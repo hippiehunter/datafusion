@@ -1238,7 +1238,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .get_table_source(table.clone())?
                     .schema()
                     .to_dfschema_ref()?;
-                let using: Option<String> = using.as_ref().map(|u| u.to_string());
+                let using: Option<String> = using.as_ref().map(|u| u.to_string().to_lowercase());
                 let order_by_exprs: Vec<ast::OrderByExpr> = columns
                     .into_iter()
                     .map(|col| col.column)
