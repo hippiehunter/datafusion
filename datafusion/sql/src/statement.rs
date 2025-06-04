@@ -46,7 +46,7 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
     cast, col, Analyze, CreateCatalog, CreateCatalogSchema,
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
-    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
+    CreateIndex as PlanCreateIndex, CreateTableExpr, CreateView, Deallocate,
     DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView,
     EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter,
     LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable,
@@ -235,67 +235,68 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::Query(query) => self.query_to_plan(*query, planner_context),
             Statement::ShowVariable { variable } => self.show_variable_to_plan(&variable),
 
-            Statement::CreateTable(CreateTable {
-                temporary,
-                external,
-                global,
-                transient,
-                volatile,
-                hive_distribution,
-                hive_formats,
-                file_format,
-                location,
-                query,
-                name,
-                columns,
-                constraints,
-                if_not_exists,
-                or_replace,
-                without_rowid,
-                like,
-                clone,
-                comment,
-                on_commit,
-                on_cluster,
-                primary_key,
-                order_by,
-                partition_by,
-                cluster_by,
-                clustered_by,
-                strict,
-                copy_grants,
-                enable_schema_evolution,
-                change_tracking,
-                data_retention_time_in_days,
-                max_data_extension_time_in_days,
-                default_ddl_collation,
-                with_aggregation_policy,
-                with_row_access_policy,
-                with_tags,
-                iceberg,
-                external_volume,
-                base_location,
-                catalog,
-                catalog_sync,
-                storage_serialization_policy,
-                .. // ignore other fields
-            }) => {
-                if temporary {
+            Statement::CreateTable(create_table_stmt) => {
+                let CreateTable {
+                    temporary,
+                    external,
+                    global,
+                    transient,
+                    volatile,
+                    hive_distribution,
+                    hive_formats,
+                    file_format,
+                    location,
+                    query,
+                    name,
+                    columns,
+                    constraints,
+                    if_not_exists,
+                    or_replace,
+                    without_rowid,
+                    like,
+                    clone,
+                    comment,
+                    on_commit,
+                    on_cluster,
+                    primary_key,
+                    order_by,
+                    partition_by,
+                    cluster_by,
+                    clustered_by,
+                    strict,
+                    copy_grants,
+                    enable_schema_evolution,
+                    change_tracking,
+                    data_retention_time_in_days,
+                    max_data_extension_time_in_days,
+                    default_ddl_collation,
+                    with_aggregation_policy,
+                    with_row_access_policy,
+                    with_tags,
+                    iceberg,
+                    external_volume,
+                    base_location,
+                    catalog,
+                    catalog_sync,
+                    storage_serialization_policy,
+                    ..
+                } = &create_table_stmt;
+                if *temporary {
                     return not_impl_err!("Temporary tables not supported")?;
                 }
-                if external {
+                if *external {
                     return not_impl_err!("External tables not supported")?;
                 }
                 if global.is_some() {
                     return not_impl_err!("Global tables not supported")?;
                 }
-                if transient {
+                if *transient {
                     return not_impl_err!("Transient tables not supported")?;
                 }
-                if volatile {
+                if *volatile {
                     return not_impl_err!("Volatile tables not supported")?;
                 }
-                if hive_distribution != ast::HiveDistributionStyle::NONE {
+                if *hive_distribution != ast::HiveDistributionStyle::NONE {
                     return not_impl_err!(
                         "Hive distribution not supported: {hive_distribution:?}"
                     )?;
@@ -319,7 +320,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if location.is_some() {
                     return not_impl_err!("Location not supported")?;
                 }
-                if without_rowid {
+                if *without_rowid {
                     return not_impl_err!("Without rowid not supported")?;
                 }
                 if like.is_some() {
@@ -352,10 +353,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if clustered_by.is_some() {
                     return not_impl_err!("Clustered by not supported")?;
                 }
-                if strict {
+                if *strict {
                     return not_impl_err!("Strict not supported")?;
                 }
-                if copy_grants {
+                if *copy_grants {
                     return not_impl_err!("Copy grants not supported")?;
                 }
                 if enable_schema_evolution.is_some() {
@@ -384,7 +385,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if with_tags.is_some() {
                     return not_impl_err!("With tags not supported")?;
                 }
-                if iceberg {
+                if *iceberg {
                     return not_impl_err!("Iceberg not supported")?;
                 }
                 if external_volume.is_some() {
@@ -404,7 +405,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
 
                 // Merge inline constraints and existing constraints
-                let mut all_constraints = constraints;
+                let mut all_constraints = constraints.clone();
                 let inline_constraints = calc_inline_constraints_from_columns(&columns);
                 all_constraints.extend(inline_constraints);
                 // Build column default values
@@ -412,14 +413,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.build_column_defaults(&columns, planner_context)?;
 
                 let has_columns = !columns.is_empty();
-                let schema = self.build_schema(columns)?.to_dfschema_ref()?;
+                let schema = self.build_schema(columns.clone())?.to_dfschema_ref()?;
                 if has_columns {
                     planner_context.set_table_schema(Some(Arc::clone(&schema)));
                 }
 
                 match query {
                     Some(query) => {
-                        let plan = self.query_to_plan(*query, planner_context)?;
+                        let plan = self.query_to_plan(*query.clone(), planner_context)?;
                         let input_schema = plan.schema();
 
                         let plan = if has_columns {
@@ -456,15 +457,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             plan.schema(),
                         )?;
 
-                        Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                            CreateMemoryTable {
-                                name: self.object_name_to_table_reference(name)?,
+                        Ok(LogicalPlan::Ddl(DdlStatement::CreateTableExpr(
+                            CreateTableExpr {
+                                name: self.object_name_to_table_reference(name.clone())?,
                                 constraints,
                                 input: Arc::new(plan),
-                                if_not_exists,
-                                or_replace,
+                                if_not_exists: *if_not_exists,
+                                or_replace: *or_replace,
                                 column_defaults,
-                                temporary,
+                                temporary: *temporary,
+                                ast: Some(Box::new(create_table_stmt.clone())),
                             },
                         )))
                     }
@@ -479,15 +481,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             &all_constraints,
                             plan.schema(),
                         )?;
-                        Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                            CreateMemoryTable {
-                                name: self.object_name_to_table_reference(name)?,
+                        Ok(LogicalPlan::Ddl(DdlStatement::CreateTableExpr(
+                            CreateTableExpr {
+                                name: self.object_name_to_table_reference(name.clone())?,
                                 constraints,
                                 input: Arc::new(plan),
-                                if_not_exists,
-                                or_replace,
+                                if_not_exists: *if_not_exists,
+                                or_replace: *or_replace,
                                 column_defaults,
-                                temporary,
+                                temporary: *temporary,
+                                ast: Some(Box::new(create_table_stmt.clone())),
                             },
                         )))
                     }

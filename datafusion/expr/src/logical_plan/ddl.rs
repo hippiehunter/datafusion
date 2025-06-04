@@ -38,7 +38,7 @@ pub enum DdlStatement {
     /// Creates an external table.
     CreateExternalTable(CreateExternalTable),
     /// Creates an in memory table.
-    CreateMemoryTable(CreateMemoryTable),
+    CreateTableExpr(CreateTableExpr),
     /// Creates a new view.
     CreateView(CreateView),
     /// Creates a new catalog schema.
@@ -66,7 +66,7 @@ impl DdlStatement {
             DdlStatement::CreateExternalTable(CreateExternalTable { schema, .. }) => {
                 schema
             }
-            DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. })
+            DdlStatement::CreateTableExpr(CreateTableExpr { input, .. })
             | DdlStatement::CreateView(CreateView { input, .. }) => input.schema(),
             DdlStatement::CreateCatalogSchema(CreateCatalogSchema { schema, .. }) => {
                 schema
@@ -86,7 +86,7 @@ impl DdlStatement {
     pub fn name(&self) -> &str {
         match self {
             DdlStatement::CreateExternalTable(_) => "CreateExternalTable",
-            DdlStatement::CreateMemoryTable(_) => "CreateMemoryTable",
+            DdlStatement::CreateTableExpr(_) => "CreateMemoryTable",
             DdlStatement::CreateView(_) => "CreateView",
             DdlStatement::CreateCatalogSchema(_) => "CreateCatalogSchema",
             DdlStatement::CreateCatalog(_) => "CreateCatalog",
@@ -105,7 +105,7 @@ impl DdlStatement {
             DdlStatement::CreateExternalTable(_) => vec![],
             DdlStatement::CreateCatalogSchema(_) => vec![],
             DdlStatement::CreateCatalog(_) => vec![],
-            DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. }) => {
+            DdlStatement::CreateTableExpr(CreateTableExpr { input, .. }) => {
                 vec![input]
             }
             DdlStatement::CreateView(CreateView { input, .. }) => vec![input],
@@ -139,7 +139,7 @@ impl DdlStatement {
                             write!(f, "CreateExternalTable: {name:?} {constraints}")
                         }
                     }
-                    DdlStatement::CreateMemoryTable(CreateMemoryTable {
+                    DdlStatement::CreateTableExpr(CreateTableExpr {
                         name,
                         constraints,
                         ..
@@ -297,8 +297,8 @@ impl PartialOrd for CreateExternalTable {
 }
 
 /// Creates an in memory table.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct CreateMemoryTable {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableExpr {
     /// The table name
     pub name: TableReference,
     /// The list of constraints in the schema, such as primary key, unique, etc.
@@ -313,6 +313,52 @@ pub struct CreateMemoryTable {
     pub column_defaults: Vec<(String, Expr)>,
     /// Whether the table is `TableType::Temporary`
     pub temporary: bool,
+    /// Original SQL AST CreateTable statement for consumers to access full options
+    pub ast: Option<Box<sqlparser::ast::CreateTable>>,
+}
+
+impl Hash for CreateTableExpr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.constraints.hash(state);
+        self.input.hash(state);
+        self.if_not_exists.hash(state);
+        self.or_replace.hash(state);
+        self.column_defaults.hash(state);
+        self.temporary.hash(state);
+        // Skip hashing the AST to avoid potential recursion issues
+    }
+}
+
+impl PartialOrd for CreateTableExpr {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        // Compare all fields except ast
+        match self.name.partial_cmp(&other.name) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.constraints.partial_cmp(&other.constraints) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.input.partial_cmp(&other.input) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.if_not_exists.partial_cmp(&other.if_not_exists) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.or_replace.partial_cmp(&other.or_replace) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.column_defaults.partial_cmp(&other.column_defaults) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.temporary.partial_cmp(&other.temporary)
+    }
 }
 
 /// Creates a view.

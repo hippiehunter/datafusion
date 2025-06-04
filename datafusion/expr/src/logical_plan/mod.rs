@@ -32,7 +32,7 @@ pub use builder::{
 };
 pub use ddl::{
     CreateCatalog, CreateCatalogSchema, CreateExternalTable, CreateFunction,
-    CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateView, DdlStatement,
+    CreateFunctionBody, CreateIndex, CreateTableExpr, CreateView, DdlStatement,
     DropCatalogSchema, DropFunction, DropTable, DropView, OperateFunctionArg,
 };
 pub use dml::{DmlStatement, WriteOp};

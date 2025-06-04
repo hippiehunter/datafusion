@@ -24,7 +24,7 @@ use datafusion_common::{not_impl_err, Constraints, DFSchema, Result};
 use datafusion_expr::expr::Sort;
 
 use datafusion_expr::{
-    CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
+    CreateTableExpr, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
 };
 use sqlparser::ast::{
     Expr as SQLExpr, Ident, Offset as SQLOffset, OrderBy, OrderByExpr, OrderByKind,
@@ -155,8 +155,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         select_into: Option<SelectInto>,
     ) -> Result<LogicalPlan> {
         match select_into {
-            Some(into) => Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                CreateMemoryTable {
+            Some(into) => Ok(LogicalPlan::Ddl(DdlStatement::CreateTableExpr(
+                CreateTableExpr {
                     name: self.object_name_to_table_reference(into.name)?,
                     constraints: Constraints::empty(),
                     input: Arc::new(plan),
@@ -164,6 +164,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     or_replace: false,
                     temporary: false,
                     column_defaults: vec![],
+                    ast: None, // SELECT INTO doesn't have original CREATE TABLE AST
                 },
             ))),
             _ => Ok(plan),

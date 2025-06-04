@@ -43,7 +43,7 @@ use crate::utils::{
     grouping_set_expr_count, grouping_set_to_exprlist, split_conjunction,
 };
 use crate::{
-    build_join_schema, expr_vec_fmt, BinaryExpr, CreateMemoryTable, CreateView, Execute,
+    build_join_schema, expr_vec_fmt, BinaryExpr, CreateTableExpr, CreateView, Execute,
     Expr, ExprSchemable, LogicalPlanBuilder, Operator, Prepare,
     TableProviderFilterPushDown, TableSource, WindowFunctionDefinition,
 };
@@ -975,18 +975,19 @@ impl LogicalPlan {
                     input: Arc::new(input),
                 }))
             }
-            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            LogicalPlan::Ddl(DdlStatement::CreateTableExpr(CreateTableExpr {
                 name,
                 if_not_exists,
                 or_replace,
                 column_defaults,
                 temporary,
+                ast,
                 ..
             })) => {
                 self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
-                Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                    CreateMemoryTable {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateTableExpr(
+                    CreateTableExpr {
                         input: Arc::new(input),
                         constraints: Constraints::empty(),
                         name: name.clone(),
@@ -994,6 +995,7 @@ impl LogicalPlan {
                         or_replace: *or_replace,
                         column_defaults: column_defaults.clone(),
                         temporary: *temporary,
+                        ast: ast.as_ref().map(|a| a.clone()),
                     },
                 )))
             }
