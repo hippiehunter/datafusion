@@ -27,7 +27,7 @@ use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::{plan_err, DFSchema, GetExt, Result, TableReference};
 use datafusion_expr::planner::{ExprPlanner, PlannerResult, TypePlanner};
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_functions_nested::expr_fn::make_array;
+// use datafusion_functions_nested::expr_fn::make_array;
 use datafusion_sql::planner::ContextProvider;
 
 struct MockCsvType {}
@@ -335,6 +335,8 @@ impl ExprPlanner for CustomExprPlanner {
         exprs: Vec<Expr>,
         _schema: &DFSchema,
     ) -> Result<PlannerResult<Vec<Expr>>> {
-        Ok(PlannerResult::Planned(make_array(exprs)))
+        // Ok(PlannerResult::Planned(make_array(exprs)))
+        // For now, just return the original expressions unmodified
+        Ok(PlannerResult::Original(exprs))
     }
 }

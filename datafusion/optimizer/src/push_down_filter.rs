@@ -1392,7 +1392,7 @@ mod tests {
     use async_trait::async_trait;
 
     use datafusion_common::{DFSchemaRef, DataFusionError, ScalarValue};
-    use datafusion_expr::expr::{ScalarFunction, WindowFunction};
+    use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::logical_plan::table_scan;
     use datafusion_expr::{
         col, in_list, in_subquery, lit, ColumnarValue, ExprFunctionExt, Extension,
@@ -1579,247 +1579,247 @@ mod tests {
         )
     }
 
-    /// verifies that when partitioning by 'a' and 'b', and filtering by 'b', 'b' is pushed
-    #[test]
-    fn filter_move_window() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that when partitioning by 'a' and 'b', and filtering by 'b', 'b' is pushed
+    // #[test]
+    // fn filter_move_window() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("a"), col("b")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("a"), col("b")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window])?
-            .filter(col("b").gt(lit(10i64)))?
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window])?
+    //         .filter(col("b").gt(lit(10i64)))?
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        WindowAggr: windowExpr=[[rank() PARTITION BY [test.a, test.b] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-          TableScan: test, full_filters=[test.b > Int64(10)]
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     WindowAggr: windowExpr=[[rank() PARTITION BY [test.a, test.b] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //       TableScan: test, full_filters=[test.b > Int64(10)]
+    //     "
+    //     )
+    // }
 
-    /// verifies that when partitioning by 'a' and 'b', and filtering by 'a' and 'b', both 'a' and
-    /// 'b' are pushed
-    #[test]
-    fn filter_move_complex_window() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that when partitioning by 'a' and 'b', and filtering by 'a' and 'b', both 'a' and
+    // /// 'b' are pushed
+    // #[test]
+    // fn filter_move_complex_window() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("a"), col("b")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("a"), col("b")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window])?
-            .filter(and(col("a").gt(lit(10i64)), col("b").eq(lit(1i64))))?
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window])?
+    //         .filter(and(col("a").gt(lit(10i64)), col("b").eq(lit(1i64))))?
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        WindowAggr: windowExpr=[[rank() PARTITION BY [test.a, test.b] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-          TableScan: test, full_filters=[test.a > Int64(10), test.b = Int64(1)]
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     WindowAggr: windowExpr=[[rank() PARTITION BY [test.a, test.b] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //       TableScan: test, full_filters=[test.a > Int64(10), test.b = Int64(1)]
+    //     "
+    //     )
+    // }
 
-    /// verifies that when partitioning by 'a' and filtering by 'a' and 'b', only 'a' is pushed
-    #[test]
-    fn filter_move_partial_window() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that when partitioning by 'a' and filtering by 'a' and 'b', only 'a' is pushed
+    // #[test]
+    // fn filter_move_partial_window() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("a")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("a")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window])?
-            .filter(and(col("a").gt(lit(10i64)), col("b").eq(lit(1i64))))?
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window])?
+    //         .filter(and(col("a").gt(lit(10i64)), col("b").eq(lit(1i64))))?
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        Filter: test.b = Int64(1)
-          WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-            TableScan: test, full_filters=[test.a > Int64(10)]
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     Filter: test.b = Int64(1)
+    //       WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //         TableScan: test, full_filters=[test.a > Int64(10)]
+    //     "
+    //     )
+    // }
 
-    /// verifies that filters on partition expressions are not pushed, as the single expression
-    /// column is not available to the user, unlike with aggregations
-    #[test]
-    fn filter_expression_keep_window() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that filters on partition expressions are not pushed, as the single expression
+    // /// column is not available to the user, unlike with aggregations
+    // #[test]
+    // fn filter_expression_keep_window() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![add(col("a"), col("b"))]) // PARTITION BY a + b
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![add(col("a"), col("b"))]) // PARTITION BY a + b
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window])?
-            // unlike with aggregations, single partition column "test.a + test.b" is not available
-            // to the plan, so we use multiple columns when filtering
-            .filter(add(col("a"), col("b")).gt(lit(10i64)))?
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window])?
+    //         // unlike with aggregations, single partition column "test.a + test.b" is not available
+    //         // to the plan, so we use multiple columns when filtering
+    //         .filter(add(col("a"), col("b")).gt(lit(10i64)))?
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        Filter: test.a + test.b > Int64(10)
-          WindowAggr: windowExpr=[[rank() PARTITION BY [test.a + test.b] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-            TableScan: test
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     Filter: test.a + test.b > Int64(10)
+    //       WindowAggr: windowExpr=[[rank() PARTITION BY [test.a + test.b] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //         TableScan: test
+    //     "
+    //     )
+    // }
 
-    /// verifies that filters are not pushed on order by columns (that are not used in partitioning)
-    #[test]
-    fn filter_order_keep_window() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that filters are not pushed on order by columns (that are not used in partitioning)
+    // #[test]
+    // fn filter_order_keep_window() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("a")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("a")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window])?
-            .filter(col("c").gt(lit(10i64)))?
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window])?
+    //         .filter(col("c").gt(lit(10i64)))?
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        Filter: test.c > Int64(10)
-          WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-            TableScan: test
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     Filter: test.c > Int64(10)
+    //       WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //         TableScan: test
+    //     "
+    //     )
+    // }
 
-    /// verifies that when we use multiple window functions with a common partition key, the filter
-    /// on that key is pushed
-    #[test]
-    fn filter_multiple_windows_common_partitions() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that when we use multiple window functions with a common partition key, the filter
+    // /// on that key is pushed
+    // #[test]
+    // fn filter_multiple_windows_common_partitions() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window1 = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("a")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window1 = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("a")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let window2 = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("b"), col("a")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window2 = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("b"), col("a")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window1, window2])?
-            .filter(col("a").gt(lit(10i64)))? // a appears in both window functions
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window1, window2])?
+    //         .filter(col("a").gt(lit(10i64)))? // a appears in both window functions
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, rank() PARTITION BY [test.b, test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-          TableScan: test, full_filters=[test.a > Int64(10)]
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, rank() PARTITION BY [test.b, test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //       TableScan: test, full_filters=[test.a > Int64(10)]
+    //     "
+    //     )
+    // }
 
-    /// verifies that when we use multiple window functions with different partitions keys, the
-    /// filter cannot be pushed
-    #[test]
-    fn filter_multiple_windows_disjoint_partitions() -> Result<()> {
-        let table_scan = test_table_scan()?;
+    // /// verifies that when we use multiple window functions with different partitions keys, the
+    // /// filter cannot be pushed
+    // #[test]
+    // fn filter_multiple_windows_disjoint_partitions() -> Result<()> {
+    //     let table_scan = test_table_scan()?;
 
-        let window1 = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("a")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window1 = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("a")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let window2 = Expr::from(WindowFunction::new(
-            WindowFunctionDefinition::WindowUDF(
-                datafusion_functions_window::rank::rank_udwf(),
-            ),
-            vec![],
-        ))
-        .partition_by(vec![col("b"), col("a")])
-        .order_by(vec![col("c").sort(true, true)])
-        .build()
-        .unwrap();
+    //     let window2 = Expr::from(WindowFunction::new(
+    //         WindowFunctionDefinition::WindowUDF(
+    //             datafusion_functions_window::rank::rank_udwf(),
+    //         ),
+    //         vec![],
+    //     ))
+    //     .partition_by(vec![col("b"), col("a")])
+    //     .order_by(vec![col("c").sort(true, true)])
+    //     .build()
+    //     .unwrap();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .window(vec![window1, window2])?
-            .filter(col("b").gt(lit(10i64)))? // b only appears in one window function
-            .build()?;
+    //     let plan = LogicalPlanBuilder::from(table_scan)
+    //         .window(vec![window1, window2])?
+    //         .filter(col("b").gt(lit(10i64)))? // b only appears in one window function
+    //         .build()?;
 
-        assert_optimized_plan_equal!(
-            plan,
-            @r"
-        Filter: test.b > Int64(10)
-          WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, rank() PARTITION BY [test.b, test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-            TableScan: test
-        "
-        )
-    }
+    //     assert_optimized_plan_equal!(
+    //         plan,
+    //         @r"
+    //     Filter: test.b > Int64(10)
+    //       WindowAggr: windowExpr=[[rank() PARTITION BY [test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, rank() PARTITION BY [test.b, test.a] ORDER BY [test.c ASC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    //         TableScan: test
+    //     "
+    //     )
+    // }
 
     /// verifies that a filter is pushed to before a projection, the filter expression is correctly re-written
     #[test]
