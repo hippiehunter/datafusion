@@ -62,6 +62,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     substring_from: None,
                     substring_for: None,
                     special: false,
+                    shorthand: false,
                 };
 
                 return plan_err!("Substring without for/from is not valid {orig_sql:?}");

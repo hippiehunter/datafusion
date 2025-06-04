@@ -100,10 +100,17 @@ impl QueryBuilder {
                 None => return Err(Into::into(UninitializedFieldError::from("body"))),
             },
             order_by,
-            limit: self.limit.clone(),
-            limit_by: self.limit_by.clone(),
-            offset: self.offset.clone(),
+            limit_clause: if self.limit.is_some() || self.offset.is_some() || !self.limit_by.is_empty() {
+                Some(ast::LimitClause::LimitOffset {
+                    limit: self.limit.clone(),
+                    offset: self.offset.clone(),
+                    limit_by: self.limit_by.clone(),
+                })
+            } else {
+                None
+            },
             fetch: self.fetch.clone(),
+            pipe_operators: vec![],
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
             settings: None,

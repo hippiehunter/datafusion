@@ -63,8 +63,8 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr, FromTable, Ident, Insert,
     ObjectName, ObjectType, OneOrManyWithParens, Query, SchemaName, SetExpr,
-    ShowCreateObject, ShowStatementFilter, Statement, TableConstraint, TableFactor,
-    TableWithJoins, TransactionMode, UnaryOperator, Value,
+    ShowCreateObject, ShowStatementFilter, Statement, TableConstraint, 
+    TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
 
@@ -168,7 +168,8 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                 | ast::ColumnOption::Policy(_)
                 | ast::ColumnOption::Tags(_)
                 | ast::ColumnOption::Alias(_)
-                | ast::ColumnOption::Collation(_) => {}
+                | ast::ColumnOption::Collation(_)
+                | ast::ColumnOption::Srid(_) => {}
             }
         }
     }
@@ -233,12 +234,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             Statement::Query(query) => self.query_to_plan(*query, planner_context),
             Statement::ShowVariable { variable } => self.show_variable_to_plan(&variable),
-            Statement::SetVariable {
-                local,
-                hivevar,
-                variables,
-                value,
-            } => self.set_variable_to_plan(local, hivevar, &variables, value),
 
             Statement::CreateTable(CreateTable {
                 temporary,
@@ -254,18 +249,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 name,
                 columns,
                 constraints,
-                table_properties,
-                with_options,
                 if_not_exists,
                 or_replace,
                 without_rowid,
                 like,
                 clone,
-                engine,
                 comment,
-                auto_increment_offset,
-                default_charset,
-                collation,
                 on_commit,
                 on_cluster,
                 primary_key,
@@ -273,7 +262,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 partition_by,
                 cluster_by,
                 clustered_by,
-                options,
                 strict,
                 copy_grants,
                 enable_schema_evolution,
@@ -290,7 +278,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 catalog,
                 catalog_sync,
                 storage_serialization_policy,
-            }) if table_properties.is_empty() && with_options.is_empty() => {
+                .. // ignore other fields
+            }) => {
                 if temporary {
                     return not_impl_err!("Temporary tables not supported")?;
                 }
@@ -339,20 +328,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if clone.is_some() {
                     return not_impl_err!("Clone not supported")?;
                 }
-                if engine.is_some() {
-                    return not_impl_err!("Engine not supported")?;
-                }
                 if comment.is_some() {
                     return not_impl_err!("Comment not supported")?;
-                }
-                if auto_increment_offset.is_some() {
-                    return not_impl_err!("Auto increment offset not supported")?;
-                }
-                if default_charset.is_some() {
-                    return not_impl_err!("Default charset not supported")?;
-                }
-                if collation.is_some() {
-                    return not_impl_err!("Collation not supported")?;
                 }
                 if on_commit.is_some() {
                     return not_impl_err!("On commit not supported")?;
@@ -374,9 +351,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if clustered_by.is_some() {
                     return not_impl_err!("Clustered by not supported")?;
-                }
-                if options.is_some() {
-                    return not_impl_err!("Options not supported")?;
                 }
                 if strict {
                     return not_impl_err!("Strict not supported")?;
@@ -534,6 +508,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 temporary,
                 to,
                 params,
+                .. // ignore or_alter and other new fields
             } => {
                 if materialized {
                     return not_impl_err!("Materialized views not supported")?;
@@ -570,6 +545,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     temporary,
                     to,
                     params,
+                    or_alter: false, // default value for missing field
                 };
                 let sql = stmt.to_string();
                 let Statement::CreateView {
@@ -617,6 +593,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::CreateSchema {
                 schema_name,
                 if_not_exists,
+                .. // ignore options and default_collate_spec
             } => Ok(LogicalPlan::Ddl(DdlStatement::CreateCatalogSchema(
                 CreateCatalogSchema {
                     schema_name: get_schema_name(&schema_name),
@@ -643,6 +620,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 restrict: _,
                 purge: _,
                 temporary: _,
+                .. // ignore table and other new fields
             } => {
                 // We don't support cascade and purge for now.
                 // nor do we support multiple object names
@@ -1182,6 +1160,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             ast::CreateFunctionBody::AsBeforeOptions(expr) => expr,
                             ast::CreateFunctionBody::AsAfterOptions(expr) => expr,
                             ast::CreateFunctionBody::Return(expr) => expr,
+                            ast::CreateFunctionBody::AsBeginEnd(_) => {
+                                return not_impl_err!("AsBeginEnd function body not supported")?;
+                            }
+                            ast::CreateFunctionBody::AsReturnExpr(_) => {
+                                return not_impl_err!("AsReturnExpr function body not supported")?;
+                            }
+                            ast::CreateFunctionBody::AsReturnSelect(_) => {
+                                return not_impl_err!("AsReturnSelect function body not supported")?;
+                            }
                         },
                         &DFSchema::empty(),
                         &mut planner_context,
@@ -1251,9 +1238,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .get_table_source(table.clone())?
                     .schema()
                     .to_dfschema_ref()?;
-                let using: Option<String> = using.as_ref().map(ident_to_string);
+                let using: Option<String> = using.as_ref().map(|u| u.to_string());
+                let order_by_exprs: Vec<ast::OrderByExpr> = columns
+                    .into_iter()
+                    .map(|col| col.column)
+                    .collect();
                 let columns = self.order_by_to_sort_expr(
-                    columns,
+                    order_by_exprs,
                     &table_schema,
                     planner_context,
                     false,

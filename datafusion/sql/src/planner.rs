@@ -563,8 +563,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 Ok(DataType::Int32)
             }
             SQLDataType::BigInt(_) | SQLDataType::Int8(_) => Ok(DataType::Int64),
-            SQLDataType::TinyIntUnsigned(_) => Ok(DataType::UInt8),
-            SQLDataType::SmallIntUnsigned(_) | SQLDataType::Int2Unsigned(_) => {
+            SQLDataType::HugeInt => Ok(DataType::Int64), // Map to Int64 for now
+            SQLDataType::TinyIntUnsigned(_) | SQLDataType::UTinyInt => Ok(DataType::UInt8),
+            SQLDataType::SmallIntUnsigned(_) | SQLDataType::Int2Unsigned(_) | SQLDataType::USmallInt => {
                 Ok(DataType::UInt16)
             }
             SQLDataType::IntUnsigned(_)
@@ -585,9 +586,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     }
                 }
             }
-            SQLDataType::BigIntUnsigned(_) | SQLDataType::Int8Unsigned(_) => {
+            SQLDataType::BigIntUnsigned(_) | SQLDataType::Int8Unsigned(_) | SQLDataType::UBigInt => {
                 Ok(DataType::UInt64)
             }
+            SQLDataType::UHugeInt => Ok(DataType::UInt64), // Map to UInt64 for now
             SQLDataType::Float(_) => Ok(DataType::Float32),
             SQLDataType::Real | SQLDataType::Float4 => Ok(DataType::Float32),
             SQLDataType::Double(ExactNumberInfo::None)
@@ -626,6 +628,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 };
                 Ok(DataType::Timestamp(precision, tz.map(Into::into)))
             }
+            SQLDataType::TimestampNtz => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
             SQLDataType::Date => Ok(DataType::Date32),
             SQLDataType::Time(None, tz_info) => {
                 if matches!(tz_info, TimezoneInfo::None)
@@ -735,7 +738,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::AnyType
             | SQLDataType::Table(_)
             | SQLDataType::VarBit(_)
-            | SQLDataType::GeometricType(_) => {
+            | SQLDataType::GeometricType(_)
+            | SQLDataType::NamedTable { .. } => {
                 not_impl_err!("Unsupported SQL type {sql_type:?}")
             }
         }

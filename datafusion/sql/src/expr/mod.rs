@@ -446,6 +446,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 substring_from,
                 substring_for,
                 special: _,
+                shorthand: _,
             } => self.sql_substring_to_expr(
                 expr,
                 substring_from,
@@ -520,7 +521,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 subquery,
                 negated,
             } => {
-                self.parse_in_subquery(*expr, *subquery, negated, schema, planner_context)
+                // Convert SetExpr to Query
+                let query = sqlparser::ast::Query {
+                    with: None,
+                    body: subquery,
+                    order_by: None,
+                    limit_clause: None,
+                    fetch: None,
+                    pipe_operators: vec![],
+                    locks: vec![],
+                    for_clause: None,
+                    settings: None,
+                    format_clause: None,
+                };
+                self.parse_in_subquery(*expr, query, negated, schema, planner_context)
             }
             SQLExpr::Subquery(subquery) => {
                 self.parse_scalar_subquery(*subquery, schema, planner_context)
