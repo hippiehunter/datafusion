@@ -56,16 +56,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.select_to_plan(*select, query.order_by, planner_context)?;
                 // Extract limit and offset from limit_clause
                 let (offset, limit) = match &query.limit_clause {
-                    Some(sqlparser::ast::LimitClause::LimitOffset { limit, offset, .. }) => {
-                        (offset.clone(), limit.clone())
-                    }
-                    Some(sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit }) => {
-                        (Some(sqlparser::ast::Offset { value: offset.clone(), rows: sqlparser::ast::OffsetRows::None }), Some(limit.clone()))
-                    }
+                    Some(sqlparser::ast::LimitClause::LimitOffset {
+                        limit,
+                        offset,
+                        ..
+                    }) => (offset.clone(), limit.clone()),
+                    Some(sqlparser::ast::LimitClause::OffsetCommaLimit {
+                        offset,
+                        limit,
+                    }) => (
+                        Some(sqlparser::ast::Offset {
+                            value: offset.clone(),
+                            rows: sqlparser::ast::OffsetRows::None,
+                        }),
+                        Some(limit.clone()),
+                    ),
                     None => (None, None),
                 };
-                let plan =
-                    self.limit(plan, offset, limit, planner_context)?;
+                let plan = self.limit(plan, offset, limit, planner_context)?;
                 // Process the `SELECT INTO` after `LIMIT`.
                 self.select_into(plan, select_into)
             }
@@ -89,12 +97,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let plan = self.order_by(plan, order_by_rex)?;
                 // Extract limit and offset from limit_clause
                 let (offset, limit) = match &query.limit_clause {
-                    Some(sqlparser::ast::LimitClause::LimitOffset { limit, offset, .. }) => {
-                        (offset.clone(), limit.clone())
-                    }
-                    Some(sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit }) => {
-                        (Some(sqlparser::ast::Offset { value: offset.clone(), rows: sqlparser::ast::OffsetRows::None }), Some(limit.clone()))
-                    }
+                    Some(sqlparser::ast::LimitClause::LimitOffset {
+                        limit,
+                        offset,
+                        ..
+                    }) => (offset.clone(), limit.clone()),
+                    Some(sqlparser::ast::LimitClause::OffsetCommaLimit {
+                        offset,
+                        limit,
+                    }) => (
+                        Some(sqlparser::ast::Offset {
+                            value: offset.clone(),
+                            rows: sqlparser::ast::OffsetRows::None,
+                        }),
+                        Some(limit.clone()),
+                    ),
                     None => (None, None),
                 };
                 self.limit(plan, offset, limit, planner_context)

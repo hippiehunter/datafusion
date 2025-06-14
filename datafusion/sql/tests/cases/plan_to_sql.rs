@@ -257,7 +257,7 @@ fn roundtrip_crossjoin() -> Result<()> {
         .parse_statement()?;
 
     let state = MockSessionState::default();
-        // .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
+    // .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
 
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new(&context);
@@ -1308,9 +1308,9 @@ where
             .with_aggregate_function(sum_udaf())
             .with_aggregate_function(max_udaf())
             .with_aggregate_function(grouping_udaf()),
-            // .with_window_function(rank_udwf())  // Removed: function no longer available
-            // .with_scalar_function(Arc::new(unicode::substr().as_ref().clone()))  // Removed: function no longer available
-            // .with_scalar_function(make_array_udf()),  // Removed: function no longer available
+        // .with_window_function(rank_udwf())  // Removed: function no longer available
+        // .with_scalar_function(Arc::new(unicode::substr().as_ref().clone()))  // Removed: function no longer available
+        // .with_scalar_function(make_array_udf()),  // Removed: function no longer available
     };
     let sql_to_rel = SqlToRel::new(&context);
     let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();

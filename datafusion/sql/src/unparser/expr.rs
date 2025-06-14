@@ -16,6 +16,7 @@
 // under the License.
 
 use datafusion_expr::expr::{AggregateFunctionParams, Unnest, WindowFunctionParams};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::Value::SingleQuotedString;
 use sqlparser::ast::{
     self, Array, BinaryOperator, CaseWhen, Expr as AstExpr, Function, Ident, Interval,
@@ -44,7 +45,6 @@ use datafusion_expr::{
     expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
     Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like, Operator, TryCast,
 };
-use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::tokenizer::Span;
 
 /// Convert a DataFusion [`Expr`] to [`ast::Expr`]
@@ -182,6 +182,8 @@ impl Unparser<'_> {
                     operand,
                     conditions,
                     else_result,
+                    case_token: AttachedToken::empty(),
+                    end_token: AttachedToken::empty(),
                 })
             }
             Expr::Cast(Cast { expr, data_type }) => {
@@ -378,7 +380,7 @@ impl Unparser<'_> {
                 };
                 Ok(ast::Expr::InSubquery {
                     expr: inexpr,
-                    subquery: sub_query.body,  // Extract the SetExpr from Query
+                    subquery: sub_query.body, // Extract the SetExpr from Query
                     negated: insubq.negated,
                 })
             }
@@ -1744,8 +1746,7 @@ mod tests {
     use sqlparser::ast::ExactNumberInfo;
 
     use crate::unparser::dialect::{
-        CustomDialect, CustomDialectBuilder,
-        Dialect, DuckDBDialect, ScalarFnToSqlHandler,
+        CustomDialect, CustomDialectBuilder, Dialect, DuckDBDialect, ScalarFnToSqlHandler,
     };
 
     use super::*;

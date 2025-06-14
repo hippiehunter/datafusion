@@ -19,7 +19,9 @@ use core::fmt;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::helpers::attached_token::AttachedToken;
-use sqlparser::ast::{self, visit_expressions_mut, OrderByKind, SelectFlavor};
+use sqlparser::ast::{
+    self, visit_expressions_mut, OrderByExpr, OrderByKind, SelectFlavor,
+};
 
 #[derive(Clone)]
 pub struct QueryBuilder {
@@ -100,7 +102,10 @@ impl QueryBuilder {
                 None => return Err(Into::into(UninitializedFieldError::from("body"))),
             },
             order_by,
-            limit_clause: if self.limit.is_some() || self.offset.is_some() || !self.limit_by.is_empty() {
+            limit_clause: if self.limit.is_some()
+                || self.offset.is_some()
+                || !self.limit_by.is_empty()
+            {
                 Some(ast::LimitClause::LimitOffset {
                     limit: self.limit.clone(),
                     offset: self.offset.clone(),
@@ -150,7 +155,7 @@ pub struct SelectBuilder {
     group_by: Option<ast::GroupByExpr>,
     cluster_by: Vec<ast::Expr>,
     distribute_by: Vec<ast::Expr>,
-    sort_by: Vec<ast::Expr>,
+    sort_by: Vec<OrderByExpr>,
     having: Option<ast::Expr>,
     named_window: Vec<ast::NamedWindowDefinition>,
     qualify: Option<ast::Expr>,
@@ -268,7 +273,17 @@ impl SelectBuilder {
         self
     }
     pub fn sort_by(&mut self, value: Vec<ast::Expr>) -> &mut Self {
-        self.sort_by = value;
+        self.sort_by = value
+            .into_iter()
+            .map(|expr| OrderByExpr {
+                expr,
+                options: ast::OrderByOptions {
+                    asc: None,
+                    nulls_first: None,
+                },
+                with_fill: None,
+            })
+            .collect();
         self
     }
     pub fn having(&mut self, value: Option<ast::Expr>) -> &mut Self {

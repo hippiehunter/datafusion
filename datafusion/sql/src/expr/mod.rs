@@ -254,6 +254,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 operand,
                 conditions,
                 else_result,
+                ..
             } => self.sql_case_identifier_to_expr(
                 operand,
                 conditions,

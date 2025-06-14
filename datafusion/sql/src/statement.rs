@@ -63,8 +63,8 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr, FromTable, Ident, Insert,
     ObjectName, ObjectType, OneOrManyWithParens, Query, SchemaName, SetExpr,
-    ShowCreateObject, ShowStatementFilter, Statement, TableConstraint, 
-    TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
+    ShowCreateObject, ShowStatementFilter, Statement, TableConstraint, TableFactor,
+    TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
 
@@ -144,11 +144,13 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                     on_delete: *on_delete,
                     on_update: *on_update,
                     characteristics: *characteristics,
+                    index_name: None,
                 }),
                 ast::ColumnOption::Check(expr) => {
                     constraints.push(TableConstraint::Check {
                         name: name.clone(),
                         expr: Box::new(expr.clone()),
+                        enforced: None,
                     })
                 }
                 // Other options are not constraint related.

@@ -3301,9 +3301,9 @@ fn logical_plan_with_dialect_and_options(
         .with_aggregate_function(min_udaf())
         .with_aggregate_function(max_udaf())
         .with_aggregate_function(grouping_udaf());
-        // TODO: Uncomment when datafusion_functions_window is available
-        // .with_window_function(rank_udwf())
-        // .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
+    // TODO: Uncomment when datafusion_functions_window is available
+    // .with_window_function(rank_udwf())
+    // .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
 
     let context = MockContextProvider { state };
     let planner = SqlToRel::new_with_options(&context, options);

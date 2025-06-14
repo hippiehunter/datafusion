@@ -564,10 +564,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
             SQLDataType::BigInt(_) | SQLDataType::Int8(_) => Ok(DataType::Int64),
             SQLDataType::HugeInt => Ok(DataType::Int64), // Map to Int64 for now
-            SQLDataType::TinyIntUnsigned(_) | SQLDataType::UTinyInt => Ok(DataType::UInt8),
-            SQLDataType::SmallIntUnsigned(_) | SQLDataType::Int2Unsigned(_) | SQLDataType::USmallInt => {
-                Ok(DataType::UInt16)
+            SQLDataType::TinyIntUnsigned(_) | SQLDataType::UTinyInt => {
+                Ok(DataType::UInt8)
             }
+            SQLDataType::SmallIntUnsigned(_)
+            | SQLDataType::Int2Unsigned(_)
+            | SQLDataType::USmallInt => Ok(DataType::UInt16),
             SQLDataType::IntUnsigned(_)
             | SQLDataType::IntegerUnsigned(_)
             | SQLDataType::Int4Unsigned(_) => Ok(DataType::UInt32),
@@ -586,9 +588,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     }
                 }
             }
-            SQLDataType::BigIntUnsigned(_) | SQLDataType::Int8Unsigned(_) | SQLDataType::UBigInt => {
-                Ok(DataType::UInt64)
-            }
+            SQLDataType::BigIntUnsigned(_)
+            | SQLDataType::Int8Unsigned(_)
+            | SQLDataType::UBigInt => Ok(DataType::UInt64),
             SQLDataType::UHugeInt => Ok(DataType::UInt64), // Map to UInt64 for now
             SQLDataType::Float(_) => Ok(DataType::Float32),
             SQLDataType::Real | SQLDataType::Float4 => Ok(DataType::Float32),
@@ -628,7 +630,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 };
                 Ok(DataType::Timestamp(precision, tz.map(Into::into)))
             }
-            SQLDataType::TimestampNtz => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+            SQLDataType::TimestampNtz => {
+                Ok(DataType::Timestamp(TimeUnit::Nanosecond, None))
+            }
             SQLDataType::Date => Ok(DataType::Date32),
             SQLDataType::Time(None, tz_info) => {
                 if matches!(tz_info, TimezoneInfo::None)
