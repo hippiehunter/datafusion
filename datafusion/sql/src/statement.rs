@@ -35,8 +35,8 @@ use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::{
     exec_err, internal_err, not_impl_err, plan_datafusion_err, plan_err, schema_err,
     unqualified_field_not_found, Column, Constraint, Constraints, DFSchema, DFSchemaRef,
-    DataFusionError, Result, ScalarValue, SchemaError, SchemaReference, TableReference,
-    ToDFSchema,
+    DataFusionError, MatchType, ReferentialAction, Result, ScalarValue, SchemaError,
+    SchemaReference, TableReference, ToDFSchema,
 };
 use datafusion_expr::dml::{CopyTo, InsertOp};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -138,7 +138,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                     characteristics,
                 } => constraints.push(TableConstraint::ForeignKey {
                     name: name.clone(),
-                    columns: vec![],
+                    columns: vec![column.name.clone()],
                     foreign_table: foreign_table.clone(),
                     referred_columns: referred_columns.to_vec(),
                     on_delete: *on_delete,
@@ -1582,17 +1582,91 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )?;
                     Ok(Constraint::PrimaryKey(indices))
                 }
-                TableConstraint::ForeignKey { .. } => {
-                    _plan_err!("Foreign key constraints are not currently supported")
+                TableConstraint::ForeignKey {
+                    name,
+                    columns,
+                    foreign_table,
+                    referred_columns,
+                    on_delete,
+                    on_update,
+                    characteristics,
+                    ..
+                } => {
+                    // Extract column names
+                    let column_names = columns
+                        .iter()
+                        .map(|c| normalize_ident(c.clone()))
+                        .collect::<Vec<_>>();
+
+                    // Extract referenced column names
+                    let ref_column_names = referred_columns
+                        .iter()
+                        .map(|c| normalize_ident(c.clone()))
+                        .collect::<Vec<_>>();
+
+                    // Convert referential actions
+                    let on_delete_action = on_delete
+                        .as_ref()
+                        .map(|action| convert_referential_action(action))
+                        .unwrap_or(ReferentialAction::NoAction);
+
+                    let on_update_action = on_update
+                        .as_ref()
+                        .map(|action| convert_referential_action(action))
+                        .unwrap_or(ReferentialAction::NoAction);
+
+                    // Extract deferrable properties from characteristics
+                    let (deferrable, initially_deferred) =
+                        if let Some(chars) = characteristics {
+                            (
+                                chars.deferrable.is_some(),
+                                matches!(
+                                    chars.initially,
+                                    Some(ast::DeferrableInitial::Deferred)
+                                ),
+                            )
+                        } else {
+                            (false, false)
+                        };
+
+                    Ok(Constraint::ForeignKey {
+                        name: name.as_ref().map(|n| n.value.clone()),
+                        columns: column_names,
+                        referenced_table: object_name_to_string(foreign_table),
+                        referenced_columns: ref_column_names,
+                        on_delete: on_delete_action,
+                        on_update: on_update_action,
+                        match_type: MatchType::Simple, // Default to Simple for now
+                        deferrable,
+                        initially_deferred,
+                        is_validated: characteristics
+                            .as_ref()
+                            .and_then(|c| c.enforced)
+                            .unwrap_or(true),
+                    })
                 }
                 TableConstraint::Check { .. } => {
                     _plan_err!("Check constraints are not currently supported")
                 }
-                TableConstraint::Index { .. } => {
-                    _plan_err!("Indexes are not currently supported")
+                TableConstraint::Index { name, columns, .. } => {
+                    let constraint_name = match name {
+                        Some(name) => &format!("index with name '{name}'"),
+                        None => "index",
+                    };
+                    // Get index column indices in the schema
+                    let indices = self.get_constraint_column_indices(
+                        df_schema,
+                        columns,
+                        constraint_name,
+                    )?;
+                    Ok(Constraint::Index {
+                        name: name.as_ref().map(|n| n.value.clone()),
+                        columns: indices,
+                        is_unique: false, // Regular indexes are not unique
+                    })
                 }
                 TableConstraint::FulltextOrSpatial { .. } => {
-                    _plan_err!("Indexes are not currently supported")
+                    _plan_err!("Fulltext and spatial indexes are not currently supported")
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2260,5 +2334,16 @@ ON p.function_name = r.routine_name
                 not_impl_err!("Transaction kind not supported: {kind:?}")
             }
         }
+    }
+}
+
+/// Convert sqlparser ReferentialAction to DataFusion ReferentialAction
+fn convert_referential_action(action: &ast::ReferentialAction) -> ReferentialAction {
+    match action {
+        ast::ReferentialAction::NoAction => ReferentialAction::NoAction,
+        ast::ReferentialAction::Restrict => ReferentialAction::Restrict,
+        ast::ReferentialAction::Cascade => ReferentialAction::Cascade,
+        ast::ReferentialAction::SetNull => ReferentialAction::SetNull,
+        ast::ReferentialAction::SetDefault => ReferentialAction::SetDefault,
     }
 }

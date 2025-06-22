@@ -513,6 +513,58 @@ fn plan_create_table_check_constraint() {
 }
 
 #[test]
+fn plan_create_table_with_index() {
+    let sql = "create table person (id int, name string, index (id))";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+        CreateMemoryTable: Bare { table: "person" } constraints=[Index { name: None, columns: [0], is_unique: false }]
+          EmptyRelation
+        "#
+    );
+}
+
+#[test]
+fn plan_create_table_with_named_index() {
+    let sql = "create table person (id int, name string, index idx_id (id))";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+        CreateMemoryTable: Bare { table: "person" } constraints=[Index { name: Some("idx_id"), columns: [0], is_unique: false }]
+          EmptyRelation
+        "#
+    );
+}
+
+#[test]
+fn plan_create_table_with_multi_column_index() {
+    let sql = "create table person (id int, name string, age int, index idx_name_age (name, age))";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+        CreateMemoryTable: Bare { table: "person" } constraints=[Index { name: Some("idx_name_age"), columns: [1, 2], is_unique: false }]
+          EmptyRelation
+        "#
+    );
+}
+
+#[test]
+fn plan_create_table_with_multiple_indexes() {
+    let sql = "create table person (id int, name string, age int, index (id), index idx_name (name))";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+        CreateMemoryTable: Bare { table: "person" } constraints=[Index { name: None, columns: [0], is_unique: false }, Index { name: Some("idx_name"), columns: [1], is_unique: false }]
+          EmptyRelation
+        "#
+    );
+}
+
+#[test]
 fn plan_start_transaction() {
     let sql = "start transaction";
     let plan = logical_plan(sql).unwrap();
@@ -4724,4 +4776,220 @@ fn test_using_join_wildcard_schema() {
             "t3.d".to_string()
         ]
     );
+}
+
+#[test]
+fn plan_create_table_with_foreign_key() {
+    let sql = "CREATE TABLE orders (
+        order_id INT PRIMARY KEY,
+        customer_id INT,
+        product_id INT NOT NULL,
+        FOREIGN KEY (customer_id) REFERENCES customers(id),
+        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    )";
+
+    let plan = logical_plan(sql).unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateTableExpr(create_table)) = plan else {
+        panic!("Expected CreateTableExpr");
+    };
+
+    // Should have 3 constraints: 1 primary key and 2 foreign keys
+    assert_eq!(create_table.constraints.len(), 3);
+
+    // Find primary key constraint
+    let primary_key_idx = create_table
+        .constraints
+        .iter()
+        .position(|c| matches!(c, datafusion_common::Constraint::PrimaryKey(_)))
+        .expect("Primary key not found");
+
+    // Check primary key constraint
+    assert!(matches!(
+        &create_table.constraints[primary_key_idx],
+        datafusion_common::Constraint::PrimaryKey(indices) if indices == &[0]
+    ));
+
+    // Find foreign key constraints
+    let foreign_keys: Vec<_> = create_table
+        .constraints
+        .iter()
+        .filter_map(|c| match c {
+            datafusion_common::Constraint::ForeignKey { .. } => Some(c),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(foreign_keys.len(), 2);
+
+    // Check first foreign key constraint (customer_id)
+    let customer_fk = foreign_keys.iter()
+        .find(|fk| matches!(fk, datafusion_common::Constraint::ForeignKey { columns, .. } if columns == &["customer_id"]))
+        .expect("Customer foreign key not found");
+
+    match customer_fk {
+        datafusion_common::Constraint::ForeignKey {
+            columns,
+            referenced_table,
+            referenced_columns,
+            on_delete,
+            on_update,
+            match_type,
+            ..
+        } => {
+            assert_eq!(columns, &["customer_id"]);
+            assert_eq!(referenced_table, "customers");
+            assert_eq!(referenced_columns, &["id"]);
+            assert_eq!(*on_delete, datafusion_common::ReferentialAction::NoAction);
+            assert_eq!(*on_update, datafusion_common::ReferentialAction::NoAction);
+            assert_eq!(*match_type, datafusion_common::MatchType::Simple);
+        }
+        _ => panic!("Expected ForeignKey constraint"),
+    }
+
+    // Check second foreign key constraint with CASCADE (product_id)
+    let product_fk = foreign_keys.iter()
+        .find(|fk| matches!(fk, datafusion_common::Constraint::ForeignKey { columns, .. } if columns == &["product_id"]))
+        .expect("Product foreign key not found");
+
+    match product_fk {
+        datafusion_common::Constraint::ForeignKey {
+            columns,
+            referenced_table,
+            referenced_columns,
+            on_delete,
+            ..
+        } => {
+            assert_eq!(columns, &["product_id"]);
+            assert_eq!(referenced_table, "products");
+            assert_eq!(referenced_columns, &["id"]);
+            assert_eq!(*on_delete, datafusion_common::ReferentialAction::Cascade);
+        }
+        _ => panic!("Expected ForeignKey constraint"),
+    }
+}
+
+#[test]
+fn plan_create_table_with_inline_foreign_key() {
+    let sql = "CREATE TABLE orders (
+        order_id INT PRIMARY KEY,
+        customer_id INT REFERENCES customers(id) ON UPDATE SET NULL,
+        product_id INT NOT NULL REFERENCES products
+    )";
+
+    let plan = logical_plan(sql).unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateTableExpr(create_table)) = plan else {
+        panic!("Expected CreateTableExpr");
+    };
+
+    // Should have 3 constraints: 1 primary key and 2 foreign keys
+    assert_eq!(create_table.constraints.len(), 3);
+
+    // Find foreign key constraints
+    let foreign_keys: Vec<_> = create_table
+        .constraints
+        .iter()
+        .filter_map(|c| match c {
+            datafusion_common::Constraint::ForeignKey { .. } => Some(c),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(foreign_keys.len(), 2);
+
+    // Check inline foreign key with ON UPDATE (customer_id)
+    let customer_fk = foreign_keys.iter()
+        .find(|fk| matches!(fk, datafusion_common::Constraint::ForeignKey { columns, .. } if columns == &["customer_id"]))
+        .expect("Customer foreign key not found");
+
+    match customer_fk {
+        datafusion_common::Constraint::ForeignKey {
+            columns,
+            referenced_table,
+            referenced_columns,
+            on_update,
+            ..
+        } => {
+            assert_eq!(columns, &["customer_id"]);
+            assert_eq!(referenced_table, "customers");
+            assert_eq!(referenced_columns, &["id"]);
+            assert_eq!(*on_update, datafusion_common::ReferentialAction::SetNull);
+        }
+        _ => panic!("Expected ForeignKey constraint"),
+    }
+
+    // Check inline foreign key without explicit columns (product_id)
+    let product_fk = foreign_keys.iter()
+        .find(|fk| matches!(fk, datafusion_common::Constraint::ForeignKey { columns, .. } if columns == &["product_id"]))
+        .expect("Product foreign key not found");
+
+    match product_fk {
+        datafusion_common::Constraint::ForeignKey {
+            columns,
+            referenced_table,
+            referenced_columns,
+            ..
+        } => {
+            assert_eq!(columns, &["product_id"]);
+            assert_eq!(referenced_table, "products");
+            assert!(referenced_columns.is_empty()); // No explicit columns specified
+        }
+        _ => panic!("Expected ForeignKey constraint"),
+    }
+}
+
+#[test]
+fn plan_create_table_with_complex_foreign_key() {
+    let sql = "CREATE TABLE order_items (
+        order_id INT,
+        product_id INT,
+        quantity INT,
+        PRIMARY KEY (order_id, product_id),
+        CONSTRAINT fk_order FOREIGN KEY (order_id, product_id) 
+            REFERENCES orders(id, product_id) 
+            ON DELETE RESTRICT 
+            ON UPDATE CASCADE
+    )";
+
+    let plan = logical_plan(sql).unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateTableExpr(create_table)) = plan else {
+        panic!("Expected CreateTableExpr");
+    };
+
+    // Should have 2 constraints: 1 composite primary key and 1 foreign key
+    assert_eq!(create_table.constraints.len(), 2);
+
+    // Find foreign key constraint
+    let foreign_key = create_table
+        .constraints
+        .iter()
+        .find(|c| matches!(c, datafusion_common::Constraint::ForeignKey { .. }))
+        .expect("Foreign key not found");
+
+    // Check composite foreign key with all options
+    match foreign_key {
+        datafusion_common::Constraint::ForeignKey {
+            name,
+            columns,
+            referenced_table,
+            referenced_columns,
+            on_delete,
+            on_update,
+            match_type,
+            deferrable,
+            initially_deferred,
+            is_validated,
+        } => {
+            assert_eq!(name.as_deref(), Some("fk_order"));
+            assert_eq!(columns, &["order_id", "product_id"]);
+            assert_eq!(referenced_table, "orders");
+            assert_eq!(referenced_columns, &["id", "product_id"]);
+            assert_eq!(*on_delete, datafusion_common::ReferentialAction::Restrict);
+            assert_eq!(*on_update, datafusion_common::ReferentialAction::Cascade);
+            assert_eq!(*match_type, datafusion_common::MatchType::Simple);
+            assert!(!*deferrable);
+            assert!(!*initially_deferred);
+            assert!(*is_validated);
+        }
+        _ => panic!("Expected ForeignKey constraint"),
+    }
 }

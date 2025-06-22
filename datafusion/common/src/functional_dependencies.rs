@@ -25,6 +25,31 @@ use std::vec::IntoIter;
 use crate::utils::{merge_and_order_indices, set_difference};
 use crate::{DFSchema, HashSet, JoinType};
 
+/// Referential action for foreign key constraints
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+pub enum ReferentialAction {
+    /// No action taken (default)
+    NoAction,
+    /// Restrict the operation
+    Restrict,
+    /// Cascade the operation to dependent rows
+    Cascade,
+    /// Set foreign key columns to NULL
+    SetNull,
+    /// Set foreign key columns to their default values
+    SetDefault,
+}
+
+/// Match type for foreign key constraints
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+pub enum MatchType {
+    /// Simple match (default) - allows partially null foreign keys
+    Simple,
+    /// Full match - requires all foreign key columns to be non-null or all null
+    Full,
+    // Partial match is not supported initially
+}
+
 /// This object defines a constraint on a table.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum Constraint {
@@ -33,6 +58,46 @@ pub enum Constraint {
     PrimaryKey(Vec<usize>),
     /// Columns with the given indices form a composite unique key:
     Unique(Vec<usize>),
+    /// Index constraint for optimized data access. Indexes can be:
+    /// - Named or unnamed
+    /// - Unique or non-unique
+    /// - Single-column or multi-column (composite)
+    ///
+    /// Note: Non-unique indexes do not create functional dependencies.
+    Index {
+        /// Optional name for the index
+        name: Option<String>,
+        /// Column indices that form the index
+        columns: Vec<usize>,
+        /// Whether this index enforces uniqueness
+        is_unique: bool,
+    },
+    /// Foreign key constraint that references another table.
+    /// Note: Unlike other constraints, foreign key constraints store column names
+    /// rather than indices, as the referenced table may not be available when
+    /// the constraint is created.
+    ForeignKey {
+        /// Optional name for the foreign key constraint
+        name: Option<String>,
+        /// Column names in this table (not indices)
+        columns: Vec<String>,
+        /// The referenced table name
+        referenced_table: String,
+        /// Column names in the referenced table
+        referenced_columns: Vec<String>,
+        /// Action to take on DELETE of referenced row
+        on_delete: ReferentialAction,
+        /// Action to take on UPDATE of referenced row
+        on_update: ReferentialAction,
+        /// Match type for the foreign key
+        match_type: MatchType,
+        /// Whether the constraint checking can be deferred
+        deferrable: bool,
+        /// Whether the constraint is initially deferred
+        initially_deferred: bool,
+        /// Whether the constraint is validated (false if NOT VALID specified)
+        is_validated: bool,
+    },
 }
 
 /// This object encapsulates a list of functional constraints:
@@ -84,6 +149,28 @@ impl Constraints {
                         // Only keep constraint if all columns are preserved
                         (new_indices.len() == indices.len())
                             .then_some(Constraint::Unique(new_indices))
+                    }
+                    Constraint::Index {
+                        name,
+                        columns,
+                        is_unique,
+                    } => {
+                        let new_indices =
+                            update_elements_with_matching_indices(columns, proj_indices);
+                        // Only keep constraint if all columns are preserved
+                        (new_indices.len() == columns.len()).then_some(
+                            Constraint::Index {
+                                name: name.clone(),
+                                columns: new_indices,
+                                is_unique: *is_unique,
+                            },
+                        )
+                    }
+                    Constraint::ForeignKey { .. } => {
+                        // Foreign keys cannot be projected as they use column names,
+                        // not indices. They would need to be re-resolved after projection.
+                        // For now, we drop foreign key constraints during projection.
+                        None
                     }
                 }
             })
@@ -214,24 +301,49 @@ impl FunctionalDependencies {
             // Construct dependency objects based on each individual constraint:
             let dependencies = constraints
                 .iter()
-                .map(|constraint| {
+                .filter_map(|constraint| {
                     // All the field indices are associated with the whole table
                     // since we are dealing with table level constraints:
-                    let dependency = match constraint {
-                        Constraint::PrimaryKey(indices) => FunctionalDependence::new(
-                            indices.to_vec(),
-                            (0..n_field).collect::<Vec<_>>(),
-                            false,
-                        ),
-                        Constraint::Unique(indices) => FunctionalDependence::new(
-                            indices.to_vec(),
-                            (0..n_field).collect::<Vec<_>>(),
-                            true,
-                        ),
-                    };
-                    // As primary keys are guaranteed to be unique, set the
-                    // functional dependency mode to `Dependency::Single`:
-                    dependency.with_mode(Dependency::Single)
+                    match constraint {
+                        Constraint::PrimaryKey(indices) => {
+                            let dependency = FunctionalDependence::new(
+                                indices.to_vec(),
+                                (0..n_field).collect::<Vec<_>>(),
+                                false,
+                            );
+                            // As primary keys are guaranteed to be unique, set the
+                            // functional dependency mode to `Dependency::Single`:
+                            Some(dependency.with_mode(Dependency::Single))
+                        }
+                        Constraint::Unique(indices) => {
+                            let dependency = FunctionalDependence::new(
+                                indices.to_vec(),
+                                (0..n_field).collect::<Vec<_>>(),
+                                true,
+                            );
+                            Some(dependency.with_mode(Dependency::Single))
+                        }
+                        Constraint::Index {
+                            columns, is_unique, ..
+                        } => {
+                            if *is_unique {
+                                let dependency = FunctionalDependence::new(
+                                    columns.to_vec(),
+                                    (0..n_field).collect::<Vec<_>>(),
+                                    true,
+                                );
+                                Some(dependency.with_mode(Dependency::Single))
+                            } else {
+                                // Non-unique indexes don't create functional dependencies
+                                None
+                            }
+                        }
+                        Constraint::ForeignKey { .. } => {
+                            // Foreign keys don't create functional dependencies
+                            // as they reference external tables
+                            None
+                        }
+                    }
                 })
                 .collect::<Vec<_>>();
             Self::new(dependencies)
@@ -629,10 +741,23 @@ mod tests {
         let constraints = Constraints::new_unverified(vec![
             Constraint::PrimaryKey(vec![10]),
             Constraint::Unique(vec![20]),
+            Constraint::Index {
+                name: Some("idx_test".to_string()),
+                columns: vec![30],
+                is_unique: false,
+            },
         ]);
         let mut iter = constraints.iter();
         assert_eq!(iter.next(), Some(&Constraint::PrimaryKey(vec![10])));
         assert_eq!(iter.next(), Some(&Constraint::Unique(vec![20])));
+        assert_eq!(
+            iter.next(),
+            Some(&Constraint::Index {
+                name: Some("idx_test".to_string()),
+                columns: vec![30],
+                is_unique: false,
+            })
+        );
         assert_eq!(iter.next(), None);
     }
 
@@ -652,6 +777,41 @@ mod tests {
 
         // Project keeping only column 0 - should return None as no constraints are preserved
         assert!(constraints.project(&[0]).is_none());
+    }
+
+    #[test]
+    fn test_project_constraints_with_index() {
+        let constraints = Constraints::new_unverified(vec![
+            Constraint::PrimaryKey(vec![1, 2]),
+            Constraint::Index {
+                name: Some("idx1".to_string()),
+                columns: vec![0, 3],
+                is_unique: false,
+            },
+            Constraint::Index {
+                name: Some("idx2".to_string()),
+                columns: vec![2, 3],
+                is_unique: true,
+            },
+        ]);
+
+        // Project keeping columns 0,2,3
+        let projected = constraints.project(&[0, 2, 3]).unwrap();
+        assert_eq!(
+            projected,
+            Constraints::new_unverified(vec![
+                Constraint::Index {
+                    name: Some("idx1".to_string()),
+                    columns: vec![0, 2],
+                    is_unique: false,
+                },
+                Constraint::Index {
+                    name: Some("idx2".to_string()),
+                    columns: vec![1, 2],
+                    is_unique: true,
+                },
+            ])
+        );
     }
 
     #[test]

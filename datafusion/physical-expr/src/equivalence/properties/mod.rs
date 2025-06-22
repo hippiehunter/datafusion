@@ -623,6 +623,19 @@ impl EquivalenceProperties {
                     indices,
                     matches!(constraint, Constraint::Unique(_)),
                 ),
+            Constraint::Index {
+                columns, is_unique, ..
+            } => {
+                if *is_unique {
+                    self.satisfied_by_constraint(normalized_reqs, columns, true)
+                } else {
+                    false
+                }
+            }
+            Constraint::ForeignKey { .. } => {
+                // Foreign keys don't affect sort order satisfaction
+                false
+            }
         })
     }
 
