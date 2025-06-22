@@ -995,7 +995,7 @@ impl LogicalPlan {
                         or_replace: *or_replace,
                         column_defaults: column_defaults.clone(),
                         temporary: *temporary,
-                        ast: ast.as_ref().map(|a| a.clone()),
+                        ast: ast.clone(),
                     },
                 )))
             }
