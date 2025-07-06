@@ -525,7 +525,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 arg: FunctionArgExpr::Wildcard,
                 operator: _,
             } => {
-                #[expect(deprecated)]
                 let expr = Expr::Wildcard {
                     qualifier: None,
                     options: Box::new(WildcardOptions::default()),
@@ -537,7 +536,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.sql_expr_to_logical_expr(arg, schema, planner_context)
             }
             FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
-                #[expect(deprecated)]
                 let expr = Expr::Wildcard {
                     qualifier: None,
                     options: Box::new(WildcardOptions::default()),
@@ -553,7 +551,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     return plan_err!("Invalid qualifier {qualifier}");
                 }
 
-                #[expect(deprecated)]
                 let expr = Expr::Wildcard {
                     qualifier: qualifier.into(),
                     options: Box::new(WildcardOptions::default()),

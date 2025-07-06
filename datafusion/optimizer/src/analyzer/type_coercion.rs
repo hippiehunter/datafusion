@@ -575,7 +575,6 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                 ))
             }
             // TODO: remove the next line after `Expr::Wildcard` is removed
-            #[expect(deprecated)]
             Expr::Alias(_)
             | Expr::Column(_)
             | Expr::ScalarVariable(_, _)
@@ -1043,7 +1042,6 @@ fn project_with_column_index(
                 spans: _,
             }) if name != schema.field(i).name() => Ok(e.alias(schema.field(i).name())),
             Expr::Alias { .. } | Expr::Column { .. } => Ok(e),
-            #[expect(deprecated)]
             Expr::Wildcard { .. } => {
                 plan_err!("Wildcard should be expanded before type coercion")
             }

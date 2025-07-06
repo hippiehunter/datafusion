@@ -272,7 +272,6 @@ pub fn expr_to_columns(expr: &Expr, accum: &mut HashSet<Column>) -> Result<()> {
             // implementation, so that in the future if someone adds
             // new Expr types, they will check here as well
             // TODO: remove the next line after `Expr::Wildcard` is removed
-            #[expect(deprecated)]
             Expr::Unnest(_)
             | Expr::ScalarVariable(_, _)
             | Expr::Alias(_)
