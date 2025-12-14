@@ -35,8 +35,7 @@ use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::{
     Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, Result,
     ScalarValue, SchemaError, SchemaReference, TableReference, ToDFSchema, exec_err,
-    internal_err, not_impl_err, plan_datafusion_err, plan_err, schema_err,
-    unqualified_field_not_found,
+    not_impl_err, plan_datafusion_err, plan_err, schema_err, unqualified_field_not_found,
 };
 use datafusion_expr::dml::{CopyTo, InsertOp};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -55,9 +54,9 @@ use datafusion_expr::{
     TransactionIsolationLevel, TransactionStart, Volatility, WriteOp, cast, col,
 };
 use sqlparser::ast::{
-    self, BeginTransactionKind, IndexColumn, IndexType, NullsDistinctOption, OrderByExpr,
-    OrderByOptions, Set, ShowStatementIn, ShowStatementOptions, SqliteOnConflict,
-    TableObject, UpdateTableFromKind, ValueWithSpan,
+    self, BeginTransactionKind, IndexColumn, IndexType, OrderByExpr, OrderByOptions, Set,
+    ShowStatementIn, ShowStatementOptions, SqliteOnConflict, TableObject,
+    UpdateTableFromKind, ValueWithSpan,
 };
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
@@ -102,16 +101,17 @@ fn get_schema_name(schema_name: &SchemaName) -> String {
 /// Construct `TableConstraint`(s) for the given columns by iterating over
 /// `columns` and extracting individual inline constraint definitions.
 fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConstraint> {
+    use ast::{
+        CheckConstraint, ForeignKeyConstraint, PrimaryKeyConstraint, UniqueConstraint,
+    };
+
     let mut constraints = vec![];
     for column in columns {
         for ast::ColumnOptionDef { name, option } in &column.options {
             match option {
-                ast::ColumnOption::Unique {
-                    is_primary: false,
-                    characteristics,
-                } => constraints.push(TableConstraint::Unique {
-                    name: name.clone(),
-                    columns: vec![IndexColumn {
+                ast::ColumnOption::Unique(unique_constraint) => {
+                    // Create a new UniqueConstraint with the column from this definition
+                    let column_expr = IndexColumn {
                         column: OrderByExpr {
                             expr: SQLExpr::Identifier(column.name.clone()),
                             options: OrderByOptions {
@@ -121,57 +121,58 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                             with_fill: None,
                         },
                         operator_class: None,
-                    }],
-                    characteristics: *characteristics,
-                    index_name: None,
-                    index_type_display: ast::KeyOrIndexDisplay::None,
-                    index_type: None,
-                    index_options: vec![],
-                    nulls_distinct: NullsDistinctOption::None,
-                }),
-                ast::ColumnOption::Unique {
-                    is_primary: true,
-                    characteristics,
-                } => constraints.push(TableConstraint::PrimaryKey {
-                    name: name.clone(),
-                    columns: vec![IndexColumn {
-                        column: OrderByExpr {
-                            expr: SQLExpr::Identifier(column.name.clone()),
-                            options: OrderByOptions {
-                                asc: None,
-                                nulls_first: None,
-                            },
-                            with_fill: None,
-                        },
-                        operator_class: None,
-                    }],
-                    characteristics: *characteristics,
-                    index_name: None,
-                    index_type: None,
-                    index_options: vec![],
-                }),
-                ast::ColumnOption::ForeignKey {
-                    foreign_table,
-                    referred_columns,
-                    on_delete,
-                    on_update,
-                    characteristics,
-                } => constraints.push(TableConstraint::ForeignKey {
-                    name: name.clone(),
-                    columns: vec![],
-                    foreign_table: foreign_table.clone(),
-                    referred_columns: referred_columns.to_vec(),
-                    on_delete: *on_delete,
-                    on_update: *on_update,
-                    characteristics: *characteristics,
-                    index_name: None,
-                }),
-                ast::ColumnOption::Check(expr) => {
-                    constraints.push(TableConstraint::Check {
+                    };
+                    constraints.push(TableConstraint::Unique(UniqueConstraint {
                         name: name.clone(),
-                        expr: Box::new(expr.clone()),
-                        enforced: None,
-                    })
+                        index_name: unique_constraint.index_name.clone(),
+                        index_type_display: unique_constraint.index_type_display,
+                        index_type: unique_constraint.index_type.clone(),
+                        columns: vec![column_expr],
+                        index_options: unique_constraint.index_options.clone(),
+                        characteristics: unique_constraint.characteristics,
+                        nulls_distinct: unique_constraint.nulls_distinct.clone(),
+                    }));
+                }
+                ast::ColumnOption::PrimaryKey(pk_constraint) => {
+                    let column_expr = IndexColumn {
+                        column: OrderByExpr {
+                            expr: SQLExpr::Identifier(column.name.clone()),
+                            options: OrderByOptions {
+                                asc: None,
+                                nulls_first: None,
+                            },
+                            with_fill: None,
+                        },
+                        operator_class: None,
+                    };
+                    constraints.push(TableConstraint::PrimaryKey(PrimaryKeyConstraint {
+                        name: name.clone(),
+                        index_name: pk_constraint.index_name.clone(),
+                        index_type: pk_constraint.index_type.clone(),
+                        columns: vec![column_expr],
+                        index_options: pk_constraint.index_options.clone(),
+                        characteristics: pk_constraint.characteristics,
+                    }));
+                }
+                ast::ColumnOption::ForeignKey(fk_constraint) => {
+                    constraints.push(TableConstraint::ForeignKey(ForeignKeyConstraint {
+                        name: name.clone(),
+                        index_name: fk_constraint.index_name.clone(),
+                        columns: vec![column.name.clone()],
+                        foreign_table: fk_constraint.foreign_table.clone(),
+                        referred_columns: fk_constraint.referred_columns.clone(),
+                        on_delete: fk_constraint.on_delete.clone(),
+                        on_update: fk_constraint.on_update.clone(),
+                        match_kind: fk_constraint.match_kind.clone(),
+                        characteristics: fk_constraint.characteristics,
+                    }));
+                }
+                ast::ColumnOption::Check(check_constraint) => {
+                    constraints.push(TableConstraint::Check(CheckConstraint {
+                        name: name.clone(),
+                        expr: check_constraint.expr.clone(),
+                        enforced: check_constraint.enforced,
+                    }));
                 }
                 // Other options are not constraint related.
                 ast::ColumnOption::Default(_)
@@ -191,7 +192,8 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                 | ast::ColumnOption::Tags(_)
                 | ast::ColumnOption::Alias(_)
                 | ast::ColumnOption::Srid(_)
-                | ast::ColumnOption::Collation(_) => {}
+                | ast::ColumnOption::Collation(_)
+                | ast::ColumnOption::Invisible => {}
             }
         }
     }
@@ -557,77 +559,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                 }
             }
-            Statement::CreateView {
-                or_replace,
-                materialized,
-                name,
-                columns,
-                query,
-                options: CreateTableOptions::None,
-                cluster_by,
-                comment,
-                with_no_schema_binding,
-                if_not_exists,
-                temporary,
-                to,
-                params,
-                or_alter,
-                secure,
-                name_before_not_exists,
-            } => {
-                if materialized {
+            Statement::CreateView(view) => {
+                if view.materialized {
                     return not_impl_err!("Materialized views not supported")?;
                 }
-                if !cluster_by.is_empty() {
+                if !view.cluster_by.is_empty() {
                     return not_impl_err!("Cluster by not supported")?;
                 }
-                if comment.is_some() {
+                if view.comment.is_some() {
                     return not_impl_err!("Comment not supported")?;
                 }
-                if with_no_schema_binding {
+                if view.with_no_schema_binding {
                     return not_impl_err!("With no schema binding not supported")?;
                 }
-                if if_not_exists {
+                if view.if_not_exists {
                     return not_impl_err!("If not exists not supported")?;
                 }
-                if to.is_some() {
+                if view.to.is_some() {
                     return not_impl_err!("To not supported")?;
                 }
 
                 // put the statement back together temporarily to get the SQL
                 // string representation
-                let stmt = Statement::CreateView {
-                    or_replace,
-                    materialized,
-                    name,
-                    columns,
-                    query,
-                    options: CreateTableOptions::None,
-                    cluster_by,
-                    comment,
-                    with_no_schema_binding,
-                    if_not_exists,
-                    temporary,
-                    to,
-                    params,
-                    or_alter,
-                    secure,
-                    name_before_not_exists,
-                };
-                let sql = stmt.to_string();
-                let Statement::CreateView {
-                    name,
-                    columns,
-                    query,
-                    or_replace,
-                    temporary,
-                    ..
-                } = stmt
-                else {
-                    return internal_err!("Unreachable code in create view");
-                };
+                let sql = Statement::CreateView(view.clone()).to_string();
 
-                let columns = columns
+                let columns = view
+                    .columns
                     .into_iter()
                     .map(|view_column_def| {
                         if let Some(options) = view_column_def.options {
@@ -640,15 +597,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let mut plan = self.query_to_plan(*query, &mut PlannerContext::new())?;
+                let mut plan =
+                    self.query_to_plan(*view.query, &mut PlannerContext::new())?;
                 plan = self.apply_expr_alias(plan, columns)?;
 
                 Ok(LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {
-                    name: self.object_name_to_table_reference(name)?,
+                    name: self.object_name_to_table_reference(view.name)?,
                     input: Arc::new(plan),
-                    or_replace,
+                    or_replace: view.or_replace,
                     definition: Some(sql),
-                    temporary,
+                    temporary: view.temporary,
                 })))
             }
             Statement::ShowCreate { obj_type, obj_name } => match obj_type {
@@ -965,6 +923,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 has_table_keyword,
                 settings,
                 format_clause,
+                ..
             }) => {
                 let table_name = match table {
                     TableObject::TableName(table_name) => table_name,
@@ -1025,17 +984,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let _ = has_table_keyword;
                 self.insert_to_plan(table_name, columns, source, overwrite, replace_into)
             }
-            Statement::Update {
-                table,
-                assignments,
-                from,
-                selection,
-                returning,
-                or,
-                limit,
-            } => {
+            Statement::Update(update) => {
                 let from_clauses =
-                    from.map(|update_table_from_kind| match update_table_from_kind {
+                    update.from.map(|update_table_from_kind| match update_table_from_kind {
                         UpdateTableFromKind::BeforeSet(from_clauses) => from_clauses,
                         UpdateTableFromKind::AfterSet(from_clauses) => from_clauses,
                     });
@@ -1044,16 +995,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("Multiple tables in UPDATE SET FROM not yet supported")?;
                 }
                 let update_from = from_clauses.and_then(|mut f| f.pop());
-                if returning.is_some() {
+                if update.returning.is_some() {
                     plan_err!("Update-returning clause not yet supported")?;
                 }
-                if or.is_some() {
+                if update.or.is_some() {
                     plan_err!("ON conflict not supported")?;
                 }
-                if limit.is_some() {
+                if update.limit.is_some() {
                     return not_impl_err!("Update-limit clause not supported")?;
                 }
-                self.update_to_plan(table, &assignments, update_from, selection)
+                self.update_to_plan(update.table, &update.assignments, update_from, update.selection)
             }
 
             Statement::Delete(Delete {
@@ -1064,6 +1015,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 from,
                 order_by,
                 limit,
+                ..
             }) => {
                 if !tables.is_empty() {
                     plan_err!("DELETE <TABLE> not supported")?;
@@ -1295,7 +1247,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let function_body = match function_body {
                     Some(r) => Some(self.sql_to_expr(
                         match r {
-                            ast::CreateFunctionBody::AsBeforeOptions(expr) => expr,
+                            ast::CreateFunctionBody::AsBeforeOptions { body, .. } => body,
                             ast::CreateFunctionBody::AsAfterOptions(expr) => expr,
                             ast::CreateFunctionBody::Return(expr) => expr,
                             ast::CreateFunctionBody::AsBeginEnd(_) => {
@@ -1338,14 +1290,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 Ok(LogicalPlan::Ddl(statement))
             }
-            Statement::DropFunction {
-                if_exists,
-                func_desc,
-                ..
-            } => {
+            Statement::DropFunction(drop_func) => {
                 // According to postgresql documentation it can be only one function
                 // specified in drop statement
-                if let Some(desc) = func_desc.first() {
+                if let Some(desc) = drop_func.func_desc.first() {
                     // At the moment functions can't be qualified `schema.name`
                     let name = match &desc.name.0[..] {
                         [] => exec_err!("Function should have name")?,
@@ -1353,7 +1301,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         [..] => not_impl_err!("Qualified functions are not supported")?,
                     };
                     let statement = DdlStatement::DropFunction(DropFunction {
-                        if_exists,
+                        if_exists: drop_func.if_exists,
                         name,
                         schema: DFSchemaRef::new(DFSchema::empty()),
                     });
@@ -1716,32 +1664,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let constraints = constraints
             .iter()
             .map(|c: &TableConstraint| match c {
-                TableConstraint::Unique { name, columns, .. } => {
-                    let constraint_name = match name {
+                TableConstraint::Unique(unique) => {
+                    let constraint_name = match &unique.name {
                         Some(name) => &format!("unique constraint with name '{name}'"),
                         None => "unique constraint",
                     };
                     // Get unique constraint indices in the schema
                     let indices = self.get_constraint_column_indices(
                         df_schema,
-                        columns,
+                        &unique.columns,
                         constraint_name,
                     )?;
                     Ok(Constraint::Unique(indices))
                 }
-                TableConstraint::PrimaryKey { columns, .. } => {
+                TableConstraint::PrimaryKey(pk) => {
                     // Get primary key indices in the schema
                     let indices = self.get_constraint_column_indices(
                         df_schema,
-                        columns,
+                        &pk.columns,
                         "primary key",
                     )?;
                     Ok(Constraint::PrimaryKey(indices))
                 }
-                TableConstraint::ForeignKey { .. } => {
+                TableConstraint::ForeignKey(_) => {
                     _plan_err!("Foreign key constraints are not currently supported")
                 }
-                TableConstraint::Check { .. } => {
+                TableConstraint::Check(_) => {
                     _plan_err!("Check constraints are not currently supported")
                 }
                 TableConstraint::Index { .. } => {
