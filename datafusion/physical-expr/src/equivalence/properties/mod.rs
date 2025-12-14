@@ -735,6 +735,8 @@ impl EquivalenceProperties {
                         })
                     })
             }
+            // Foreign keys don't affect sort order satisfaction
+            Constraint::ForeignKey { .. } => false,
         })
     }
 
@@ -780,6 +782,8 @@ impl EquivalenceProperties {
                         })
                     })
             }
+            // Foreign keys don't affect sort requirements satisfaction
+            Constraint::ForeignKey { .. } => false,
         })
     }
 

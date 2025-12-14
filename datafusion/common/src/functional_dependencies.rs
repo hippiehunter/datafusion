@@ -25,6 +25,30 @@ use std::vec::IntoIter;
 use crate::utils::{merge_and_order_indices, set_difference};
 use crate::{DFSchema, HashSet, JoinType};
 
+/// Referential action for foreign key constraints
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+pub enum ReferentialAction {
+    /// No action taken (default)
+    NoAction,
+    /// Restrict the operation
+    Restrict,
+    /// Cascade the operation to dependent rows
+    Cascade,
+    /// Set foreign key columns to NULL
+    SetNull,
+    /// Set foreign key columns to their default values
+    SetDefault,
+}
+
+/// Match type for foreign key constraints
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+pub enum MatchType {
+    /// Simple match (default) - allows partially null foreign keys
+    Simple,
+    /// Full match - requires all foreign key columns to be non-null or all null
+    Full,
+}
+
 /// This object defines a constraint on a table.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum Constraint {
@@ -33,6 +57,26 @@ pub enum Constraint {
     PrimaryKey(Vec<usize>),
     /// Columns with the given indices form a composite unique key:
     Unique(Vec<usize>),
+    /// Foreign key constraint that references another table.
+    /// Note: Unlike other constraints, foreign key constraints store column names
+    /// rather than indices, as the referenced table may not be available when
+    /// the constraint is created.
+    ForeignKey {
+        /// Optional name for the foreign key constraint
+        name: Option<String>,
+        /// Column names in this table (not indices)
+        columns: Vec<String>,
+        /// The referenced table name
+        referenced_table: String,
+        /// Column names in the referenced table
+        referenced_columns: Vec<String>,
+        /// Action to take on DELETE of referenced row
+        on_delete: ReferentialAction,
+        /// Action to take on UPDATE of referenced row
+        on_update: ReferentialAction,
+        /// Match type for the foreign key
+        match_type: MatchType,
+    },
 }
 
 /// This object encapsulates a list of functional constraints:
@@ -80,6 +124,12 @@ impl Constraints {
                         // Only keep the constraint if all columns are preserved:
                         (new_indices.len() == indices.len())
                             .then_some(Constraint::Unique(new_indices))
+                    }
+                    Constraint::ForeignKey { .. } => {
+                        // Foreign keys cannot be projected as they use column names,
+                        // not indices. They would need to be re-resolved after projection.
+                        // For now, we drop foreign key constraints during projection.
+                        None
                     }
                 }
             })
@@ -204,24 +254,27 @@ impl FunctionalDependencies {
             // Construct dependency objects based on each individual constraint:
             let dependencies = constraints
                 .iter()
-                .map(|constraint| {
+                .filter_map(|constraint| {
                     // All the field indices are associated with the whole table
                     // since we are dealing with table level constraints:
                     let dependency = match constraint {
-                        Constraint::PrimaryKey(indices) => FunctionalDependence::new(
+                        Constraint::PrimaryKey(indices) => Some(FunctionalDependence::new(
                             indices.to_vec(),
                             (0..n_field).collect::<Vec<_>>(),
                             false,
-                        ),
-                        Constraint::Unique(indices) => FunctionalDependence::new(
+                        )),
+                        Constraint::Unique(indices) => Some(FunctionalDependence::new(
                             indices.to_vec(),
                             (0..n_field).collect::<Vec<_>>(),
                             true,
-                        ),
+                        )),
+                        // Foreign keys don't create functional dependencies
+                        // as they reference another table
+                        Constraint::ForeignKey { .. } => None,
                     };
                     // As primary keys are guaranteed to be unique, set the
                     // functional dependency mode to `Dependency::Single`:
-                    dependency.with_mode(Dependency::Single)
+                    dependency.map(|d| d.with_mode(Dependency::Single))
                 })
                 .collect::<Vec<_>>();
             Self::new(dependencies)

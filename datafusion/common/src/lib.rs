@@ -82,8 +82,8 @@ pub use file_options::file_type::{
 };
 pub use functional_dependencies::{
     Constraint, Constraints, Dependency, FunctionalDependence, FunctionalDependencies,
-    aggregate_functional_dependencies, get_required_group_by_exprs_indices,
-    get_target_functional_dependencies,
+    MatchType, ReferentialAction, aggregate_functional_dependencies,
+    get_required_group_by_exprs_indices, get_target_functional_dependencies,
 };
 use hashbrown::hash_map::DefaultHashBuilder;
 pub use join_type::{JoinConstraint, JoinSide, JoinType};

@@ -33,9 +33,10 @@ use arrow::datatypes::{Field, FieldRef, Fields};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::{
-    Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, Result,
-    ScalarValue, SchemaError, SchemaReference, TableReference, ToDFSchema, exec_err,
-    not_impl_err, plan_datafusion_err, plan_err, schema_err, unqualified_field_not_found,
+    Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, MatchType,
+    ReferentialAction, Result, ScalarValue, SchemaError, SchemaReference, TableReference,
+    ToDFSchema, exec_err, not_impl_err, plan_datafusion_err, plan_err, schema_err,
+    unqualified_field_not_found,
 };
 use datafusion_expr::dml::{CopyTo, InsertOp};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -1686,8 +1687,40 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )?;
                     Ok(Constraint::PrimaryKey(indices))
                 }
-                TableConstraint::ForeignKey(_) => {
-                    _plan_err!("Foreign key constraints are not currently supported")
+                TableConstraint::ForeignKey(fk) => {
+                    // Convert sqlparser ReferentialAction to DataFusion ReferentialAction
+                    let convert_action = |action: Option<ast::ReferentialAction>| match action {
+                        None | Some(ast::ReferentialAction::NoAction) => {
+                            ReferentialAction::NoAction
+                        }
+                        Some(ast::ReferentialAction::Restrict) => ReferentialAction::Restrict,
+                        Some(ast::ReferentialAction::Cascade) => ReferentialAction::Cascade,
+                        Some(ast::ReferentialAction::SetNull) => ReferentialAction::SetNull,
+                        Some(ast::ReferentialAction::SetDefault) => {
+                            ReferentialAction::SetDefault
+                        }
+                    };
+
+                    // Convert match kind to MatchType
+                    let match_type = match fk.match_kind {
+                        Some(ast::ConstraintReferenceMatchKind::Full) => MatchType::Full,
+                        _ => MatchType::Simple,
+                    };
+
+                    let columns: Vec<String> =
+                        fk.columns.iter().map(|c| c.value.clone()).collect();
+                    let referenced_columns: Vec<String> =
+                        fk.referred_columns.iter().map(|c| c.value.clone()).collect();
+
+                    Ok(Constraint::ForeignKey {
+                        name: fk.name.as_ref().map(|n| n.value.clone()),
+                        columns,
+                        referenced_table: fk.foreign_table.to_string(),
+                        referenced_columns,
+                        on_delete: convert_action(fk.on_delete.clone()),
+                        on_update: convert_action(fk.on_update.clone()),
+                        match_type,
+                    })
                 }
                 TableConstraint::Check(_) => {
                     _plan_err!("Check constraints are not currently supported")
