@@ -21,20 +21,14 @@ use datafusion_common::{
     Column, DFSchema, DFSchemaRef, DataFusionError, Result, TableReference,
     assert_contains,
 };
-use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
 use datafusion_expr::test::function_stub::{
     count_udaf, max_udaf, min_udaf, sum, sum_udaf,
 };
 use datafusion_expr::{
     EmptyRelation, Expr, Extension, LogicalPlan, LogicalPlanBuilder, Union,
-    UserDefinedLogicalNode, UserDefinedLogicalNodeCore, WindowFrame,
-    WindowFunctionDefinition, cast, col, lit, table_scan, wildcard,
+    UserDefinedLogicalNode, UserDefinedLogicalNodeCore, cast, col, lit, table_scan, wildcard,
 };
-use datafusion_functions::unicode;
 use datafusion_functions_aggregate::grouping::grouping_udaf;
-use datafusion_functions_nested::make_array::make_array_udf;
-use datafusion_functions_nested::map::map_udf;
-use datafusion_functions_window::rank::rank_udwf;
 use datafusion_sql::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_sql::unparser::dialect::{
     BigQueryDialect, CustomDialectBuilder, DefaultDialect as UnparserDefaultDialect,
@@ -53,10 +47,11 @@ use crate::common::{MockContextProvider, MockSessionState};
 use datafusion_expr::builder::{
     project, subquery_alias, table_scan_with_filter_and_fetch, table_scan_with_filters,
 };
-use datafusion_functions::core::planner::CoreFunctionPlanner;
-use datafusion_functions::unicode::planner::UnicodeFunctionPlanner;
-use datafusion_functions_nested::extract::array_element_udf;
-use datafusion_functions_nested::planner::{FieldAccessPlanner, NestedFunctionPlanner};
+
+// Note: Many tests in this file are disabled because they depend on removed crates:
+// - datafusion_functions (CoreFunctionPlanner, UnicodeFunctionPlanner, unicode)
+// - datafusion_functions_nested (make_array_udf, map_udf, array_element_udf, FieldAccessPlanner, NestedFunctionPlanner)
+// - datafusion_functions_window (rank_udwf)
 use datafusion_sql::unparser::ast::{
     DerivedRelationBuilder, QueryBuilder, RelationBuilder, SelectBuilder,
 };
@@ -211,14 +206,15 @@ fn roundtrip_statement() -> Result<()> {
             SUM(id) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
             FROM person
             GROUP BY GROUPING SETS ((id, first_name, last_name), (first_name, last_name), (last_name))"#,
-            "SELECT ARRAY[1, 2, 3]",
-            "SELECT ARRAY[1, 2, 3][1]",
-            "SELECT [1, 2, 3]",
-            "SELECT [1, 2, 3][1]",
-            "SELECT left[1] FROM array",
-            "SELECT {a:1, b:2}",
-            "SELECT s.a FROM (SELECT {a:1, b:2} AS s)",
-            "SELECT MAP {'a': 1, 'b': 2}"
+            // Removed: Array/struct/map literals require datafusion_functions_nested which was pruned
+            // "SELECT ARRAY[1, 2, 3]",
+            // "SELECT ARRAY[1, 2, 3][1]",
+            // "SELECT [1, 2, 3]",
+            // "SELECT [1, 2, 3][1]",
+            // "SELECT left[1] FROM array",
+            // "SELECT {a:1, b:2}",
+            // "SELECT s.a FROM (SELECT {a:1, b:2} AS s)",
+            // "SELECT MAP {'a': 1, 'b': 2}"
     ];
 
     // For each test sql string, we transform as follows:
@@ -232,15 +228,9 @@ fn roundtrip_statement() -> Result<()> {
             .try_with_sql(query)?
             .parse_statement()?;
         let state = MockSessionState::default()
-            .with_scalar_function(make_array_udf())
-            .with_scalar_function(array_element_udf())
-            .with_scalar_function(map_udf())
             .with_aggregate_function(sum_udaf())
             .with_aggregate_function(count_udaf())
-            .with_aggregate_function(max_udaf())
-            .with_expr_planner(Arc::new(CoreFunctionPlanner::default()))
-            .with_expr_planner(Arc::new(NestedFunctionPlanner))
-            .with_expr_planner(Arc::new(FieldAccessPlanner));
+            .with_aggregate_function(max_udaf());
         let context = MockContextProvider { state };
         let sql_to_rel = SqlToRel::new(&context);
         let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
@@ -266,8 +256,7 @@ fn roundtrip_crossjoin() -> Result<()> {
         .try_with_sql(query)?
         .parse_statement()?;
 
-    let state = MockSessionState::default()
-        .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
+    let state = MockSessionState::default();
 
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new(&context);
@@ -309,10 +298,7 @@ macro_rules! roundtrip_statement_with_dialect_helper {
 
         let state = MockSessionState::default()
             .with_aggregate_function(max_udaf())
-            .with_aggregate_function(min_udaf())
-            .with_expr_planner(Arc::new(CoreFunctionPlanner::default()))
-            .with_expr_planner(Arc::new(NestedFunctionPlanner))
-            .with_expr_planner(Arc::new(FieldAccessPlanner));
+            .with_aggregate_function(min_udaf());
 
         let context = MockContextProvider { state };
         let sql_to_rel = SqlToRel::new(&context);
@@ -694,6 +680,7 @@ fn roundtrip_statement_with_dialect_26() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_27() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3])",
@@ -705,6 +692,7 @@ fn roundtrip_statement_with_dialect_27() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_28() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) AS t1 (c1)",
@@ -716,6 +704,7 @@ fn roundtrip_statement_with_dialect_28() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_29() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]), j1",
@@ -727,6 +716,7 @@ fn roundtrip_statement_with_dialect_29() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_30() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) JOIN j1 ON u.c1 = j1.j1_id",
@@ -738,6 +728,7 @@ fn roundtrip_statement_with_dialect_30() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_31() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) UNION ALL SELECT * FROM UNNEST([4,5,6]) u(c1)",
@@ -749,6 +740,7 @@ fn roundtrip_statement_with_dialect_31() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_32() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -774,6 +766,7 @@ fn roundtrip_statement_with_dialect_33() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_34() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -788,6 +781,7 @@ fn roundtrip_statement_with_dialect_34() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_35() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -802,6 +796,7 @@ fn roundtrip_statement_with_dialect_35() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_36() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -816,6 +811,7 @@ fn roundtrip_statement_with_dialect_36() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_37() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -830,6 +826,7 @@ fn roundtrip_statement_with_dialect_37() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_38() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -844,6 +841,7 @@ fn roundtrip_statement_with_dialect_38() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_39() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -858,6 +856,7 @@ fn roundtrip_statement_with_dialect_39() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_40() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -900,6 +899,7 @@ fn roundtrip_statement_with_dialect_42() -> Result<(), DataFusionError> {
 }
 
 #[test]
+#[ignore = "requires array literals from pruned datafusion_functions_nested"]
 fn roundtrip_statement_with_dialect_43() -> Result<(), DataFusionError> {
     let unparser = CustomDialectBuilder::default()
         .with_unnest_as_table_factor(true)
@@ -1335,14 +1335,7 @@ where
         state: MockSessionState::default()
             .with_aggregate_function(sum_udaf())
             .with_aggregate_function(max_udaf())
-            .with_aggregate_function(grouping_udaf())
-            .with_window_function(rank_udwf())
-            .with_scalar_function(Arc::new(unicode::substr().as_ref().clone()))
-            .with_scalar_function(make_array_udf())
-            .with_expr_planner(Arc::new(CoreFunctionPlanner::default()))
-            .with_expr_planner(Arc::new(UnicodeFunctionPlanner))
-            .with_expr_planner(Arc::new(NestedFunctionPlanner))
-            .with_expr_planner(Arc::new(FieldAccessPlanner)),
+            .with_aggregate_function(grouping_udaf()),
     };
     let sql_to_rel = SqlToRel::new(&context);
     let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
@@ -1855,17 +1848,8 @@ fn test_order_by_to_sql_2() {
     );
 }
 
-#[test]
-fn test_order_by_to_sql_3() {
-    let statement = generate_round_trip_statement(
-        GenericDialect {},
-        r#"SELECT id, first_name, substr(first_name,0,5) FROM person ORDER BY id, substr(first_name,0,5)"#,
-    );
-    assert_snapshot!(
-        statement,
-        @r#"SELECT person.id, person.first_name, substr(person.first_name, 0, 5) FROM person ORDER BY person.id ASC NULLS LAST, substr(person.first_name, 0, 5) ASC NULLS LAST"#
-    );
-}
+// Removed: test_order_by_to_sql_3
+// (requires substr from pruned datafusion_functions)
 
 #[test]
 fn test_complex_order_by_with_grouping() -> Result<()> {
@@ -1912,23 +1896,8 @@ fn test_complex_order_by_with_grouping() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_aggregation_to_sql() {
-    let sql = r#"SELECT id, first_name,
-        SUM(id) AS total_sum,
-        SUM(id) OVER (PARTITION BY first_name ROWS BETWEEN 5 PRECEDING AND 2 FOLLOWING) AS moving_sum,
-        SUM(id) FILTER (WHERE id > 50 AND first_name = 'John') OVER (PARTITION BY first_name ROWS BETWEEN 5 PRECEDING AND 2 FOLLOWING) AS filtered_sum,
-        MAX(SUM(id)) OVER (PARTITION BY first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS max_total,
-        rank() OVER (PARTITION BY grouping(id) + grouping(age), CASE WHEN grouping(age) = 0 THEN id END ORDER BY sum(id) DESC) AS rank_within_parent_1,
-        rank() OVER (PARTITION BY grouping(age) + grouping(id), CASE WHEN (CAST(grouping(age) AS BIGINT) = 0) THEN id END ORDER BY sum(id) DESC) AS rank_within_parent_2
-        FROM person
-        GROUP BY id, first_name"#;
-    let statement = generate_round_trip_statement(GenericDialect {}, sql);
-    assert_snapshot!(
-        statement,
-        @"SELECT person.id, person.first_name, sum(person.id) AS total_sum, sum(person.id) OVER (PARTITION BY person.first_name ROWS BETWEEN 5 PRECEDING AND 2 FOLLOWING) AS moving_sum, sum(person.id) FILTER (WHERE ((person.id > 50) AND (person.first_name = 'John'))) OVER (PARTITION BY person.first_name ROWS BETWEEN 5 PRECEDING AND 2 FOLLOWING) AS filtered_sum, max(sum(person.id)) OVER (PARTITION BY person.first_name ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS max_total, rank() OVER (PARTITION BY (grouping(person.id) + grouping(person.age)), CASE WHEN (grouping(person.age) = 0) THEN person.id END ORDER BY sum(person.id) DESC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rank_within_parent_1, rank() OVER (PARTITION BY (grouping(person.age) + grouping(person.id)), CASE WHEN (CAST(grouping(person.age) AS BIGINT) = 0) THEN person.id END ORDER BY sum(person.id) DESC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rank_within_parent_2 FROM person GROUP BY person.id, person.first_name",
-    );
-}
+// Removed: test_aggregation_to_sql
+// (requires rank() from pruned datafusion_functions_window)
 
 #[test]
 fn test_unnest_to_sql_1() {
@@ -1942,17 +1911,8 @@ fn test_unnest_to_sql_1() {
     );
 }
 
-#[test]
-fn test_unnest_to_sql_2() {
-    let statement = generate_round_trip_statement(
-        GenericDialect {},
-        r#"SELECT unnest(make_array(1, 2, 2, 5, NULL)) as u1"#,
-    );
-    assert_snapshot!(
-        statement,
-        @r#"SELECT UNNEST([1, 2, 2, 5, NULL]) AS u1"#
-    );
-}
+// Removed: test_unnest_to_sql_2
+// (requires make_array from pruned datafusion_functions_nested)
 
 #[test]
 fn test_join_with_no_conditions() {
@@ -2518,6 +2478,10 @@ fn test_unparse_left_semi_join_with_table_scan_projection() -> Result<()> {
     Ok(())
 }
 
+// NOTE: This test is disabled because it depends on rank_udwf() from the removed
+// datafusion_functions_window crate. To re-enable this test, the window function
+// implementation would need to be available.
+/*
 #[test]
 fn test_unparse_window() -> Result<()> {
     // SubqueryAlias: t
@@ -2601,6 +2565,7 @@ fn test_unparse_window() -> Result<()> {
 
     Ok(())
 }
+*/
 
 #[test]
 fn test_like_filter() {
@@ -2686,59 +2651,5 @@ fn test_not_ilike_filter_with_escape() {
     );
 }
 
-#[test]
-fn test_struct_expr() {
-    let statement = generate_round_trip_statement(
-        GenericDialect {},
-        r#"WITH test AS (SELECT STRUCT(STRUCT('Product Name' as name) as product) AS metadata) SELECT metadata.product FROM test WHERE metadata.product.name  = 'Product Name'"#,
-    );
-    assert_snapshot!(
-        statement,
-        @r#"SELECT test."metadata".product FROM (SELECT {product: {"name": 'Product Name'}} AS "metadata") AS test WHERE (test."metadata".product."name" = 'Product Name')"#
-    );
-
-    let statement = generate_round_trip_statement(
-        GenericDialect {},
-        r#"WITH test AS (SELECT STRUCT(STRUCT('Product Name' as name) as product) AS metadata) SELECT metadata.product FROM test WHERE metadata['product']['name']  = 'Product Name'"#,
-    );
-    assert_snapshot!(
-        statement,
-        @r#"SELECT test."metadata".product FROM (SELECT {product: {"name": 'Product Name'}} AS "metadata") AS test WHERE (test."metadata".product."name" = 'Product Name')"#
-    );
-}
-
-#[test]
-fn test_struct_expr2() {
-    let statement = generate_round_trip_statement(
-        GenericDialect {},
-        r#"SELECT STRUCT(STRUCT('Product Name' as name) as product)['product']['name']  = 'Product Name';"#,
-    );
-    assert_snapshot!(
-        statement,
-        @r#"SELECT ({product: {"name": 'Product Name'}}.product."name" = 'Product Name')"#
-    );
-}
-
-#[test]
-fn test_struct_expr3() {
-    let statement = generate_round_trip_statement(
-        GenericDialect {},
-        r#"WITH
-                test AS (
-                    SELECT
-                        STRUCT (
-                            STRUCT (
-                                STRUCT ('Product Name' as name) as product
-                            ) AS metadata
-                        ) AS c1
-                )
-            SELECT
-                c1.metadata.product.name
-            FROM
-                test"#,
-    );
-    assert_snapshot!(
-        statement,
-        @r#"SELECT test.c1."metadata".product."name" FROM (SELECT {"metadata": {product: {"name": 'Product Name'}}} AS c1) AS test"#
-    );
-}
+// Removed: test_struct_expr, test_struct_expr2, test_struct_expr3
+// (require Struct support from pruned datafusion_functions_nested)

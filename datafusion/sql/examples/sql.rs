@@ -26,7 +26,6 @@ use datafusion_expr::planner::ExprPlanner;
 use datafusion_expr::{
     AggregateUDF, ScalarUDF, TableSource, logical_plan::builder::LogicalTableSource,
 };
-use datafusion_functions::core::planner::CoreFunctionPlanner;
 use datafusion_functions_aggregate::count::count_udaf;
 use datafusion_functions_aggregate::sum::sum_udaf;
 use datafusion_sql::{
@@ -56,8 +55,7 @@ fn main() {
     // create a logical query plan
     let context_provider = MyContextProvider::new()
         .with_udaf(sum_udaf())
-        .with_udaf(count_udaf())
-        .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
+        .with_udaf(count_udaf());
     let sql_to_rel = SqlToRel::new(&context_provider);
     let plan = sql_to_rel.sql_statement_to_plan(statement.clone()).unwrap();
 
@@ -69,17 +67,11 @@ struct MyContextProvider {
     options: ConfigOptions,
     tables: HashMap<String, Arc<dyn TableSource>>,
     udafs: HashMap<String, Arc<AggregateUDF>>,
-    expr_planners: Vec<Arc<dyn ExprPlanner>>,
 }
 
 impl MyContextProvider {
     fn with_udaf(mut self, udaf: Arc<AggregateUDF>) -> Self {
         self.udafs.insert(udaf.name().to_string(), udaf);
-        self
-    }
-
-    fn with_expr_planner(mut self, planner: Arc<dyn ExprPlanner>) -> Self {
-        self.expr_planners.push(planner);
         self
     }
 
@@ -115,7 +107,6 @@ impl MyContextProvider {
             tables,
             options: Default::default(),
             udafs: Default::default(),
-            expr_planners: vec![],
         }
     }
 }
@@ -167,6 +158,6 @@ impl ContextProvider for MyContextProvider {
     }
 
     fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
-        &self.expr_planners
+        &[]
     }
 }

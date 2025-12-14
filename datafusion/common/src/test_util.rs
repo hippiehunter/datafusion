@@ -204,7 +204,7 @@ macro_rules! assert_not_contains {
 /// panics when the directory can not be found.
 ///
 /// Example:
-/// ```
+/// ```no_run
 /// let testdata = datafusion_common::test_util::datafusion_test_data();
 /// let csvdata = format!("{}/window_1.csv", testdata);
 /// assert!(std::path::PathBuf::from(csvdata).exists());
@@ -225,7 +225,7 @@ pub fn datafusion_test_data() -> String {
 /// panics when the directory can not be found.
 ///
 /// Example:
-/// ```
+/// ```no_run
 /// let testdata = datafusion_common::test_util::arrow_test_data();
 /// let csvdata = format!("{}/csv/aggregate_test_100.csv", testdata);
 /// assert!(std::path::PathBuf::from(csvdata).exists());

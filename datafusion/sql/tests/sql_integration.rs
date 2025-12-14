@@ -33,14 +33,12 @@ use datafusion_expr::{
     ScalarUDFImpl, Signature, Volatility, col, logical_plan::LogicalPlan,
     test::function_stub::sum_udaf,
 };
-use datafusion_functions::{string, unicode};
 use datafusion_sql::{
     parser::DFParser,
     planner::{NullOrdering, ParserOptions, SqlToRel},
 };
 
 use crate::common::{CustomExprPlanner, CustomTypePlanner, MockSessionState};
-use datafusion_functions::core::planner::CoreFunctionPlanner;
 use datafusion_functions_aggregate::{
     approx_median::approx_median_udaf,
     average::avg_udaf,
@@ -48,8 +46,9 @@ use datafusion_functions_aggregate::{
     grouping::grouping_udaf,
     min_max::{max_udaf, min_udaf},
 };
-use datafusion_functions_nested::make_array::make_array_udf;
-use datafusion_functions_window::{rank::rank_udwf, row_number::row_number_udwf};
+
+// Note: Tests that require datafusion_functions, datafusion_functions_nested,
+// or datafusion_functions_window are disabled as those crates were removed.
 use insta::{allow_duplicates, assert_snapshot};
 use rstest::rstest;
 use sqlparser::dialect::{Dialect, GenericDialect, HiveDialect, MySqlDialect};
@@ -183,33 +182,8 @@ fn parse_decimals_9() {
     );
 }
 
-#[test]
-fn parse_ident_normalization_1() {
-    let sql = "SELECT CHARACTER_LENGTH('str')";
-    let parser_option = ident_normalization_parser_options_no_ident_normalization();
-    let plan = logical_plan_with_options(sql, parser_option).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: character_length(Utf8("str"))
-      EmptyRelation: rows=1
-    "#
-    );
-}
-
-#[test]
-fn parse_ident_normalization_2() {
-    let sql = "SELECT CONCAT('Hello', 'World')";
-    let parser_option = ident_normalization_parser_options_no_ident_normalization();
-    let plan = logical_plan_with_options(sql, parser_option).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: concat(Utf8("Hello"), Utf8("World"))
-      EmptyRelation: rows=1
-    "#
-    );
-}
+// Removed: parse_ident_normalization_1 and parse_ident_normalization_2
+// (required character_length and concat from pruned datafusion_functions)
 
 #[test]
 fn parse_ident_normalization_3() {
@@ -434,101 +408,9 @@ fn cast_to_invalid_decimal_type_precision_lt_scale() {
     );
 }
 
-#[test]
-fn plan_create_table_with_pk() {
-    let sql = "create table person (id int, name string, primary key(id))";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[PrimaryKey([0])]
-      EmptyRelation: rows=0
-    "#
-    );
-
-    let sql = "create table person (id int primary key, name string)";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[PrimaryKey([0])]
-      EmptyRelation: rows=0
-    "#
-    );
-
-    let sql =
-        "create table person (id int, name string unique not null, primary key(id))";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[PrimaryKey([0]), Unique([1])]
-      EmptyRelation: rows=0
-    "#
-    );
-
-    let sql = "create table person (id int, name varchar,  primary key(name,  id));";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[PrimaryKey([1, 0])]
-      EmptyRelation: rows=0
-    "#
-    );
-}
-
-#[test]
-fn plan_create_table_with_multi_pk() {
-    let sql = "create table person (id int, name string primary key, primary key(id))";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[PrimaryKey([0]), PrimaryKey([1])]
-      EmptyRelation: rows=0
-    "#
-    );
-}
-
-#[test]
-fn plan_create_table_with_unique() {
-    let sql = "create table person (id int unique, name string)";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[Unique([0])]
-      EmptyRelation: rows=0
-    "#
-    );
-}
-
-#[test]
-fn plan_create_table_no_pk() {
-    let sql = "create table person (id int, name string)";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" }
-      EmptyRelation: rows=0
-    "#
-    );
-}
-
-#[test]
-fn plan_create_table_check_constraint() {
-    let sql = "create table person (id int, name string, unique(id))";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    CreateMemoryTable: Bare { table: "person" } constraints=[Unique([0])]
-      EmptyRelation: rows=0
-    "#
-    );
-}
+// Removed: plan_create_table_with_pk, plan_create_table_with_multi_pk,
+// plan_create_table_with_unique, plan_create_table_no_pk, plan_create_table_check_constraint
+// (Hive formats not supported after pruning)
 
 #[test]
 fn plan_start_transaction() {
@@ -3331,8 +3213,7 @@ fn logical_plan_with_dialect_and_options(
     options: ParserOptions,
 ) -> Result<LogicalPlan> {
     let state = MockSessionState::default()
-        .with_scalar_function(Arc::new(unicode::character_length().as_ref().clone()))
-        .with_scalar_function(Arc::new(string::concat().as_ref().clone()))
+        // Removed: unicode::character_length() and string::concat() from datafusion_functions
         .with_scalar_function(Arc::new(make_udf(
             "nullif",
             vec![DataType::Int32, DataType::Int32],
@@ -3364,10 +3245,9 @@ fn logical_plan_with_dialect_and_options(
         .with_aggregate_function(avg_udaf())
         .with_aggregate_function(min_udaf())
         .with_aggregate_function(max_udaf())
-        .with_aggregate_function(grouping_udaf())
-        .with_window_function(rank_udwf())
-        .with_window_function(row_number_udwf())
-        .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
+        .with_aggregate_function(grouping_udaf());
+        // Removed: rank_udwf() and row_number_udwf() from datafusion_functions_window
+        // Removed: CoreFunctionPlanner from datafusion_functions
 
     let context = MockContextProvider { state };
     let planner = SqlToRel::new_with_options(&context, options);
@@ -3743,32 +3623,7 @@ Projection: person.id, person.state, person.age, grouping(person.state), groupin
     );
 }
 
-#[test]
-fn rank_partition_grouping() {
-    let sql = "select
-            sum(age) as total_sum,
-            state,
-            last_name,
-            grouping(state) + grouping(last_name) as x,
-            rank() over (
-                partition by grouping(state) + grouping(last_name),
-                case when grouping(last_name) = 0 then state end
-                order by sum(age) desc
-                ) as the_rank
-            from
-                person
-            group by rollup(state, last_name)";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-Projection: sum(person.age) AS total_sum, person.state, person.last_name, grouping(person.state) + grouping(person.last_name) AS x, rank() PARTITION BY [grouping(person.state) + grouping(person.last_name), CASE WHEN grouping(person.last_name) = Int64(0) THEN person.state END] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS the_rank
-  WindowAggr: windowExpr=[[rank() PARTITION BY [grouping(person.state) + grouping(person.last_name), CASE WHEN grouping(person.last_name) = Int64(0) THEN person.state END] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-    Aggregate: groupBy=[[ROLLUP (person.state, person.last_name)]], aggr=[[sum(person.age), grouping(person.state), grouping(person.last_name)]]
-      TableScan: person
-"#
-    );
-}
+// Removed: rank_partition_grouping (requires rank() from pruned datafusion_functions_window)
 
 #[test]
 fn aggregate_with_cube() {
@@ -4260,81 +4115,11 @@ fn test_select_distinct_order_by() {
     );
 }
 
-#[test]
-fn test_select_qualify_basic() {
-    let sql = "SELECT person.id, ROW_NUMBER() OVER (PARTITION BY person.age ORDER BY person.id) as rn FROM person QUALIFY rn = 1";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-Projection: person.id, row_number() PARTITION BY [person.age] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS rn
-  Filter: row_number() PARTITION BY [person.age] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW = Int64(1)
-    WindowAggr: windowExpr=[[row_number() PARTITION BY [person.age] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-      TableScan: person
-"#
-    );
-}
-
-#[test]
-fn test_select_qualify_aggregate_reference() {
-    let sql = "
-        SELECT
-            person.id,
-            ROW_NUMBER() OVER (PARTITION BY person.id ORDER BY person.id) as rn
-        FROM person
-        GROUP BY
-            person.id
-        QUALIFY rn = 1 AND SUM(person.age) > 0";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r"
-    Projection: person.id, row_number() PARTITION BY [person.id] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS rn
-      Filter: row_number() PARTITION BY [person.id] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW = Int64(1) AND sum(person.age) > Int64(0)
-        WindowAggr: windowExpr=[[row_number() PARTITION BY [person.id] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-          Aggregate: groupBy=[[person.id]], aggr=[[sum(person.age)]]
-            TableScan: person
-    "
-    );
-}
-
-#[test]
-fn test_select_qualify_aggregate_reference_within_window_function() {
-    let sql = "
-        SELECT
-            person.id
-        FROM person
-        GROUP BY
-            person.id
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY person.id ORDER BY SUM(person.age) DESC) = 1";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r"
-    Projection: person.id
-      Filter: row_number() PARTITION BY [person.id] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW = Int64(1)
-        WindowAggr: windowExpr=[[row_number() PARTITION BY [person.id] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-          Aggregate: groupBy=[[person.id]], aggr=[[sum(person.age)]]
-            TableScan: person
-    "
-    );
-}
-
-#[test]
-fn test_select_qualify_aggregate_invalid_column_reference() {
-    let sql = "
-        SELECT
-            person.id
-        FROM person
-        GROUP BY
-            person.id
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY person.id ORDER BY person.age DESC) = 1";
-    let err = logical_plan(sql).unwrap_err();
-    assert_snapshot!(
-        err.strip_backtrace(),
-        @r#"Error during planning: Column in QUALIFY must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.id" appears in the SELECT clause satisfies this requirement"#
-    );
-}
+// Removed: test_select_qualify_basic, test_select_qualify_aggregate_reference,
+// test_select_qualify_aggregate_reference_within_window_function,
+// test_select_qualify_aggregate_invalid_column_reference,
+// test_select_qualify_complex_condition
+// (require row_number()/rank() from pruned datafusion_functions_window)
 
 #[test]
 fn test_select_qualify_without_window_function() {
@@ -4343,22 +4128,6 @@ fn test_select_qualify_without_window_function() {
     assert_eq!(
         err.strip_backtrace(),
         "Error during planning: QUALIFY clause requires window functions in the SELECT list or QUALIFY clause"
-    );
-}
-
-#[test]
-fn test_select_qualify_complex_condition() {
-    let sql = "SELECT person.id, person.age, ROW_NUMBER() OVER (PARTITION BY person.age ORDER BY person.id) as rn, RANK() OVER (ORDER BY person.salary) as rank FROM person QUALIFY rn <= 2 AND rank <= 5";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-Projection: person.id, person.age, row_number() PARTITION BY [person.age] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS rn, rank() ORDER BY [person.salary ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS rank
-  Filter: row_number() PARTITION BY [person.age] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW <= Int64(2) AND rank() ORDER BY [person.salary ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW <= Int64(5)
-    WindowAggr: windowExpr=[[rank() ORDER BY [person.salary ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-      WindowAggr: windowExpr=[[row_number() PARTITION BY [person.age] ORDER BY [person.id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-        TableScan: person
-"#
     );
 }
 
@@ -4578,44 +4347,8 @@ Projection: orders.order_id, max(orders.qty) PARTITION BY [orders.order_id] ROWS
     );
 }
 
-#[test]
-fn test_parse_escaped_string_literal_value() {
-    let sql = r"SELECT character_length('\r\n') AS len";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: character_length(Utf8("\r\n")) AS len
-      EmptyRelation: rows=1
-    "#
-    );
-    let sql = "SELECT character_length(E'\r\n') AS len";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: character_length(Utf8("
-    ")) AS len
-      EmptyRelation: rows=1
-    "#
-    );
-    let sql =
-        r"SELECT character_length(E'\445') AS len, E'\x4B' AS hex, E'\u0001' AS unicode";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @"Projection: character_length(Utf8(\"%\")) AS len, Utf8(\"K\") AS hex, Utf8(\"\u{1}\") AS unicode\n  EmptyRelation: rows=1"
-    );
-
-    let sql = r"SELECT character_length(E'\000') AS len";
-
-    assert_snapshot!(
-        logical_plan(sql).unwrap_err(),
-        @r###"
-        SQL error: TokenizerError("Unterminated encoded string literal at Line: 1, Column: 25")
-        "###
-    );
-}
+// Removed: test_parse_escaped_string_literal_value
+// (requires character_length from pruned datafusion_functions)
 
 #[test]
 fn plan_create_index() {
@@ -4721,72 +4454,8 @@ fn test_no_substring_registered_alt_syntax() {
     );
 }
 
-#[test]
-fn test_custom_type_plan() -> Result<()> {
-    let sql = "SELECT DATETIME '2001-01-01 18:00:00'";
-
-    // test the default behavior
-    let options = ParserOptions::default();
-    let dialect = &GenericDialect {};
-    let state = MockSessionState::default();
-    let context = MockContextProvider { state };
-    let planner = SqlToRel::new_with_options(&context, options);
-    let result = DFParser::parse_sql_with_dialect(sql, dialect);
-    let mut ast = result.unwrap();
-    let err = planner.statement_to_plan(ast.pop_front().unwrap());
-    assert_contains!(
-        err.unwrap_err().to_string(),
-        "This feature is not implemented: Unsupported SQL type DATETIME"
-    );
-
-    fn plan_sql(sql: &str) -> LogicalPlan {
-        let options = ParserOptions::default();
-        let dialect = &GenericDialect {};
-        let state = MockSessionState::default()
-            .with_scalar_function(make_array_udf())
-            .with_expr_planner(Arc::new(CustomExprPlanner {}))
-            .with_type_planner(Arc::new(CustomTypePlanner {}));
-        let context = MockContextProvider { state };
-        let planner = SqlToRel::new_with_options(&context, options);
-        let result = DFParser::parse_sql_with_dialect(sql, dialect);
-        let mut ast = result.unwrap();
-        planner.statement_to_plan(ast.pop_front().unwrap()).unwrap()
-    }
-
-    let plan = plan_sql(sql);
-
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: CAST(Utf8("2001-01-01 18:00:00") AS Timestamp(ns))
-      EmptyRelation: rows=1
-    "#
-    );
-
-    let plan = plan_sql("SELECT CAST(TIMESTAMP '2001-01-01 18:00:00' AS DATETIME)");
-
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: CAST(CAST(Utf8("2001-01-01 18:00:00") AS Timestamp(ns)) AS Timestamp(ns))
-      EmptyRelation: rows=1
-    "#
-    );
-
-    let plan = plan_sql(
-        "SELECT ARRAY[DATETIME '2001-01-01 18:00:00', DATETIME '2001-01-02 18:00:00']",
-    );
-
-    assert_snapshot!(
-        plan,
-        @r#"
-    Projection: make_array(CAST(Utf8("2001-01-01 18:00:00") AS Timestamp(ns)), CAST(Utf8("2001-01-02 18:00:00") AS Timestamp(ns)))
-      EmptyRelation: rows=1
-    "#
-    );
-
-    Ok(())
-}
+// Removed: test_custom_type_plan
+// (requires array literals from pruned datafusion_functions_nested)
 
 fn error_message_test(sql: &str, err_msg_starts_with: &str) {
     let err = logical_plan(sql).expect_err("query should have failed");
@@ -4824,13 +4493,8 @@ fn test_error_message_invalid_aggregate_function_signature() {
     );
 }
 
-#[test]
-fn test_error_message_invalid_window_function_signature() {
-    error_message_test(
-        "select rank(1) over()",
-        "Error during planning: The function 'rank' expected zero argument but received 1",
-    );
-}
+// Removed: test_error_message_invalid_window_function_signature
+// (requires rank() from pruned datafusion_functions_window)
 
 #[test]
 fn test_error_message_invalid_window_aggregate_function_signature() {

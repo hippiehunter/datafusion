@@ -29,7 +29,6 @@ use datafusion_expr::{AggregateUDF, LogicalPlan, ScalarUDF, TableSource, WindowU
 use datafusion_functions_aggregate::average::avg_udaf;
 use datafusion_functions_aggregate::count::count_udaf;
 use datafusion_functions_aggregate::planner::AggregateFunctionPlanner;
-use datafusion_functions_window::planner::WindowFunctionPlanner;
 use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use datafusion_optimizer::{OptimizerConfig, OptimizerContext, OptimizerRule};
@@ -648,7 +647,6 @@ fn test_sql(sql: &str) -> Result<LogicalPlan> {
         .with_udaf(avg_udaf())
         .with_expr_planners(vec![
             Arc::new(AggregateFunctionPlanner),
-            Arc::new(WindowFunctionPlanner),
         ])
         .with_schema(
             "test",

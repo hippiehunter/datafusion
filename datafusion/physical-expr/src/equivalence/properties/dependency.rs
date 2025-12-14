@@ -392,6 +392,7 @@ mod tests {
     use crate::equivalence::{ProjectionMapping, convert_to_sort_exprs};
     use crate::expressions::{BinaryExpr, CastExpr, Column, col};
     use crate::projection::tests::output_schema;
+    use crate::utils::tests::TestConcatUDF;
     use crate::{ConstExpr, EquivalenceProperties, ScalarFunctionExpr};
 
     use arrow::compute::SortOptions;
@@ -399,8 +400,8 @@ mod tests {
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::{Constraint, Constraints, Result};
     use datafusion_expr::Operator;
+    use datafusion_expr::ScalarUDF;
     use datafusion_expr::sort_properties::SortProperties;
-    use datafusion_functions::string::concat;
     use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
     use datafusion_physical_expr_common::sort_expr::{
         LexRequirement, PhysicalSortRequirement,
@@ -1031,13 +1032,13 @@ mod tests {
         let col_b = col("b", &schema)?;
         let col_c = col("c", &schema)?;
 
-        let a_concat_b: Arc<dyn PhysicalExpr> = Arc::new(ScalarFunctionExpr::new(
-            "concat",
-            concat(),
+        let concat_udf = Arc::new(ScalarUDF::new_from_impl(TestConcatUDF::new()));
+        let a_concat_b: Arc<dyn PhysicalExpr> = Arc::new(ScalarFunctionExpr::try_new(
+            concat_udf,
             vec![Arc::clone(&col_a), Arc::clone(&col_b)],
-            Field::new("f", DataType::Utf8, true).into(),
+            &schema,
             Arc::new(ConfigOptions::default()),
-        ));
+        )?);
 
         // Assume existing ordering is [c ASC, a ASC, b ASC]
         let mut eq_properties = EquivalenceProperties::new(Arc::clone(&schema));
@@ -1122,13 +1123,13 @@ mod tests {
         let col_b = col("b", &schema)?;
         let col_c = col("c", &schema)?;
 
-        let a_concat_b = Arc::new(ScalarFunctionExpr::new(
-            "concat",
-            concat(),
+        let concat_udf = Arc::new(ScalarUDF::new_from_impl(TestConcatUDF::new()));
+        let a_concat_b = Arc::new(ScalarFunctionExpr::try_new(
+            concat_udf,
             vec![Arc::clone(&col_a), Arc::clone(&col_b)],
-            Field::new("f", DataType::Utf8, true).into(),
+            &schema,
             Arc::new(ConfigOptions::default()),
-        )) as _;
+        )?) as _;
 
         // Assume existing ordering is [concat(a, b) ASC, a ASC, b ASC]
         let mut eq_properties = EquivalenceProperties::new(Arc::clone(&schema));

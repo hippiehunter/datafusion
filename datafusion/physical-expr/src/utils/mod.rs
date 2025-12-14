@@ -373,6 +373,86 @@ pub(crate) mod tests {
         }
     }
 
+    /// A test UDF that simulates concat behavior for testing ordering equivalence.
+    /// It accepts multiple Utf8 arguments and returns Utf8.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    pub struct TestConcatUDF {
+        signature: Signature,
+    }
+
+    impl TestConcatUDF {
+        pub fn new() -> Self {
+            Self {
+                signature: Signature::variadic(vec![DataType::Utf8], Volatility::Immutable),
+            }
+        }
+    }
+
+    impl ScalarUDFImpl for TestConcatUDF {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn name(&self) -> &str {
+            "test-concat-udf"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+            Ok(DataType::Utf8)
+        }
+
+        fn output_ordering(&self, input: &[ExprProperties]) -> Result<SortProperties> {
+            // Concat is lexicographically monotonic - if all inputs are ordered
+            // in the same direction, the output preserves that ordering
+            if input.is_empty() {
+                return Ok(SortProperties::Singleton);
+            }
+
+            // Check if all inputs have the same ordering
+            let first = input[0].sort_properties;
+            let all_same = input.iter().skip(1).all(|p| {
+                matches!(
+                    (&first, &p.sort_properties),
+                    (SortProperties::Ordered(a), SortProperties::Ordered(b)) if a.descending == b.descending
+                ) || matches!(p.sort_properties, SortProperties::Singleton)
+            });
+
+            if all_same {
+                Ok(first)
+            } else {
+                Ok(SortProperties::Unordered)
+            }
+        }
+
+        fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+            // Simple implementation: just return the first argument for testing
+            // (actual concat behavior not needed for ordering tests)
+            args.args.first().cloned().ok_or_else(|| {
+                datafusion_common::internal_datafusion_err!("concat requires at least one argument")
+            })
+        }
+
+        fn preserves_lex_ordering(&self, inputs: &[ExprProperties]) -> Result<bool> {
+            // Concat preserves lexicographic ordering when all inputs have the same order
+            if inputs.is_empty() {
+                return Ok(true);
+            }
+
+            let first = inputs[0].sort_properties;
+            let all_same = inputs.iter().skip(1).all(|p| {
+                matches!(
+                    (&first, &p.sort_properties),
+                    (SortProperties::Ordered(a), SortProperties::Ordered(b)) if a.descending == b.descending
+                ) || matches!(p.sort_properties, SortProperties::Singleton)
+            });
+
+            Ok(all_same)
+        }
+    }
+
     #[derive(Clone)]
     struct DummyProperty {
         expr_type: String,

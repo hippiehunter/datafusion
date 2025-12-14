@@ -27,8 +27,9 @@ use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::{DFSchema, GetExt, Result, TableReference, plan_err};
 use datafusion_expr::planner::{ExprPlanner, PlannerResult, TypePlanner};
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_functions_nested::expr_fn::make_array;
 use datafusion_sql::planner::ContextProvider;
+
+// Note: make_array from datafusion_functions_nested was removed
 
 struct MockCsvType {}
 
@@ -89,6 +90,7 @@ impl MockSessionState {
         self
     }
 
+    #[allow(dead_code)] // Window function crate was pruned but keep method for potential future use
     pub fn with_window_function(mut self, window_function: Arc<WindowUDF>) -> Self {
         self.window_functions
             .insert(window_function.name().to_string(), window_function);
@@ -343,6 +345,8 @@ impl ExprPlanner for CustomExprPlanner {
         exprs: Vec<Expr>,
         _schema: &DFSchema,
     ) -> Result<PlannerResult<Vec<Expr>>> {
-        Ok(PlannerResult::Planned(make_array(exprs)))
+        // make_array was from datafusion_functions_nested which was removed
+        // Return Original to let the default behavior handle it
+        Ok(PlannerResult::Original(exprs))
     }
 }
