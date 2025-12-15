@@ -346,7 +346,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if !matches!(
                     hive_formats,
-                    Some(ast::HiveFormat {
+                    None | Some(ast::HiveFormat {
                         row_format: None,
                         serde_properties: None,
                         storage: None,
