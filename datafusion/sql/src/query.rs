@@ -28,9 +28,9 @@ use datafusion_expr::{
     CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, ExprWithAliasAndOrderBy, Ident, LimitClause, Offset, OffsetRows,
-    OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, SelectInto, SetExpr,
-    SetOperator, SetQuantifier, TableAlias,
+    Expr as SQLExpr, ExprWithAliasAndOrderBy, Fetch, Ident, LimitClause, Offset,
+    OffsetRows, OrderBy, OrderByExpr, OrderByKind, PipeOperator, Query, SelectInto,
+    SetExpr, SetOperator, SetQuantifier, TableAlias,
 };
 use sqlparser::tokenizer::Span;
 
@@ -59,9 +59,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             pipe_operators,
         } = query;
 
-        if fetch.is_some() {
-            return not_impl_err!("FETCH clause is not supported yet");
-        }
+        // Combine FETCH clause with LIMIT/OFFSET handling
+        let limit_clause = self.combine_limit_and_fetch(limit_clause, fetch)?;
 
         if let Some(with) = with {
             self.plan_with_clause(with, planner_context)?;
@@ -240,6 +239,93 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         Ok(plan)
+    }
+
+    /// Combines FETCH clause with LIMIT/OFFSET into a single LimitClause.
+    ///
+    /// SQL allows two syntaxes for limiting results:
+    /// - `LIMIT n [OFFSET m]` (MySQL/PostgreSQL style)
+    /// - `[OFFSET m ROWS] FETCH FIRST n ROWS ONLY` (SQL standard)
+    ///
+    /// This method converts FETCH to the internal LimitClause representation.
+    fn combine_limit_and_fetch(
+        &self,
+        limit_clause: Option<LimitClause>,
+        fetch: Option<Fetch>,
+    ) -> Result<Option<LimitClause>> {
+        let Some(fetch) = fetch else {
+            // No FETCH clause, use LIMIT/OFFSET as-is
+            return Ok(limit_clause);
+        };
+
+        // Validate unsupported FETCH options
+        if fetch.percent {
+            return not_impl_err!("FETCH PERCENT is not supported");
+        }
+        if fetch.with_ties {
+            return not_impl_err!("FETCH WITH TIES is not supported");
+        }
+
+        // Extract the fetch quantity (number of rows to return)
+        let fetch_quantity = fetch.quantity;
+
+        // Handle combination with existing LIMIT clause
+        match limit_clause {
+            None => {
+                // Only FETCH, no LIMIT/OFFSET
+                // Convert FETCH to LimitClause
+                match fetch_quantity {
+                    Some(quantity) => Ok(Some(LimitClause::LimitOffset {
+                        limit: Some(quantity),
+                        offset: None,
+                        limit_by: vec![],
+                    })),
+                    None => {
+                        // FETCH FIRST ROWS ONLY with no quantity - return all rows
+                        Ok(None)
+                    }
+                }
+            }
+            Some(LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => {
+                // OFFSET ... FETCH ... combination
+                if limit.is_some() {
+                    return not_impl_err!(
+                        "Cannot use both LIMIT and FETCH clauses in the same query"
+                    );
+                }
+                // OFFSET with FETCH - combine them
+                match fetch_quantity {
+                    Some(quantity) => Ok(Some(LimitClause::LimitOffset {
+                        limit: Some(quantity),
+                        offset,
+                        limit_by,
+                    })),
+                    None => {
+                        // OFFSET with FETCH FIRST ROWS ONLY (no quantity)
+                        // Keep offset but no limit
+                        if offset.is_some() || !limit_by.is_empty() {
+                            Ok(Some(LimitClause::LimitOffset {
+                                limit: None,
+                                offset,
+                                limit_by,
+                            }))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                }
+            }
+            Some(LimitClause::OffsetCommaLimit { .. }) => {
+                // This is the "OFFSET n, LIMIT m" syntax which conflicts with FETCH
+                not_impl_err!(
+                    "Cannot use both LIMIT and FETCH clauses in the same query"
+                )
+            }
+        }
     }
 
     /// Wrap a plan in a limit

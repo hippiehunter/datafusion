@@ -17,9 +17,9 @@
 
 use super::{Between, Expr, Like, predicate_bounds};
 use crate::expr::{
-    AggregateFunction, AggregateFunctionParams, Alias, BinaryExpr, Cast, InList,
-    InSubquery, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction,
-    WindowFunctionParams,
+    AggregateFunction, AggregateFunctionParams, Alias, AllExpr, AnyExpr, BinaryExpr,
+    Cast, InList, InSubquery, Placeholder, ScalarFunction, TryCast, Unnest,
+    WindowFunction, WindowFunctionParams,
 };
 use crate::type_coercion::functions::{
     data_types_with_scalar_udf, fields_with_aggregate_udf, fields_with_window_udf,
@@ -196,6 +196,8 @@ impl ExprSchemable for Expr {
             | Expr::IsNull(_)
             | Expr::Exists { .. }
             | Expr::InSubquery(_)
+            | Expr::AnyExpr(_)
+            | Expr::AllExpr(_)
             | Expr::Between { .. }
             | Expr::InList { .. }
             | Expr::IsNotNull(_)
@@ -377,6 +379,10 @@ impl ExprSchemable for Expr {
             | Expr::IsNotUnknown(_)
             | Expr::Exists { .. } => Ok(false),
             Expr::InSubquery(InSubquery { expr, .. }) => expr.nullable(input_schema),
+            // ANY/ALL can be nullable due to SQL three-valued logic when
+            // comparing with NULL values
+            Expr::AnyExpr(AnyExpr { expr, .. })
+            | Expr::AllExpr(AllExpr { expr, .. }) => expr.nullable(input_schema),
             Expr::ScalarSubquery(subquery) => {
                 Ok(subquery.subquery.schema().field(0).is_nullable())
             }
@@ -514,6 +520,10 @@ impl ExprSchemable for Expr {
             | Expr::IsNotUnknown(_)
             | Expr::Exists { .. } => {
                 Ok(Arc::new(Field::new(&schema_name, DataType::Boolean, false)))
+            }
+            // ANY/ALL return Boolean, nullable due to three-valued logic
+            Expr::AnyExpr(_) | Expr::AllExpr(_) => {
+                Ok(Arc::new(Field::new(&schema_name, DataType::Boolean, true)))
             }
             Expr::ScalarSubquery(subquery) => {
                 Ok(Arc::clone(&subquery.subquery.schema().fields()[0]))

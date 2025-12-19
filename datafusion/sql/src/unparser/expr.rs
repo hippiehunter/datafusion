@@ -44,7 +44,8 @@ use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::{
-    Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like, Operator, TryCast,
+    AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like,
+    Operator, TryCast,
     expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
@@ -524,6 +525,71 @@ impl Unparser<'_> {
             }
             Expr::OuterReferenceColumn(_, col) => self.col_to_sql(col),
             Expr::Unnest(unnest) => self.unnest_to_sql(unnest),
+            Expr::AnyExpr(any_expr) => self.any_expr_to_sql(any_expr),
+            Expr::AllExpr(all_expr) => self.all_expr_to_sql(all_expr),
+        }
+    }
+
+    fn any_expr_to_sql(&self, any_expr: &AnyExpr) -> Result<ast::Expr> {
+        use datafusion_expr::QuantifiedSource;
+        let AnyExpr { expr, op, source } = any_expr;
+        let left = Box::new(self.expr_to_sql_inner(expr)?);
+        let compare_op = self.op_to_ast_binary_op(op)?;
+
+        let right = match source {
+            QuantifiedSource::Subquery(subquery) => {
+                let sub_statement = self.plan_to_sql(subquery.subquery.as_ref())?;
+                if let ast::Statement::Query(query) = sub_statement {
+                    Box::new(ast::Expr::Subquery(query))
+                } else {
+                    return internal_err!("Expected Query for subquery in AnyExpr");
+                }
+            }
+            QuantifiedSource::Array(arr) => Box::new(self.expr_to_sql_inner(arr)?),
+        };
+
+        Ok(ast::Expr::AnyOp {
+            left,
+            compare_op,
+            right,
+            is_some: false,
+        })
+    }
+
+    fn all_expr_to_sql(&self, all_expr: &AllExpr) -> Result<ast::Expr> {
+        use datafusion_expr::QuantifiedSource;
+        let AllExpr { expr, op, source } = all_expr;
+        let left = Box::new(self.expr_to_sql_inner(expr)?);
+        let compare_op = self.op_to_ast_binary_op(op)?;
+
+        let right = match source {
+            QuantifiedSource::Subquery(subquery) => {
+                let sub_statement = self.plan_to_sql(subquery.subquery.as_ref())?;
+                if let ast::Statement::Query(query) = sub_statement {
+                    Box::new(ast::Expr::Subquery(query))
+                } else {
+                    return internal_err!("Expected Query for subquery in AllExpr");
+                }
+            }
+            QuantifiedSource::Array(arr) => Box::new(self.expr_to_sql_inner(arr)?),
+        };
+
+        Ok(ast::Expr::AllOp {
+            left,
+            compare_op,
+            right,
+        })
+    }
+
+    fn op_to_ast_binary_op(&self, op: &Operator) -> Result<BinaryOperator> {
+        match op {
+            Operator::Eq => Ok(BinaryOperator::Eq),
+            Operator::NotEq => Ok(BinaryOperator::NotEq),
+            Operator::Lt => Ok(BinaryOperator::Lt),
+            Operator::LtEq => Ok(BinaryOperator::LtEq),
+            Operator::Gt => Ok(BinaryOperator::Gt),
+            Operator::GtEq => Ok(BinaryOperator::GtEq),
+            _ => not_impl_err!("Operator {op} not supported in ANY/ALL expressions"),
         }
     }
 

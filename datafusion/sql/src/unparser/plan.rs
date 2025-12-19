@@ -46,9 +46,10 @@ use datafusion_common::{
 use datafusion_expr::expr::OUTER_REFERENCE_COLUMN_PREFIX;
 use datafusion_expr::{
     BinaryExpr, Distinct, Expr, JoinConstraint, JoinType, LogicalPlan,
-    LogicalPlanBuilder, Operator, Projection, SortExpr, TableScan, Unnest,
-    UserDefinedLogicalNode, expr::Alias,
+    LogicalPlanBuilder, Operator, Projection, RecursiveQuery, SortExpr, TableScan,
+    Unnest, UserDefinedLogicalNode, expr::Alias,
 };
+use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{self, Ident, OrderByKind, SetExpr, TableAliasColumnDef};
 use std::{sync::Arc, vec};
 
@@ -125,12 +126,12 @@ impl Unparser<'_> {
             LogicalPlan::Extension(extension) => {
                 self.extension_to_statement(extension.node.as_ref())
             }
+            LogicalPlan::RecursiveQuery(rq) => self.recursive_query_to_sql_statement(&rq),
             LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::RecursiveQuery(_)
             | LogicalPlan::Unnest(_) => not_impl_err!("Unsupported plan: {plan:?}"),
         }
     }
@@ -184,6 +185,154 @@ impl Unparser<'_> {
         let body = self.select_to_sql_expr(plan, &mut query_builder)?;
 
         let query = query_builder.unwrap().body(Box::new(body)).build()?;
+
+        Ok(ast::Statement::Query(Box::new(query)))
+    }
+
+    /// Convert a RecursiveQuery to a SQL statement with WITH RECURSIVE clause.
+    ///
+    /// Generates SQL like:
+    /// ```sql
+    /// WITH RECURSIVE <name>(<columns>) AS (
+    ///     <static_term>
+    ///     UNION [ALL]
+    ///     <recursive_term>
+    /// )
+    /// SELECT * FROM <name>
+    /// ```
+    fn recursive_query_to_sql_statement(
+        &self,
+        rq: &RecursiveQuery,
+    ) -> Result<ast::Statement> {
+        let RecursiveQuery {
+            name,
+            static_term,
+            recursive_term,
+            is_distinct,
+        } = rq;
+
+        // Unparse the static term
+        let static_body = self.select_to_sql_expr(static_term.as_ref(), &mut None)?;
+
+        // Unparse the recursive term
+        let recursive_body =
+            self.select_to_sql_expr(recursive_term.as_ref(), &mut None)?;
+
+        // Create UNION or UNION ALL
+        let set_quantifier = if *is_distinct {
+            ast::SetQuantifier::None // UNION (distinct by default)
+        } else {
+            ast::SetQuantifier::All // UNION ALL
+        };
+
+        let union_body = SetExpr::SetOperation {
+            op: ast::SetOperator::Union,
+            set_quantifier,
+            left: Box::new(static_body),
+            right: Box::new(recursive_body),
+        };
+
+        // Get column names from static term schema
+        let columns: Vec<TableAliasColumnDef> = static_term
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| TableAliasColumnDef {
+                name: self.new_ident_quoted_if_needs(f.name().to_string()),
+                data_type: None,
+            })
+            .collect();
+
+        // Create the CTE query (the body inside the WITH clause)
+        let cte_query = ast::Query {
+            with: None,
+            body: Box::new(union_body),
+            order_by: None,
+            limit_clause: None,
+            fetch: None,
+            locks: vec![],
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+        };
+
+        // Create the CTE
+        let cte = ast::Cte {
+            alias: ast::TableAlias {
+                name: self.new_ident_quoted_if_needs(name.clone()),
+                columns,
+                explicit: true,
+            },
+            query: Box::new(cte_query),
+            from: None,
+            materialized: None,
+            closing_paren_token: AttachedToken::empty(),
+        };
+
+        // Create WITH RECURSIVE clause
+        let with_clause = ast::With {
+            with_token: AttachedToken::empty(),
+            recursive: true,
+            cte_tables: vec![cte],
+        };
+
+        // Create outer SELECT * FROM <name>
+        let outer_select = ast::Select {
+            select_token: AttachedToken::empty(),
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: vec![ast::SelectItem::Wildcard(
+                ast::WildcardAdditionalOptions::default(),
+            )],
+            into: None,
+            from: vec![ast::TableWithJoins {
+                relation: ast::TableFactor::Table {
+                    name: ast::ObjectName::from(vec![self
+                        .new_ident_quoted_if_needs(name.clone())]),
+                    alias: None,
+                    args: None,
+                    with_hints: vec![],
+                    version: None,
+                    partitions: vec![],
+                    with_ordinality: false,
+                    json_path: None,
+                    sample: None,
+                    index_hints: vec![],
+                },
+                joins: vec![],
+            }],
+            lateral_views: vec![],
+            prewhere: None,
+            selection: None,
+            group_by: ast::GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            qualify: None,
+            window_before_qualify: false,
+            value_table_mode: None,
+            connect_by: None,
+            flavor: ast::SelectFlavor::Standard,
+            exclude: None,
+        };
+
+        // Build the final query with WITH clause
+        let query = ast::Query {
+            with: Some(with_clause),
+            body: Box::new(SetExpr::Select(Box::new(outer_select))),
+            order_by: None,
+            limit_clause: None,
+            fetch: None,
+            locks: vec![],
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+        };
 
         Ok(ast::Statement::Query(Box::new(query)))
     }

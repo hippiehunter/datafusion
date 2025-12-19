@@ -19,9 +19,10 @@
 
 use crate::Expr;
 use crate::expr::{
-    AggregateFunction, AggregateFunctionParams, Alias, Between, BinaryExpr, Case, Cast,
-    GroupingSet, InList, InSubquery, Like, Placeholder, ScalarFunction, TryCast, Unnest,
-    WindowFunction, WindowFunctionParams,
+    AggregateFunction, AggregateFunctionParams, Alias, AllExpr, AnyExpr, Between,
+    BinaryExpr, Case, Cast, GroupingSet, InList, InSubquery, Like, Placeholder,
+    QuantifiedSource, ScalarFunction, TryCast, Unnest, WindowFunction,
+    WindowFunctionParams,
 };
 
 use datafusion_common::Result;
@@ -106,6 +107,14 @@ impl TreeNode for Expr {
             Expr::InList(InList { expr, list, .. }) => {
                 (expr, list).apply_ref_elements(f)
             }
+            Expr::AnyExpr(AnyExpr { expr, source, .. }) => match source {
+                QuantifiedSource::Array(arr) => (expr, arr).apply_ref_elements(f),
+                QuantifiedSource::Subquery(_) => expr.apply_elements(f),
+            },
+            Expr::AllExpr(AllExpr { expr, source, .. }) => match source {
+                QuantifiedSource::Array(arr) => (expr, arr).apply_ref_elements(f),
+                QuantifiedSource::Subquery(_) => expr.apply_elements(f),
+            },
         }
     }
 
@@ -311,6 +320,46 @@ impl TreeNode for Expr {
                 .update_data(|(new_expr, new_list)| {
                     Expr::InList(InList::new(new_expr, new_list, negated))
                 }),
+            Expr::AnyExpr(AnyExpr { expr, op, source }) => match source {
+                QuantifiedSource::Array(arr) => (expr, arr)
+                    .map_elements(f)?
+                    .update_data(|(new_expr, new_arr)| {
+                        Expr::AnyExpr(AnyExpr::new(
+                            new_expr,
+                            op,
+                            QuantifiedSource::Array(new_arr),
+                        ))
+                    }),
+                QuantifiedSource::Subquery(subquery) => expr
+                    .map_elements(f)?
+                    .update_data(|new_expr| {
+                        Expr::AnyExpr(AnyExpr::new(
+                            new_expr,
+                            op,
+                            QuantifiedSource::Subquery(subquery),
+                        ))
+                    }),
+            },
+            Expr::AllExpr(AllExpr { expr, op, source }) => match source {
+                QuantifiedSource::Array(arr) => (expr, arr)
+                    .map_elements(f)?
+                    .update_data(|(new_expr, new_arr)| {
+                        Expr::AllExpr(AllExpr::new(
+                            new_expr,
+                            op,
+                            QuantifiedSource::Array(new_arr),
+                        ))
+                    }),
+                QuantifiedSource::Subquery(subquery) => expr
+                    .map_elements(f)?
+                    .update_data(|new_expr| {
+                        Expr::AllExpr(AllExpr::new(
+                            new_expr,
+                            op,
+                            QuantifiedSource::Subquery(subquery),
+                        ))
+                    }),
+            },
         })
     }
 }

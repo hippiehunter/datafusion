@@ -372,6 +372,10 @@ pub enum Expr {
     Exists(Exists),
     /// IN subquery
     InSubquery(InSubquery),
+    /// ANY comparison expression (e.g., x > ANY(SELECT ...) or x = ANY(array))
+    AnyExpr(AnyExpr),
+    /// ALL comparison expression (e.g., x > ALL(SELECT ...) or x = ALL(array))
+    AllExpr(AllExpr),
     /// Scalar subquery
     ScalarSubquery(Subquery),
     /// Represents a reference to all available fields in a specific schema,
@@ -1145,6 +1149,67 @@ impl InSubquery {
     }
 }
 
+/// Source for quantified comparison (ANY/ALL/SOME).
+///
+/// This can be either a subquery or an array expression.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub enum QuantifiedSource {
+    /// Source is a subquery (e.g., `x > ALL(SELECT ...)`)
+    Subquery(Subquery),
+    /// Source is an array expression (e.g., `x = ANY(ARRAY[1,2,3])`)
+    Array(Box<Expr>),
+}
+
+/// ANY comparison expression (x op ANY(...))
+///
+/// ANY and SOME are semantically equivalent per SQL standard.
+/// Returns TRUE if the comparison is true for at least one value from the source.
+///
+/// Examples:
+/// - `x = ANY(SELECT col FROM table)` - true if x equals any value in the subquery
+/// - `x > ANY(ARRAY[1,2,3])` - true if x is greater than at least one element
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct AnyExpr {
+    /// The left-hand expression to compare
+    pub expr: Box<Expr>,
+    /// The comparison operator (=, <>, <, <=, >, >=)
+    pub op: Operator,
+    /// The source (subquery or array)
+    pub source: QuantifiedSource,
+}
+
+impl AnyExpr {
+    /// Create a new AnyExpr
+    pub fn new(expr: Box<Expr>, op: Operator, source: QuantifiedSource) -> Self {
+        Self { expr, op, source }
+    }
+}
+
+/// ALL comparison expression (x op ALL(...))
+///
+/// Returns TRUE if the comparison is true for all values from the source.
+/// Returns TRUE for an empty source (vacuous truth).
+///
+/// Examples:
+/// - `x > ALL(SELECT col FROM table)` - true if x is greater than all values
+/// - `x <> ALL(ARRAY[1,2,3])` - true if x is not equal to any element
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct AllExpr {
+    /// The left-hand expression to compare
+    pub expr: Box<Expr>,
+    /// The comparison operator (=, <>, <, <=, >, >=)
+    pub op: Operator,
+    /// The source (subquery or array)
+    pub source: QuantifiedSource,
+}
+
+impl AllExpr {
+    /// Create a new AllExpr
+    pub fn new(expr: Box<Expr>, op: Operator, source: QuantifiedSource) -> Self {
+        Self { expr, op, source }
+    }
+}
+
 /// Placeholder, representing bind parameter values such as `$1` or `$name`.
 ///
 /// The type of these parameters is inferred using [`Expr::infer_placeholder_types`]
@@ -1502,6 +1567,8 @@ impl Expr {
             Expr::GroupingSet(..) => "GroupingSet",
             Expr::InList { .. } => "InList",
             Expr::InSubquery(..) => "InSubquery",
+            Expr::AnyExpr(..) => "AnyExpr",
+            Expr::AllExpr(..) => "AllExpr",
             Expr::IsNotNull(..) => "IsNotNull",
             Expr::IsNull(..) => "IsNull",
             Expr::Like { .. } => "Like",
@@ -2057,6 +2124,8 @@ impl Expr {
             | Expr::GroupingSet(..)
             | Expr::InList(..)
             | Expr::InSubquery(..)
+            | Expr::AnyExpr(..)
+            | Expr::AllExpr(..)
             | Expr::IsFalse(..)
             | Expr::IsNotFalse(..)
             | Expr::IsNotNull(..)
@@ -2650,6 +2719,28 @@ impl HashNode for Expr {
                 subquery.hash(state);
                 negated.hash(state);
             }
+            Expr::AnyExpr(AnyExpr {
+                expr: _expr,
+                op,
+                source,
+            }) => {
+                op.hash(state);
+                match source {
+                    QuantifiedSource::Subquery(subquery) => subquery.hash(state),
+                    QuantifiedSource::Array(_arr) => {}
+                }
+            }
+            Expr::AllExpr(AllExpr {
+                expr: _expr,
+                op,
+                source,
+            }) => {
+                op.hash(state);
+                match source {
+                    QuantifiedSource::Subquery(subquery) => subquery.hash(state),
+                    QuantifiedSource::Array(_arr) => {}
+                }
+            }
             Expr::ScalarSubquery(subquery) => {
                 subquery.hash(state);
             }
@@ -2840,6 +2931,22 @@ impl Display for SchemaDisplay<'_> {
                 write!(f, "NOT IN")
             }
             Expr::InSubquery(InSubquery { negated: false, .. }) => write!(f, "IN"),
+            Expr::AnyExpr(AnyExpr { expr, op, source }) => match source {
+                QuantifiedSource::Subquery(_) => {
+                    write!(f, "{} {} ANY(<subquery>)", SchemaDisplay(expr), op)
+                }
+                QuantifiedSource::Array(arr) => {
+                    write!(f, "{} {} ANY({})", SchemaDisplay(expr), op, SchemaDisplay(arr))
+                }
+            },
+            Expr::AllExpr(AllExpr { expr, op, source }) => match source {
+                QuantifiedSource::Subquery(_) => {
+                    write!(f, "{} {} ALL(<subquery>)", SchemaDisplay(expr), op)
+                }
+                QuantifiedSource::Array(arr) => {
+                    write!(f, "{} {} ALL({})", SchemaDisplay(expr), op, SchemaDisplay(arr))
+                }
+            },
             Expr::IsTrue(expr) => write!(f, "{} IS TRUE", SchemaDisplay(expr)),
             Expr::IsFalse(expr) => write!(f, "{} IS FALSE", SchemaDisplay(expr)),
             Expr::IsNotTrue(expr) => {
@@ -3315,6 +3422,22 @@ impl Display for Expr {
                 subquery,
                 negated: false,
             }) => write!(f, "{expr} IN ({subquery:?})"),
+            Expr::AnyExpr(AnyExpr { expr, op, source }) => match source {
+                QuantifiedSource::Subquery(subquery) => {
+                    write!(f, "{expr} {op} ANY({subquery:?})")
+                }
+                QuantifiedSource::Array(arr) => {
+                    write!(f, "{expr} {op} ANY({arr})")
+                }
+            },
+            Expr::AllExpr(AllExpr { expr, op, source }) => match source {
+                QuantifiedSource::Subquery(subquery) => {
+                    write!(f, "{expr} {op} ALL({subquery:?})")
+                }
+                QuantifiedSource::Array(arr) => {
+                    write!(f, "{expr} {op} ALL({arr})")
+                }
+            },
             Expr::ScalarSubquery(subquery) => write!(f, "({subquery:?})"),
             Expr::BinaryExpr(expr) => write!(f, "{expr}"),
             Expr::ScalarFunction(fun) => {

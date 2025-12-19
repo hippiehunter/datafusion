@@ -312,6 +312,8 @@ pub fn expr_to_columns(expr: &Expr, accum: &mut HashSet<Column>) -> Result<()> {
             | Expr::InList { .. }
             | Expr::Exists { .. }
             | Expr::InSubquery(_)
+            | Expr::AnyExpr(_)
+            | Expr::AllExpr(_)
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard { .. }
             | Expr::Placeholder(_)

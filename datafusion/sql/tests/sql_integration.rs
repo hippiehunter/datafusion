@@ -3823,10 +3823,72 @@ Limit: skip=3, fetch=5
 }
 
 #[test]
-fn fetch_clause_is_not_supported() {
+fn test_fetch_clause() {
+    // FETCH FIRST/NEXT is SQL standard syntax equivalent to LIMIT
     let sql = "SELECT 1 FETCH NEXT 1 ROW ONLY";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Limit: skip=0, fetch=1
+  Projection: Int64(1)
+    EmptyRelation: rows=1
+"#
+    );
+}
+
+#[test]
+fn test_fetch_first_rows() {
+    // Test FETCH FIRST n ROWS ONLY syntax
+    let sql = "SELECT id FROM person FETCH FIRST 5 ROWS ONLY";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Limit: skip=0, fetch=5
+  Projection: person.id
+    TableScan: person
+"#
+    );
+}
+
+#[test]
+fn test_offset_with_fetch() {
+    // Test OFFSET combined with FETCH (SQL standard syntax)
+    let sql = "SELECT id FROM person OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Limit: skip=10, fetch=5
+  Projection: person.id
+    TableScan: person
+"#
+    );
+}
+
+#[test]
+fn test_fetch_percent_not_supported() {
+    // FETCH PERCENT is not yet supported
+    let sql = "SELECT id FROM person FETCH FIRST 10 PERCENT ROWS ONLY";
     let err = logical_plan(sql).unwrap_err();
-    assert_contains!(err.to_string(), "FETCH clause is not supported yet");
+    assert_contains!(err.to_string(), "FETCH PERCENT is not supported");
+}
+
+#[test]
+fn test_fetch_with_ties_not_supported() {
+    // FETCH WITH TIES is not yet supported
+    let sql = "SELECT id FROM person ORDER BY id FETCH FIRST 5 ROWS WITH TIES";
+    let err = logical_plan(sql).unwrap_err();
+    assert_contains!(err.to_string(), "FETCH WITH TIES is not supported");
+}
+
+#[test]
+fn test_limit_and_fetch_conflict() {
+    // Cannot use both LIMIT and FETCH
+    let sql = "SELECT id FROM person LIMIT 5 FETCH FIRST 3 ROWS ONLY";
+    let err = logical_plan(sql).unwrap_err();
+    assert_contains!(err.to_string(), "Cannot use both LIMIT and FETCH");
 }
 
 #[test]
@@ -3856,6 +3918,89 @@ Repartition: DistributeBy(person.state)
     TableScan: person
 "#
     );
+}
+
+// =========================================================================
+// ANY/ALL/SOME SQL Parsing Tests
+// =========================================================================
+
+#[test]
+fn test_any_subquery() {
+    // Test ANY with subquery
+    let sql = "SELECT id FROM person WHERE id > ANY(SELECT id FROM person WHERE id < 5)";
+    let plan = logical_plan(sql).unwrap();
+    let plan_str = format!("{plan}");
+    assert!(
+        plan_str.contains("ANY"),
+        "Expected ANY in plan: {}",
+        plan_str
+    );
+}
+
+#[test]
+fn test_all_subquery() {
+    // Test ALL with subquery
+    let sql = "SELECT id FROM person WHERE id > ALL(SELECT id FROM person WHERE id < 5)";
+    let plan = logical_plan(sql).unwrap();
+    let plan_str = format!("{plan}");
+    assert!(
+        plan_str.contains("ALL"),
+        "Expected ALL in plan: {}",
+        plan_str
+    );
+}
+
+#[test]
+fn test_some_subquery() {
+    // SOME is a synonym for ANY
+    let sql =
+        "SELECT id FROM person WHERE id = SOME(SELECT id FROM person WHERE id < 5)";
+    let plan = logical_plan(sql).unwrap();
+    let plan_str = format!("{plan}");
+    // SOME gets converted to ANY internally
+    assert!(
+        plan_str.contains("ANY"),
+        "Expected ANY (from SOME) in plan: {}",
+        plan_str
+    );
+}
+
+#[test]
+fn test_any_with_different_operators() {
+    // Test with different comparison operators
+    let operators = ["=", "<>", "<", "<=", ">", ">="];
+    for op in operators {
+        let sql = format!(
+            "SELECT id FROM person WHERE id {} ANY(SELECT id FROM person WHERE id < 5)",
+            op
+        );
+        let result = logical_plan(&sql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse ANY with operator {}: {:?}",
+            op,
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn test_all_with_different_operators() {
+    // Test ALL with different comparison operators
+    let operators = ["=", "<>", "<", "<=", ">", ">="];
+    for op in operators {
+        let sql = format!(
+            "SELECT id FROM person WHERE id {} ALL(SELECT id FROM person WHERE id < 5)",
+            op
+        );
+        let result = logical_plan(&sql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse ALL with operator {}: {:?}",
+            op,
+            result.err()
+        );
+    }
 }
 
 #[test]

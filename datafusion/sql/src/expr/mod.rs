@@ -32,7 +32,7 @@ use datafusion_common::{
 };
 
 use datafusion_expr::expr::ScalarFunction;
-use datafusion_expr::expr::{InList, WildcardOptions};
+use datafusion_expr::expr::{AnyExpr, AllExpr, InList, QuantifiedSource, WildcardOptions};
 use datafusion_expr::{
     Between, BinaryExpr, Cast, Expr, ExprSchemable, GetFieldAccess, Like, Literal,
     Operator, TryCast, lit,
@@ -595,30 +595,40 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // specified but it doesn't affect the plan so ignore the field
                 is_some: _,
             } => {
-                let mut binary_expr = RawBinaryExpr {
-                    op: compare_op,
-                    left: self.sql_expr_to_logical_expr(
-                        *left,
-                        schema,
-                        planner_context,
-                    )?,
-                    right: self.sql_expr_to_logical_expr(
-                        *right,
-                        schema,
-                        planner_context,
-                    )?,
-                };
-                for planner in self.context_provider.get_expr_planners() {
-                    match planner.plan_any(binary_expr)? {
-                        PlannerResult::Planned(expr) => {
-                            return Ok(expr);
-                        }
-                        PlannerResult::Original(expr) => {
-                            binary_expr = expr;
-                        }
-                    }
+                let op = self.parse_sql_binary_op(&compare_op)?;
+                // Check if right side is a subquery
+                if let SQLExpr::Subquery(subquery) = *right {
+                    self.parse_any_subquery(*left, op, *subquery, schema, planner_context)
+                } else {
+                    // Right side is an array expression
+                    let left_expr = self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
+                    let right_expr = self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
+                    Ok(Expr::AnyExpr(AnyExpr::new(
+                        Box::new(left_expr),
+                        op,
+                        QuantifiedSource::Array(Box::new(right_expr)),
+                    )))
                 }
-                not_impl_err!("AnyOp not supported by ExprPlanner: {binary_expr:?}")
+            }
+            SQLExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => {
+                let op = self.parse_sql_binary_op(&compare_op)?;
+                // Check if right side is a subquery
+                if let SQLExpr::Subquery(subquery) = *right {
+                    self.parse_all_subquery(*left, op, *subquery, schema, planner_context)
+                } else {
+                    // Right side is an array expression
+                    let left_expr = self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
+                    let right_expr = self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
+                    Ok(Expr::AllExpr(AllExpr::new(
+                        Box::new(left_expr),
+                        op,
+                        QuantifiedSource::Array(Box::new(right_expr)),
+                    )))
+                }
             }
             #[expect(deprecated)]
             SQLExpr::Wildcard(_token) => Ok(Expr::Wildcard {

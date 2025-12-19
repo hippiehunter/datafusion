@@ -2653,3 +2653,143 @@ fn test_not_ilike_filter_with_escape() {
 
 // Removed: test_struct_expr, test_struct_expr2, test_struct_expr3
 // (require Struct support from pruned datafusion_functions_nested)
+
+#[test]
+fn test_recursive_cte_unparse() {
+    // Test that we can unparse a RecursiveQuery plan back to SQL
+    use datafusion_expr::RecursiveQuery;
+
+    // Create a simple recursive CTE manually:
+    // WITH RECURSIVE numbers(n) AS (
+    //     SELECT 1 AS n
+    //     UNION ALL
+    //     SELECT n + 1 FROM numbers WHERE n < 5
+    // )
+    // SELECT * FROM numbers
+
+    // For simplicity, create a minimal RecursiveQuery directly
+
+    // Static term: SELECT 1 AS n (represented as EmptyRelation with projection)
+    let static_term = Arc::new(LogicalPlan::Projection(
+        datafusion_expr::Projection::try_new(
+            vec![lit(1i64).alias("n")],
+            Arc::new(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: true,
+                schema: Arc::new(DFSchema::empty()),
+            })),
+        )
+        .unwrap(),
+    ));
+
+    // Recursive term: SELECT n + 1 FROM numbers WHERE n < 5
+    // For this test, we'll use a simpler representation
+    let recursive_term = Arc::new(LogicalPlan::Projection(
+        datafusion_expr::Projection::try_new(
+            vec![(col("n") + lit(1i64)).alias("n")],
+            Arc::new(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: true,
+                schema: Arc::new(
+                    DFSchema::try_from(Schema::new(vec![Field::new(
+                        "n",
+                        DataType::Int64,
+                        false,
+                    )]))
+                    .unwrap(),
+                ),
+            })),
+        )
+        .unwrap(),
+    ));
+
+    let recursive_query = RecursiveQuery {
+        name: "numbers".to_string(),
+        static_term,
+        recursive_term,
+        is_distinct: false, // UNION ALL
+    };
+
+    let plan = LogicalPlan::RecursiveQuery(recursive_query);
+    let sql = plan_to_sql(&plan).unwrap();
+    let sql_string = sql.to_string();
+
+    // Verify the output contains WITH RECURSIVE
+    assert!(
+        sql_string.contains("WITH RECURSIVE"),
+        "Expected WITH RECURSIVE in output: {}",
+        sql_string
+    );
+    assert!(
+        sql_string.contains("numbers"),
+        "Expected CTE name 'numbers' in output: {}",
+        sql_string
+    );
+    assert!(
+        sql_string.contains("UNION ALL"),
+        "Expected UNION ALL in output: {}",
+        sql_string
+    );
+}
+
+#[test]
+fn test_recursive_cte_union_distinct() {
+    // Test WITH RECURSIVE using UNION (distinct) instead of UNION ALL
+    use datafusion_expr::RecursiveQuery;
+
+    let static_term = Arc::new(LogicalPlan::Projection(
+        datafusion_expr::Projection::try_new(
+            vec![lit(1i64).alias("n")],
+            Arc::new(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: true,
+                schema: Arc::new(DFSchema::empty()),
+            })),
+        )
+        .unwrap(),
+    ));
+
+    let recursive_term = Arc::new(LogicalPlan::Projection(
+        datafusion_expr::Projection::try_new(
+            vec![(col("n") + lit(1i64)).alias("n")],
+            Arc::new(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: true,
+                schema: Arc::new(
+                    DFSchema::try_from(Schema::new(vec![Field::new(
+                        "n",
+                        DataType::Int64,
+                        false,
+                    )]))
+                    .unwrap(),
+                ),
+            })),
+        )
+        .unwrap(),
+    ));
+
+    let recursive_query = RecursiveQuery {
+        name: "tree".to_string(),
+        static_term,
+        recursive_term,
+        is_distinct: true, // UNION (distinct)
+    };
+
+    let plan = LogicalPlan::RecursiveQuery(recursive_query);
+    let sql = plan_to_sql(&plan).unwrap();
+    let sql_string = sql.to_string();
+
+    // Verify the output contains WITH RECURSIVE and UNION (not UNION ALL)
+    assert!(
+        sql_string.contains("WITH RECURSIVE"),
+        "Expected WITH RECURSIVE in output: {}",
+        sql_string
+    );
+    assert!(
+        sql_string.contains("tree"),
+        "Expected CTE name 'tree' in output: {}",
+        sql_string
+    );
+    // UNION without ALL means UNION DISTINCT (SQL standard behavior)
+    assert!(
+        sql_string.contains("UNION") && !sql_string.contains("UNION ALL"),
+        "Expected UNION (not UNION ALL) in output: {}",
+        sql_string
+    );
+}
