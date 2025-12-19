@@ -34,8 +34,9 @@ use datafusion_common::{
     plan_err,
 };
 use datafusion_expr::expr::{
-    self, AggregateFunctionParams, Alias, Between, BinaryExpr, Case, Exists, InList,
-    InSubquery, Like, ScalarFunction, Sort, WindowFunction,
+    self, AggregateFunctionParams, Alias, AllExpr, AnyExpr, Between, BinaryExpr, Case,
+    Exists, InList, InSubquery, Like, QuantifiedSource, ScalarFunction, Sort,
+    WindowFunction,
 };
 use datafusion_expr::expr_rewriter::coerce_plan_expr_for_schema;
 use datafusion_expr::expr_schema::cast_subquery;
@@ -583,6 +584,74 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                 });
                 Ok(Transformed::yes(new_expr))
             }
+            Expr::AnyExpr(AnyExpr { expr, op, source }) => match source {
+                QuantifiedSource::Subquery(subquery) => {
+                    let new_plan = analyze_internal(
+                        self.schema,
+                        Arc::unwrap_or_clone(subquery.subquery),
+                    )?
+                    .data;
+                    let expr_type = expr.get_type(self.schema)?;
+                    let subquery_type = new_plan.schema().field(0).data_type();
+                    let common_type =
+                        comparison_coercion(&expr_type, subquery_type).ok_or(
+                            plan_datafusion_err!(
+                                "expr type {expr_type} can't cast to {subquery_type} in AnyExpr"
+                            ),
+                        )?;
+                    let new_subquery = Subquery {
+                        subquery: Arc::new(new_plan),
+                        outer_ref_columns: subquery.outer_ref_columns,
+                        spans: subquery.spans,
+                    };
+                    Ok(Transformed::yes(Expr::AnyExpr(AnyExpr::new(
+                        Box::new(expr.cast_to(&common_type, self.schema)?),
+                        op,
+                        QuantifiedSource::Subquery(cast_subquery(
+                            new_subquery,
+                            &common_type,
+                        )?),
+                    ))))
+                }
+                QuantifiedSource::Array(_) => {
+                    // Array sources are handled by recursive traversal
+                    Ok(Transformed::no(Expr::AnyExpr(AnyExpr { expr, op, source })))
+                }
+            },
+            Expr::AllExpr(AllExpr { expr, op, source }) => match source {
+                QuantifiedSource::Subquery(subquery) => {
+                    let new_plan = analyze_internal(
+                        self.schema,
+                        Arc::unwrap_or_clone(subquery.subquery),
+                    )?
+                    .data;
+                    let expr_type = expr.get_type(self.schema)?;
+                    let subquery_type = new_plan.schema().field(0).data_type();
+                    let common_type =
+                        comparison_coercion(&expr_type, subquery_type).ok_or(
+                            plan_datafusion_err!(
+                                "expr type {expr_type} can't cast to {subquery_type} in AllExpr"
+                            ),
+                        )?;
+                    let new_subquery = Subquery {
+                        subquery: Arc::new(new_plan),
+                        outer_ref_columns: subquery.outer_ref_columns,
+                        spans: subquery.spans,
+                    };
+                    Ok(Transformed::yes(Expr::AllExpr(AllExpr::new(
+                        Box::new(expr.cast_to(&common_type, self.schema)?),
+                        op,
+                        QuantifiedSource::Subquery(cast_subquery(
+                            new_subquery,
+                            &common_type,
+                        )?),
+                    ))))
+                }
+                QuantifiedSource::Array(_) => {
+                    // Array sources are handled by recursive traversal
+                    Ok(Transformed::no(Expr::AllExpr(AllExpr { expr, op, source })))
+                }
+            },
             // TODO: remove the next line after `Expr::Wildcard` is removed
             #[expect(deprecated)]
             Expr::Alias(_)

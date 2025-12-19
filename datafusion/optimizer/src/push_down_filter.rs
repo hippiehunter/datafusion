@@ -264,6 +264,8 @@ fn can_evaluate_as_join_condition(predicate: &Expr) -> Result<bool> {
         Expr::Exists { .. }
         | Expr::InSubquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::AnyExpr(_)
+        | Expr::AllExpr(_)
         | Expr::OuterReferenceColumn(_, _)
         | Expr::Unnest(_) => {
             is_evaluate = false;

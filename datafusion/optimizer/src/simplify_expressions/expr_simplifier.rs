@@ -649,6 +649,8 @@ impl<'a> ConstEvaluator<'a> {
             | Expr::Exists { .. }
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
+            | Expr::AnyExpr(_)
+            | Expr::AllExpr(_)
             | Expr::WindowFunction { .. }
             | Expr::GroupingSet(_)
             | Expr::Wildcard { .. }
