@@ -2501,6 +2501,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         planner_context.set_table_schema(Some(DFSchemaRef::new(
             DFSchema::from_unqualified_fields(fields.clone(), Default::default())?,
         )));
+        if matches!(source.body.as_ref(), SetExpr::Values(_)) {
+            let defaults = fields
+                .iter()
+                .map(|field| table_source.get_column_default(field.name()).cloned())
+                .collect::<Vec<_>>();
+            planner_context.set_values_defaults(Some(defaults));
+        }
         let source = self.query_to_plan(*source, &mut planner_context)?;
         if fields.len() != source.schema().fields().len() {
             plan_err!("Column count doesn't match insert query!")?;

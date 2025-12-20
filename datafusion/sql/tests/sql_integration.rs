@@ -29,8 +29,8 @@ use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::MockContextProvider;
 use datafusion_common::{DataFusionError, Result, assert_contains};
 use datafusion_expr::{
-    ColumnarValue, CreateIndex, DdlStatement, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, Volatility, col, logical_plan::LogicalPlan,
+    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs,
+    ScalarUDF, ScalarUDFImpl, Signature, Volatility, col, logical_plan::LogicalPlan,
     test::function_stub::sum_udaf,
 };
 use datafusion_sql::{
@@ -581,6 +581,20 @@ fn plan_insert() {
 }
 
 #[test]
+fn plan_insert_default_values() {
+    let sql = "insert into person (id, first_name, last_name) values (DEFAULT, 'Alan', DEFAULT)";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+    Dml: op=[Insert Into] table=[person]
+      Projection: column1 AS id, column2 AS first_name, column3 AS last_name, CAST(NULL AS Int32) AS age, CAST(NULL AS Utf8) AS state, CAST(NULL AS Float64) AS salary, CAST(NULL AS Timestamp(ns)) AS birth_date, CAST(NULL AS Int32) AS 😀
+        Values: (UInt32(NULL), Utf8("Alan"), Utf8(NULL))
+    "#
+    );
+}
+
+#[test]
 fn plan_insert_no_target_columns() {
     let sql = "INSERT INTO test_decimal VALUES (1, 2), (3, 4)";
     let plan = logical_plan(sql).unwrap();
@@ -592,6 +606,25 @@ fn plan_insert_no_target_columns() {
             Values: (CAST(Int64(1) AS Int32), CAST(Int64(2) AS Decimal128(10, 2))), (CAST(Int64(3) AS Int32), CAST(Int64(4) AS Decimal128(10, 2)))
         "#
     );
+}
+
+#[test]
+fn plan_create_table_interval_day_to_second() {
+    let sql = "CREATE TABLE intervals (span INTERVAL DAY TO SECOND)";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            input,
+            ..
+        })) => {
+            let schema = input.schema();
+            assert_eq!(
+                schema.field(0).data_type(),
+                &DataType::Interval(IntervalUnit::MonthDayNano)
+            );
+        }
+        other => panic!("Expected CreateMemoryTable plan, got {other:?}"),
+    }
 }
 
 #[rstest]

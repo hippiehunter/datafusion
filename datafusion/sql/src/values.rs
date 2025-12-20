@@ -18,9 +18,9 @@
 use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::{DFSchema, Result};
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
-use sqlparser::ast::Values as SQLValues;
+use datafusion_common::{DFSchema, Result, ScalarValue};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder};
+use sqlparser::ast::{Expr as SQLExpr, Ident, Values as SQLValues};
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn sql_values_to_plan(
@@ -35,11 +35,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         } = values;
 
         let empty_schema = Arc::new(DFSchema::empty());
+        let defaults = planner_context.take_values_defaults();
         let values = rows
             .into_iter()
             .map(|row| {
                 row.into_iter()
-                    .map(|v| self.sql_to_expr(v, &empty_schema, planner_context))
+                    .enumerate()
+                    .map(|(idx, v)| {
+                        if let (Some(defaults), SQLExpr::Identifier(ident)) =
+                            (defaults.as_ref(), &v)
+                        {
+                            if is_default_identifier(ident) {
+                                let default_expr = defaults
+                                    .get(idx)
+                                    .and_then(|expr| expr.clone())
+                                    .unwrap_or(Expr::Literal(ScalarValue::Null, None));
+                                return Ok(default_expr);
+                            }
+                        }
+                        self.sql_to_expr(v, &empty_schema, planner_context)
+                    })
                     .collect::<Result<Vec<_>>>()
             })
             .collect::<Result<Vec<_>>>()?;
@@ -51,4 +66,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             LogicalPlanBuilder::values_with_schema(values, &schema)?.build()
         }
     }
+}
+
+fn is_default_identifier(ident: &Ident) -> bool {
+    ident.quote_style.is_none() && ident.value.eq_ignore_ascii_case("default")
 }

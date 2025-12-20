@@ -268,6 +268,8 @@ pub struct PlannerContext {
     outer_from_schema: Option<DFSchemaRef>,
     /// The query schema defined by the table
     create_table_schema: Option<DFSchemaRef>,
+    /// Default expressions for VALUES planning (e.g. INSERT ... VALUES DEFAULT)
+    values_defaults: Option<Vec<Option<Expr>>>,
 }
 
 impl Default for PlannerContext {
@@ -285,6 +287,7 @@ impl PlannerContext {
             outer_query_schema: None,
             outer_from_schema: None,
             create_table_schema: None,
+            values_defaults: None,
         }
     }
 
@@ -322,6 +325,20 @@ impl PlannerContext {
 
     pub fn table_schema(&self) -> Option<DFSchemaRef> {
         self.create_table_schema.clone()
+    }
+
+    /// Sets default expressions for VALUES planning, returning the previous value if any.
+    pub fn set_values_defaults(
+        &mut self,
+        mut defaults: Option<Vec<Option<Expr>>>,
+    ) -> Option<Vec<Option<Expr>>> {
+        std::mem::swap(&mut self.values_defaults, &mut defaults);
+        defaults
+    }
+
+    /// Consume defaults for VALUES planning (one-shot).
+    pub fn take_values_defaults(&mut self) -> Option<Vec<Option<Expr>>> {
+        self.values_defaults.take()
     }
 
     // Return a clone of the outer FROM schema
@@ -731,12 +748,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 make_decimal_type(precision, scale.map(|s| s as u64))
             }
             SQLDataType::Bytea => Ok(DataType::Binary),
-            SQLDataType::Interval { fields, precision } => {
-                if fields.is_some() || precision.is_some() {
-                    return not_impl_err!("Unsupported SQL type {sql_type}");
+            SQLDataType::Interval { fields, precision: _ } => match fields {
+                None | Some(sqlparser::ast::IntervalFields::DayToSecond) => {
+                    Ok(DataType::Interval(IntervalUnit::MonthDayNano))
                 }
-                Ok(DataType::Interval(IntervalUnit::MonthDayNano))
-            }
+                _ => not_impl_err!("Unsupported SQL type {sql_type}"),
+            },
             SQLDataType::Struct(fields, _) => {
                 let fields = fields
                     .iter()
