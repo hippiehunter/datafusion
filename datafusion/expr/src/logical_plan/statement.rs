@@ -19,6 +19,10 @@ use arrow::datatypes::FieldRef;
 use datafusion_common::metadata::format_type_and_metadata;
 use datafusion_common::{DFSchema, DFSchemaRef};
 use itertools::Itertools as _;
+use sqlparser::ast::{
+    CascadeOption, CurrentGrantsKind, GrantObjects, Grantee, Ident, Privileges,
+    TransactionMode, Value,
+};
 use std::fmt::{self, Display};
 use std::sync::{Arc, LazyLock};
 
@@ -37,10 +41,22 @@ pub enum Statement {
     TransactionStart(TransactionStart),
     // Commit or rollback a transaction
     TransactionEnd(TransactionEnd),
+    /// Define a savepoint
+    Savepoint(Savepoint),
+    /// Release a savepoint
+    ReleaseSavepoint(ReleaseSavepoint),
+    /// Rollback to a savepoint
+    RollbackToSavepoint(RollbackToSavepoint),
+    /// Set transaction characteristics
+    SetTransaction(SetTransaction),
     /// Set a Variable
     SetVariable(SetVariable),
     /// Reset a Variable
     ResetVariable(ResetVariable),
+    /// GRANT privileges
+    Grant(Grant),
+    /// REVOKE privileges
+    Revoke(Revoke),
     /// Prepare a statement and find any bind parameters
     /// (e.g. `?`). This is used to implement SQL-prepared statements.
     Prepare(Prepare),
@@ -67,8 +83,14 @@ impl Statement {
         match self {
             Statement::TransactionStart(_) => "TransactionStart",
             Statement::TransactionEnd(_) => "TransactionEnd",
+            Statement::Savepoint(_) => "Savepoint",
+            Statement::ReleaseSavepoint(_) => "ReleaseSavepoint",
+            Statement::RollbackToSavepoint(_) => "RollbackToSavepoint",
+            Statement::SetTransaction(_) => "SetTransaction",
             Statement::SetVariable(_) => "SetVariable",
             Statement::ResetVariable(_) => "ResetVariable",
+            Statement::Grant(_) => "Grant",
+            Statement::Revoke(_) => "Revoke",
             Statement::Prepare(_) => "Prepare",
             Statement::Execute(_) => "Execute",
             Statement::Deallocate(_) => "Deallocate",
@@ -107,6 +129,29 @@ impl Statement {
                     }) => {
                         write!(f, "TransactionEnd: {conclusion:?} chain:={chain}")
                     }
+                    Statement::Savepoint(Savepoint { name }) => {
+                        write!(f, "Savepoint: {name}")
+                    }
+                    Statement::ReleaseSavepoint(ReleaseSavepoint { name }) => {
+                        write!(f, "ReleaseSavepoint: {name}")
+                    }
+                    Statement::RollbackToSavepoint(RollbackToSavepoint {
+                        name,
+                        chain,
+                    }) => {
+                        write!(f, "RollbackToSavepoint: {name} chain:={chain}")
+                    }
+                    Statement::SetTransaction(SetTransaction {
+                        modes,
+                        snapshot,
+                        session,
+                    }) => {
+                        write!(
+                            f,
+                            "SetTransaction: modes={:?} snapshot={:?} session:={session}",
+                            modes, snapshot
+                        )
+                    }
                     Statement::SetVariable(SetVariable {
                         variable, value, ..
                     }) => {
@@ -114,6 +159,12 @@ impl Statement {
                     }
                     Statement::ResetVariable(ResetVariable { variable }) => {
                         write!(f, "ResetVariable: reset {variable:?}")
+                    }
+                    Statement::Grant(Grant { privileges, .. }) => {
+                        write!(f, "Grant: {privileges}")
+                    }
+                    Statement::Revoke(Revoke { privileges, .. }) => {
+                        write!(f, "Revoke: {privileges}")
                     }
                     Statement::Prepare(Prepare { name, fields, .. }) => {
                         write!(
@@ -190,6 +241,33 @@ pub struct TransactionEnd {
     pub chain: bool,
 }
 
+/// Define a savepoint within the current transaction.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct Savepoint {
+    pub name: Ident,
+}
+
+/// Release a savepoint.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct ReleaseSavepoint {
+    pub name: Ident,
+}
+
+/// Rollback to a savepoint.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct RollbackToSavepoint {
+    pub name: Ident,
+    pub chain: bool,
+}
+
+/// SET TRANSACTION statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct SetTransaction {
+    pub modes: Vec<TransactionMode>,
+    pub snapshot: Option<Value>,
+    pub session: bool,
+}
+
 /// Set a Variable's value -- value in
 /// [`ConfigOptions`](datafusion_common::config::ConfigOptions)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
@@ -205,6 +283,28 @@ pub struct SetVariable {
 pub struct ResetVariable {
     /// The variable name
     pub variable: String,
+}
+
+/// GRANT privileges statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct Grant {
+    pub privileges: Privileges,
+    pub objects: Option<GrantObjects>,
+    pub grantees: Vec<Grantee>,
+    pub with_grant_option: bool,
+    pub as_grantor: Option<Ident>,
+    pub granted_by: Option<Ident>,
+    pub current_grants: Option<CurrentGrantsKind>,
+}
+
+/// REVOKE privileges statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct Revoke {
+    pub privileges: Privileges,
+    pub objects: Option<GrantObjects>,
+    pub grantees: Vec<Grantee>,
+    pub granted_by: Option<Ident>,
+    pub cascade: Option<CascadeOption>,
 }
 /// Prepare a statement but do not execute it. Prepare statements can have 0 or more
 /// `Expr::Placeholder` expressions that are filled in during execution

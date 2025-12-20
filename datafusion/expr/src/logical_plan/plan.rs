@@ -39,7 +39,10 @@ use crate::expr_rewriter::{
 };
 use crate::logical_plan::display::{GraphvizVisitor, IndentVisitor};
 use crate::logical_plan::extension::UserDefinedLogicalNode;
-use crate::logical_plan::{DmlStatement, Statement};
+use crate::logical_plan::{
+    DmlStatement, Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr,
+    MergeInsertKind, MergeUpdateExpr, Statement,
+};
 use crate::utils::{
     enumerate_grouping_sets, exprlist_to_fields, find_out_reference_exprs,
     grouping_set_expr_count, grouping_set_to_exprlist, split_conjunction,
@@ -278,6 +281,8 @@ pub enum LogicalPlan {
     Distinct(Distinct),
     /// Data Manipulation Language (DML): Insert / Update / Delete
     Dml(DmlStatement),
+    /// MERGE statement
+    Merge(Merge),
     /// Data Definition Language (DDL): CREATE / DROP TABLES / VIEWS / SCHEMAS
     Ddl(DdlStatement),
     /// `COPY TO` for writing plan results to files
@@ -347,6 +352,7 @@ impl LogicalPlan {
                 output_schema
             }
             LogicalPlan::Dml(DmlStatement { output_schema, .. }) => output_schema,
+            LogicalPlan::Merge(Merge { output_schema, .. }) => output_schema,
             LogicalPlan::Copy(CopyTo { output_schema, .. }) => output_schema,
             LogicalPlan::Ddl(ddl) => ddl.schema(),
             LogicalPlan::Unnest(Unnest { schema, .. }) => schema,
@@ -365,7 +371,8 @@ impl LogicalPlan {
             | LogicalPlan::Projection(_)
             | LogicalPlan::Aggregate(_)
             | LogicalPlan::Unnest(_)
-            | LogicalPlan::Join(_) => self
+            | LogicalPlan::Join(_)
+            | LogicalPlan::Merge(_) => self
                 .inputs()
                 .iter()
                 .map(|input| input.schema().as_ref())
@@ -468,6 +475,7 @@ impl LogicalPlan {
             LogicalPlan::Explain(explain) => vec![&explain.plan],
             LogicalPlan::Analyze(analyze) => vec![&analyze.input],
             LogicalPlan::Dml(write) => vec![&write.input],
+            LogicalPlan::Merge(merge) => vec![&merge.target, &merge.source],
             LogicalPlan::Copy(copy) => vec![&copy.input],
             LogicalPlan::Ddl(ddl) => ddl.inputs(),
             LogicalPlan::Unnest(Unnest { input, .. }) => vec![input],
@@ -591,6 +599,7 @@ impl LogicalPlan {
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Extension(_)
             | LogicalPlan::Dml(_)
+            | LogicalPlan::Merge(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::DescribeTable(_)
@@ -630,6 +639,7 @@ impl LogicalPlan {
                 schema: _,
             }) => Projection::try_new(expr, input).map(LogicalPlan::Projection),
             LogicalPlan::Dml(_) => Ok(self),
+            LogicalPlan::Merge(_) => Ok(self),
             LogicalPlan::Copy(_) => Ok(self),
             LogicalPlan::Values(Values { schema, values }) => {
                 // todo it isn't clear why the schema is not recomputed here
@@ -805,6 +815,141 @@ impl LogicalPlan {
                     op.clone(),
                     Arc::new(input),
                 )))
+            }
+            LogicalPlan::Merge(merge) => {
+                let (target, source) = self.only_two_inputs(inputs)?;
+                let mut expr_iter = expr.into_iter();
+                let Some(on) = expr_iter.next() else {
+                    return internal_err!("Merge expects join predicate expression");
+                };
+
+                let mut clauses = Vec::with_capacity(merge.clauses.len());
+                for clause in &merge.clauses {
+                    let predicate = match clause.predicate {
+                        Some(_) => Some(
+                            expr_iter
+                                .next()
+                                .ok_or_else(|| {
+                                    DataFusionError::Internal(
+                                        "Merge clause predicate missing".to_string(),
+                                    )
+                                })?,
+                        ),
+                        None => None,
+                    };
+
+                    let action = match &clause.action {
+                        MergeAction::Insert(insert) => {
+                            let kind = match &insert.kind {
+                                MergeInsertKind::Values(values) => {
+                                    let mut rows = Vec::with_capacity(values.len());
+                                    for row in values {
+                                        let mut new_row = Vec::with_capacity(row.len());
+                                        for _ in row {
+                                            let value = expr_iter.next().ok_or_else(|| {
+                                                DataFusionError::Internal(
+                                                    "Merge insert value missing".to_string(),
+                                                )
+                                            })?;
+                                            new_row.push(value);
+                                        }
+                                        rows.push(new_row);
+                                    }
+                                    MergeInsertKind::Values(rows)
+                                }
+                                MergeInsertKind::Row => MergeInsertKind::Row,
+                            };
+
+                            let insert_predicate = match insert.insert_predicate {
+                                Some(_) => Some(
+                                    expr_iter
+                                        .next()
+                                        .ok_or_else(|| {
+                                            DataFusionError::Internal(
+                                                "Merge insert predicate missing".to_string(),
+                                            )
+                                        })?,
+                                ),
+                                None => None,
+                            };
+
+                            MergeAction::Insert(MergeInsertExpr {
+                                columns: insert.columns.clone(),
+                                kind,
+                                insert_predicate,
+                            })
+                        }
+                        MergeAction::Update(update) => {
+                            let mut assignments =
+                                Vec::with_capacity(update.assignments.len());
+                            for assignment in &update.assignments {
+                                let value = expr_iter.next().ok_or_else(|| {
+                                    DataFusionError::Internal(
+                                        "Merge update assignment missing".to_string(),
+                                    )
+                                })?;
+                                assignments.push(MergeAssignment {
+                                    target: assignment.target.clone(),
+                                    value,
+                                });
+                            }
+
+                            let update_predicate = match update.update_predicate {
+                                Some(_) => Some(
+                                    expr_iter
+                                        .next()
+                                        .ok_or_else(|| {
+                                            DataFusionError::Internal(
+                                                "Merge update predicate missing"
+                                                    .to_string(),
+                                            )
+                                        })?,
+                                ),
+                                None => None,
+                            };
+
+                            let delete_predicate = match update.delete_predicate {
+                                Some(_) => Some(
+                                    expr_iter
+                                        .next()
+                                        .ok_or_else(|| {
+                                            DataFusionError::Internal(
+                                                "Merge delete predicate missing"
+                                                    .to_string(),
+                                            )
+                                        })?,
+                                ),
+                                None => None,
+                            };
+
+                            MergeAction::Update(MergeUpdateExpr {
+                                assignments,
+                                update_predicate,
+                                delete_predicate,
+                            })
+                        }
+                        MergeAction::Delete => MergeAction::Delete,
+                    };
+
+                    clauses.push(MergeClause {
+                        clause_kind: clause.clause_kind.clone(),
+                        predicate,
+                        action,
+                    });
+                }
+
+                if expr_iter.next().is_some() {
+                    return internal_err!("Too many expressions for Merge");
+                }
+
+                Ok(LogicalPlan::Merge(Merge {
+                    target_table: merge.target_table.clone(),
+                    target: Arc::new(target),
+                    source: Arc::new(source),
+                    on,
+                    clauses,
+                    output_schema: Arc::clone(&merge.output_schema),
+                }))
             }
             LogicalPlan::Copy(CopyTo {
                 input: _,
@@ -1022,6 +1167,11 @@ impl LogicalPlan {
                     definition: definition.clone(),
                 })))
             }
+            LogicalPlan::Ddl(ddl) => {
+                self.assert_no_expressions(expr)?;
+                self.assert_no_inputs(inputs)?;
+                Ok(LogicalPlan::Ddl(ddl.clone()))
+            }
             LogicalPlan::Extension(e) => Ok(LogicalPlan::Extension(Extension {
                 node: e.node.with_exprs_and_inputs(expr, inputs)?,
             })),
@@ -1127,7 +1277,6 @@ impl LogicalPlan {
                 }))
             }
             LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Ddl(_)
             | LogicalPlan::Statement(_)
             | LogicalPlan::DescribeTable(_) => {
                 // All of these plan types have no inputs / exprs so should not be called
@@ -1381,6 +1530,7 @@ impl LogicalPlan {
             | LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Dml(_)
+            | LogicalPlan::Merge(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Statement(_)
@@ -1889,6 +2039,9 @@ impl LogicalPlan {
                     }
                     LogicalPlan::Dml(DmlStatement { table_name, op, .. }) => {
                         write!(f, "Dml: op=[{op}] table=[{table_name}]")
+                    }
+                    LogicalPlan::Merge(Merge { target_table, .. }) => {
+                        write!(f, "Merge: target=[{target_table}]")
                     }
                     LogicalPlan::Copy(CopyTo {
                         input: _,

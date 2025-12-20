@@ -288,7 +288,7 @@ impl Display for InsertOp {
     }
 }
 
-fn make_count_schema() -> DFSchemaRef {
+pub(crate) fn make_count_schema() -> DFSchemaRef {
     Arc::new(
         Schema::new(vec![Field::new("count", DataType::UInt64, false)])
             .try_into()

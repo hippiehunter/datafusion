@@ -18,7 +18,7 @@
 use crate::{Expr, LogicalPlan, SortExpr, Volatility};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::{
     fmt::{self, Display},
     hash::{Hash, Hasher},
@@ -30,10 +30,15 @@ use crate::expr::Sort;
 use arrow::datatypes::DataType;
 use datafusion_common::tree_node::{Transformed, TreeNodeContainer, TreeNodeRecursion};
 use datafusion_common::{
-    Constraints, DFSchemaRef, Result, SchemaReference, TableReference,
+    Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
 };
 #[cfg(feature = "sql")]
-use sqlparser::ast::Ident;
+pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain};
+#[cfg(feature = "sql")]
+use sqlparser::ast::{Ident, ObjectName};
+
+static DDL_EMPTY_SCHEMA: LazyLock<DFSchemaRef> =
+    LazyLock::new(|| Arc::new(DFSchema::empty()));
 
 /// Various types of DDL  (CREATE / DROP) catalog manipulation
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
@@ -60,6 +65,14 @@ pub enum DdlStatement {
     CreateFunction(CreateFunction),
     /// Drop function statement
     DropFunction(DropFunction),
+    /// ALTER TABLE
+    AlterTable(AlterTable),
+    /// CREATE DOMAIN
+    CreateDomain(CreateDomain),
+    /// DROP DOMAIN
+    DropDomain(DropDomain),
+    /// DROP SEQUENCE
+    DropSequence(DropSequence),
 }
 
 impl DdlStatement {
@@ -81,6 +94,10 @@ impl DdlStatement {
             DdlStatement::DropCatalogSchema(DropCatalogSchema { schema, .. }) => schema,
             DdlStatement::CreateFunction(CreateFunction { schema, .. }) => schema,
             DdlStatement::DropFunction(DropFunction { schema, .. }) => schema,
+            DdlStatement::AlterTable(_)
+            | DdlStatement::CreateDomain(_)
+            | DdlStatement::DropDomain(_)
+            | DdlStatement::DropSequence(_) => &DDL_EMPTY_SCHEMA,
         }
     }
 
@@ -99,6 +116,10 @@ impl DdlStatement {
             DdlStatement::DropCatalogSchema(_) => "DropCatalogSchema",
             DdlStatement::CreateFunction(_) => "CreateFunction",
             DdlStatement::DropFunction(_) => "DropFunction",
+            DdlStatement::AlterTable(_) => "AlterTable",
+            DdlStatement::CreateDomain(_) => "CreateDomain",
+            DdlStatement::DropDomain(_) => "DropDomain",
+            DdlStatement::DropSequence(_) => "DropSequence",
         }
     }
 
@@ -118,6 +139,10 @@ impl DdlStatement {
             DdlStatement::DropCatalogSchema(_) => vec![],
             DdlStatement::CreateFunction(_) => vec![],
             DdlStatement::DropFunction(_) => vec![],
+            DdlStatement::AlterTable(_) => vec![],
+            DdlStatement::CreateDomain(_) => vec![],
+            DdlStatement::DropDomain(_) => vec![],
+            DdlStatement::DropSequence(_) => vec![],
         }
     }
 
@@ -196,6 +221,28 @@ impl DdlStatement {
                     }
                     DdlStatement::DropFunction(DropFunction { name, .. }) => {
                         write!(f, "DropFunction: name {name:?}")
+                    }
+                    DdlStatement::AlterTable(alter_table) => {
+                        write!(f, "AlterTable: {alter_table}")
+                    }
+                    DdlStatement::CreateDomain(create_domain) => {
+                        write!(f, "CreateDomain: {create_domain}")
+                    }
+                    DdlStatement::DropDomain(DropDomain {
+                        if_exists,
+                        name,
+                        drop_behavior,
+                    }) => {
+                        write!(
+                            f,
+                            "DropDomain: {name:?} if not exist:={if_exists} drop_behavior:={drop_behavior:?}"
+                        )
+                    }
+                    DdlStatement::DropSequence(DropSequence { name, if_exists, .. }) => {
+                        write!(
+                            f,
+                            "DropSequence: {name:?} if not exist:={if_exists}"
+                        )
                     }
                 }
             }
@@ -583,6 +630,25 @@ impl PartialOrd for DropView {
         // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
         .filter(|cmp| *cmp != Ordering::Equal || self == other)
     }
+}
+
+/// Drops a sequence.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct DropSequence {
+    /// The sequence name
+    pub name: ObjectName,
+    /// If the sequence exists
+    pub if_exists: bool,
+    /// Whether drop should cascade
+    pub cascade: bool,
+    /// Whether drop should restrict
+    pub restrict: bool,
+    /// Whether drop should purge
+    pub purge: bool,
+    /// Whether drop should use TEMPORARY
+    pub temporary: bool,
+    /// Optional table qualifier (dialect-specific)
+    pub table: Option<ObjectName>,
 }
 
 /// Drops a schema

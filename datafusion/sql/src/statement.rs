@@ -40,17 +40,20 @@ use datafusion_common::{
 };
 use datafusion_expr::dml::{CopyTo, InsertOp};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
-use datafusion_expr::logical_plan::DdlStatement;
+use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
     Analyze, CreateCatalog, CreateCatalogSchema,
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
     CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
-    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView,
-    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter,
-    LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare,
-    ResetVariable, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
+    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropSequence,
+    DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr,
+    ExprSchemable, Filter, Grant, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
+    MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
+    MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare, ReleaseSavepoint,
+    ResetVariable, Revoke, RollbackToSavepoint, Savepoint, SetTransaction,
+    SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
     TransactionAccessMode, TransactionConclusion, TransactionEnd,
     TransactionIsolationLevel, TransactionStart, Volatility, WriteOp, cast, col,
 };
@@ -324,9 +327,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 initialize,
                 require_user,
             }) => {
-                if temporary {
-                    return not_impl_err!("Temporary tables not supported")?;
-                }
                 if external {
                     return not_impl_err!("External tables not supported")?;
                 }
@@ -610,6 +610,75 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     temporary: view.temporary,
                 })))
             }
+            Statement::AlterTable(mut alter_table) => {
+                if alter_table.location.is_some() {
+                    return not_impl_err!("ALTER TABLE ... SET LOCATION not supported");
+                }
+                if alter_table.on_cluster.is_some() {
+                    return not_impl_err!("ALTER TABLE ... ON CLUSTER not supported");
+                }
+                if alter_table.table_type.is_some() {
+                    return not_impl_err!("ALTER TABLE type modifiers not supported");
+                }
+
+                let mut operations = Vec::with_capacity(alter_table.operations.len());
+                for operation in alter_table.operations {
+                    use ast::AlterColumnOperation;
+                    use ast::AlterTableOperation;
+
+                    match operation {
+                        AlterTableOperation::AddColumn { column_position, .. }
+                            if column_position.is_some() =>
+                        {
+                            return not_impl_err!(
+                                "ALTER TABLE ADD COLUMN position not supported"
+                            );
+                        }
+                        AlterTableOperation::AddColumn { .. }
+                        | AlterTableOperation::DropColumn { .. }
+                        | AlterTableOperation::AddConstraint { .. }
+                        | AlterTableOperation::DropConstraint { .. }
+                        | AlterTableOperation::RenameColumn { .. }
+                        | AlterTableOperation::RenameTable { .. } => {
+                            operations.push(operation);
+                        }
+                        AlterTableOperation::AlterColumn { column_name, op } => {
+                            match op {
+                                AlterColumnOperation::SetNotNull
+                                | AlterColumnOperation::DropNotNull
+                                | AlterColumnOperation::SetDefault { .. }
+                                | AlterColumnOperation::DropDefault
+                                | AlterColumnOperation::SetDataType { .. } => {
+                                    operations.push(AlterTableOperation::AlterColumn {
+                                        column_name,
+                                        op,
+                                    });
+                                }
+                                _ => {
+                                    return not_impl_err!(
+                                        "ALTER TABLE ALTER COLUMN operation not supported: {op:?}"
+                                    );
+                                }
+                            }
+                        }
+                        other => {
+                            return not_impl_err!(
+                                "ALTER TABLE operation not supported: {other:?}"
+                            );
+                        }
+                    }
+                }
+
+                alter_table.operations = operations;
+
+                Ok(LogicalPlan::Ddl(DdlStatement::AlterTable(alter_table)))
+            }
+            Statement::CreateDomain(create_domain) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateDomain(create_domain)))
+            }
+            Statement::DropDomain(drop_domain) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::DropDomain(drop_domain)))
+            }
             Statement::ShowCreate { obj_type, obj_name } => match obj_type {
                 ShowCreateObject::Table => self.show_create_table_to_plan(obj_name),
                 _ => {
@@ -643,21 +712,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if_exists,
                 mut names,
                 cascade,
-                restrict: _,
-                purge: _,
-                temporary: _,
-                table: _,
+                restrict,
+                purge,
+                temporary,
+                table,
             } => {
-                // We don't support cascade and purge for now.
-                // nor do we support multiple object names
-                let name = match names.len() {
-                    0 => Err(ParserError("Missing table name.".to_string()).into()),
-                    1 => self.object_name_to_table_reference(names.pop().unwrap()),
-                    _ => {
-                        Err(ParserError("Multiple objects not supported".to_string())
-                            .into())
+                // We don't support multiple object names
+                let object_name = match names.len() {
+                    0 => {
+                        return Err(
+                            ParserError("Missing table name.".to_string()).into()
+                        );
                     }
-                }?;
+                    1 => names.pop().unwrap(),
+                    _ => {
+                        return Err(ParserError(
+                            "Multiple objects not supported".to_string(),
+                        )
+                        .into());
+                    }
+                };
+                let name = self.object_name_to_table_reference(object_name.clone())?;
 
                 match object_type {
                     ObjectType::Table => {
@@ -702,6 +777,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             },
                         )))
                     }
+                    ObjectType::Sequence => Ok(LogicalPlan::Ddl(DdlStatement::DropSequence(
+                        DropSequence {
+                            name: object_name,
+                            if_exists,
+                            cascade,
+                            restrict,
+                            purge,
+                            temporary,
+                            table,
+                        },
+                    ))),
                     _ => not_impl_err!(
                         "Only `DROP TABLE/VIEW/SCHEMA  ...` statement is supported currently"
                     ),
@@ -802,6 +888,36 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     name: ident_to_string(&name),
                 },
             ))),
+            Statement::Grant {
+                privileges,
+                objects,
+                grantees,
+                with_grant_option,
+                as_grantor,
+                granted_by,
+                current_grants,
+            } => Ok(LogicalPlan::Statement(PlanStatement::Grant(Grant {
+                privileges,
+                objects,
+                grantees,
+                with_grant_option,
+                as_grantor,
+                granted_by,
+                current_grants,
+            }))),
+            Statement::Revoke {
+                privileges,
+                objects,
+                grantees,
+                granted_by,
+                cascade,
+            } => Ok(LogicalPlan::Statement(PlanStatement::Revoke(Revoke {
+                privileges,
+                objects,
+                grantees,
+                granted_by,
+                cascade,
+            }))),
 
             Statement::ShowTables {
                 extended,
@@ -1041,6 +1157,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let table_name = self.get_delete_target(from)?;
                 self.delete_to_plan(&table_name, selection)
             }
+            Statement::Merge(merge) => self.merge_to_plan(merge, planner_context),
 
             Statement::StartTransaction {
                 modes,
@@ -1136,15 +1253,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 });
                 Ok(LogicalPlan::Statement(statement))
             }
+            Statement::Savepoint { name } => Ok(LogicalPlan::Statement(
+                PlanStatement::Savepoint(Savepoint { name }),
+            )),
+            Statement::ReleaseSavepoint { name } => Ok(LogicalPlan::Statement(
+                PlanStatement::ReleaseSavepoint(ReleaseSavepoint { name }),
+            )),
             Statement::Rollback { chain, savepoint } => {
-                if savepoint.is_some() {
-                    plan_err!("Savepoints not supported")?;
+                if let Some(savepoint) = savepoint {
+                    let statement =
+                        PlanStatement::RollbackToSavepoint(RollbackToSavepoint {
+                            name: savepoint,
+                            chain,
+                        });
+                    Ok(LogicalPlan::Statement(statement))
+                } else {
+                    let statement = PlanStatement::TransactionEnd(TransactionEnd {
+                        conclusion: TransactionConclusion::Rollback,
+                        chain,
+                    });
+                    Ok(LogicalPlan::Statement(statement))
                 }
-                let statement = PlanStatement::TransactionEnd(TransactionEnd {
-                    conclusion: TransactionConclusion::Rollback,
-                    chain,
-                });
-                Ok(LogicalPlan::Statement(statement))
             }
             Statement::CreateFunction(ast::CreateFunction {
                 or_replace,
@@ -1931,6 +2060,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     },
                 )))
             }
+            Set::SetTransaction {
+                modes,
+                snapshot,
+                session,
+            } => Ok(LogicalPlan::Statement(PlanStatement::SetTransaction(
+                SetTransaction {
+                    modes,
+                    snapshot,
+                    session,
+                },
+            ))),
             other => not_impl_err!("SET variant not implemented yet: {other:?}"),
         }
     }
@@ -1996,6 +2136,169 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Arc::new(source),
         ));
         Ok(plan)
+    }
+
+    fn merge_to_plan(
+        &self,
+        merge: ast::Merge,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        if merge.output.is_some() {
+            return not_impl_err!("MERGE OUTPUT/RETURNING not supported");
+        }
+
+        let (table_name, table_alias) = match merge.table {
+            TableFactor::Table {
+                name,
+                alias,
+                args,
+                with_hints,
+                version,
+                with_ordinality,
+                partitions,
+                json_path,
+                sample,
+                index_hints,
+            } => {
+                if args.is_some() {
+                    return not_impl_err!("MERGE target table functions not supported");
+                }
+                if !with_hints.is_empty() {
+                    return not_impl_err!("MERGE target table hints not supported");
+                }
+                if version.is_some() {
+                    return not_impl_err!("MERGE target table version not supported");
+                }
+                if with_ordinality {
+                    return not_impl_err!("MERGE target WITH ORDINALITY not supported");
+                }
+                if !partitions.is_empty() {
+                    return not_impl_err!("MERGE target partitions not supported");
+                }
+                if json_path.is_some() {
+                    return not_impl_err!("MERGE target JSON path not supported");
+                }
+                if sample.is_some() {
+                    return not_impl_err!("MERGE target TABLESAMPLE not supported");
+                }
+                if !index_hints.is_empty() {
+                    return not_impl_err!("MERGE target index hints not supported");
+                }
+                (name, alias)
+            }
+            _ => plan_err!("MERGE target must be a table")?,
+        };
+
+        let table_ref = self.object_name_to_table_reference(table_name)?;
+        let table_source = self.context_provider.get_table_source(table_ref.clone())?;
+        let mut target_plan =
+            LogicalPlanBuilder::scan(table_ref.clone(), table_source, None)?.build()?;
+        if let Some(alias) = table_alias {
+            target_plan = self.apply_table_alias(target_plan, alias)?;
+        }
+
+        let source_plan = self.plan_table_with_joins(
+            TableWithJoins {
+                relation: merge.source,
+                joins: vec![],
+            },
+            planner_context,
+        )?;
+
+        let join_schema =
+            build_join_schema(target_plan.schema(), source_plan.schema(), &JoinType::Inner)?;
+
+        let mut normalize_expr =
+            |sql_expr: SQLExpr| -> Result<Expr> {
+                let expr =
+                    self.sql_to_expr(sql_expr, &join_schema, planner_context)?;
+                let mut using_columns = HashSet::new();
+                expr_to_columns(&expr, &mut using_columns)?;
+                normalize_col_with_schemas_and_ambiguity_check(
+                    expr,
+                    &[&[&join_schema]],
+                    &[using_columns],
+                )
+            };
+
+        let on = normalize_expr(*merge.on)?;
+
+        let mut clauses = Vec::with_capacity(merge.clauses.len());
+        for clause in merge.clauses {
+            let predicate = match clause.predicate {
+                Some(predicate) => Some(normalize_expr(predicate)?),
+                None => None,
+            };
+
+            let action = match clause.action {
+                ast::MergeAction::Insert(insert) => {
+                    let kind = match insert.kind {
+                        ast::MergeInsertKind::Values(values) => {
+                            let mut rows =
+                                Vec::with_capacity(values.rows.len());
+                            for row in values.rows {
+                                let mut expr_row =
+                                    Vec::with_capacity(row.len());
+                                for value in row {
+                                    expr_row.push(normalize_expr(value)?);
+                                }
+                                rows.push(expr_row);
+                            }
+                            MergeInsertKind::Values(rows)
+                        }
+                        ast::MergeInsertKind::Row => MergeInsertKind::Row,
+                    };
+                    let insert_predicate = match insert.insert_predicate {
+                        Some(predicate) => Some(normalize_expr(predicate)?),
+                        None => None,
+                    };
+                    MergeAction::Insert(MergeInsertExpr {
+                        columns: insert.columns,
+                        kind,
+                        insert_predicate,
+                    })
+                }
+                ast::MergeAction::Update(update) => {
+                    let mut assignments =
+                        Vec::with_capacity(update.assignments.len());
+                    for assignment in update.assignments {
+                        let value = normalize_expr(assignment.value)?;
+                        assignments.push(MergeAssignment {
+                            target: assignment.target,
+                            value,
+                        });
+                    }
+                    let update_predicate = match update.update_predicate {
+                        Some(predicate) => Some(normalize_expr(predicate)?),
+                        None => None,
+                    };
+                    let delete_predicate = match update.delete_predicate {
+                        Some(predicate) => Some(normalize_expr(predicate)?),
+                        None => None,
+                    };
+                    MergeAction::Update(MergeUpdateExpr {
+                        assignments,
+                        update_predicate,
+                        delete_predicate,
+                    })
+                }
+                ast::MergeAction::Delete { .. } => MergeAction::Delete,
+            };
+
+            clauses.push(MergeClause {
+                clause_kind: clause.clause_kind,
+                predicate,
+                action,
+            });
+        }
+
+        Ok(LogicalPlan::Merge(Merge::new(
+            table_ref,
+            Arc::new(target_plan),
+            Arc::new(source_plan),
+            on,
+            clauses,
+        )))
     }
 
     fn update_to_plan(

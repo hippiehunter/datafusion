@@ -416,6 +416,12 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "Table Name": table_name.table()
                 })
             }
+            LogicalPlan::Merge(merge) => {
+                json!({
+                    "Node Type": "Merge",
+                    "Target Table": merge.target_table.table()
+                })
+            }
             LogicalPlan::Copy(CopyTo {
                 input: _,
                 output_url,

@@ -318,6 +318,7 @@ fn optimize_projections(
         LogicalPlan::Copy(_)
         | LogicalPlan::Ddl(_)
         | LogicalPlan::Dml(_)
+        | LogicalPlan::Merge(_)
         | LogicalPlan::Explain(_)
         | LogicalPlan::Analyze(_)
         | LogicalPlan::Subquery(_)

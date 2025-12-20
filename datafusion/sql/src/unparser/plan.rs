@@ -46,8 +46,9 @@ use datafusion_common::{
 use datafusion_expr::expr::OUTER_REFERENCE_COLUMN_PREFIX;
 use datafusion_expr::{
     BinaryExpr, Distinct, Expr, JoinConstraint, JoinType, LogicalPlan,
-    LogicalPlanBuilder, Operator, Projection, RecursiveQuery, SortExpr, TableScan,
-    Unnest, UserDefinedLogicalNode, expr::Alias,
+    LogicalPlanBuilder, Merge, MergeAction, MergeInsertKind, Operator, Projection,
+    RecursiveQuery, SortExpr, TableScan, Unnest, UserDefinedLogicalNode, expr::Alias,
+    logical_plan::DdlStatement, logical_plan::Statement as PlanStatement,
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{self, Ident, OrderByKind, SetExpr, TableAliasColumnDef};
@@ -119,17 +120,18 @@ impl Unparser<'_> {
             | LogicalPlan::Subquery(_)
             | LogicalPlan::SubqueryAlias(_)
             | LogicalPlan::Limit(_)
-            | LogicalPlan::Statement(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Distinct(_) => self.select_to_sql_statement(&plan),
+            LogicalPlan::Statement(statement) => self.statement_to_sql(&statement),
             LogicalPlan::Dml(_) => self.dml_to_sql(&plan),
+            LogicalPlan::Merge(merge) => self.merge_to_sql(&merge),
+            LogicalPlan::Ddl(ddl) => self.ddl_to_sql(&ddl),
             LogicalPlan::Extension(extension) => {
                 self.extension_to_statement(extension.node.as_ref())
             }
             LogicalPlan::RecursiveQuery(rq) => self.recursive_query_to_sql_statement(&rq),
             LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
-            | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_) => not_impl_err!("Unsupported plan: {plan:?}"),
@@ -1558,6 +1560,300 @@ impl Unparser<'_> {
             columns,
             explicit: true,
         }
+    }
+
+    fn statement_to_sql(&self, statement: &PlanStatement) -> Result<ast::Statement> {
+        match statement {
+            PlanStatement::Savepoint(savepoint) => Ok(ast::Statement::Savepoint {
+                name: savepoint.name.clone(),
+            }),
+            PlanStatement::ReleaseSavepoint(release) => {
+                Ok(ast::Statement::ReleaseSavepoint {
+                    name: release.name.clone(),
+                })
+            }
+            PlanStatement::RollbackToSavepoint(rollback) => {
+                Ok(ast::Statement::Rollback {
+                    chain: rollback.chain,
+                    savepoint: Some(rollback.name.clone()),
+                })
+            }
+            PlanStatement::SetTransaction(set_txn) => Ok(ast::Statement::Set(
+                ast::Set::SetTransaction {
+                    modes: set_txn.modes.clone(),
+                    snapshot: set_txn.snapshot.clone(),
+                    session: set_txn.session,
+                },
+            )),
+            PlanStatement::Grant(grant) => Ok(ast::Statement::Grant {
+                privileges: grant.privileges.clone(),
+                objects: grant.objects.clone(),
+                grantees: grant.grantees.clone(),
+                with_grant_option: grant.with_grant_option,
+                as_grantor: grant.as_grantor.clone(),
+                granted_by: grant.granted_by.clone(),
+                current_grants: grant.current_grants.clone(),
+            }),
+            PlanStatement::Revoke(revoke) => Ok(ast::Statement::Revoke {
+                privileges: revoke.privileges.clone(),
+                objects: revoke.objects.clone(),
+                grantees: revoke.grantees.clone(),
+                granted_by: revoke.granted_by.clone(),
+                cascade: revoke.cascade.clone(),
+            }),
+            PlanStatement::TransactionStart(start) => {
+                let isolation_level = match start.isolation_level {
+                    datafusion_expr::TransactionIsolationLevel::ReadUncommitted => {
+                        ast::TransactionIsolationLevel::ReadUncommitted
+                    }
+                    datafusion_expr::TransactionIsolationLevel::ReadCommitted => {
+                        ast::TransactionIsolationLevel::ReadCommitted
+                    }
+                    datafusion_expr::TransactionIsolationLevel::RepeatableRead => {
+                        ast::TransactionIsolationLevel::RepeatableRead
+                    }
+                    datafusion_expr::TransactionIsolationLevel::Serializable => {
+                        ast::TransactionIsolationLevel::Serializable
+                    }
+                    datafusion_expr::TransactionIsolationLevel::Snapshot => {
+                        ast::TransactionIsolationLevel::Snapshot
+                    }
+                };
+                let access_mode = match start.access_mode {
+                    datafusion_expr::TransactionAccessMode::ReadOnly => {
+                        ast::TransactionAccessMode::ReadOnly
+                    }
+                    datafusion_expr::TransactionAccessMode::ReadWrite => {
+                        ast::TransactionAccessMode::ReadWrite
+                    }
+                };
+                Ok(ast::Statement::StartTransaction {
+                    modes: vec![
+                        ast::TransactionMode::IsolationLevel(isolation_level),
+                        ast::TransactionMode::AccessMode(access_mode),
+                    ],
+                    begin: false,
+                    transaction: None,
+                    modifier: None,
+                    statements: vec![],
+                    exception: None,
+                    has_end_keyword: false,
+                })
+            }
+            PlanStatement::TransactionEnd(end) => match end.conclusion {
+                datafusion_expr::TransactionConclusion::Commit => Ok(
+                    ast::Statement::Commit {
+                        chain: end.chain,
+                        end: false,
+                        modifier: None,
+                    },
+                ),
+                datafusion_expr::TransactionConclusion::Rollback => Ok(
+                    ast::Statement::Rollback {
+                        chain: end.chain,
+                        savepoint: None,
+                    },
+                ),
+            },
+            _ => not_impl_err!("Unsupported statement: {statement:?}"),
+        }
+    }
+
+    fn ddl_to_sql(&self, ddl: &DdlStatement) -> Result<ast::Statement> {
+        match ddl {
+            DdlStatement::AlterTable(alter_table) => {
+                Ok(ast::Statement::AlterTable(alter_table.clone()))
+            }
+            DdlStatement::CreateDomain(create_domain) => {
+                Ok(ast::Statement::CreateDomain(create_domain.clone()))
+            }
+            DdlStatement::DropDomain(drop_domain) => {
+                Ok(ast::Statement::DropDomain(drop_domain.clone()))
+            }
+            DdlStatement::DropSequence(drop_sequence) => Ok(ast::Statement::Drop {
+                object_type: ast::ObjectType::Sequence,
+                if_exists: drop_sequence.if_exists,
+                names: vec![drop_sequence.name.clone()],
+                cascade: drop_sequence.cascade,
+                restrict: drop_sequence.restrict,
+                purge: drop_sequence.purge,
+                temporary: drop_sequence.temporary,
+                table: drop_sequence.table.clone(),
+            }),
+            other => not_impl_err!("Unsupported DDL plan: {other:?}"),
+        }
+    }
+
+    fn merge_to_sql(&self, merge: &Merge) -> Result<ast::Statement> {
+        let table = self.plan_to_table_factor(&merge.target)?;
+        let source = self.plan_to_table_factor(&merge.source)?;
+        let on = Box::new(self.expr_to_sql(&merge.on)?);
+        let mut clauses = Vec::with_capacity(merge.clauses.len());
+
+        for clause in &merge.clauses {
+            let predicate = match &clause.predicate {
+                Some(expr) => Some(self.expr_to_sql(expr)?),
+                None => None,
+            };
+
+            let action = match &clause.action {
+                MergeAction::Insert(insert) => {
+                    let kind = match &insert.kind {
+                        MergeInsertKind::Values(values) => {
+                            let mut rows = Vec::with_capacity(values.len());
+                            for row in values {
+                                let mut sql_row =
+                                    Vec::with_capacity(row.len());
+                                for value in row {
+                                    sql_row.push(self.expr_to_sql(value)?);
+                                }
+                                rows.push(sql_row);
+                            }
+                            ast::MergeInsertKind::Values(ast::Values {
+                                explicit_row: false,
+                                value_keyword: false,
+                                rows,
+                            })
+                        }
+                        MergeInsertKind::Row => ast::MergeInsertKind::Row,
+                    };
+
+                    let insert_predicate = match &insert.insert_predicate {
+                        Some(expr) => Some(self.expr_to_sql(expr)?),
+                        None => None,
+                    };
+
+                    ast::MergeAction::Insert(ast::MergeInsertExpr {
+                        insert_token: AttachedToken::empty(),
+                        columns: insert.columns.clone(),
+                        kind_token: AttachedToken::empty(),
+                        kind,
+                        insert_predicate,
+                    })
+                }
+                MergeAction::Update(update) => {
+                    let mut assignments =
+                        Vec::with_capacity(update.assignments.len());
+                    for assignment in &update.assignments {
+                        assignments.push(ast::Assignment {
+                            target: assignment.target.clone(),
+                            value: self.expr_to_sql(&assignment.value)?,
+                        });
+                    }
+                    let update_predicate = match &update.update_predicate {
+                        Some(expr) => Some(self.expr_to_sql(expr)?),
+                        None => None,
+                    };
+                    let delete_predicate = match &update.delete_predicate {
+                        Some(expr) => Some(self.expr_to_sql(expr)?),
+                        None => None,
+                    };
+                    ast::MergeAction::Update(ast::MergeUpdateExpr {
+                        update_token: AttachedToken::empty(),
+                        assignments,
+                        update_predicate,
+                        delete_predicate,
+                    })
+                }
+                MergeAction::Delete => ast::MergeAction::Delete {
+                    delete_token: AttachedToken::empty(),
+                },
+            };
+
+            clauses.push(ast::MergeClause {
+                when_token: AttachedToken::empty(),
+                clause_kind: clause.clause_kind.clone(),
+                predicate,
+                action,
+            });
+        }
+
+        Ok(ast::Statement::Merge(ast::Merge {
+            merge_token: AttachedToken::empty(),
+            into: true,
+            table,
+            source,
+            on,
+            clauses,
+            output: None,
+        }))
+    }
+
+    fn plan_to_query(&self, plan: &LogicalPlan) -> Result<ast::Query> {
+        let statement = self.plan_to_sql(plan)?;
+        if let ast::Statement::Query(query) = statement {
+            Ok(*query)
+        } else {
+            internal_err!("Subquery must be a Query, but found {statement:?}")
+        }
+    }
+
+    fn plan_to_table_factor(&self, plan: &LogicalPlan) -> Result<ast::TableFactor> {
+        match plan {
+            LogicalPlan::TableScan(scan) if !Self::is_scan_with_pushdown(scan) => {
+                Ok(ast::TableFactor::Table {
+                    name: self.table_reference_to_object_name(&scan.table_name),
+                    alias: None,
+                    args: None,
+                    with_hints: vec![],
+                    version: None,
+                    with_ordinality: false,
+                    partitions: vec![],
+                    json_path: None,
+                    sample: None,
+                    index_hints: vec![],
+                })
+            }
+            LogicalPlan::SubqueryAlias(alias) => {
+                let alias_name =
+                    self.new_table_alias(alias.alias.table().to_string(), vec![]);
+                match alias.input.as_ref() {
+                    LogicalPlan::TableScan(scan)
+                        if !Self::is_scan_with_pushdown(scan) =>
+                    {
+                        Ok(ast::TableFactor::Table {
+                            name: self.table_reference_to_object_name(
+                                &scan.table_name,
+                            ),
+                            alias: Some(alias_name),
+                            args: None,
+                            with_hints: vec![],
+                            version: None,
+                            with_ordinality: false,
+                            partitions: vec![],
+                            json_path: None,
+                            sample: None,
+                            index_hints: vec![],
+                        })
+                    }
+                    _ => Ok(ast::TableFactor::Derived {
+                        lateral: false,
+                        subquery: Box::new(self.plan_to_query(&alias.input)?),
+                        alias: Some(alias_name),
+                    }),
+                }
+            }
+            _ => Ok(ast::TableFactor::Derived {
+                lateral: false,
+                subquery: Box::new(self.plan_to_query(plan)?),
+                alias: None,
+            }),
+        }
+    }
+
+    fn table_reference_to_object_name(
+        &self,
+        reference: &TableReference,
+    ) -> ast::ObjectName {
+        let mut parts = vec![];
+        if let Some(catalog_name) = reference.catalog() {
+            parts.push(self.new_ident_quoted_if_needs(catalog_name.to_string()));
+        }
+        if let Some(schema_name) = reference.schema() {
+            parts.push(self.new_ident_quoted_if_needs(schema_name.to_string()));
+        }
+        parts.push(self.new_ident_quoted_if_needs(reference.table().to_string()));
+        ast::ObjectName::from(parts)
     }
 
     fn dml_to_sql(&self, plan: &LogicalPlan) -> Result<ast::Statement> {

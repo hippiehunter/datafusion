@@ -25,8 +25,9 @@ use datafusion_expr::test::function_stub::{
     count_udaf, max_udaf, min_udaf, sum, sum_udaf,
 };
 use datafusion_expr::{
-    EmptyRelation, Expr, Extension, LogicalPlan, LogicalPlanBuilder, Union,
-    UserDefinedLogicalNode, UserDefinedLogicalNodeCore, cast, col, lit, table_scan, wildcard,
+    CreateMemoryTable, DdlStatement, EmptyRelation, Expr, Extension, LogicalPlan,
+    LogicalPlanBuilder, Union, UserDefinedLogicalNode, UserDefinedLogicalNodeCore, cast,
+    col, lit, table_scan, wildcard,
 };
 use datafusion_functions_aggregate::grouping::grouping_udaf;
 use datafusion_sql::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -206,6 +207,27 @@ fn roundtrip_statement() -> Result<()> {
             SUM(id) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
             FROM person
             GROUP BY GROUPING SETS ((id, first_name, last_name), (first_name, last_name), (last_name))"#,
+            "ALTER TABLE j1 ADD COLUMN j1_extra INT",
+            "ALTER TABLE j1 DROP COLUMN j1_string",
+            "ALTER TABLE j1 ADD CONSTRAINT j1_positive CHECK (j1_id > 0)",
+            "ALTER TABLE j1 DROP CONSTRAINT j1_positive",
+            "ALTER TABLE j1 ALTER COLUMN j1_string SET DEFAULT 'x'",
+            "ALTER TABLE j1 ALTER COLUMN j1_string DROP DEFAULT",
+            "ALTER TABLE j1 ALTER COLUMN j1_string SET NOT NULL",
+            "ALTER TABLE j1 ALTER COLUMN j1_string DROP NOT NULL",
+            "ALTER TABLE j1 ALTER COLUMN j1_string TYPE VARCHAR",
+            "ALTER TABLE j1 RENAME COLUMN j1_string TO j1_text",
+            "ALTER TABLE j1 RENAME TO j1_renamed",
+            "CREATE DOMAIN dom_int AS INT",
+            "DROP DOMAIN IF EXISTS dom_int CASCADE",
+            "DROP SEQUENCE IF EXISTS seq1",
+            "MERGE INTO j1 USING j2 ON j1.j1_id = j2.j2_id WHEN MATCHED THEN UPDATE SET j1_string = j2.j2_string WHEN NOT MATCHED THEN INSERT (j1_id, j1_string) VALUES (j2.j2_id, j2.j2_string)",
+            "GRANT SELECT ON TABLE j1 TO PUBLIC",
+            "REVOKE SELECT ON TABLE j1 FROM PUBLIC",
+            "SAVEPOINT sp1",
+            "ROLLBACK TO SAVEPOINT sp1",
+            "RELEASE SAVEPOINT sp1",
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
             // Removed: Array/struct/map literals require datafusion_functions_nested which was pruned
             // "SELECT ARRAY[1, 2, 3]",
             // "SELECT ARRAY[1, 2, 3][1]",
@@ -242,6 +264,34 @@ fn roundtrip_statement() -> Result<()> {
             .unwrap();
 
         assert_eq!(plan, plan_roundtrip);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn plan_create_temporary_table() -> Result<()> {
+    let sql = "CREATE TEMPORARY TABLE temp_table (id INT, name VARCHAR)";
+    let dialect = GenericDialect {};
+    let statement = Parser::new(&dialect)
+        .try_with_sql(sql)?
+        .parse_statement()?;
+    let state = MockSessionState::default();
+    let context = MockContextProvider { state };
+    let sql_to_rel = SqlToRel::new(&context);
+    let plan = sql_to_rel.sql_statement_to_plan(statement)?;
+
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
+            CreateMemoryTable { temporary, .. },
+        )) => {
+            assert!(temporary);
+        }
+        other => {
+            return Err(DataFusionError::Internal(format!(
+                "Expected CreateMemoryTable for temp table, got {other:?}"
+            )));
+        }
     }
 
     Ok(())

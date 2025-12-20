@@ -40,11 +40,13 @@
 use crate::{
     Aggregate, Analyze, CreateMemoryTable, CreateView, DdlStatement, Distinct,
     DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
-    LogicalPlan, Partitioning, Prepare, Projection, RecursiveQuery, Repartition, Sort,
-    Statement, Subquery, SubqueryAlias, TableScan, Union, Unnest, UserDefinedLogicalNode,
-    Values, Window, dml::CopyTo,
+    LogicalPlan, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
+    Projection, RecursiveQuery, Repartition, Sort, Statement, Subquery, SubqueryAlias,
+    TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::CopyTo,
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
+
+use std::sync::Arc;
 
 use crate::expr::{Exists, InSubquery};
 use datafusion_common::tree_node::{
@@ -237,6 +239,25 @@ impl TreeNode for LogicalPlan {
                     output_schema,
                 })
             }),
+            LogicalPlan::Merge(Merge {
+                target_table,
+                target,
+                source,
+                on,
+                clauses,
+                output_schema,
+            }) => (target, source).map_elements(f)?.update_data(
+                |(target, source)| {
+                    LogicalPlan::Merge(Merge {
+                        target_table,
+                        target,
+                        source,
+                        on,
+                        clauses,
+                        output_schema,
+                    })
+                },
+            ),
             LogicalPlan::Copy(CopyTo {
                 input,
                 output_url,
@@ -299,7 +320,11 @@ impl TreeNode for LogicalPlan {
                     | DdlStatement::DropView(_)
                     | DdlStatement::DropCatalogSchema(_)
                     | DdlStatement::CreateFunction(_)
-                    | DdlStatement::DropFunction(_) => Transformed::no(ddl),
+                    | DdlStatement::DropFunction(_)
+                    | DdlStatement::AlterTable(_)
+                    | DdlStatement::CreateDomain(_)
+                    | DdlStatement::DropDomain(_)
+                    | DdlStatement::DropSequence(_) => Transformed::no(ddl),
                 }
                 .update_data(LogicalPlan::Ddl)
             }
@@ -461,6 +486,41 @@ impl LogicalPlan {
                 }
                 _ => Ok(TreeNodeRecursion::Continue),
             },
+            LogicalPlan::Merge(merge) => {
+                f(&merge.on)?;
+                for clause in &merge.clauses {
+                    if let Some(predicate) = &clause.predicate {
+                        f(predicate)?;
+                    }
+                    match &clause.action {
+                        MergeAction::Insert(insert) => {
+                            if let MergeInsertKind::Values(rows) = &insert.kind {
+                                for row in rows {
+                                    for value in row {
+                                        f(value)?;
+                                    }
+                                }
+                            }
+                            if let Some(predicate) = &insert.insert_predicate {
+                                f(predicate)?;
+                            }
+                        }
+                        MergeAction::Update(update) => {
+                            for assignment in &update.assignments {
+                                f(&assignment.value)?;
+                            }
+                            if let Some(predicate) = &update.update_predicate {
+                                f(predicate)?;
+                            }
+                            if let Some(predicate) = &update.delete_predicate {
+                                f(predicate)?;
+                            }
+                        }
+                        MergeAction::Delete => {}
+                    }
+                }
+                Ok(TreeNodeRecursion::Continue)
+            }
             // plans without expressions
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::RecursiveQuery(_)
@@ -640,6 +700,17 @@ impl LogicalPlan {
                 _ => Transformed::no(stmt),
             }
             .update_data(LogicalPlan::Statement),
+            LogicalPlan::Merge(merge) => {
+                let exprs = LogicalPlan::Merge(merge.clone()).expressions();
+                let exprs = exprs.map_elements(f)?;
+                let inputs = vec![
+                    Arc::unwrap_or_clone(Arc::clone(&merge.target)),
+                    Arc::unwrap_or_clone(Arc::clone(&merge.source)),
+                ];
+                let plan = LogicalPlan::Merge(merge)
+                    .with_new_exprs(exprs.data, inputs)?;
+                Transformed::new(plan, exprs.transformed, exprs.tnr)
+            }
             // plans without expressions
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Unnest(_)

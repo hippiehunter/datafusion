@@ -19,6 +19,7 @@ pub mod builder;
 mod ddl;
 pub mod display;
 pub mod dml;
+mod merge;
 mod extension;
 pub(crate) mod invariants;
 pub use invariants::{InvariantLevel, assert_expected_schema, check_subquery_expr};
@@ -32,11 +33,16 @@ pub use builder::{
     wrap_projection_for_join_if_necessary,
 };
 pub use ddl::{
-    CreateCatalog, CreateCatalogSchema, CreateExternalTable, CreateFunction,
-    CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateView, DdlStatement,
-    DropCatalogSchema, DropFunction, DropTable, DropView, OperateFunctionArg,
+    AlterTable, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
+    CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateView,
+    DdlStatement, DropCatalogSchema, DropDomain, DropFunction, DropSequence, DropTable,
+    DropView, OperateFunctionArg,
 };
 pub use dml::{DmlStatement, WriteOp};
+pub use merge::{
+    Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
+    MergeUpdateExpr,
+};
 pub use plan::{
     Aggregate, Analyze, ColumnUnnestList, DescribeTable, Distinct, DistinctOn,
     EmptyRelation, Explain, ExplainOption, Extension, FetchType, Filter, Join,
@@ -46,7 +52,8 @@ pub use plan::{
     projection_schema,
 };
 pub use statement::{
-    Deallocate, Execute, Prepare, ResetVariable, SetVariable, Statement,
+    Deallocate, Execute, Grant, Prepare, ReleaseSavepoint, ResetVariable, Revoke,
+    RollbackToSavepoint, Savepoint, SetTransaction, SetVariable, Statement,
     TransactionAccessMode, TransactionConclusion, TransactionEnd,
     TransactionIsolationLevel, TransactionStart,
 };

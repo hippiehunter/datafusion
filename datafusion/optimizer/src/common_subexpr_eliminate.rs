@@ -584,6 +584,7 @@ impl OptimizerRule for CommonSubexprEliminate {
             | LogicalPlan::Distinct(_)
             | LogicalPlan::Extension(_)
             | LogicalPlan::Dml(_)
+            | LogicalPlan::Merge(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::Unnest(_)
             | LogicalPlan::RecursiveQuery(_) => {
