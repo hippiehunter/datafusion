@@ -627,6 +627,42 @@ fn plan_create_table_interval_day_to_second() {
     }
 }
 
+#[test]
+fn plan_create_table_with_storage_parameters() {
+    let sql =
+        "CREATE TABLE t (id INT) WITH (fillfactor = 70, autovacuum_enabled = true)";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            storage_parameters,
+            ..
+        })) => {
+            assert_eq!(
+                storage_parameters.get("fillfactor").map(String::as_str),
+                Some("70")
+            );
+            assert_eq!(
+                storage_parameters
+                    .get("autovacuum_enabled")
+                    .map(|value| value.to_ascii_lowercase()),
+                Some("true".to_string())
+            );
+            assert_eq!(storage_parameters.len(), 2);
+        }
+        other => panic!("Expected CreateMemoryTable plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn plan_create_table_with_storage_parameter_expression_error() {
+    let sql = "CREATE TABLE t (id INT) WITH (fillfactor = 10 * 2)";
+    let err = logical_plan(sql).unwrap_err();
+    assert_contains!(
+        err.strip_backtrace(),
+        "Unsupported storage parameter value"
+    );
+}
+
 #[rstest]
 #[case::duplicate_columns(
     "INSERT INTO test_decimal (id, price, price) VALUES (1, 2, 3), (4, 5, 6)",

@@ -17,7 +17,7 @@
 
 use crate::{Expr, LogicalPlan, SortExpr, Volatility};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock};
 use std::{
     fmt::{self, Display},
@@ -523,6 +523,8 @@ pub struct CreateMemoryTable {
     pub column_defaults: Vec<(String, Expr)>,
     /// Whether the table is `TableType::Temporary`
     pub temporary: bool,
+    /// Storage parameters supplied via CREATE TABLE WITH (...)
+    pub storage_parameters: BTreeMap<String, String>,
 }
 
 /// Creates a view.

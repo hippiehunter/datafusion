@@ -285,6 +285,7 @@ impl TreeNode for LogicalPlan {
                         or_replace,
                         column_defaults,
                         temporary,
+                        storage_parameters,
                     }) => input.map_elements(f)?.update_data(|input| {
                         DdlStatement::CreateMemoryTable(CreateMemoryTable {
                             name,
@@ -294,6 +295,7 @@ impl TreeNode for LogicalPlan {
                             or_replace,
                             column_defaults,
                             temporary,
+                            storage_parameters,
                         })
                     }),
                     DdlStatement::CreateView(CreateView {

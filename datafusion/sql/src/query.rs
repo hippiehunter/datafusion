@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -459,6 +460,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     or_replace: false,
                     temporary: false,
                     column_defaults: vec![],
+                    storage_parameters: BTreeMap::new(),
                 },
             ))),
             _ => Ok(plan),

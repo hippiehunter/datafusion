@@ -66,8 +66,8 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr, FromTable, Ident, Insert,
     ObjectName, ObjectType, Query, SchemaName, SetExpr, ShowCreateObject,
-    ShowStatementFilter, Statement, TableConstraint, TableFactor, TableWithJoins,
-    TransactionMode, UnaryOperator, Value,
+    ShowStatementFilter, SqlOption, Statement, TableConstraint, TableFactor,
+    TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
 
@@ -318,7 +318,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 catalog_sync,
                 storage_serialization_policy,
                 inherits,
-                table_options: CreateTableOptions::None,
+                table_options,
                 dynamic,
                 version,
                 target_lag,
@@ -470,6 +470,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if require_user {
                     return not_impl_err!("Require user not supported")?;
                 }
+                let storage_parameters = match table_options {
+                    CreateTableOptions::None => BTreeMap::new(),
+                    CreateTableOptions::With(options) => {
+                        self.parse_storage_parameters(options)?
+                    }
+                    other => {
+                        return not_impl_err!(
+                            "CREATE TABLE options not supported: {other}"
+                        )?;
+                    }
+                };
                 // Merge inline constraints and existing constraints
                 let mut all_constraints = constraints;
                 let inline_constraints = calc_inline_constraints_from_columns(&columns);
@@ -532,6 +543,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 or_replace,
                                 column_defaults,
                                 temporary,
+                                storage_parameters: storage_parameters.clone(),
                             },
                         )))
                     }
@@ -555,6 +567,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 or_replace,
                                 column_defaults,
                                 temporary,
+                                storage_parameters,
                             },
                         )))
                     }
@@ -1892,6 +1905,57 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         Ok(options_map)
+    }
+
+    fn parse_storage_parameters(
+        &self,
+        options: Vec<SqlOption>,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut storage_parameters = BTreeMap::new();
+        for option in options {
+            match option {
+                SqlOption::KeyValue { key, value } => {
+                    let key = ident_to_string(&key);
+                    if storage_parameters.contains_key(&key) {
+                        return plan_err!(
+                            "Storage parameter {key} is specified multiple times"
+                        );
+                    }
+                    let value_string =
+                        self.storage_parameter_value_to_string(value)?;
+                    storage_parameters.insert(key, value_string);
+                }
+                other => {
+                    return not_impl_err!(
+                        "Only key = value storage parameters are supported, got {other:?}"
+                    );
+                }
+            }
+        }
+
+        Ok(storage_parameters)
+    }
+
+    fn storage_parameter_value_to_string(&self, value: SQLExpr) -> Result<String> {
+        match value {
+            SQLExpr::Identifier(ident) => Ok(ident_to_string(&ident)),
+            SQLExpr::Value(value) => match crate::utils::value_to_string(&value.value)
+            {
+                Some(value_string) => Ok(value_string),
+                None => {
+                    plan_err!("Unsupported storage parameter value {:?}", value.value)
+                }
+            },
+            SQLExpr::UnaryOp { op, expr } => match op {
+                UnaryOperator::Plus => Ok(format!("+{expr}")),
+                UnaryOperator::Minus => Ok(format!("-{expr}")),
+                _ => plan_err!(
+                    "Unsupported unary op {:?} in storage parameter value",
+                    op
+                ),
+            },
+            _ => plan_err!("Unsupported storage parameter value {:?}", value),
+        }
     }
 
     /// Generate a plan for EXPLAIN ... that will print out a plan
