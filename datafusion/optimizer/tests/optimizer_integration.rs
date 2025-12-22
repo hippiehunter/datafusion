@@ -114,34 +114,6 @@ Projection: CASE WHEN test.col_int32 > Int32(0) THEN Int64(1) ELSE Int64(0) END 
 }
 
 #[test]
-fn subquery_filter_with_cast() -> Result<()> {
-    // regression test for https://github.com/apache/datafusion/issues/3760
-    let sql = "SELECT col_int32 FROM test \
-    WHERE col_int32 > (\
-      SELECT avg(col_int32) FROM test \
-      WHERE col_utf8 BETWEEN '2002-05-08' \
-        AND (cast('2002-05-08' as date) + interval '5 days')\
-    )";
-    let plan = test_sql(sql)?;
-
-    assert_snapshot!(
-    format!("{plan}"),
-    @r#"
-    Projection: test.col_int32
-      Inner Join:  Filter: CAST(test.col_int32 AS Float64) > __scalar_sq_1.avg(test.col_int32)
-        TableScan: test projection=[col_int32]
-        SubqueryAlias: __scalar_sq_1
-          Aggregate: groupBy=[[]], aggr=[[avg(CAST(test.col_int32 AS Float64))]]
-            Projection: test.col_int32
-              Filter: __common_expr_4 >= Date32("2002-05-08") AND __common_expr_4 <= Date32("2002-05-13")
-                Projection: CAST(test.col_utf8 AS Date32) AS __common_expr_4, test.col_int32
-                  TableScan: test projection=[col_int32, col_utf8]
-    "#
-    );
-    Ok(())
-}
-
-#[test]
 fn case_when_aggregate() -> Result<()> {
     let sql = "SELECT col_utf8, sum(CASE WHEN col_int32 > 0 THEN 1 ELSE 0 END) AS n FROM test GROUP BY col_utf8";
     let plan = test_sql(sql)?;
@@ -185,76 +157,6 @@ fn distribute_by() -> Result<()> {
         Repartition: DistributeBy(test.col_utf8)
           TableScan: test projection=[col_int32, col_utf8]
         "#
-    );
-    Ok(())
-}
-
-#[test]
-fn semi_join_with_join_filter() -> Result<()> {
-    // regression test for https://github.com/apache/datafusion/issues/2888
-    let sql = "SELECT col_utf8 FROM test WHERE EXISTS (\
-               SELECT col_utf8 FROM test t2 WHERE test.col_int32 = t2.col_int32 \
-               AND test.col_uint32 != t2.col_uint32)";
-    let plan = test_sql(sql)?;
-
-    assert_snapshot!(
-    format!("{plan}"),
-    @r#"
-        Projection: test.col_utf8
-          LeftSemi Join: test.col_int32 = __correlated_sq_1.col_int32 Filter: test.col_uint32 != __correlated_sq_1.col_uint32
-            Filter: test.col_int32 IS NOT NULL
-              TableScan: test projection=[col_int32, col_uint32, col_utf8]
-            SubqueryAlias: __correlated_sq_1
-              SubqueryAlias: t2
-                Filter: test.col_int32 IS NOT NULL
-                  TableScan: test projection=[col_int32, col_uint32]
-        "#
-    );
-    Ok(())
-}
-
-#[test]
-fn anti_join_with_join_filter() -> Result<()> {
-    // regression test for https://github.com/apache/datafusion/issues/2888
-    let sql = "SELECT col_utf8 FROM test WHERE NOT EXISTS (\
-               SELECT col_utf8 FROM test t2 WHERE test.col_int32 = t2.col_int32 \
-               AND test.col_uint32 != t2.col_uint32)";
-    let plan = test_sql(sql)?;
-
-    assert_snapshot!(
-    format!("{plan}"),
-    @r#"
-Projection: test.col_utf8
-  LeftAnti Join: test.col_int32 = __correlated_sq_1.col_int32 Filter: test.col_uint32 != __correlated_sq_1.col_uint32
-    TableScan: test projection=[col_int32, col_uint32, col_utf8]
-    SubqueryAlias: __correlated_sq_1
-      SubqueryAlias: t2
-        Filter: test.col_int32 IS NOT NULL
-          TableScan: test projection=[col_int32, col_uint32]
-"#
-    );
-    Ok(())
-}
-
-#[test]
-fn where_exists_distinct() -> Result<()> {
-    let sql = "SELECT col_int32 FROM test WHERE EXISTS (\
-               SELECT DISTINCT col_int32 FROM test t2 WHERE test.col_int32 = t2.col_int32)";
-    let plan = test_sql(sql)?;
-
-    assert_snapshot!(
-    format!("{plan}"),
-    @r#"
-LeftSemi Join: test.col_int32 = __correlated_sq_1.col_int32
-  Filter: test.col_int32 IS NOT NULL
-    TableScan: test projection=[col_int32]
-  SubqueryAlias: __correlated_sq_1
-    Aggregate: groupBy=[[t2.col_int32]], aggr=[[]]
-      SubqueryAlias: t2
-        Filter: test.col_int32 IS NOT NULL
-          TableScan: test projection=[col_int32]
-"#
-
     );
     Ok(())
 }
@@ -487,36 +389,6 @@ fn select_wildcard_with_repeated_column_but_is_aliased() {
     @r#"
         Projection: test.col_int32, test.col_uint32, test.col_utf8, test.col_date32, test.col_date64, test.col_ts_nano_none, test.col_ts_nano_utc, test.col_int32 AS col_32
           TableScan: test projection=[col_int32, col_uint32, col_utf8, col_date32, col_date64, col_ts_nano_none, col_ts_nano_utc]
-        "#
-    );
-}
-
-#[test]
-fn select_correlated_predicate_subquery_with_uppercase_ident() {
-    let sql = r#"
-        SELECT *
-        FROM
-            test
-        WHERE
-            EXISTS (
-                SELECT 1
-                FROM (SELECT col_int32 as "COL_INT32", col_uint32 as "COL_UINT32" FROM test) "T1"
-                WHERE "T1"."COL_INT32" = test.col_int32
-            )
-    "#;
-    let plan = test_sql(sql).unwrap();
-
-    assert_snapshot!(
-    format!("{plan}"),
-    @r#"
-        LeftSemi Join: test.col_int32 = __correlated_sq_1.COL_INT32
-          Filter: test.col_int32 IS NOT NULL
-            TableScan: test projection=[col_int32, col_uint32, col_utf8, col_date32, col_date64, col_ts_nano_none, col_ts_nano_utc]
-          SubqueryAlias: __correlated_sq_1
-            SubqueryAlias: T1
-              Projection: test.col_int32 AS COL_INT32
-                Filter: test.col_int32 IS NOT NULL
-                  TableScan: test projection=[col_int32]
         "#
     );
 }

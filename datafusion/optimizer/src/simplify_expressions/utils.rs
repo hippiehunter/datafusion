@@ -21,7 +21,7 @@ use arrow::datatypes::i256;
 use datafusion_common::{Result, ScalarValue, internal_err};
 use datafusion_expr::{
     Case, Expr, Like, Operator,
-    expr::{Between, BinaryExpr, InList},
+    expr::{Between, BinaryExpr, Cast, InList, TryCast},
     expr_fn::{and, bitwise_and, bitwise_or, or},
 };
 
@@ -213,6 +213,20 @@ pub fn is_null(expr: &Expr) -> bool {
         Expr::Literal(v, _) => v.is_null(),
         _ => false,
     }
+}
+
+pub fn is_null_or_cast(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(v, _) => v.is_null(),
+        Expr::Cast(Cast { expr, .. }) | Expr::TryCast(TryCast { expr, .. }) => {
+            is_null_or_cast(expr)
+        }
+        _ => false,
+    }
+}
+
+pub fn inlist_contains_null(list: &[Expr]) -> bool {
+    list.iter().any(is_null_or_cast)
 }
 
 pub fn is_false(expr: &Expr) -> bool {

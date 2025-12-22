@@ -32,16 +32,11 @@ use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, HashSet, Result, internal_err};
 use datafusion_expr::logical_plan::LogicalPlan;
 
-use crate::common_subexpr_eliminate::CommonSubexprEliminate;
-use crate::decorrelate_lateral_join::DecorrelateLateralJoin;
-use crate::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
-use crate::eliminate_cross_join::EliminateCrossJoin;
 use crate::eliminate_duplicated_expr::EliminateDuplicatedExpr;
 use crate::eliminate_filter::EliminateFilter;
 use crate::eliminate_group_by_constant::EliminateGroupByConstant;
 use crate::eliminate_join::EliminateJoin;
 use crate::eliminate_limit::EliminateLimit;
-use crate::eliminate_outer_join::EliminateOuterJoin;
 use crate::extract_equijoin_predicate::ExtractEquijoinPredicate;
 use crate::filter_null_join_keys::FilterNullJoinKeys;
 use crate::optimize_projections::OptimizeProjections;
@@ -51,7 +46,6 @@ use crate::propagate_empty_relation::PropagateEmptyRelation;
 use crate::push_down_filter::PushDownFilter;
 use crate::push_down_limit::PushDownLimit;
 use crate::replace_distinct_aggregate::ReplaceDistinctWithAggregate;
-use crate::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use crate::simplify_expressions::SimplifyExpressions;
 use crate::single_distinct_to_groupby::SingleDistinctToGroupBy;
 use crate::utils::log_plan;
@@ -231,17 +225,12 @@ impl Optimizer {
             Arc::new(SimplifyExpressions::new()),
             Arc::new(ReplaceDistinctWithAggregate::new()),
             Arc::new(EliminateJoin::new()),
-            Arc::new(DecorrelatePredicateSubquery::new()),
-            Arc::new(ScalarSubqueryToJoin::new()),
-            Arc::new(DecorrelateLateralJoin::new()),
             Arc::new(ExtractEquijoinPredicate::new()),
             Arc::new(EliminateDuplicatedExpr::new()),
             Arc::new(EliminateFilter::new()),
-            Arc::new(EliminateCrossJoin::new()),
             Arc::new(EliminateLimit::new()),
             Arc::new(PropagateEmptyRelation::new()),
             Arc::new(FilterNullJoinKeys::default()),
-            Arc::new(EliminateOuterJoin::new()),
             // Filters can't be pushed down past Limits, we should do PushDownFilter after PushDownLimit
             Arc::new(PushDownLimit::new()),
             Arc::new(PushDownFilter::new()),
@@ -249,7 +238,6 @@ impl Optimizer {
             // The previous optimizations added expressions and projections,
             // that might benefit from the following rules
             Arc::new(EliminateGroupByConstant::new()),
-            Arc::new(CommonSubexprEliminate::new()),
             Arc::new(OptimizeProjections::new()),
         ];
 

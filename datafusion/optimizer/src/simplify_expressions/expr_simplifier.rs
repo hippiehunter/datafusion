@@ -2004,7 +2004,11 @@ fn are_inlist_and_eq_and_match_neg(
 ) -> bool {
     match (left, right) {
         (Expr::InList(l), Expr::InList(r)) => {
-            l.expr == r.expr && l.negated == is_left_neg && r.negated == is_right_neg
+            l.expr == r.expr
+                && l.negated == is_left_neg
+                && r.negated == is_right_neg
+                && !inlist_contains_null(&l.list)
+                && !inlist_contains_null(&r.list)
         }
         _ => false,
     }
@@ -4281,6 +4285,52 @@ mod tests {
         // https://github.com/apache/datafusion/issues/8970
         // assert_eq!(simplify(expr.clone()), lit(true));
         assert_eq!(simplify(expr.clone()), expr);
+    }
+
+    #[test]
+    fn simplify_inlist_with_nulls() {
+        let expr = in_list(
+            col("c1"),
+            vec![lit(1), lit(2), Expr::Literal(ScalarValue::Null, None), lit(3)],
+            false,
+        )
+        .and(in_list(
+            col("c1"),
+            vec![lit(4), lit(5), lit(6), lit(7)],
+            false,
+        ));
+        assert_eq!(simplify(expr.clone()), expr);
+
+        let cast_null = Expr::Cast(Cast::new(
+            Box::new(Expr::Literal(ScalarValue::Null, None)),
+            DataType::Int64,
+        ));
+        let expr = in_list(
+            col("c1"),
+            vec![lit(1), cast_null, lit(2), lit(3)],
+            true,
+        )
+        .or(in_list(
+            col("c1"),
+            vec![lit(4), lit(5), lit(6), lit(7)],
+            true,
+        ));
+        let expected = in_list(
+            col("c1"),
+            vec![
+                lit(1),
+                Expr::Literal(ScalarValue::Int64(None), None),
+                lit(2),
+                lit(3),
+            ],
+            true,
+        )
+        .or(in_list(
+            col("c1"),
+            vec![lit(4), lit(5), lit(6), lit(7)],
+            true,
+        ));
+        assert_eq!(simplify(expr), expected);
     }
 
     #[test]

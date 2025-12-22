@@ -17,7 +17,7 @@
 
 //! Utility functions leveraged by the query optimizer rules
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::analyzer::type_coercion::TypeCoercionRewriter;
 use arrow::array::{Array, RecordBatch, new_null_array};
@@ -45,21 +45,6 @@ pub(crate) fn has_all_column_refs(expr: &Expr, schema_cols: &HashSet<Column>) ->
         .filter(|c| column_refs.contains(c))
         .count()
         == column_refs.len()
-}
-
-pub(crate) fn replace_qualified_name(
-    expr: Expr,
-    cols: &BTreeSet<Column>,
-    subquery_alias: &str,
-) -> Result<Expr> {
-    let alias_cols: Vec<Column> = cols
-        .iter()
-        .map(|col| Column::new(Some(subquery_alias), &col.name))
-        .collect();
-    let replace_map: HashMap<&Column, &Column> =
-        cols.iter().zip(alias_cols.iter()).collect();
-
-    replace_col(expr, &replace_map)
 }
 
 /// Log the plan in debug/tracing mode after some part of the optimizer runs

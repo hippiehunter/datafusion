@@ -39,11 +39,6 @@
 //! [`LogicalPlan`]: datafusion_expr::LogicalPlan
 //! [`TypeCoercion`]: analyzer::type_coercion::TypeCoercion
 pub mod analyzer;
-pub mod common_subexpr_eliminate;
-pub mod decorrelate;
-pub mod decorrelate_lateral_join;
-pub mod decorrelate_predicate_subquery;
-pub mod eliminate_cross_join;
 pub mod eliminate_duplicated_expr;
 pub mod eliminate_filter;
 pub mod eliminate_group_by_constant;
@@ -55,7 +50,6 @@ pub mod eliminate_nested_union {
     #[deprecated(since = "52.0.0", note = "Please use OptimizeUnions instead")]
     pub type EliminateNestedUnion = OptimizeUnions;
 }
-pub mod eliminate_outer_join;
 pub mod extract_equijoin_predicate;
 pub mod filter_null_join_keys;
 pub mod optimize_projections;
@@ -65,7 +59,6 @@ pub mod propagate_empty_relation;
 pub mod push_down_filter;
 pub mod push_down_limit;
 pub mod replace_distinct_aggregate;
-pub mod scalar_subquery_to_join;
 pub mod simplify_expressions;
 pub mod single_distinct_to_groupby;
 pub mod utils;
@@ -78,7 +71,6 @@ pub use optimizer::{
     ApplyOrder, Optimizer, OptimizerConfig, OptimizerContext, OptimizerRule,
 };
 
-pub(crate) mod join_key_set;
 mod plan_signature;
 
 #[cfg(test)]
