@@ -45,7 +45,6 @@ ahash = { workspace = true }
 arrow = { workspace = true }
 datafusion-common = { workspace = true }
 datafusion-doc = { workspace = true }
-datafusion-execution = { workspace = true }
 datafusion-expr = { workspace = true }
 datafusion-functions-aggregate-common = { workspace = true }
 datafusion-macros = { workspace = true }

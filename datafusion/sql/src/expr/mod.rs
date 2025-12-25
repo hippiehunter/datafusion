@@ -380,6 +380,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 negated,
                 low,
                 high,
+                ..
             } => Ok(Expr::Between(Between::new(
                 Box::new(self.sql_expr_to_logical_expr(
                     *expr,
@@ -1176,6 +1177,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 stop: Box::new(upper_bound),
                                 stride: Box::new(stride),
                             }))
+                        }
+                        Subscript::Wildcard => {
+                            not_impl_err!("Wildcard subscript [*] not supported")
                         }
                     }
                 }

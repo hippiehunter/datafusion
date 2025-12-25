@@ -331,8 +331,6 @@ pub(crate) fn value_to_string(value: &Value) -> Option<String> {
         Value::Number(_, _) | Value::Boolean(_) => Some(value.to_string()),
         Value::UnicodeStringLiteral(s) => Some(s.to_string()),
         Value::EscapedStringLiteral(s) => Some(s.to_string()),
-        Value::QuoteDelimitedStringLiteral(s)
-        | Value::NationalQuoteDelimitedStringLiteral(s) => Some(s.value.clone()),
         Value::DoubleQuotedString(_)
         | Value::NationalStringLiteral(_)
         | Value::SingleQuotedByteStringLiteral(_)
@@ -680,7 +678,7 @@ mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema};
     use datafusion_common::{Column, DFSchema, Result};
     use datafusion_expr::{
-        ColumnUnnestList, EmptyRelation, LogicalPlan, col, lit, unnest,
+        ColumnUnnestList, EmptyRelation, Expr, LogicalPlan, col, lit, unnest,
     };
     use datafusion_functions_aggregate::expr_fn::count;
 
@@ -859,8 +857,8 @@ mod tests {
         assert_eq!(
             transformed_exprs,
             vec![
-                col("__unnest_placeholder(struct_col).field1"),
-                col("__unnest_placeholder(struct_col).field2"),
+                Expr::Column(Column::from_name("__unnest_placeholder(struct_col).field1")),
+                Expr::Column(Column::from_name("__unnest_placeholder(struct_col).field2")),
             ]
         );
         column_unnests_eq(

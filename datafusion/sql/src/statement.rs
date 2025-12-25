@@ -64,10 +64,10 @@ use sqlparser::ast::{
 };
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
-    CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr, FromTable, Ident, Insert,
-    ObjectName, ObjectType, Query, SchemaName, SetExpr, ShowCreateObject,
-    ShowStatementFilter, SqlOption, Statement, TableConstraint, TableFactor,
-    TableWithJoins, TransactionMode, UnaryOperator, Value,
+    CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr,
+    ForeignKeyColumnOrPeriod, FromTable, Ident, Insert, ObjectName, ObjectType, Query,
+    SchemaName, SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
+    TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
 
@@ -156,13 +156,14 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         columns: vec![column_expr],
                         index_options: pk_constraint.index_options.clone(),
                         characteristics: pk_constraint.characteristics,
+                        period_without_overlaps: None,
                     }));
                 }
                 ast::ColumnOption::ForeignKey(fk_constraint) => {
                     constraints.push(TableConstraint::ForeignKey(ForeignKeyConstraint {
                         name: name.clone(),
                         index_name: fk_constraint.index_name.clone(),
-                        columns: vec![column.name.clone()],
+                        columns: vec![ForeignKeyColumnOrPeriod::Column(column.name.clone())],
                         foreign_table: fk_constraint.foreign_table.clone(),
                         referred_columns: fk_constraint.referred_columns.clone(),
                         on_delete: fk_constraint.on_delete.clone(),
@@ -326,6 +327,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 refresh_mode,
                 initialize,
                 require_user,
+                ..
             }) => {
                 if external {
                     return not_impl_err!("External tables not supported")?;
@@ -924,6 +926,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 grantees,
                 granted_by,
                 cascade,
+                ..
             } => Ok(LogicalPlan::Statement(PlanStatement::Revoke(Revoke {
                 privileges,
                 objects,
@@ -1170,7 +1173,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let table_name = self.get_delete_target(from)?;
                 self.delete_to_plan(&table_name, selection)
             }
-            Statement::Merge(merge) => self.merge_to_plan(merge, planner_context),
+            Statement::Merge { into, table, source, on, clauses, output } => {
+                self.merge_to_plan(into, table, source, on, clauses, output, planner_context)
+            }
 
             Statement::StartTransaction {
                 modes,
@@ -1390,13 +1395,39 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let function_body = match function_body {
                     Some(r) => Some(self.sql_to_expr(
                         match r {
-                            ast::CreateFunctionBody::AsBeforeOptions { body, .. } => body,
+                            ast::CreateFunctionBody::AsBeforeOptions(expr) => expr,
                             ast::CreateFunctionBody::AsAfterOptions(expr) => expr,
                             ast::CreateFunctionBody::Return(expr) => expr,
-                            ast::CreateFunctionBody::AsBeginEnd(_) => {
-                                return not_impl_err!(
-                                    "BEGIN/END enclosed function body syntax is not supported"
-                                )?;
+                            ast::CreateFunctionBody::AsBeginEnd(begin_end) => {
+                                // Plan the PSM block and store in psm_body field
+                                let psm_body =
+                                    self.plan_psm_block(&begin_end, &mut planner_context)?;
+                                let statement =
+                                    DdlStatement::CreateFunction(CreateFunction {
+                                        or_replace,
+                                        temporary,
+                                        name,
+                                        return_type: return_type.map(|f| f.data_type().clone()),
+                                        args,
+                                        params: CreateFunctionBody {
+                                            language,
+                                            behavior: behavior.map(|b| match b {
+                                                ast::FunctionBehavior::Immutable => {
+                                                    Volatility::Immutable
+                                                }
+                                                ast::FunctionBehavior::Stable => {
+                                                    Volatility::Stable
+                                                }
+                                                ast::FunctionBehavior::Volatile => {
+                                                    Volatility::Volatile
+                                                }
+                                            }),
+                                            function_body: None,
+                                        },
+                                        psm_body: Some(psm_body),
+                                        schema: DFSchemaRef::new(DFSchema::empty()),
+                                    });
+                                return Ok(LogicalPlan::Ddl(statement));
                             }
                             ast::CreateFunctionBody::AsReturnExpr(_)
                             | ast::CreateFunctionBody::AsReturnSelect(_) => {
@@ -1428,6 +1459,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     return_type: return_type.map(|f| f.data_type().clone()),
                     args,
                     params,
+                    psm_body: None,
                     schema: DFSchemaRef::new(DFSchema::empty()),
                 });
 
@@ -1849,10 +1881,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         _ => MatchType::Simple,
                     };
 
-                    let columns: Vec<String> =
-                        fk.columns.iter().map(|c| c.value.clone()).collect();
-                    let referenced_columns: Vec<String> =
-                        fk.referred_columns.iter().map(|c| c.value.clone()).collect();
+                    let columns: Vec<String> = fk
+                        .columns
+                        .iter()
+                        .map(|c| match c {
+                            ForeignKeyColumnOrPeriod::Column(ident) => ident.value.clone(),
+                            ForeignKeyColumnOrPeriod::Period(ident) => ident.value.clone(),
+                        })
+                        .collect();
+                    let referenced_columns: Vec<String> = fk
+                        .referred_columns
+                        .iter()
+                        .map(|c| match c {
+                            ForeignKeyColumnOrPeriod::Column(ident) => ident.value.clone(),
+                            ForeignKeyColumnOrPeriod::Period(ident) => ident.value.clone(),
+                        })
+                        .collect();
 
                     Ok(Constraint::ForeignKey {
                         name: fk.name.as_ref().map(|n| n.value.clone()),
@@ -1872,6 +1916,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 TableConstraint::FulltextOrSpatial { .. } => {
                     _plan_err!("Indexes are not currently supported")
+                }
+                TableConstraint::Period { .. } => {
+                    _plan_err!("PERIOD constraints are not currently supported")
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2202,16 +2249,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(plan)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn merge_to_plan(
         &self,
-        merge: ast::Merge,
+        _into: bool,
+        table: TableFactor,
+        source: TableFactor,
+        on: Box<ast::Expr>,
+        clauses: Vec<ast::MergeClause>,
+        output: Option<ast::OutputClause>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        if merge.output.is_some() {
+        if output.is_some() {
             return not_impl_err!("MERGE OUTPUT/RETURNING not supported");
         }
 
-        let (table_name, table_alias) = match merge.table {
+        let (table_name, table_alias) = match table {
             TableFactor::Table {
                 name,
                 alias,
@@ -2263,7 +2316,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let source_plan = self.plan_table_with_joins(
             TableWithJoins {
-                relation: merge.source,
+                relation: source,
                 joins: vec![],
             },
             planner_context,
@@ -2285,10 +2338,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )
             };
 
-        let on = normalize_expr(*merge.on)?;
+        let on_expr = normalize_expr(*on)?;
 
-        let mut clauses = Vec::with_capacity(merge.clauses.len());
-        for clause in merge.clauses {
+        let mut merge_clauses = Vec::with_capacity(clauses.len());
+        for clause in clauses {
             let predicate = match clause.predicate {
                 Some(predicate) => Some(normalize_expr(predicate)?),
                 None => None,
@@ -2312,44 +2365,35 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         }
                         ast::MergeInsertKind::Row => MergeInsertKind::Row,
                     };
-                    let insert_predicate = match insert.insert_predicate {
-                        Some(predicate) => Some(normalize_expr(predicate)?),
-                        None => None,
-                    };
+                    let columns = insert.columns.into_iter()
+                        .map(|ident| ObjectName::from(vec![ident]))
+                        .collect();
                     MergeAction::Insert(MergeInsertExpr {
-                        columns: insert.columns,
+                        columns,
                         kind,
-                        insert_predicate,
+                        insert_predicate: None,
                     })
                 }
-                ast::MergeAction::Update(update) => {
+                ast::MergeAction::Update { assignments: update_assignments } => {
                     let mut assignments =
-                        Vec::with_capacity(update.assignments.len());
-                    for assignment in update.assignments {
+                        Vec::with_capacity(update_assignments.len());
+                    for assignment in update_assignments {
                         let value = normalize_expr(assignment.value)?;
                         assignments.push(MergeAssignment {
                             target: assignment.target,
                             value,
                         });
                     }
-                    let update_predicate = match update.update_predicate {
-                        Some(predicate) => Some(normalize_expr(predicate)?),
-                        None => None,
-                    };
-                    let delete_predicate = match update.delete_predicate {
-                        Some(predicate) => Some(normalize_expr(predicate)?),
-                        None => None,
-                    };
                     MergeAction::Update(MergeUpdateExpr {
                         assignments,
-                        update_predicate,
-                        delete_predicate,
+                        update_predicate: None,
+                        delete_predicate: None,
                     })
                 }
                 ast::MergeAction::Delete { .. } => MergeAction::Delete,
             };
 
-            clauses.push(MergeClause {
+            merge_clauses.push(MergeClause {
                 clause_kind: clause.clause_kind,
                 predicate,
                 action,
@@ -2360,8 +2404,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             table_ref,
             Arc::new(target_plan),
             Arc::new(source_plan),
-            on,
-            clauses,
+            on_expr,
+            merge_clauses,
         )))
     }
 

@@ -361,6 +361,7 @@ impl PostgreSqlDialect {
             within_group: vec![],
             parameters: ast::FunctionArguments::None,
             uses_odbc_syntax: false,
+            nth_value_order: None,
         }))
     }
 }

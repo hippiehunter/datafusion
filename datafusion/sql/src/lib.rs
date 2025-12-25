@@ -47,6 +47,7 @@ mod cte;
 mod expr;
 pub mod parser;
 pub mod planner;
+mod psm;
 mod query;
 mod relation;
 pub mod resolve;

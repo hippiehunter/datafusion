@@ -41,9 +41,9 @@ workspace = true
 name = "datafusion_expr"
 
 [features]
-default = ["sql"]
+default = []
 recursive_protection = ["dep:recursive"]
-sql = ["sqlparser"]
+sql = []  # No-op, sqlparser is always included
 
 [dependencies]
 arrow = { workspace = true }
@@ -60,7 +60,7 @@ itertools = { workspace = true }
 paste = { workspace = true }
 recursive = { workspace = true, optional = true }
 serde_json = { workspace = true }
-sqlparser = { workspace = true, optional = true }
+sqlparser = { workspace = true }
 
 [dev-dependencies]
 ctor = { workspace = true }

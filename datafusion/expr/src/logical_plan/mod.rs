@@ -21,6 +21,7 @@ pub mod display;
 pub mod dml;
 mod merge;
 mod extension;
+pub mod psm;
 pub(crate) mod invariants;
 pub use invariants::{InvariantLevel, assert_expected_schema, check_subquery_expr};
 mod plan;
@@ -34,9 +35,9 @@ pub use builder::{
 };
 pub use ddl::{
     AlterTable, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
-    CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateView,
-    DdlStatement, DropCatalogSchema, DropDomain, DropFunction, DropSequence, DropTable,
-    DropView, OperateFunctionArg,
+    CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateProcedure,
+    CreateView, DdlStatement, DropCatalogSchema, DropDomain, DropFunction, DropProcedure,
+    DropSequence, DropTable, DropView, OperateFunctionArg,
 };
 pub use dml::{DmlStatement, WriteOp};
 pub use merge::{
@@ -52,10 +53,16 @@ pub use plan::{
     projection_schema,
 };
 pub use statement::{
-    Deallocate, Execute, Grant, Prepare, ReleaseSavepoint, ResetVariable, Revoke,
+    Call, Deallocate, Execute, Grant, Prepare, ReleaseSavepoint, ResetVariable, Revoke,
     RollbackToSavepoint, Savepoint, SetTransaction, SetVariable, Statement,
     TransactionAccessMode, TransactionConclusion, TransactionEnd,
     TransactionIsolationLevel, TransactionStart,
+};
+pub use psm::{
+    HandlerCondition, HandlerType, ParameterMode, ProcedureArg, PsmBlock, PsmCase,
+    PsmElseIf, PsmFor, PsmHandler, PsmIf, PsmLoop, PsmRepeat, PsmResignal, PsmReturn,
+    PsmSelectInto, PsmSetVariable, PsmSignal, PsmStatement, PsmStatementKind, PsmVariable,
+    PsmWhen, PsmWhile, RegionInfo,
 };
 
 pub use datafusion_common::format::ExplainFormat;

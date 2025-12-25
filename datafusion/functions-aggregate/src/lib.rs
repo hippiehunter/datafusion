@@ -97,7 +97,7 @@ mod utils;
 use crate::approx_percentile_cont::approx_percentile_cont_udaf;
 use crate::approx_percentile_cont_with_weight::approx_percentile_cont_with_weight_udaf;
 use datafusion_common::Result;
-use datafusion_execution::FunctionRegistry;
+use datafusion_expr::registry::FunctionRegistry;
 use datafusion_expr::AggregateUDF;
 use log::debug;
 use std::sync::Arc;

@@ -326,7 +326,9 @@ impl TreeNode for LogicalPlan {
                     | DdlStatement::AlterTable(_)
                     | DdlStatement::CreateDomain(_)
                     | DdlStatement::DropDomain(_)
-                    | DdlStatement::DropSequence(_) => Transformed::no(ddl),
+                    | DdlStatement::DropSequence(_)
+                    | DdlStatement::CreateProcedure(_)
+                    | DdlStatement::DropProcedure(_) => Transformed::no(ddl),
                 }
                 .update_data(LogicalPlan::Ddl)
             }

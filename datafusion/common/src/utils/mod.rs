@@ -32,7 +32,6 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::{SortColumn, SortOptions, partition};
 use arrow::datatypes::{DataType, Field, SchemaRef};
-#[cfg(feature = "sql")]
 use sqlparser::{ast::Ident, dialect::GenericDialect, parser::Parser};
 use std::borrow::{Borrow, Cow};
 use std::cmp::{Ordering, min};
@@ -275,18 +274,36 @@ fn needs_quotes(s: &str) -> bool {
     !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-#[cfg(feature = "sql")]
 pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<Ident>> {
     let dialect = GenericDialect;
     let mut parser = Parser::new(&dialect).try_with_sql(s)?;
     let idents = parser.parse_multipart_identifier()?;
+
+    // Validate that parsing didn't incorrectly split on dots inside parentheses.
+    // If any identifier has unbalanced parentheses, the parsing was incorrect.
+    for ident in &idents {
+        let mut paren_depth = 0i32;
+        for ch in ident.value.chars() {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth -= 1,
+                _ => {}
+            }
+        }
+        if paren_depth != 0 {
+            return Err(crate::DataFusionError::Internal(format!(
+                "Invalid identifier with unbalanced parentheses: {}",
+                s
+            )));
+        }
+    }
+
     Ok(idents)
 }
 
 /// Parse a string into a vector of identifiers.
 ///
 /// Note: If ignore_case is false, the string will be normalized to lowercase.
-#[cfg(feature = "sql")]
 pub(crate) fn parse_identifiers_normalized(s: &str, ignore_case: bool) -> Vec<String> {
     parse_identifiers(s)
         .unwrap_or_default()
@@ -295,59 +312,6 @@ pub(crate) fn parse_identifiers_normalized(s: &str, ignore_case: bool) -> Vec<St
             Some(_) => id.value,
             None if ignore_case => id.value,
             _ => id.value.to_ascii_lowercase(),
-        })
-        .collect::<Vec<_>>()
-}
-
-#[cfg(not(feature = "sql"))]
-pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<String>> {
-    let mut result = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-
-    for ch in s.chars() {
-        match ch {
-            '"' => {
-                in_quotes = !in_quotes;
-                current.push(ch);
-            }
-            '.' if !in_quotes => {
-                result.push(current.clone());
-                current.clear();
-            }
-            _ => {
-                current.push(ch);
-            }
-        }
-    }
-
-    // Push the last part if it's not empty
-    if !current.is_empty() {
-        result.push(current);
-    }
-
-    Ok(result)
-}
-
-#[cfg(not(feature = "sql"))]
-pub(crate) fn parse_identifiers_normalized(s: &str, ignore_case: bool) -> Vec<String> {
-    parse_identifiers(s)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| {
-            let is_double_quoted = if id.len() > 2 {
-                let mut chars = id.chars();
-                chars.next() == Some('"') && chars.last() == Some('"')
-            } else {
-                false
-            };
-            if is_double_quoted {
-                id[1..id.len() - 1].to_string().replace("\"\"", "\"")
-            } else if ignore_case {
-                id
-            } else {
-                id.to_ascii_lowercase()
-            }
         })
         .collect::<Vec<_>>()
 }
@@ -1138,7 +1102,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "sql")]
     #[test]
     fn test_quote_identifier() -> Result<()> {
         let cases = vec![

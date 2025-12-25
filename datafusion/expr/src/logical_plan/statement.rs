@@ -65,6 +65,8 @@ pub enum Statement {
     /// Deallocate a prepared statement.
     /// This is used to implement SQL 'DEALLOCATE'.
     Deallocate(Deallocate),
+    /// CALL a stored procedure (SQL:2016 Part 4 - PSM).
+    Call(Call),
 }
 
 impl Statement {
@@ -94,6 +96,7 @@ impl Statement {
             Statement::Prepare(_) => "Prepare",
             Statement::Execute(_) => "Execute",
             Statement::Deallocate(_) => "Deallocate",
+            Statement::Call(_) => "Call",
         }
     }
 
@@ -191,6 +194,14 @@ impl Statement {
                     }
                     Statement::Deallocate(Deallocate { name }) => {
                         write!(f, "Deallocate: {name}")
+                    }
+                    Statement::Call(Call { procedure_name, args }) => {
+                        write!(
+                            f,
+                            "Call: {} args=[{}]",
+                            procedure_name,
+                            expr_vec_fmt!(args)
+                        )
                     }
                 }
             }
@@ -332,4 +343,13 @@ pub struct Execute {
 pub struct Deallocate {
     /// The name of the prepared statement to deallocate
     pub name: String,
+}
+
+/// CALL a stored procedure (SQL:2016 Part 4 - PSM).
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct Call {
+    /// The procedure name to call.
+    pub procedure_name: String,
+    /// The arguments to pass to the procedure.
+    pub args: Vec<Expr>,
 }

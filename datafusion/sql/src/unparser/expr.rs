@@ -241,6 +241,7 @@ impl Unparser<'_> {
                         units,
                         start_bound,
                         end_bound: Some(end_bound),
+                        exclude: None,
                     })
                 } else {
                     None
@@ -277,6 +278,7 @@ impl Unparser<'_> {
                     within_group: vec![],
                     parameters: ast::FunctionArguments::None,
                     uses_odbc_syntax: false,
+                    nth_value_order: None,
                 }))
             }
             Expr::SimilarTo(Like {
@@ -362,6 +364,7 @@ impl Unparser<'_> {
                     within_group,
                     parameters: ast::FunctionArguments::None,
                     uses_odbc_syntax: false,
+                    nth_value_order: None,
                 }))
             }
             Expr::ScalarSubquery(subq) => {
@@ -632,6 +635,7 @@ impl Unparser<'_> {
             within_group: vec![],
             parameters: ast::FunctionArguments::None,
             uses_odbc_syntax: false,
+            nth_value_order: None,
         }))
     }
 
@@ -1020,6 +1024,7 @@ impl Unparser<'_> {
         ast::Expr::Between {
             expr: Box::new(expr),
             negated,
+            symmetric: ast::BetweenSymmetric::None,
             low: Box::new(low),
             high: Box::new(high),
         }
@@ -1744,6 +1749,7 @@ impl Unparser<'_> {
             within_group: vec![],
             parameters: ast::FunctionArguments::None,
             uses_odbc_syntax: false,
+            nth_value_order: None,
         }))
     }
 

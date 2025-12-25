@@ -191,6 +191,26 @@ impl FunctionArgs {
                         "Calling {name}: JSON RETURNING clause not supported in function arguments: {jr}"
                     );
                 }
+                FunctionArgumentClause::JsonOnEmpty(je) => {
+                    return not_impl_err!(
+                        "Calling {name}: JSON ON EMPTY clause not supported in function arguments: {je}"
+                    );
+                }
+                FunctionArgumentClause::JsonOnError(je) => {
+                    return not_impl_err!(
+                        "Calling {name}: JSON ON ERROR clause not supported in function arguments: {je}"
+                    );
+                }
+                FunctionArgumentClause::JsonQueryWrapper(jw) => {
+                    return not_impl_err!(
+                        "Calling {name}: JSON query wrapper not supported in function arguments: {jw}"
+                    );
+                }
+                FunctionArgumentClause::JsonUniqueKeys(uk) => {
+                    return not_impl_err!(
+                        "Calling {name}: JSON unique keys not supported in function arguments: {uk}"
+                    );
+                }
             }
         }
 

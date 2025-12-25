@@ -21,7 +21,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::expr::NullTreatment;
-#[cfg(feature = "sql")]
+
 use crate::logical_plan::LogicalPlan;
 use crate::{
     AggregateUDF, Expr, GetFieldAccess, ScalarUDF, SortExpr, TableSource, WindowFrame,
@@ -33,7 +33,7 @@ use datafusion_common::{
     DFSchema, Result, TableReference, config::ConfigOptions,
     file_options::file_type::FileType, not_impl_err,
 };
-#[cfg(feature = "sql")]
+
 use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor};
 
 /// Provides the `SQL` query planner meta-data about tables and
@@ -89,13 +89,13 @@ pub trait ContextProvider {
     }
 
     /// Return [`RelationPlanner`] extensions for planning table factors
-    #[cfg(feature = "sql")]
+    
     fn get_relation_planners(&self) -> &[Arc<dyn RelationPlanner>] {
         &[]
     }
 
     /// Return [`TypePlanner`] extensions for planning data types
-    #[cfg(feature = "sql")]
+    
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
         None
     }
@@ -283,9 +283,6 @@ pub trait ExprPlanner: Debug + Send + Sync {
 /// custom expressions.
 #[derive(Debug, Clone)]
 pub struct RawBinaryExpr {
-    #[cfg(not(feature = "sql"))]
-    pub op: datafusion_expr_common::operator::Operator,
-    #[cfg(feature = "sql")]
     pub op: sqlparser::ast::BinaryOperator,
     pub left: Expr,
     pub right: Expr,
@@ -347,7 +344,7 @@ pub enum PlannerResult<T> {
 }
 
 /// Result of planning a relation with [`RelationPlanner`]
-#[cfg(feature = "sql")]
+
 #[derive(Debug, Clone)]
 pub struct PlannedRelation {
     /// The logical plan for the relation
@@ -356,7 +353,7 @@ pub struct PlannedRelation {
     pub alias: Option<TableAlias>,
 }
 
-#[cfg(feature = "sql")]
+
 impl PlannedRelation {
     /// Create a new `PlannedRelation` with the given plan and alias
     pub fn new(plan: LogicalPlan, alias: Option<TableAlias>) -> Self {
@@ -365,7 +362,7 @@ impl PlannedRelation {
 }
 
 /// Result of attempting to plan a relation with extension planners
-#[cfg(feature = "sql")]
+
 #[derive(Debug)]
 pub enum RelationPlanning {
     /// The relation was successfully planned by an extension planner
@@ -375,7 +372,7 @@ pub enum RelationPlanning {
 }
 
 /// Customize planning SQL table factors to [`LogicalPlan`]s.
-#[cfg(feature = "sql")]
+
 pub trait RelationPlanner: Debug + Send + Sync {
     /// Plan a table factor into a [`LogicalPlan`].
     ///
@@ -396,7 +393,7 @@ pub trait RelationPlanner: Debug + Send + Sync {
 /// such as converting SQL expressions to logical expressions and normalizing
 /// identifiers. It uses composition to provide access to session context via
 /// [`ContextProvider`].
-#[cfg(feature = "sql")]
+
 pub trait RelationPlannerContext {
     /// Provides access to the underlying context provider for reading session
     /// configuration, accessing tables, functions, and other metadata.
@@ -426,7 +423,7 @@ pub trait RelationPlannerContext {
 }
 
 /// Customize planning SQL types to DataFusion (Arrow) types.
-#[cfg(feature = "sql")]
+
 pub trait TypePlanner: Debug + Send + Sync {
     /// Plan SQL [`sqlparser::ast::DataType`] to DataFusion [`DataType`]
     ///

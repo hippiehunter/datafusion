@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::logical_plan::psm::{ProcedureArg, PsmBlock};
 use crate::{Expr, LogicalPlan, SortExpr, Volatility};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -24,17 +25,13 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-#[cfg(not(feature = "sql"))]
-use crate::expr::Ident;
 use crate::expr::Sort;
 use arrow::datatypes::DataType;
 use datafusion_common::tree_node::{Transformed, TreeNodeContainer, TreeNodeRecursion};
 use datafusion_common::{
     Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
 };
-#[cfg(feature = "sql")]
 pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain};
-#[cfg(feature = "sql")]
 use sqlparser::ast::{Ident, ObjectName};
 
 static DDL_EMPTY_SCHEMA: LazyLock<DFSchemaRef> =
@@ -73,6 +70,10 @@ pub enum DdlStatement {
     DropDomain(DropDomain),
     /// DROP SEQUENCE
     DropSequence(DropSequence),
+    /// CREATE PROCEDURE (SQL:2016 Part 4 - PSM)
+    CreateProcedure(CreateProcedure),
+    /// DROP PROCEDURE (SQL:2016 Part 4 - PSM)
+    DropProcedure(DropProcedure),
 }
 
 impl DdlStatement {
@@ -97,7 +98,9 @@ impl DdlStatement {
             DdlStatement::AlterTable(_)
             | DdlStatement::CreateDomain(_)
             | DdlStatement::DropDomain(_)
-            | DdlStatement::DropSequence(_) => &DDL_EMPTY_SCHEMA,
+            | DdlStatement::DropSequence(_)
+            | DdlStatement::CreateProcedure(_)
+            | DdlStatement::DropProcedure(_) => &DDL_EMPTY_SCHEMA,
         }
     }
 
@@ -120,6 +123,8 @@ impl DdlStatement {
             DdlStatement::CreateDomain(_) => "CreateDomain",
             DdlStatement::DropDomain(_) => "DropDomain",
             DdlStatement::DropSequence(_) => "DropSequence",
+            DdlStatement::CreateProcedure(_) => "CreateProcedure",
+            DdlStatement::DropProcedure(_) => "DropProcedure",
         }
     }
 
@@ -143,6 +148,8 @@ impl DdlStatement {
             DdlStatement::CreateDomain(_) => vec![],
             DdlStatement::DropDomain(_) => vec![],
             DdlStatement::DropSequence(_) => vec![],
+            DdlStatement::CreateProcedure(_) => vec![],
+            DdlStatement::DropProcedure(_) => vec![],
         }
     }
 
@@ -243,6 +250,12 @@ impl DdlStatement {
                             f,
                             "DropSequence: {name:?} if not exist:={if_exists}"
                         )
+                    }
+                    DdlStatement::CreateProcedure(CreateProcedure { name, .. }) => {
+                        write!(f, "CreateProcedure: name {name:?}")
+                    }
+                    DdlStatement::DropProcedure(DropProcedure { name, if_exists, .. }) => {
+                        write!(f, "DropProcedure: name {name:?} if not exist:={if_exists}")
                     }
                 }
             }
@@ -701,6 +714,9 @@ pub struct CreateFunction {
     pub args: Option<Vec<OperateFunctionArg>>,
     pub return_type: Option<DataType>,
     pub params: CreateFunctionBody,
+    /// PSM body (BEGIN/END block) for SQL:2016 procedural functions.
+    /// Mutually exclusive with `params.function_body`.
+    pub psm_body: Option<PsmBlock>,
     /// Dummy schema
     pub schema: DFSchemaRef,
 }
@@ -825,6 +841,45 @@ impl PartialOrd for DropFunction {
         // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
         .filter(|cmp| *cmp != Ordering::Equal || self == other)
     }
+}
+
+/// CREATE PROCEDURE statement (SQL:2016 Part 4 - PSM).
+///
+/// Procedures differ from functions in that:
+/// - They do not have a return type (but may have OUT/INOUT parameters)
+/// - They are invoked with CALL, not in expressions
+/// - They may modify database state via DML
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct CreateProcedure {
+    /// Whether to replace an existing procedure with the same name.
+    pub or_replace: bool,
+    /// The procedure name.
+    pub name: String,
+    /// The procedure arguments (may include IN, OUT, INOUT parameters).
+    pub args: Option<Vec<ProcedureArg>>,
+    /// The procedure body as a PSM block.
+    pub body: PsmBlock,
+}
+
+// Manual implementation needed because PsmBlock doesn't implement PartialOrd.
+// Comparison is based on name and or_replace only.
+impl PartialOrd for CreateProcedure {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.name.partial_cmp(&other.name) {
+            Some(Ordering::Equal) => self.or_replace.partial_cmp(&other.or_replace),
+            cmp => cmp,
+        }
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+/// DROP PROCEDURE statement (SQL:2016 Part 4 - PSM).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct DropProcedure {
+    /// The procedure name.
+    pub name: String,
+    /// IF EXISTS clause.
+    pub if_exists: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

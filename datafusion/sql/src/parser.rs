@@ -415,6 +415,15 @@ impl<'a> DFParserBuilder<'a> {
 }
 
 impl<'a> DFParser<'a> {
+    /// Helper to check if nth token is a specific keyword.
+    /// Uses string-based comparison to avoid lifetime issues with Token<'a>.
+    fn peek_nth_is_keyword(&self, n: usize, expected: Keyword) -> bool {
+        let token_with_span = self.parser.peek_nth_token(n);
+        // Use string-based keyword comparison to avoid Token<'a> pattern matching
+        let keyword_str = format!("{expected:?}").to_uppercase();
+        token_with_span.token == Token::make_keyword(&keyword_str)
+    }
+
     #[deprecated(since = "46.0.0", note = "DFParserBuilder")]
     pub fn new(sql: &'a str) -> Result<Self, DataFusionError> {
         DFParserBuilder::new(sql).build()
@@ -518,52 +527,36 @@ impl<'a> DFParser<'a> {
 
     /// Parse a new expression
     pub fn parse_statement(&mut self) -> Result<Statement, DataFusionError> {
-        match self.parser.peek_token().token {
-            Token::Word(w) => {
-                match w.keyword {
-                    Keyword::CREATE => {
-                        self.parser.next_token(); // CREATE
-                        self.parse_create()
-                    }
-                    Keyword::COPY => {
-                        if let Token::Word(w) = self.parser.peek_nth_token(1).token {
-                            // use native parser for COPY INTO
-                            if w.keyword == Keyword::INTO {
-                                return self.parse_and_handle_statement();
-                            }
-                        }
-                        self.parser.next_token(); // COPY
-                        self.parse_copy()
-                    }
-                    Keyword::EXPLAIN => {
-                        self.parser.next_token(); // EXPLAIN
-                        self.parse_explain()
-                    }
-                    Keyword::RESET => {
-                        self.parser.next_token(); // RESET
-                        self.parse_reset()
-                    }
-                    _ => {
-                        // use sqlparser-rs parser
-                        self.parse_and_handle_statement()
-                    }
-                }
+        // Use peek_keyword to avoid lifetime issues with Token<'a>
+        if self.parser.peek_keyword(Keyword::CREATE) {
+            self.parser.next_token(); // CREATE
+            self.parse_create()
+        } else if self.parser.peek_keyword(Keyword::COPY) {
+            // Check if this is COPY INTO - use native parser
+            if self.peek_nth_is_keyword(1, Keyword::INTO) {
+                return self.parse_and_handle_statement();
             }
-            _ => {
-                // use the native parser
-                self.parse_and_handle_statement()
-            }
+            self.parser.next_token(); // COPY
+            self.parse_copy()
+        } else if self.parser.peek_keyword(Keyword::EXPLAIN) {
+            self.parser.next_token(); // EXPLAIN
+            self.parse_explain()
+        } else if self.parser.peek_keyword(Keyword::RESET) {
+            self.parser.next_token(); // RESET
+            self.parse_reset()
+        } else {
+            // use sqlparser-rs parser for all other statements
+            self.parse_and_handle_statement()
         }
     }
 
     pub fn parse_expr(&mut self) -> Result<ExprWithAlias, DataFusionError> {
-        if let Token::Word(w) = self.parser.peek_token().token {
-            match w.keyword {
-                Keyword::CREATE | Keyword::COPY | Keyword::EXPLAIN => {
-                    return parser_err!("Unsupported command in expression")?;
-                }
-                _ => {}
-            }
+        // Use peek_keyword to avoid lifetime issues with Token<'a>
+        if self.parser.peek_keyword(Keyword::CREATE)
+            || self.parser.peek_keyword(Keyword::COPY)
+            || self.parser.peek_keyword(Keyword::EXPLAIN)
+        {
+            return parser_err!("Unsupported command in expression")?;
         }
 
         Ok(self.parser.parse_expr_with_alias()?)
@@ -688,26 +681,28 @@ impl<'a> DFParser<'a> {
     /// [`parse_literal_string`]: sqlparser::parser::Parser::parse_literal_string
     pub fn parse_option_key(&mut self) -> Result<String, DataFusionError> {
         let next_token = self.parser.next_token();
-        match next_token.token {
+        // Use to_static() to convert Token<'a> to Token<'static>
+        let static_token = next_token.to_static();
+        match static_token.token {
             Token::Word(Word { value, .. }) => {
-                let mut parts = vec![value];
+                let mut parts: Vec<String> = vec![value.to_string()];
                 while self.parser.consume_token(&Token::Period) {
-                    let next_token = self.parser.next_token();
-                    if let Token::Word(Word { value, .. }) = next_token.token {
-                        parts.push(value);
+                    let inner_token = self.parser.next_token().to_static();
+                    if let Token::Word(Word { value, .. }) = inner_token.token {
+                        parts.push(value.to_string());
                     } else {
                         // Unquoted namespaced keys have to conform to the syntax
                         // "<WORD>[\.<WORD>]*". If we have a key that breaks this
                         // pattern, error out:
-                        return self.expected("key name", &next_token);
+                        return self.expected("key name", &inner_token);
                     }
                 }
                 Ok(parts.join("."))
             }
-            Token::SingleQuotedString(s) => Ok(s),
-            Token::DoubleQuotedString(s) => Ok(s),
-            Token::EscapedStringLiteral(s) => Ok(s),
-            _ => self.expected("key name", &next_token),
+            Token::SingleQuotedString(s) => Ok(s.to_string()),
+            Token::DoubleQuotedString(s) => Ok(s.to_string()),
+            Token::EscapedStringLiteral(s) => Ok(s.to_string()),
+            _ => self.expected("key name", &static_token),
         }
     }
 
@@ -719,14 +714,16 @@ impl<'a> DFParser<'a> {
     /// [`parse_value`]: sqlparser::parser::Parser::parse_value
     pub fn parse_option_value(&mut self) -> Result<Value, DataFusionError> {
         let next_token = self.parser.next_token();
-        match next_token.token {
+        // Use to_static() to convert Token<'a> to Token<'static>
+        let static_token = next_token.to_static();
+        match static_token.token {
             // e.g. things like "snappy" or "gzip" that may be keywords
-            Token::Word(word) => Ok(Value::SingleQuotedString(word.value)),
-            Token::SingleQuotedString(s) => Ok(Value::SingleQuotedString(s)),
-            Token::DoubleQuotedString(s) => Ok(Value::DoubleQuotedString(s)),
-            Token::EscapedStringLiteral(s) => Ok(Value::EscapedStringLiteral(s)),
-            Token::Number(n, l) => Ok(Value::Number(n, l)),
-            _ => self.expected("string or numeric value", &next_token),
+            Token::Word(word) => Ok(Value::SingleQuotedString(word.value.to_string())),
+            Token::SingleQuotedString(s) => Ok(Value::SingleQuotedString(s.to_string())),
+            Token::DoubleQuotedString(s) => Ok(Value::DoubleQuotedString(s.to_string())),
+            Token::EscapedStringLiteral(s) => Ok(Value::EscapedStringLiteral(s.to_string())),
+            Token::Number(n, l) => Ok(Value::Number(n.to_string(), l)),
+            _ => self.expected("string or numeric value", &static_token),
         }
     }
 
@@ -752,16 +749,20 @@ impl<'a> DFParser<'a> {
         let mut expecting_segment = true;
 
         loop {
-            let next_token = self.parser.peek_token();
-            match &next_token.token {
+            // Use to_static() to convert Token<'a> to Token<'static>
+            let static_token = self.parser.peek_token().clone().to_static();
+            match static_token.token {
                 Token::Word(word) => {
                     self.parser.next_token();
-                    parts.push(word.value.clone());
+                    parts.push(word.value.to_string());
                     expecting_segment = false;
                 }
-                Token::SingleQuotedString(s)
-                | Token::DoubleQuotedString(s)
-                | Token::EscapedStringLiteral(s) => {
+                Token::SingleQuotedString(s) => {
+                    self.parser.next_token();
+                    parts.push(s.to_string());
+                    expecting_segment = false;
+                }
+                Token::EscapedStringLiteral(s) | Token::DoubleQuotedString(s) => {
                     self.parser.next_token();
                     parts.push(s.clone());
                     expecting_segment = false;
@@ -769,17 +770,22 @@ impl<'a> DFParser<'a> {
                 Token::Period => {
                     self.parser.next_token();
                     if expecting_segment || parts.is_empty() {
-                        return self.expected("configuration parameter", &next_token);
+                        let err_token = self.parser.peek_token().clone().to_static();
+                        return self.expected("configuration parameter", &err_token);
                     }
                     expecting_segment = true;
                 }
                 Token::EOF | Token::SemiColon => break,
-                _ => return self.expected("configuration parameter", &next_token),
+                _ => {
+                    let err_token = self.parser.peek_token().clone().to_static();
+                    return self.expected("configuration parameter", &err_token)
+                }
             }
         }
 
         if parts.is_empty() || expecting_segment {
-            return self.expected("configuration parameter", &self.parser.peek_token());
+            let err_token = self.parser.peek_token().clone().to_static();
+            return self.expected("configuration parameter", &err_token);
         }
 
         let idents: Vec<Ident> = parts.into_iter().map(Ident::new).collect();
@@ -792,12 +798,13 @@ impl<'a> DFParser<'a> {
             return Ok(None);
         }
 
-        let next_token = self.parser.next_token();
-        let format = match next_token.token {
-            Token::Word(w) => Ok(w.value),
-            Token::SingleQuotedString(w) => Ok(w),
-            Token::DoubleQuotedString(w) => Ok(w),
-            _ => self.expected("an explain format such as TREE", &next_token),
+        // Use to_static() to convert Token<'a> to Token<'static>
+        let static_token = self.parser.next_token().to_static();
+        let format = match static_token.token {
+            Token::Word(w) => Ok(w.value.to_string()),
+            Token::SingleQuotedString(w) => Ok(w.to_string()),
+            Token::DoubleQuotedString(w) => Ok(w.to_string()),
+            _ => self.expected("an explain format such as TREE", &static_token),
         }?;
         Ok(Some(format))
     }
@@ -838,20 +845,23 @@ impl<'a> DFParser<'a> {
         }
 
         loop {
-            if let Token::Word(_) = self.parser.peek_token().token {
+            // Use to_static() to convert Token<'a> to Token<'static>
+            let static_token = self.parser.peek_token().clone().to_static();
+            if let Token::Word(_) = static_token.token {
                 let identifier = self.parser.parse_identifier()?;
                 partitions.push(identifier.to_string());
             } else {
-                return self.expected("partition name", &self.parser.peek_token());
+                return self.expected("partition name", &static_token);
             }
             let comma = self.parser.consume_token(&Token::Comma);
             if self.parser.consume_token(&Token::RParen) {
                 // allow a trailing comma, even though it's not in standard
                 break;
             } else if !comma {
+                let err_token = self.parser.peek_token().clone().to_static();
                 return self.expected(
                     "',' or ')' after partition definition",
-                    &self.parser.peek_token(),
+                    &err_token,
                 );
             }
         }
@@ -916,23 +926,28 @@ impl<'a> DFParser<'a> {
         loop {
             if let Some(constraint) = self.parser.parse_optional_table_constraint()? {
                 constraints.push(constraint);
-            } else if let Token::Word(_) = self.parser.peek_token().token {
-                let column_def = self.parse_column_def()?;
-                columns.push(column_def);
             } else {
-                return self.expected(
-                    "column name or constraint definition",
-                    &self.parser.peek_token(),
-                );
+                // Use to_static() to convert Token<'a> to Token<'static>
+                let static_token = self.parser.peek_token().clone().to_static();
+                if let Token::Word(_) = static_token.token {
+                    let column_def = self.parse_column_def()?;
+                    columns.push(column_def);
+                } else {
+                    return self.expected(
+                        "column name or constraint definition",
+                        &static_token,
+                    );
+                }
             }
             let comma = self.parser.consume_token(&Token::Comma);
             if self.parser.consume_token(&Token::RParen) {
                 // allow a trailing comma, even though it's not in standard
                 break;
             } else if !comma {
+                let err_token = self.parser.peek_token().clone().to_static();
                 return self.expected(
                     "',' or ')' after column definition",
-                    &self.parser.peek_token(),
+                    &err_token,
                 );
             }
         }
@@ -1119,10 +1134,11 @@ impl<'a> DFParser<'a> {
 
     /// Parses the set of valid formats
     fn parse_file_format(&mut self) -> Result<String, DataFusionError> {
-        let token = self.parser.next_token();
-        match &token.token {
+        // Use to_static() to convert Token<'a> to Token<'static>
+        let static_token = self.parser.next_token().to_static();
+        match &static_token.token {
             Token::Word(w) => parse_file_type(&w.value),
-            _ => self.expected("one of ARROW, PARQUET, NDJSON, or CSV", &token),
+            _ => self.expected("one of ARROW, PARQUET, NDJSON, or CSV", &static_token),
         }
     }
 
@@ -1161,7 +1177,7 @@ mod tests {
     use sqlparser::ast::{
         BinaryOperator, DataType, ExactNumberInfo, Expr, Ident, ValueWithSpan,
     };
-    use sqlparser::dialect::SnowflakeDialect;
+    use sqlparser::dialect::GenericDialect;
     use sqlparser::tokenizer::Span;
 
     fn expect_parse_ok(sql: &str, expected: Statement) -> Result<(), DataFusionError> {
@@ -1799,9 +1815,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SnowflakeDialect not available in sqlparser fork"]
     fn skip_copy_into_snowflake() -> Result<(), DataFusionError> {
         let sql = "COPY INTO foo FROM @~/staged FILE_FORMAT = (FORMAT_NAME = 'mycsv');";
-        let dialect = Box::new(SnowflakeDialect);
+        let dialect = Box::new(GenericDialect {});
         let statements = DFParser::parse_sql_with_dialect(sql, dialect.as_ref())?;
 
         assert_eq!(

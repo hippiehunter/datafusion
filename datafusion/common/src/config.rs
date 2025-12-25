@@ -17,10 +17,6 @@
 
 //! Runtime configuration, via [`ConfigOptions`]
 
-use arrow_ipc::CompressionType;
-
-#[cfg(feature = "parquet_encryption")]
-use crate::encryption::{FileDecryptionProperties, FileEncryptionProperties};
 use crate::error::_config_err;
 use crate::format::{ExplainAnalyzeLevel, ExplainFormat};
 use crate::parsers::CompressionTypeVariant;
@@ -443,16 +439,6 @@ impl Display for SpillCompression {
             Self::Uncompressed => "uncompressed",
         };
         write!(f, "{str}")
-    }
-}
-
-impl From<SpillCompression> for Option<CompressionType> {
-    fn from(c: SpillCompression) -> Self {
-        match c {
-            SpillCompression::Zstd => Some(CompressionType::ZSTD),
-            SpillCompression::Lz4Frame => Some(CompressionType::LZ4_FRAME),
-            SpillCompression::Uncompressed => None,
-        }
     }
 }
 

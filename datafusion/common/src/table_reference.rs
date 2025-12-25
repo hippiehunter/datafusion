@@ -394,7 +394,7 @@ mod tests {
         // Disable this test for non-sql features so that we don't need to reproduce
         // things like table function upper case conventions, since those will not
         // be used if SQL is not selected.
-        #[cfg(feature = "sql")]
+        
         {
             // if fail to parse, take entire input string as identifier
             let expected = TableReference::Bare {

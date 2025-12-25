@@ -264,7 +264,7 @@ impl Unparser<'_> {
             alias: ast::TableAlias {
                 name: self.new_ident_quoted_if_needs(name.clone()),
                 columns,
-                explicit: true,
+                implicit: false,
             },
             query: Box::new(cte_query),
             from: None,
@@ -277,6 +277,8 @@ impl Unparser<'_> {
             with_token: AttachedToken::empty(),
             recursive: true,
             cte_tables: vec![cte],
+            cycle: None,
+            search: None,
         };
 
         // Create outer SELECT * FROM <name>
@@ -1558,7 +1560,7 @@ impl Unparser<'_> {
         ast::TableAlias {
             name: self.new_ident_quoted_if_needs(alias),
             columns,
-            explicit: true,
+            implicit: false,
         }
     }
 
@@ -1600,6 +1602,7 @@ impl Unparser<'_> {
                 grantees: revoke.grantees.clone(),
                 granted_by: revoke.granted_by.clone(),
                 cascade: revoke.cascade.clone(),
+                grant_option_for: false,
             }),
             PlanStatement::TransactionStart(start) => {
                 let isolation_level = match start.isolation_level {
@@ -1702,8 +1705,7 @@ impl Unparser<'_> {
                         MergeInsertKind::Values(values) => {
                             let mut rows = Vec::with_capacity(values.len());
                             for row in values {
-                                let mut sql_row =
-                                    Vec::with_capacity(row.len());
+                                let mut sql_row = Vec::with_capacity(row.len());
                                 for value in row {
                                     sql_row.push(self.expr_to_sql(value)?);
                                 }
@@ -1718,65 +1720,50 @@ impl Unparser<'_> {
                         MergeInsertKind::Row => ast::MergeInsertKind::Row,
                     };
 
-                    let insert_predicate = match &insert.insert_predicate {
-                        Some(expr) => Some(self.expr_to_sql(expr)?),
-                        None => None,
-                    };
+                    // Convert ObjectName columns to Ident columns
+                    let columns: Vec<Ident> = insert
+                        .columns
+                        .iter()
+                        .flat_map(|obj_name| {
+                            obj_name.0.iter().filter_map(|part| {
+                                match part {
+                                    ast::ObjectNamePart::Identifier(ident) => Some(ident.clone()),
+                                    _ => None,
+                                }
+                            })
+                        })
+                        .collect();
 
-                    ast::MergeAction::Insert(ast::MergeInsertExpr {
-                        insert_token: AttachedToken::empty(),
-                        columns: insert.columns.clone(),
-                        kind_token: AttachedToken::empty(),
-                        kind,
-                        insert_predicate,
-                    })
+                    ast::MergeAction::Insert(ast::MergeInsertExpr { columns, kind })
                 }
                 MergeAction::Update(update) => {
-                    let mut assignments =
-                        Vec::with_capacity(update.assignments.len());
+                    let mut assignments = Vec::with_capacity(update.assignments.len());
                     for assignment in &update.assignments {
                         assignments.push(ast::Assignment {
                             target: assignment.target.clone(),
                             value: self.expr_to_sql(&assignment.value)?,
                         });
                     }
-                    let update_predicate = match &update.update_predicate {
-                        Some(expr) => Some(self.expr_to_sql(expr)?),
-                        None => None,
-                    };
-                    let delete_predicate = match &update.delete_predicate {
-                        Some(expr) => Some(self.expr_to_sql(expr)?),
-                        None => None,
-                    };
-                    ast::MergeAction::Update(ast::MergeUpdateExpr {
-                        update_token: AttachedToken::empty(),
-                        assignments,
-                        update_predicate,
-                        delete_predicate,
-                    })
+                    ast::MergeAction::Update { assignments }
                 }
-                MergeAction::Delete => ast::MergeAction::Delete {
-                    delete_token: AttachedToken::empty(),
-                },
+                MergeAction::Delete => ast::MergeAction::Delete,
             };
 
             clauses.push(ast::MergeClause {
-                when_token: AttachedToken::empty(),
                 clause_kind: clause.clause_kind.clone(),
                 predicate,
                 action,
             });
         }
 
-        Ok(ast::Statement::Merge(ast::Merge {
-            merge_token: AttachedToken::empty(),
+        Ok(ast::Statement::Merge {
             into: true,
             table,
             source,
             on,
             clauses,
             output: None,
-        }))
+        })
     }
 
     fn plan_to_query(&self, plan: &LogicalPlan) -> Result<ast::Query> {

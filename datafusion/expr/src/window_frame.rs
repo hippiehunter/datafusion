@@ -28,7 +28,7 @@ use std::fmt::{self, Formatter};
 use std::hash::Hash;
 
 use datafusion_common::{Result, ScalarValue, plan_err};
-#[cfg(feature = "sql")]
+
 use sqlparser::ast::{self, ValueWithSpan};
 
 /// The frame specification determines which output rows are read by an aggregate
@@ -114,7 +114,7 @@ impl fmt::Debug for WindowFrame {
     }
 }
 
-#[cfg(feature = "sql")]
+
 impl TryFrom<ast::WindowFrame> for WindowFrame {
     type Error = datafusion_common::error::DataFusionError;
 
@@ -340,7 +340,7 @@ impl WindowFrameBound {
 }
 
 impl WindowFrameBound {
-    #[cfg(feature = "sql")]
+    
     fn try_parse(
         value: ast::WindowFrameBound,
         units: &ast::WindowFrameUnits,
@@ -363,7 +363,7 @@ impl WindowFrameBound {
     }
 }
 
-#[cfg(feature = "sql")]
+
 fn convert_frame_bound_to_scalar_value(
     v: ast::Expr,
     units: &ast::WindowFrameUnits,
@@ -484,7 +484,7 @@ impl fmt::Display for WindowFrameUnits {
     }
 }
 
-#[cfg(feature = "sql")]
+
 impl From<ast::WindowFrameUnits> for WindowFrameUnits {
     fn from(value: ast::WindowFrameUnits) -> Self {
         match value {
@@ -505,6 +505,7 @@ mod tests {
             units: ast::WindowFrameUnits::Range,
             start_bound: ast::WindowFrameBound::Following(None),
             end_bound: None,
+            exclude: None,
         };
         let err = WindowFrame::try_from(window_frame).unwrap_err();
         assert_eq!(
@@ -516,6 +517,7 @@ mod tests {
             units: ast::WindowFrameUnits::Range,
             start_bound: ast::WindowFrameBound::Preceding(None),
             end_bound: Some(ast::WindowFrameBound::Preceding(None)),
+            exclude: None,
         };
         let err = WindowFrame::try_from(window_frame).unwrap_err();
         assert_eq!(
@@ -531,6 +533,7 @@ mod tests {
             end_bound: Some(ast::WindowFrameBound::Preceding(Some(Box::new(
                 ast::Expr::value(ast::Value::Number("1".to_string(), false)),
             )))),
+            exclude: None,
         };
 
         let window_frame = WindowFrame::try_from(window_frame)?;

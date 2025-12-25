@@ -54,8 +54,8 @@ recursive_protection = ["dep:recursive"]
 arrow = { workspace = true }
 bigdecimal = { workspace = true }
 chrono = { workspace = true }
-datafusion-common = { workspace = true, features = ["sql"] }
-datafusion-expr = { workspace = true, features = ["sql"] }
+datafusion-common = { workspace = true }
+datafusion-expr = { workspace = true }
 indexmap = { workspace = true }
 log = { workspace = true }
 recursive = { workspace = true, optional = true }
