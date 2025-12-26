@@ -237,7 +237,6 @@ fn p001_03_postgres_function_syntax() {
 
 /// IF...THEN...END IF statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_if_basic() {
     assert_feature_supported!(
         "CREATE PROCEDURE check_value(val INT)
@@ -253,7 +252,6 @@ fn control_flow_if_basic() {
 
 /// IF...THEN...ELSE...END IF statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_if_else() {
     assert_feature_supported!(
         "CREATE PROCEDURE check_value(val INT)
@@ -271,7 +269,6 @@ fn control_flow_if_else() {
 
 /// IF...THEN...ELSEIF...ELSE...END IF statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_if_elseif() {
     assert_feature_supported!(
         "CREATE PROCEDURE check_value(val INT)
@@ -295,7 +292,6 @@ fn control_flow_if_elseif() {
 
 /// CASE statement (searched form)
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_case_searched() {
     assert_feature_supported!(
         "CREATE PROCEDURE classify_age(age INT)
@@ -313,7 +309,6 @@ fn control_flow_case_searched() {
 
 /// CASE statement (simple form)
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_case_simple() {
     assert_feature_supported!(
         "CREATE PROCEDURE classify_status(status INT)
@@ -336,7 +331,6 @@ fn control_flow_case_simple() {
 
 /// Basic LOOP...END LOOP
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_loop_basic() {
     assert_feature_supported!(
         "CREATE PROCEDURE loop_example()
@@ -356,7 +350,6 @@ fn control_flow_loop_basic() {
 
 /// LOOP with LEAVE statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_loop_leave() {
     assert_feature_supported!(
         "CREATE PROCEDURE loop_with_leave()
@@ -372,7 +365,6 @@ fn control_flow_loop_leave() {
 
 /// LOOP with ITERATE statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_loop_iterate() {
     assert_feature_supported!(
         "CREATE PROCEDURE loop_with_iterate()
@@ -399,7 +391,6 @@ fn control_flow_loop_iterate() {
 
 /// WHILE...DO...END WHILE statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_while() {
     assert_feature_supported!(
         "CREATE PROCEDURE while_example()
@@ -416,7 +407,6 @@ fn control_flow_while() {
 
 /// WHILE with labeled statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_while_labeled() {
     assert_feature_supported!(
         "CREATE PROCEDURE while_labeled()
@@ -440,7 +430,6 @@ fn control_flow_while_labeled() {
 
 /// REPEAT...UNTIL...END REPEAT statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_repeat() {
     assert_feature_supported!(
         "CREATE PROCEDURE repeat_example()
@@ -458,7 +447,6 @@ fn control_flow_repeat() {
 
 /// REPEAT with labeled statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_repeat_labeled() {
     assert_feature_supported!(
         "CREATE PROCEDURE repeat_labeled()
@@ -483,7 +471,6 @@ fn control_flow_repeat_labeled() {
 
 /// FOR...DO...END FOR statement (cursor-based)
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_for_cursor() {
     assert_feature_supported!(
         "CREATE PROCEDURE for_example()
@@ -499,7 +486,6 @@ fn control_flow_for_cursor() {
 
 /// FOR with labeled statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn control_flow_for_labeled() {
     assert_feature_supported!(
         "CREATE PROCEDURE for_labeled()
@@ -521,7 +507,6 @@ fn control_flow_for_labeled() {
 
 /// DECLARE variable with type
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_declare_basic() {
     assert_feature_supported!(
         "CREATE PROCEDURE declare_example()
@@ -535,7 +520,6 @@ fn variable_declare_basic() {
 
 /// DECLARE variable with DEFAULT value
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_declare_with_default() {
     assert_feature_supported!(
         "CREATE PROCEDURE declare_with_default()
@@ -550,7 +534,6 @@ fn variable_declare_with_default() {
 
 /// DECLARE multiple variables
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_declare_multiple() {
     assert_feature_supported!(
         "CREATE PROCEDURE declare_multiple()
@@ -569,7 +552,6 @@ fn variable_declare_multiple() {
 
 /// SET variable statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_set_basic() {
     assert_feature_supported!(
         "CREATE PROCEDURE set_example()
@@ -584,7 +566,6 @@ fn variable_set_basic() {
 
 /// SET with expression
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_set_expression() {
     assert_feature_supported!(
         "CREATE PROCEDURE set_expression()
@@ -600,7 +581,6 @@ fn variable_set_expression() {
 
 /// SET multiple variables
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_set_multiple() {
     assert_feature_supported!(
         "CREATE PROCEDURE set_multiple()
@@ -619,7 +599,6 @@ fn variable_set_multiple() {
 
 /// SELECT INTO variable
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_select_into_single() {
     assert_feature_supported!(
         "CREATE PROCEDURE select_into_example()
@@ -634,7 +613,6 @@ fn variable_select_into_single() {
 
 /// SELECT INTO multiple variables
 #[test]
-#[should_panic(expected = "should plan")]
 fn variable_select_into_multiple() {
     assert_feature_supported!(
         "CREATE PROCEDURE select_into_multiple()
@@ -657,7 +635,6 @@ fn variable_select_into_multiple() {
 
 /// DECLARE CONTINUE HANDLER
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_handler_continue() {
     assert_feature_supported!(
         "CREATE PROCEDURE handler_example()
@@ -673,7 +650,6 @@ fn exception_handler_continue() {
 
 /// DECLARE EXIT HANDLER
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_handler_exit() {
     assert_feature_supported!(
         "CREATE PROCEDURE handler_exit()
@@ -689,7 +665,6 @@ fn exception_handler_exit() {
 
 /// DECLARE HANDLER for specific SQLSTATE
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_handler_sqlstate() {
     assert_feature_supported!(
         "CREATE PROCEDURE handler_sqlstate()
@@ -706,7 +681,6 @@ fn exception_handler_sqlstate() {
 
 /// DECLARE HANDLER for NOT FOUND
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_handler_not_found() {
     assert_feature_supported!(
         "CREATE PROCEDURE handler_not_found()
@@ -726,7 +700,6 @@ fn exception_handler_not_found() {
 
 /// SIGNAL statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_signal() {
     assert_feature_supported!(
         "CREATE PROCEDURE signal_example()
@@ -740,7 +713,6 @@ fn exception_signal() {
 
 /// RESIGNAL statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_resignal() {
     assert_feature_supported!(
         "CREATE PROCEDURE resignal_example()
@@ -756,7 +728,6 @@ fn exception_resignal() {
 
 /// SIGNAL with multiple attributes
 #[test]
-#[should_panic(expected = "should plan")]
 fn exception_signal_attributes() {
     assert_feature_supported!(
         "CREATE PROCEDURE signal_attrs()
@@ -776,7 +747,6 @@ fn exception_signal_attributes() {
 
 /// T321-01: Simple UDF
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_01_udf_simple() {
     assert_feature_supported!(
         "CREATE FUNCTION add_ten(x INT) RETURNS INT
@@ -788,7 +758,6 @@ fn t321_01_udf_simple() {
 
 /// T321-01: UDF with DETERMINISTIC
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_01_udf_deterministic() {
     assert_feature_supported!(
         "CREATE FUNCTION calc_tax(amount DECIMAL(10,2)) RETURNS DECIMAL(10,2)
@@ -801,7 +770,6 @@ fn t321_01_udf_deterministic() {
 
 /// T321-01: UDF with CONTAINS SQL
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_01_udf_contains_sql() {
     assert_feature_supported!(
         "CREATE FUNCTION get_count() RETURNS INT
@@ -818,7 +786,6 @@ fn t321_01_udf_contains_sql() {
 
 /// T321-01: UDF with NO SQL
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_01_udf_no_sql() {
     assert_feature_supported!(
         "CREATE FUNCTION pure_calc(x INT, y INT) RETURNS INT
@@ -831,7 +798,6 @@ fn t321_01_udf_no_sql() {
 
 /// T321-01: UDF with READS SQL DATA
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_01_udf_reads_sql() {
     assert_feature_supported!(
         "CREATE FUNCTION get_salary(emp_id INT) RETURNS DECIMAL(10,2)
@@ -852,7 +818,6 @@ fn t321_01_udf_reads_sql() {
 
 /// T321-02: Simple stored procedure
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_02_procedure_simple() {
     assert_feature_supported!(
         "CREATE PROCEDURE reset_salaries()
@@ -864,7 +829,6 @@ fn t321_02_procedure_simple() {
 
 /// T321-02: Procedure with MODIFIES SQL DATA
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_02_procedure_modifies_sql() {
     assert_feature_supported!(
         "CREATE PROCEDURE update_all_salaries(increase DECIMAL(5,2))
@@ -877,7 +841,6 @@ fn t321_02_procedure_modifies_sql() {
 
 /// T321-02: Procedure with multiple statements
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_02_procedure_multiple_statements() {
     assert_feature_supported!(
         "CREATE PROCEDURE complex_update()
@@ -896,7 +859,6 @@ fn t321_02_procedure_multiple_statements() {
 
 /// T321-03: Call function in SELECT
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_03_function_invocation_select() {
     assert_feature_supported!(
         "SELECT add_ten(5)",
@@ -907,7 +869,6 @@ fn t321_03_function_invocation_select() {
 
 /// T321-03: Call function in WHERE clause
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_03_function_invocation_where() {
     assert_feature_supported!(
         "SELECT * FROM person WHERE salary > calc_tax(50000)",
@@ -918,7 +879,6 @@ fn t321_03_function_invocation_where() {
 
 /// T321-03: Call function with column reference
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_03_function_invocation_column() {
     assert_feature_supported!(
         "SELECT first_name, calc_tax(salary) FROM person",
@@ -933,7 +893,6 @@ fn t321_03_function_invocation_column() {
 
 /// T321-04: Basic CALL statement
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_04_call_basic() {
     assert_feature_supported!(
         "CALL reset_salaries()",
@@ -944,7 +903,6 @@ fn t321_04_call_basic() {
 
 /// T321-04: CALL with parameters
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_04_call_with_params() {
     assert_feature_supported!(
         "CALL increase_salary(123, 10.5)",
@@ -955,7 +913,6 @@ fn t321_04_call_with_params() {
 
 /// T321-04: CALL with OUT parameter
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_04_call_out_param() {
     assert_feature_supported!(
         "CALL get_employee_count(@count)",
@@ -966,7 +923,6 @@ fn t321_04_call_out_param() {
 
 /// T321-04: EXECUTE PROCEDURE (synonym for CALL)
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_04_execute_procedure() {
     assert_feature_supported!(
         "EXECUTE PROCEDURE reset_salaries()",
@@ -981,7 +937,6 @@ fn t321_04_execute_procedure() {
 
 /// T321-05: RETURN with literal value
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_05_return_literal() {
     assert_feature_supported!(
         "CREATE FUNCTION get_constant() RETURNS INT
@@ -995,7 +950,6 @@ fn t321_05_return_literal() {
 
 /// T321-05: RETURN with expression
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_05_return_expression() {
     assert_feature_supported!(
         "CREATE FUNCTION calc(x INT, y INT) RETURNS INT
@@ -1009,7 +963,6 @@ fn t321_05_return_expression() {
 
 /// T321-05: RETURN with variable
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_05_return_variable() {
     assert_feature_supported!(
         "CREATE FUNCTION get_value() RETURNS INT
@@ -1025,7 +978,6 @@ fn t321_05_return_variable() {
 
 /// T321-05: RETURN with SELECT result
 #[test]
-#[should_panic(expected = "should plan")]
 fn t321_05_return_select() {
     assert_feature_supported!(
         "CREATE FUNCTION get_max_salary() RETURNS DECIMAL(10,2)
@@ -1045,7 +997,6 @@ fn t321_05_return_select() {
 
 /// Nested IF statements
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_nested_if() {
     assert_feature_supported!(
         "CREATE PROCEDURE nested_if(val INT)
@@ -1067,7 +1018,6 @@ fn complex_nested_if() {
 
 /// LOOP with multiple control statements
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_loop_control() {
     assert_feature_supported!(
         "CREATE PROCEDURE complex_loop()
@@ -1091,7 +1041,6 @@ fn complex_loop_control() {
 
 /// Mixed control flow structures
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_mixed_control() {
     assert_feature_supported!(
         "CREATE PROCEDURE mixed_control(max_val INT)
@@ -1121,7 +1070,6 @@ fn complex_mixed_control() {
 
 /// Multiple exception handlers
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_multiple_handlers() {
     assert_feature_supported!(
         "CREATE PROCEDURE multi_handlers()
@@ -1142,7 +1090,6 @@ fn complex_multiple_handlers() {
 
 /// Nested blocks with handlers
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_nested_blocks_handlers() {
     assert_feature_supported!(
         "CREATE PROCEDURE nested_handlers()
@@ -1166,7 +1113,6 @@ fn complex_nested_blocks_handlers() {
 
 /// Complete procedure with all features
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_full_procedure() {
     assert_feature_supported!(
         "CREATE PROCEDURE process_employees(min_salary DECIMAL(10,2), OUT processed_count INT)
@@ -1204,7 +1150,6 @@ fn complex_full_procedure() {
 
 /// Procedure with transaction control
 #[test]
-#[should_panic(expected = "should plan")]
 fn complex_procedure_transaction() {
     assert_feature_supported!(
         "CREATE PROCEDURE safe_update(emp_id INT, new_salary DECIMAL(10,2))

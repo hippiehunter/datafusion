@@ -27,9 +27,45 @@ use datafusion_expr::logical_plan::psm::{
     PsmStatementKind, PsmVariable, PsmWhen, PsmWhile, RegionInfo,
 };
 use datafusion_expr::Expr;
-use sqlparser::ast::{self, DeclareAssignment, Ident, ReturnStatementValue, Statement};
+use sqlparser::ast::{
+    self, ConditionalStatements, DeclareAssignment, Ident, ReturnStatementValue, Statement,
+};
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
+    /// Plan PSM body from ConditionalStatements (used by CREATE PROCEDURE).
+    ///
+    /// ConditionalStatements can be either:
+    /// - Sequence { statements } - plain sequence of statements
+    /// - BeginEnd(BeginEndStatements) - BEGIN/END block
+    pub fn plan_psm_block_from_conditional(
+        &self,
+        body: &ConditionalStatements,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmBlock> {
+        match body {
+            ConditionalStatements::BeginEnd(begin_end) => {
+                // Delegate to existing BEGIN/END handler
+                self.plan_psm_block(begin_end, planner_context)
+            }
+            ConditionalStatements::Sequence { statements } => {
+                // Plan sequence of statements as a block
+                let mut planned_statements = Vec::new();
+                let mut info = RegionInfo::default();
+
+                for stmt in statements {
+                    let planned = self.plan_psm_statement(stmt, planner_context)?;
+                    info.merge(&planned.info);
+                    planned_statements.push(planned);
+                }
+
+                Ok(PsmBlock {
+                    label: None,
+                    statements: planned_statements,
+                    info,
+                })
+            }
+        }
+    }
     /// Plan a PSM compound statement (BEGIN/END block).
     pub fn plan_psm_block(
         &self,

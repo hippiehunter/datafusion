@@ -44,20 +44,21 @@ use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
-    Analyze, AnalyzeTable, CreateCatalog, CreateCatalogSchema,
+    Analyze, AnalyzeTable, Call, CreateCatalog, CreateCatalogSchema,
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
-    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateRole, CreateView, Deallocate,
-    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropRole, DropSequence,
-    DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr,
-    ExprSchemable, Filter, Grant, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
-    MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
-    MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare, ReleaseSavepoint,
-    ResetVariable, Revoke, RollbackToSavepoint, Savepoint, SetTransaction,
+    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateProcedure, CreateRole,
+    CreateView, Deallocate, DescribeTable, DmlStatement, DropCatalogSchema, DropFunction,
+    DropRole, DropSequence, DropTable, DropView, EmptyRelation, Execute, Explain,
+    ExplainFormat, Expr, ExprSchemable, Filter, Grant, JoinType, LogicalPlan,
+    LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr,
+    MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare,
+    ReleaseSavepoint, ResetVariable, Revoke, RollbackToSavepoint, Savepoint, SetTransaction,
     SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
     TransactionAccessMode, TransactionConclusion, TransactionEnd,
     TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
     Volatility, WriteOp, cast, col,
 };
+use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use sqlparser::ast::{
     self, BeginTransactionKind, IndexColumn, IndexType, OrderByExpr, OrderByOptions, Set,
     ShowStatementIn, ShowStatementOptions, SqliteOnConflict, TableObject,
@@ -1603,6 +1604,128 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(LogicalPlan::Statement(PlanStatement::UseDatabase(
                     UseDatabase { db_name },
                 )))
+            }
+            Statement::CreateProcedure {
+                or_alter,
+                name,
+                params,
+                body,
+                ..
+            } => {
+                // Extract procedure name
+                let proc_name = object_name_to_string(&name);
+
+                // Convert parameters to ProcedureArg
+                let args = match params {
+                    Some(procedure_params) => {
+                        let planned_args: Result<Vec<ProcedureArg>> = procedure_params
+                            .into_iter()
+                            .map(|p| {
+                                let mode = match p.mode {
+                                    Some(ast::ArgMode::In) | None => ParameterMode::In,
+                                    Some(ast::ArgMode::Out) => ParameterMode::Out,
+                                    Some(ast::ArgMode::InOut) => ParameterMode::InOut,
+                                };
+                                // Convert data type using the field helper
+                                let field =
+                                    self.convert_data_type_to_field(&p.data_type)?;
+                                Ok(ProcedureArg {
+                                    mode,
+                                    name: Some(p.name),
+                                    data_type: field.data_type().clone(),
+                                    default: None,
+                                })
+                            })
+                            .collect();
+                        Some(planned_args?)
+                    }
+                    None => None,
+                };
+
+                // Plan the procedure body
+                let mut planner_context = PlannerContext::new();
+                let psm_body =
+                    self.plan_psm_block_from_conditional(&body, &mut planner_context)?;
+
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateProcedure(
+                    CreateProcedure {
+                        or_replace: or_alter,
+                        name: proc_name,
+                        args,
+                        body: psm_body,
+                    },
+                )))
+            }
+            Statement::Call(function) => {
+                let procedure_name = function.name.to_string();
+                let mut planner_context = PlannerContext::new();
+                let schema = DFSchema::empty();
+
+                // Extract and plan call arguments from FunctionArguments
+                let args = match &function.args {
+                    ast::FunctionArguments::None => vec![],
+                    ast::FunctionArguments::Subquery(_) => {
+                        return not_impl_err!(
+                            "CALL with subquery argument is not supported"
+                        );
+                    }
+                    ast::FunctionArguments::List(arg_list) => {
+                        let mut planned_args = Vec::new();
+                        for arg in &arg_list.args {
+                            // Extract expression from FunctionArg
+                            let sql_expr = match arg {
+                                ast::FunctionArg::Named { arg, .. } => match arg {
+                                    ast::FunctionArgExpr::Expr(e) => e.clone(),
+                                    ast::FunctionArgExpr::Wildcard => {
+                                        return not_impl_err!(
+                                            "Wildcard in CALL is not supported"
+                                        );
+                                    }
+                                    ast::FunctionArgExpr::QualifiedWildcard(_) => {
+                                        return not_impl_err!(
+                                            "Qualified wildcard in CALL is not supported"
+                                        );
+                                    }
+                                },
+                                ast::FunctionArg::ExprNamed { arg, .. } => match arg {
+                                    ast::FunctionArgExpr::Expr(e) => e.clone(),
+                                    _ => {
+                                        return not_impl_err!(
+                                            "Non-expression args in CALL not supported"
+                                        );
+                                    }
+                                },
+                                ast::FunctionArg::Unnamed(arg_expr) => match arg_expr {
+                                    ast::FunctionArgExpr::Expr(e) => e.clone(),
+                                    ast::FunctionArgExpr::Wildcard => {
+                                        return not_impl_err!(
+                                            "Wildcard in CALL is not supported"
+                                        );
+                                    }
+                                    ast::FunctionArgExpr::QualifiedWildcard(_) => {
+                                        return not_impl_err!(
+                                            "Qualified wildcard in CALL is not supported"
+                                        );
+                                    }
+                                },
+                                other => {
+                                    return not_impl_err!(
+                                        "Unsupported CALL argument type: {other:?}"
+                                    );
+                                }
+                            };
+                            let planned =
+                                self.sql_to_expr(sql_expr, &schema, &mut planner_context)?;
+                            planned_args.push(planned);
+                        }
+                        planned_args
+                    }
+                };
+
+                Ok(LogicalPlan::Statement(PlanStatement::Call(Call {
+                    procedure_name,
+                    args,
+                })))
             }
             stmt => {
                 not_impl_err!("Unsupported SQL statement: {stmt}")
