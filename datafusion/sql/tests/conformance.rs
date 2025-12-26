@@ -59,6 +59,7 @@ use datafusion_expr::{
     ScalarUDFImpl, Signature, TableSource, TypeSignature, Volatility, WindowUDF, WindowUDFImpl,
 };
 use datafusion_expr::planner::ExprPlanner;
+use datafusion_common::ScalarValue;
 use datafusion_expr::function::PartitionEvaluatorArgs;
 use datafusion_sql::parser::DFParser;
 use datafusion_sql::planner::{ContextProvider, ParserOptions, SqlToRel};
@@ -601,6 +602,53 @@ stub_scalar_udf!(TrimArray, "trim_array");
 stub_scalar_udf!(Cardinality, "cardinality");
 stub_scalar_udf!(GetField, "get_field");
 
+// MakeArray - special stub for array literal construction
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct MakeArray {
+    signature: Signature,
+}
+
+impl Default for MakeArray {
+    fn default() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for MakeArray {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "make_array"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        // Return List type based on first argument type, or Null for empty arrays
+        if arg_types.is_empty() {
+            Ok(DataType::List(Arc::new(Field::new_list_field(DataType::Null, true))))
+        } else {
+            Ok(DataType::List(Arc::new(Field::new_list_field(arg_types[0].clone(), true))))
+        }
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("stub function make_array should not be invoked")
+    }
+}
+
+pub fn make_array_udf() -> Arc<ScalarUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(MakeArray::default())));
+    Arc::clone(&INSTANCE)
+}
+
 // Row constructor - supports zero or more arguments
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct RowConstructor {
@@ -1009,6 +1057,7 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
 
             // Array functions
             "array" => Some(array_udf()),
+            "make_array" => Some(make_array_udf()),
             "array_append" => Some(array_append_udf()),
             "array_distinct" => Some(array_distinct_udf()),
             "array_except" => Some(array_except_udf()),
@@ -1156,6 +1205,55 @@ impl ExprPlanner for ConformanceExprPlanner {
         let func = row_constructor_udf();
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
             datafusion_expr::expr::ScalarFunction::new_udf(func, args),
+        )))
+    }
+
+    fn plan_array_literal(
+        &self,
+        exprs: Vec<Expr>,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<Vec<Expr>>> {
+        // Handle array literals like [1, 2, 3] or ARRAY[...]
+
+        // Empty arrays: create a Null scalar list
+        if exprs.is_empty() {
+            let empty_list = ScalarValue::new_list_nullable(&[], &DataType::Null);
+            let list_scalar = ScalarValue::List(empty_list);
+            return Ok(PlannerResult::Planned(Expr::Literal(list_scalar, None)));
+        }
+
+        // Check if all expressions are literals (no column references)
+        let all_literals = exprs.iter().all(|e| matches!(e, Expr::Literal(_, _)));
+
+        if all_literals {
+            // For literal-only arrays, create a ScalarValue::List
+            let mut values = Vec::new();
+            for expr in &exprs {
+                if let Expr::Literal(scalar, _) = expr {
+                    values.push(scalar.clone());
+                } else {
+                    // Should not happen given all_literals check, but be defensive
+                    let func = make_array_udf();
+                    return Ok(PlannerResult::Planned(Expr::ScalarFunction(
+                        datafusion_expr::expr::ScalarFunction::new_udf(func, exprs),
+                    )));
+                }
+            }
+
+            // Try to create a list scalar value
+            // Get the data type from the first element
+            if let Some(first) = values.first() {
+                let data_type = first.data_type();
+                let list_array = ScalarValue::new_list_nullable(&values, &data_type);
+                let list_scalar = ScalarValue::List(list_array);
+                return Ok(PlannerResult::Planned(Expr::Literal(list_scalar, None)));
+            }
+        }
+
+        // For arrays with column references or expressions, use make_array function
+        let func = make_array_udf();
+        Ok(PlannerResult::Planned(Expr::ScalarFunction(
+            datafusion_expr::expr::ScalarFunction::new_udf(func, exprs),
         )))
     }
 
@@ -2061,10 +2159,11 @@ mod tests {
         assert!(provider.get_aggregate_function("avg").is_some());
         assert!(provider.get_aggregate_function("min").is_some());
         assert!(provider.get_aggregate_function("max").is_some());
-        // Scalar functions are not available in this crate
-        assert!(provider.get_scalar_function("upper").is_none());
-        // Window functions are not available in this crate
-        assert!(provider.get_window_function("row_number").is_none());
+        // Scalar functions are now available as stubs for conformance testing
+        assert!(provider.get_scalar_function("upper").is_some());
+        assert!(provider.get_scalar_function("make_array").is_some());
+        // Window functions are now available as stubs for conformance testing
+        assert!(provider.get_window_function("row_number").is_some());
     }
 
     #[test]

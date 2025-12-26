@@ -1504,28 +1504,86 @@ fn ree_comparison_coercion_numeric(
 /// 2. Data type of the other side should be able to cast to string type
 fn string_concat_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
-    string_coercion(lhs_type, rhs_type).or_else(|| match (lhs_type, rhs_type) {
-        (Utf8View, from_type) | (from_type, Utf8View) => {
-            string_concat_internal_coercion(from_type, &Utf8View)
+    string_coercion(lhs_type, rhs_type).or_else(|| {
+        // Handle array concatenation
+        if let Some(array_type) = array_coercion(lhs_type, rhs_type) {
+            return Some(array_type);
         }
-        (Utf8, from_type) | (from_type, Utf8) => {
-            string_concat_internal_coercion(from_type, &Utf8)
+
+        match (lhs_type, rhs_type) {
+            (Utf8View, from_type) | (from_type, Utf8View) => {
+                string_concat_internal_coercion(from_type, &Utf8View)
+            }
+            (Utf8, from_type) | (from_type, Utf8) => {
+                string_concat_internal_coercion(from_type, &Utf8)
+            }
+            (LargeUtf8, from_type) | (from_type, LargeUtf8) => {
+                string_concat_internal_coercion(from_type, &LargeUtf8)
+            }
+            (Dictionary(_, lhs_value_type), Dictionary(_, rhs_value_type)) => {
+                string_coercion(lhs_value_type, rhs_value_type).or(None)
+            }
+            _ => None,
         }
-        (LargeUtf8, from_type) | (from_type, LargeUtf8) => {
-            string_concat_internal_coercion(from_type, &LargeUtf8)
-        }
-        (Dictionary(_, lhs_value_type), Dictionary(_, rhs_value_type)) => {
-            string_coercion(lhs_value_type, rhs_value_type).or(None)
-        }
-        _ => None,
     })
 }
 
 fn array_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
+    use arrow::datatypes::DataType::*;
+
+    // Handle exact match
     if lhs_type.equals_datatype(rhs_type) {
-        Some(lhs_type.to_owned())
-    } else {
-        None
+        return Some(lhs_type.to_owned());
+    }
+
+    // Handle List type coercion - coerce element types if they're compatible
+    match (lhs_type, rhs_type) {
+        (List(lhs_field), List(rhs_field)) => {
+            let lhs_elem_type = lhs_field.data_type();
+            let rhs_elem_type = rhs_field.data_type();
+
+            // Try to coerce element types using numeric coercion
+            if let Some(coerced_elem_type) = mathematics_numerical_coercion(lhs_elem_type, rhs_elem_type) {
+                return Some(List(Arc::new(Field::new(
+                    lhs_field.name(),
+                    coerced_elem_type,
+                    true,
+                ))));
+            }
+
+            // If both elements are the same type, return as is
+            if lhs_elem_type.equals_datatype(rhs_elem_type) {
+                return Some(lhs_type.to_owned());
+            }
+
+            None
+        }
+        // Handle FixedSizeList as well
+        (FixedSizeList(lhs_field, lhs_size), FixedSizeList(rhs_field, rhs_size)) => {
+            if lhs_size != rhs_size {
+                return None;
+            }
+
+            let lhs_elem_type = lhs_field.data_type();
+            let rhs_elem_type = rhs_field.data_type();
+
+            // Try to coerce element types
+            if let Some(coerced_elem_type) = mathematics_numerical_coercion(lhs_elem_type, rhs_elem_type) {
+                return Some(FixedSizeList(Arc::new(Field::new(
+                    lhs_field.name(),
+                    coerced_elem_type,
+                    true,
+                )), *lhs_size));
+            }
+
+            // If both elements are the same type, return as is
+            if lhs_elem_type.equals_datatype(rhs_elem_type) {
+                return Some(lhs_type.to_owned());
+            }
+
+            None
+        }
+        _ => None,
     }
 }
 
