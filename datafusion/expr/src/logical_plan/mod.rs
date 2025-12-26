@@ -36,8 +36,8 @@ pub use builder::{
 pub use ddl::{
     AlterTable, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
     CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateProcedure,
-    CreateView, DdlStatement, DropCatalogSchema, DropDomain, DropFunction, DropProcedure,
-    DropSequence, DropTable, DropView, OperateFunctionArg,
+    CreateRole, CreateView, DdlStatement, DropCatalogSchema, DropDomain, DropFunction,
+    DropProcedure, DropRole, DropSequence, DropTable, DropView, OperateFunctionArg,
 };
 pub use dml::{DmlStatement, WriteOp};
 pub use merge::{
@@ -53,10 +53,10 @@ pub use plan::{
     projection_schema,
 };
 pub use statement::{
-    Call, Deallocate, Execute, Grant, Prepare, ReleaseSavepoint, ResetVariable, Revoke,
-    RollbackToSavepoint, Savepoint, SetTransaction, SetVariable, Statement,
-    TransactionAccessMode, TransactionConclusion, TransactionEnd,
-    TransactionIsolationLevel, TransactionStart,
+    AnalyzeTable, Call, Deallocate, Execute, Grant, Prepare, ReleaseSavepoint,
+    ResetVariable, Revoke, RollbackToSavepoint, Savepoint, SetTransaction, SetVariable,
+    Statement, TransactionAccessMode, TransactionConclusion, TransactionEnd,
+    TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
 };
 pub use psm::{
     HandlerCondition, HandlerType, ParameterMode, ProcedureArg, PsmBlock, PsmCase,

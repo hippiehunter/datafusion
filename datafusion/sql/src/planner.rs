@@ -665,7 +665,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             SQLDataType::IntUnsigned(_)
             | SQLDataType::IntegerUnsigned(_)
             | SQLDataType::Int4Unsigned(_) => Ok(DataType::UInt32),
-            SQLDataType::Varchar(length) => {
+            SQLDataType::Varchar(length)
+            | SQLDataType::CharacterVarying(length)
+            | SQLDataType::CharVarying(length) => {
                 match (length, self.options.support_varchar_with_length) {
                     (Some(_), false) => plan_err!(
                         "does not support Varchar with length, \
@@ -695,7 +697,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     "Unsupported SQL type (precision/scale not supported) {sql_type}"
                 )
             }
-            SQLDataType::Char(_) | SQLDataType::Text | SQLDataType::String(_) => {
+            SQLDataType::Char(_)
+            | SQLDataType::Character(_)
+            | SQLDataType::Text
+            | SQLDataType::String(_) => {
                 if self.options.map_string_types_to_utf8view {
                     Ok(DataType::Utf8View)
                 } else {
@@ -726,18 +731,30 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 Ok(DataType::Timestamp(precision, tz.map(Into::into)))
             }
             SQLDataType::Date => Ok(DataType::Date32),
-            SQLDataType::Time(None, tz_info) => {
-                if matches!(tz_info, TimezoneInfo::None)
-                    || matches!(tz_info, TimezoneInfo::WithoutTimeZone)
-                {
-                    Ok(DataType::Time64(TimeUnit::Nanosecond))
-                } else {
-                    // We don't support TIMETZ and TIME WITH TIME ZONE for now
-                    not_impl_err!("Unsupported SQL type {sql_type}")
+            SQLDataType::Time(precision, tz_info) => {
+                // TIME types map to Time64
+                // Note: TIME WITH TIME ZONE is accepted but timezone info is not preserved
+                // since Arrow doesn't have a native time-with-timezone type
+                // Precision mapping:
+                // - None or >= 6: Nanosecond (default, most precision)
+                // - 3-5: Microsecond
+                // - 0-2: Millisecond
+                let time_unit = match precision {
+                    None => TimeUnit::Nanosecond,
+                    Some(p) if *p >= 6 => TimeUnit::Nanosecond,
+                    Some(p) if *p >= 3 => TimeUnit::Microsecond,
+                    Some(_) => TimeUnit::Millisecond,
+                };
+                match tz_info {
+                    TimezoneInfo::None
+                    | TimezoneInfo::WithoutTimeZone
+                    | TimezoneInfo::WithTimeZone
+                    | TimezoneInfo::Tz => Ok(DataType::Time64(time_unit)),
                 }
             }
             SQLDataType::Numeric(exact_number_info)
-            | SQLDataType::Decimal(exact_number_info) => {
+            | SQLDataType::Decimal(exact_number_info)
+            | SQLDataType::Dec(exact_number_info) => {
                 let (precision, scale) = match *exact_number_info {
                     ExactNumberInfo::None => (None, None),
                     ExactNumberInfo::Precision(precision) => (Some(precision), None),
@@ -748,13 +765,80 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 make_decimal_type(precision, scale.map(|s| s as u64))
             }
             SQLDataType::Bytea => Ok(DataType::Binary),
-            SQLDataType::Interval { fields, precision: _ } => match fields {
-                None | Some(sqlparser::ast::IntervalFields::DayToSecond) => {
-                    Ok(DataType::Interval(IntervalUnit::MonthDayNano))
+            SQLDataType::Interval { fields, precision: _ } => {
+                // Map SQL interval field types to Arrow interval types
+                // MonthDayNano is the most flexible and can represent all SQL interval types
+                use sqlparser::ast::IntervalFields::*;
+                match fields {
+                    None => Ok(DataType::Interval(IntervalUnit::MonthDayNano)),
+                    Some(Year) | Some(Month) | Some(YearToMonth) => {
+                        // Year-month intervals use YearMonth for efficiency, or MonthDayNano for flexibility
+                        Ok(DataType::Interval(IntervalUnit::MonthDayNano))
+                    }
+                    Some(Day) | Some(Hour) | Some(Minute) | Some(Second)
+                    | Some(DayToHour) | Some(DayToMinute) | Some(DayToSecond)
+                    | Some(HourToMinute) | Some(HourToSecond) | Some(MinuteToSecond) => {
+                        // Day-time intervals use MonthDayNano for flexibility
+                        Ok(DataType::Interval(IntervalUnit::MonthDayNano))
+                    }
                 }
-                _ => not_impl_err!("Unsupported SQL type {sql_type}"),
-            },
+            }
             SQLDataType::Struct(fields, _) => {
+                let fields = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, sql_struct_field)| {
+                        let field = self.convert_data_type_to_field(&sql_struct_field.field_type)?;
+                        let field_name = match &sql_struct_field.field_name {
+                            Some(ident) => ident.clone(),
+                            None => Ident::new(format!("c{idx}")),
+                        };
+                        Ok(field.as_ref().clone().with_name(self.ident_normalizer.normalize(field_name)))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(DataType::Struct(Fields::from(fields)))
+            }
+            // Handle ROW type as STRUCT (SQL:2016 T051)
+            // ROW types are parsed as Custom types by sqlparser
+            SQLDataType::Custom(name, modifiers)
+                if name.0.len() == 1
+                    && name.0[0].as_ident().map_or(false, |i| i.value.to_uppercase() == "ROW") =>
+            {
+                // Parse modifiers as field name/type pairs: [name1, type1, name2, type2, ...]
+                let mut fields = Vec::new();
+                let mut iter = modifiers.iter();
+                let mut idx = 0;
+                while let Some(field_name) = iter.next() {
+                    if let Some(field_type_str) = iter.next() {
+                        // Try to parse the type string
+                        let data_type = match field_type_str.to_uppercase().as_str() {
+                            "INT" | "INTEGER" => DataType::Int32,
+                            "BIGINT" | "INT8" => DataType::Int64,
+                            "SMALLINT" | "INT2" => DataType::Int16,
+                            "TINYINT" => DataType::Int8,
+                            "FLOAT" | "REAL" => DataType::Float32,
+                            "DOUBLE" | "FLOAT8" => DataType::Float64,
+                            "VARCHAR" | "STRING" | "TEXT" => DataType::Utf8,
+                            "BOOLEAN" | "BOOL" => DataType::Boolean,
+                            "DATE" => DataType::Date32,
+                            _ => return plan_err!("Unknown or unsupported type '{}' in ROW type definition", field_type_str)
+                        };
+                        fields.push(Field::new(field_name, data_type, true));
+                    } else {
+                        // No type specified, use default
+                        fields.push(Field::new(format!("c{}", idx), DataType::Utf8, true));
+                    }
+                    idx += 1;
+                }
+                if fields.is_empty() {
+                    // Empty ROW type - create with no fields
+                    Ok(DataType::Struct(Fields::empty()))
+                } else {
+                    Ok(DataType::Struct(Fields::from(fields)))
+                }
+            }
+            // Handle Tuple type from ClickHouse as STRUCT
+            SQLDataType::Tuple(fields) => {
                 let fields = fields
                     .iter()
                     .enumerate()
@@ -783,14 +867,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::Set(_)
             | SQLDataType::MediumInt(_)
             | SQLDataType::MediumIntUnsigned(_)
-            | SQLDataType::Character(_)
-            | SQLDataType::CharacterVarying(_)
-            | SQLDataType::CharVarying(_)
             | SQLDataType::CharacterLargeObject(_)
             | SQLDataType::CharLargeObject(_)
             | SQLDataType::Timestamp(_, _)
-            | SQLDataType::Time(Some(_), _)
-            | SQLDataType::Dec(_)
             | SQLDataType::BigNumeric(_)
             | SQLDataType::BigDecimal(_)
             | SQLDataType::Clob(_)
@@ -814,7 +893,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::Datetime64(_, _)
             | SQLDataType::FixedString(_)
             | SQLDataType::Map(_, _)
-            | SQLDataType::Tuple(_)
             | SQLDataType::Nested(_)
             | SQLDataType::Union(_)
             | SQLDataType::Nullable(_)

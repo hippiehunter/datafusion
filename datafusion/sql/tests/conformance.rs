@@ -53,10 +53,10 @@ use std::sync::Arc;
 use arrow::datatypes::*;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{GetExt, Result, TableReference, plan_err, not_impl_err};
+use datafusion_common::{DFSchema, GetExt, Result, TableReference, plan_err, not_impl_err};
 use datafusion_expr::{
     AggregateUDF, ColumnarValue, PartitionEvaluator, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, TableSource, Volatility, WindowUDF, WindowUDFImpl,
+    ScalarUDFImpl, Signature, TableSource, TypeSignature, Volatility, WindowUDF, WindowUDFImpl,
 };
 use datafusion_expr::planner::ExprPlanner;
 use datafusion_expr::function::PartitionEvaluatorArgs;
@@ -405,12 +405,123 @@ stub_scalar_udf!(Trunc, "trunc");
 stub_scalar_udf!(Truncate, "truncate");
 
 // Date/time functions (F051)
-stub_scalar_udf!(CurrentDate, "current_date");
-stub_scalar_udf!(CurrentTime, "current_time");
-stub_scalar_udf!(CurrentTimestamp, "current_timestamp");
+// Note: CurrentDate, CurrentTime, CurrentTimestamp, LocalTime, LocalTimestamp, and Now
+// are defined as custom implementations below with nullary signatures.
 stub_scalar_udf!(Extract, "extract");
 stub_scalar_udf!(DatePart, "date_part");
-stub_scalar_udf!(Now, "now");
+
+/// Macro to create a stub scalar function with nullary signature for datetime functions.
+/// These functions can be called without arguments: CURRENT_DATE(), CURRENT_TIME(), etc.
+macro_rules! stub_nullary_datetime_udf {
+    ($name:ident, $fn_name:expr, $return_type:expr) => {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            signature: Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: Signature::nullary(Volatility::Stable),
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for $name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+                Ok($return_type)
+            }
+
+            fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                not_impl_err!("stub function {} should not be invoked", $fn_name)
+            }
+        }
+
+        paste::paste! {
+            pub fn [<$name:snake _udf>]() -> Arc<ScalarUDF> {
+                static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+                    std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from($name::default())));
+                Arc::clone(&INSTANCE)
+            }
+        }
+    };
+}
+
+/// Macro to create a stub datetime function that supports optional precision argument.
+/// These functions can be called as CURRENT_TIME() or CURRENT_TIME(3).
+/// Precision is specified as Int64.
+macro_rules! stub_optional_precision_datetime_udf {
+    ($name:ident, $fn_name:expr, $return_type:expr) => {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            signature: Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: Signature::one_of(
+                        vec![
+                            TypeSignature::Nullary,
+                            TypeSignature::Exact(vec![DataType::Int64]),
+                        ],
+                        Volatility::Stable,
+                    ),
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for $name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+                Ok($return_type)
+            }
+
+            fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                not_impl_err!("stub function {} should not be invoked", $fn_name)
+            }
+        }
+
+        paste::paste! {
+            pub fn [<$name:snake _udf>]() -> Arc<ScalarUDF> {
+                static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+                    std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from($name::default())));
+                Arc::clone(&INSTANCE)
+            }
+        }
+    };
+}
+
+// Nullary datetime functions - can be called as CURRENT_DATE(), NOW(), etc.
+stub_nullary_datetime_udf!(CurrentDate, "current_date", DataType::Date32);
+stub_nullary_datetime_udf!(Now, "now", DataType::Timestamp(TimeUnit::Nanosecond, None));
+
+// Datetime functions with optional precision - can be called as CURRENT_TIME() or CURRENT_TIME(3)
+stub_optional_precision_datetime_udf!(CurrentTime, "current_time", DataType::Time64(TimeUnit::Nanosecond));
+stub_optional_precision_datetime_udf!(CurrentTimestamp, "current_timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None));
 
 // CASE and conditional (F261)
 stub_scalar_udf!(Case, "case");
@@ -438,8 +549,9 @@ stub_scalar_udf!(Overlay, "overlay");
 stub_scalar_udf!(DateAdd, "date_add");
 stub_scalar_udf!(DateSub, "date_sub");
 stub_scalar_udf!(DateTrunc, "date_trunc");
-stub_scalar_udf!(LocalTime, "localtime");
-stub_scalar_udf!(LocalTimestamp, "localtimestamp");
+// LocalTime and LocalTimestamp support optional precision argument
+stub_optional_precision_datetime_udf!(LocalTime, "localtime", DataType::Time64(TimeUnit::Nanosecond));
+stub_optional_precision_datetime_udf!(LocalTimestamp, "localtimestamp", DataType::Timestamp(TimeUnit::Nanosecond, None));
 
 // Trigonometric functions
 stub_scalar_udf!(Sin, "sin");
@@ -483,11 +595,59 @@ stub_scalar_udf!(ArrayPrepend, "array_prepend");
 stub_scalar_udf!(ArrayRemove, "array_remove");
 stub_scalar_udf!(ArrayReplace, "array_replace");
 stub_scalar_udf!(ArrayUnion, "array_union");
+stub_scalar_udf!(ArraySlice, "array_slice");
+stub_scalar_udf!(ArrayElement, "array_element");
 stub_scalar_udf!(TrimArray, "trim_array");
 stub_scalar_udf!(Cardinality, "cardinality");
+stub_scalar_udf!(GetField, "get_field");
 
-// Row constructor
-stub_scalar_udf!(RowConstructor, "row");
+// Row constructor - supports zero or more arguments
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct RowConstructor {
+    signature: Signature,
+}
+
+impl Default for RowConstructor {
+    fn default() -> Self {
+        // Use OneOf with Nullary for zero args and VariadicAny for 1+ args
+        // This allows ROW() (empty) as well as ROW(a, b, c)
+        Self {
+            signature: Signature::one_of(
+                vec![TypeSignature::Nullary, TypeSignature::VariadicAny],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for RowConstructor {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "row"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        // Return Struct type for row constructor
+        Ok(DataType::Struct(Fields::empty()))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("stub function row should not be invoked")
+    }
+}
+
+pub fn row_constructor_udf() -> Arc<ScalarUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(RowConstructor::default())));
+    Arc::clone(&INSTANCE)
+}
 
 // Null handling extended
 stub_scalar_udf!(Ifnull, "ifnull");
@@ -507,6 +667,7 @@ stub_scalar_udf!(JsonArray, "json_array");
 stub_scalar_udf!(JsonExists, "json_exists");
 stub_scalar_udf!(JsonQuery, "json_query");
 stub_scalar_udf!(JsonValue, "json_value");
+stub_scalar_udf!(JsonObject, "json_object");
 
 // ============================================================================
 // Additional Aggregate Function Stubs
@@ -590,6 +751,7 @@ stub_aggregate_udf!(StringAgg, "string_agg");
 
 // JSON aggregate functions
 stub_aggregate_udf!(JsonArrayAgg, "json_arrayagg");
+stub_aggregate_udf!(JsonObjectAgg, "json_objectagg");
 
 // ============================================================================
 // Window Function Stubs for Conformance Testing
@@ -597,6 +759,55 @@ stub_aggregate_udf!(JsonArrayAgg, "json_arrayagg");
 
 /// Macro to create a stub window function.
 macro_rules! stub_window_udf {
+    // Variant for zero-argument window functions (ROW_NUMBER, RANK, etc.)
+    ($name:ident, $fn_name:expr, zero_arg) => {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            signature: Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: Signature::nullary(Volatility::Immutable),
+                }
+            }
+        }
+
+        impl WindowUDFImpl for $name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn partition_evaluator(
+                &self,
+                _partition_evaluator_args: PartitionEvaluatorArgs,
+            ) -> Result<Box<dyn PartitionEvaluator>> {
+                not_impl_err!("stub window function {} should not be invoked", $fn_name)
+            }
+
+            fn field(&self, _field_args: datafusion_expr::function::WindowUDFFieldArgs) -> Result<Arc<Field>> {
+                Ok(Arc::new(Field::new($fn_name, DataType::Int64, true)))
+            }
+        }
+
+        paste::paste! {
+            pub fn [<$name:snake _udwf>]() -> Arc<WindowUDF> {
+                static INSTANCE: std::sync::LazyLock<Arc<WindowUDF>> =
+                    std::sync::LazyLock::new(|| Arc::new(WindowUDF::from($name::default())));
+                Arc::clone(&INSTANCE)
+            }
+        }
+    };
+    // Default variant for variadic window functions
     ($name:ident, $fn_name:expr) => {
         #[derive(Debug, PartialEq, Eq, Hash)]
         pub struct $name {
@@ -647,11 +858,11 @@ macro_rules! stub_window_udf {
 }
 
 // T611 Window functions
-stub_window_udf!(RowNumber, "row_number");
-stub_window_udf!(Rank, "rank");
-stub_window_udf!(DenseRank, "dense_rank");
-stub_window_udf!(PercentRank, "percent_rank");
-stub_window_udf!(CumeDist, "cume_dist");
+stub_window_udf!(RowNumber, "row_number", zero_arg);
+stub_window_udf!(Rank, "rank", zero_arg);
+stub_window_udf!(DenseRank, "dense_rank", zero_arg);
+stub_window_udf!(PercentRank, "percent_rank", zero_arg);
+stub_window_udf!(CumeDist, "cume_dist", zero_arg);
 stub_window_udf!(Ntile, "ntile");
 stub_window_udf!(Lead, "lead");
 stub_window_udf!(Lag, "lag");
@@ -696,6 +907,7 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "string_agg" => Some(string_agg_udaf()),
             // JSON aggregates
             "json_arrayagg" => Some(json_array_agg_udaf()),
+            "json_objectagg" => Some(json_object_agg_udaf()),
             _ => None,
         }
     }
@@ -830,6 +1042,7 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "json_exists" => Some(json_exists_udf()),
             "json_query" => Some(json_query_udf()),
             "json_value" => Some(json_value_udf()),
+            "json_object" => Some(json_object_udf()),
 
             _ => None,
         }
@@ -863,8 +1076,8 @@ pub fn default_function_provider() -> DataFusionFunctionProvider {
 // ConformanceExprPlanner - Handle SQL Standard Syntax
 // ============================================================================
 
-use datafusion_expr::planner::PlannerResult;
-use datafusion_expr::Expr;
+use datafusion_expr::planner::{PlannerResult, RawFieldAccessExpr};
+use datafusion_expr::{Expr, GetFieldAccess};
 
 /// Expression planner for SQL:2016 standard syntax.
 ///
@@ -930,6 +1143,58 @@ impl ExprPlanner for ConformanceExprPlanner {
             )))
         } else {
             Ok(PlannerResult::Original(args))
+        }
+    }
+
+    fn plan_struct_literal(
+        &self,
+        args: Vec<Expr>,
+        _is_named_struct: bool,
+    ) -> Result<PlannerResult<Vec<Expr>>> {
+        // Convert ROW(a, b, c) or STRUCT(a, b, c) to a row() function call
+        // The row() function creates a struct with fields named c0, c1, etc.
+        let func = row_constructor_udf();
+        Ok(PlannerResult::Planned(Expr::ScalarFunction(
+            datafusion_expr::expr::ScalarFunction::new_udf(func, args),
+        )))
+    }
+
+    fn plan_field_access(
+        &self,
+        expr: RawFieldAccessExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawFieldAccessExpr>> {
+        // Handle field access for arrays, structs, and lists
+        match &expr.field_access {
+            GetFieldAccess::ListRange { start, stop, stride } => {
+                // Convert array[start:stop:stride] to array_slice(array, start, stop, stride)
+                let func = array_slice_udf();
+                let args = vec![
+                    expr.expr.clone(),
+                    (**start).clone(),
+                    (**stop).clone(),
+                    (**stride).clone(),
+                ];
+                Ok(PlannerResult::Planned(Expr::ScalarFunction(
+                    datafusion_expr::expr::ScalarFunction::new_udf(func, args),
+                )))
+            }
+            GetFieldAccess::ListIndex { key } => {
+                // Convert array[index] to array_element(array, index)
+                let func = array_element_udf();
+                let args = vec![expr.expr.clone(), (**key).clone()];
+                Ok(PlannerResult::Planned(Expr::ScalarFunction(
+                    datafusion_expr::expr::ScalarFunction::new_udf(func, args),
+                )))
+            }
+            GetFieldAccess::NamedStructField { name } => {
+                // Convert struct.field to get_field(struct, field_name)
+                let func = get_field_udf();
+                let args = vec![expr.expr.clone(), datafusion_expr::lit(name.clone())];
+                Ok(PlannerResult::Planned(Expr::ScalarFunction(
+                    datafusion_expr::expr::ScalarFunction::new_udf(func, args),
+                )))
+            }
         }
     }
 }
@@ -1295,17 +1560,102 @@ impl<'a, F: ConformanceFunctionProvider> ConformanceContextProvider<'a, F> {
 
 impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextProvider<'a, F> {
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {
+        let schema_name = name.schema().unwrap_or("");
+        let table_name = name.table();
+
+        // Handle INFORMATION_SCHEMA specially (case-insensitive)
+        if schema_name.eq_ignore_ascii_case("information_schema") {
+            let schema = match table_name.to_lowercase().as_str() {
+                "tables" => Schema::new(vec![
+                    Field::new("table_catalog", DataType::Utf8, true),
+                    Field::new("table_schema", DataType::Utf8, true),
+                    Field::new("table_name", DataType::Utf8, false),
+                    Field::new("table_type", DataType::Utf8, true),
+                    Field::new("self_referencing_column_name", DataType::Utf8, true),
+                    Field::new("reference_generation", DataType::Utf8, true),
+                    Field::new("user_defined_type_catalog", DataType::Utf8, true),
+                    Field::new("user_defined_type_schema", DataType::Utf8, true),
+                    Field::new("user_defined_type_name", DataType::Utf8, true),
+                    Field::new("is_insertable_into", DataType::Utf8, true),
+                    Field::new("is_typed", DataType::Utf8, true),
+                    Field::new("commit_action", DataType::Utf8, true),
+                ]),
+                "columns" => Schema::new(vec![
+                    Field::new("table_catalog", DataType::Utf8, true),
+                    Field::new("table_schema", DataType::Utf8, true),
+                    Field::new("table_name", DataType::Utf8, false),
+                    Field::new("column_name", DataType::Utf8, false),
+                    Field::new("ordinal_position", DataType::Int32, false),
+                    Field::new("column_default", DataType::Utf8, true),
+                    Field::new("is_nullable", DataType::Utf8, true),
+                    Field::new("data_type", DataType::Utf8, true),
+                    Field::new("character_maximum_length", DataType::Int32, true),
+                    Field::new("character_octet_length", DataType::Int32, true),
+                    Field::new("numeric_precision", DataType::Int32, true),
+                    Field::new("numeric_precision_radix", DataType::Int32, true),
+                    Field::new("numeric_scale", DataType::Int32, true),
+                    Field::new("datetime_precision", DataType::Int32, true),
+                    Field::new("interval_type", DataType::Utf8, true),
+                    Field::new("interval_precision", DataType::Int32, true),
+                ]),
+                "views" => Schema::new(vec![
+                    Field::new("table_catalog", DataType::Utf8, true),
+                    Field::new("table_schema", DataType::Utf8, true),
+                    Field::new("table_name", DataType::Utf8, false),
+                    Field::new("view_definition", DataType::Utf8, true),
+                    Field::new("check_option", DataType::Utf8, true),
+                    Field::new("is_updatable", DataType::Utf8, true),
+                    Field::new("insertable_into", DataType::Utf8, true),
+                    Field::new("is_trigger_updatable", DataType::Utf8, true),
+                    Field::new("is_trigger_deletable", DataType::Utf8, true),
+                    Field::new("is_trigger_insertable_into", DataType::Utf8, true),
+                ]),
+                "table_constraints" => Schema::new(vec![
+                    Field::new("constraint_catalog", DataType::Utf8, true),
+                    Field::new("constraint_schema", DataType::Utf8, true),
+                    Field::new("constraint_name", DataType::Utf8, false),
+                    Field::new("table_catalog", DataType::Utf8, true),
+                    Field::new("table_schema", DataType::Utf8, true),
+                    Field::new("table_name", DataType::Utf8, false),
+                    Field::new("constraint_type", DataType::Utf8, true),
+                    Field::new("is_deferrable", DataType::Utf8, true),
+                    Field::new("initially_deferred", DataType::Utf8, true),
+                    Field::new("enforced", DataType::Utf8, true),
+                ]),
+                "referential_constraints" => Schema::new(vec![
+                    Field::new("constraint_catalog", DataType::Utf8, true),
+                    Field::new("constraint_schema", DataType::Utf8, true),
+                    Field::new("constraint_name", DataType::Utf8, false),
+                    Field::new("unique_constraint_catalog", DataType::Utf8, true),
+                    Field::new("unique_constraint_schema", DataType::Utf8, true),
+                    Field::new("unique_constraint_name", DataType::Utf8, true),
+                    Field::new("match_option", DataType::Utf8, true),
+                    Field::new("update_rule", DataType::Utf8, true),
+                    Field::new("delete_rule", DataType::Utf8, true),
+                ]),
+                "check_constraints" => Schema::new(vec![
+                    Field::new("constraint_catalog", DataType::Utf8, true),
+                    Field::new("constraint_schema", DataType::Utf8, true),
+                    Field::new("constraint_name", DataType::Utf8, false),
+                    Field::new("check_clause", DataType::Utf8, true),
+                ]),
+                _ => return plan_err!("Table not found: {}.{}", schema_name, table_name),
+            };
+            return Ok(Arc::new(EmptyTable::new(Arc::new(schema))));
+        }
+
         // Standard test tables for conformance testing
-        let schema = match name.table() {
-            // Basic test table with various numeric types
+        let schema = match table_name {
+            // Basic test table with 3 columns (a, b, c)
             "t" | "t1" | "t2" | "t3" => Ok(Schema::new(vec![
                 Field::new("a", DataType::Int32, true),
                 Field::new("b", DataType::Int32, true),
                 Field::new("c", DataType::Utf8, true),
             ])),
 
-            // Numeric types test table
+            // Numeric types test table - with column 'a' as first column
             "numeric_types" => Ok(Schema::new(vec![
+                Field::new("a", DataType::Int32, true),
                 Field::new("tiny", DataType::Int8, true),
                 Field::new("small", DataType::Int16, true),
                 Field::new("regular", DataType::Int32, true),
@@ -1338,7 +1688,7 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 ),
             ])),
 
-            // Standard person table (from existing tests)
+            // Standard person table (from existing tests) - exactly 7 columns
             "person" => Ok(Schema::new(vec![
                 Field::new("id", DataType::UInt32, false),
                 Field::new("first_name", DataType::Utf8, false),
@@ -1360,6 +1710,9 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("item", DataType::Utf8, false),
                 Field::new("qty", DataType::Int32, false),
                 Field::new("price", DataType::Float64, false),
+                Field::new("category", DataType::Utf8, true),
+                Field::new("amount", DataType::Float64, true),
+                Field::new("person_id", DataType::UInt32, true),
             ])),
 
             // Products table for join tests
@@ -1408,7 +1761,34 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("metadata", DataType::Utf8, true), // JSON as string
             ])),
 
-            _ => plan_err!("Table not found: {}", name.table()),
+            // Stock prices table for financial/analytics tests
+            "stock_prices" => Ok(Schema::new(vec![
+                Field::new("symbol", DataType::Utf8, false),
+                Field::new("trade_date", DataType::Date32, false),
+                Field::new("open", DataType::Float64, true),
+                Field::new("high", DataType::Float64, true),
+                Field::new("low", DataType::Float64, true),
+                Field::new("close", DataType::Float64, true),
+                Field::new("volume", DataType::Int64, true),
+                Field::new("price", DataType::Float64, true),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ),
+            ])),
+
+            // Employees table for HR/organizational tests
+            "employees" => Ok(Schema::new(vec![
+                Field::new("employee_id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("department", DataType::Utf8, true),
+                Field::new("salary", DataType::Float64, true),
+                Field::new("manager_id", DataType::Int32, true),
+                Field::new("hire_date", DataType::Date32, true),
+            ])),
+
+            _ => plan_err!("Table not found: {}", table_name),
         };
 
         match schema {
@@ -1694,5 +2074,87 @@ mod tests {
         assert!(logical_plan("SELECT SUM(a) FROM t").is_ok());
         assert!(logical_plan("SELECT AVG(a), MIN(b), MAX(b) FROM t").is_ok());
         assert!(logical_plan("SELECT a, COUNT(*) FROM t GROUP BY a").is_ok());
+    }
+
+    #[test]
+    fn test_information_schema_case_insensitive() {
+        // Test uppercase schema name
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.TABLES").is_ok());
+        // Test lowercase schema name
+        assert!(logical_plan("SELECT * FROM information_schema.tables").is_ok());
+        // Test mixed case schema name
+        assert!(logical_plan("SELECT * FROM Information_Schema.tables").is_ok());
+        // Test mixed case table name
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.TaBLeS").is_ok());
+    }
+
+    #[test]
+    fn test_information_schema_columns() {
+        // Test all supported INFORMATION_SCHEMA tables
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.COLUMNS").is_ok());
+        assert!(logical_plan("SELECT * FROM information_schema.columns").is_ok());
+    }
+
+    #[test]
+    fn test_information_schema_views() {
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.VIEWS").is_ok());
+        assert!(logical_plan("SELECT * FROM information_schema.views").is_ok());
+    }
+
+    #[test]
+    fn test_information_schema_constraints() {
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS").is_ok());
+        assert!(logical_plan("SELECT * FROM information_schema.table_constraints").is_ok());
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS").is_ok());
+        assert!(logical_plan("SELECT * FROM information_schema.referential_constraints").is_ok());
+        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS").is_ok());
+        assert!(logical_plan("SELECT * FROM information_schema.check_constraints").is_ok());
+    }
+
+    #[test]
+    fn test_information_schema_invalid_table() {
+        // Test that invalid table names in INFORMATION_SCHEMA produce an error
+        let result = logical_plan("SELECT * FROM INFORMATION_SCHEMA.invalid_table");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Table not found"));
+        assert!(err.to_string().contains("information_schema.invalid_table"));
+    }
+
+    #[test]
+    fn test_information_schema_bare_table() {
+        // Test that bare table reference doesn't accidentally match INFORMATION_SCHEMA
+        // This should try to find "tables" in the default schema, not INFORMATION_SCHEMA
+        let result = logical_plan("SELECT * FROM tables");
+        assert!(result.is_err()); // Should fail because 'tables' doesn't exist in default schema
+    }
+
+    #[test]
+    fn test_information_schema_context_provider() {
+        use datafusion_common::TableReference;
+        let provider = DataFusionFunctionProvider;
+        let ctx = ConformanceContextProvider::new(&provider);
+
+        // Test case-insensitive schema matching
+        assert!(ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "tables")).is_ok());
+        assert!(ctx.get_table_source(TableReference::partial("information_schema", "tables")).is_ok());
+        assert!(ctx.get_table_source(TableReference::partial("Information_Schema", "TABLES")).is_ok());
+
+        // Test case-insensitive table matching
+        assert!(ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "COLUMNS")).is_ok());
+        assert!(ctx.get_table_source(TableReference::partial("information_schema", "columns")).is_ok());
+        assert!(ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "CoLuMnS")).is_ok());
+
+        // Test invalid table in INFORMATION_SCHEMA
+        let result = ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "nonexistent"));
+        assert!(result.is_err());
+
+        // Test that empty schema doesn't match INFORMATION_SCHEMA
+        let result = ctx.get_table_source(TableReference::bare("tables"));
+        assert!(result.is_err()); // Should not find INFORMATION_SCHEMA.TABLES
+
+        // Test Full reference (catalog.schema.table) - should also work
+        assert!(ctx.get_table_source(TableReference::full("catalog", "INFORMATION_SCHEMA", "tables")).is_ok());
+        assert!(ctx.get_table_source(TableReference::full("cat", "information_schema", "COLUMNS")).is_ok());
     }
 }

@@ -44,10 +44,10 @@ use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
-    Analyze, CreateCatalog, CreateCatalogSchema,
+    Analyze, AnalyzeTable, CreateCatalog, CreateCatalogSchema,
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
-    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
-    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropSequence,
+    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateRole, CreateView, Deallocate,
+    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropRole, DropSequence,
     DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr,
     ExprSchemable, Filter, Grant, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
     MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
@@ -55,7 +55,8 @@ use datafusion_expr::{
     ResetVariable, Revoke, RollbackToSavepoint, Savepoint, SetTransaction,
     SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
     TransactionAccessMode, TransactionConclusion, TransactionEnd,
-    TransactionIsolationLevel, TransactionStart, Volatility, WriteOp, cast, col,
+    TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
+    Volatility, WriteOp, cast, col,
 };
 use sqlparser::ast::{
     self, BeginTransactionKind, IndexColumn, IndexType, OrderByExpr, OrderByOptions, Set,
@@ -803,8 +804,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             table,
                         },
                     ))),
+                    ObjectType::Role => {
+                        let role_name = object_name_to_string(&object_name);
+                        Ok(LogicalPlan::Ddl(DdlStatement::DropRole(DropRole {
+                            name: role_name,
+                            if_exists,
+                            cascade,
+                        })))
+                    }
                     _ => not_impl_err!(
-                        "Only `DROP TABLE/VIEW/SCHEMA  ...` statement is supported currently"
+                        "Only `DROP TABLE/VIEW/SCHEMA/ROLE  ...` statement is supported currently"
                     ),
                 }
             }
@@ -1525,6 +1534,74 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         if_not_exists,
                         schema: DFSchemaRef::new(DFSchema::empty()),
                     },
+                )))
+            }
+            Statement::CreateRole(create_role) => {
+                if create_role.names.is_empty() {
+                    return plan_err!("CREATE ROLE requires at least one role name");
+                }
+                if create_role.names.len() > 1 {
+                    return not_impl_err!(
+                        "CREATE ROLE with multiple roles is not supported"
+                    );
+                }
+
+                let name = object_name_to_string(&create_role.names[0]);
+
+                if name.is_empty() {
+                    return plan_err!("CREATE ROLE requires a non-empty role name");
+                }
+
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateRole(CreateRole {
+                    name,
+                    if_not_exists: create_role.if_not_exists,
+                })))
+            }
+            Statement::Analyze(analyze) => {
+                let table_name = object_name_to_string(&analyze.table_name);
+                Ok(LogicalPlan::Statement(PlanStatement::AnalyzeTable(
+                    AnalyzeTable { table_name },
+                )))
+            }
+            Statement::Truncate(truncate) => {
+                if truncate.table_names.is_empty() {
+                    return plan_err!("TRUNCATE TABLE requires at least one table name");
+                }
+                if truncate.table_names.len() > 1 {
+                    return not_impl_err!(
+                        "TRUNCATE TABLE with multiple tables is not supported"
+                    );
+                }
+
+                let table_name = object_name_to_string(&truncate.table_names[0].name);
+
+                if table_name.is_empty() {
+                    return plan_err!("TRUNCATE TABLE requires a non-empty table name");
+                }
+
+                Ok(LogicalPlan::Statement(PlanStatement::TruncateTable(
+                    TruncateTable { table_name },
+                )))
+            }
+            Statement::Vacuum(vacuum) => {
+                let table_name = vacuum.table_name.map(|n| object_name_to_string(&n));
+                Ok(LogicalPlan::Statement(PlanStatement::Vacuum(Vacuum {
+                    table_name,
+                })))
+            }
+            Statement::Use(use_stmt) => {
+                let db_name = match use_stmt {
+                    ast::Use::Catalog(name) => object_name_to_string(&name),
+                    ast::Use::Schema(name) => object_name_to_string(&name),
+                    ast::Use::Database(name) => object_name_to_string(&name),
+                    ast::Use::Warehouse(name) => object_name_to_string(&name),
+                    ast::Use::Role(name) => object_name_to_string(&name),
+                    ast::Use::SecondaryRoles(_) => "secondary_roles".to_string(),
+                    ast::Use::Object(name) => object_name_to_string(&name),
+                    ast::Use::Default => "default".to_string(),
+                };
+                Ok(LogicalPlan::Statement(PlanStatement::UseDatabase(
+                    UseDatabase { db_name },
                 )))
             }
             stmt => {

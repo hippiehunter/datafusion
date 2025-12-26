@@ -629,6 +629,12 @@ impl<'a> DFParser<'a> {
                     Keyword::TO => {
                         ensure_not_set(&builder.target, "TO")?;
                         builder.target = Some(self.parser.parse_literal_string()?);
+
+                        // Check for inline options: COPY t TO 'file.csv' (FORMAT CSV)
+                        if self.parser.peek_token() == Token::LParen {
+                            ensure_not_set(&builder.options, "inline options")?;
+                            builder.options = Some(self.parse_value_options()?);
+                        }
                     }
                     Keyword::WITH => {
                         self.parser.expect_keyword(Keyword::HEADER)?;
@@ -1167,6 +1173,7 @@ impl<'a> DFParser<'a> {
         }
         Ok(options)
     }
+
 }
 
 #[cfg(test)]

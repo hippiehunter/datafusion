@@ -33,7 +33,7 @@ use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{Expr, Operator, lit};
 use log::debug;
 use sqlparser::ast::{
-    BinaryOperator, Expr as SQLExpr, Interval, UnaryOperator, Value, ValueWithSpan,
+    BinaryOperator, DateTimeField, Expr as SQLExpr, Interval, UnaryOperator, Value, ValueWithSpan,
 };
 use sqlparser::parser::ParserError::ParserError;
 use std::borrow::Cow;
@@ -199,11 +199,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             );
         }
 
-        if interval.last_field.is_some() {
-            return not_impl_err!(
-                "Unsupported Interval Expression with last_field {:?}",
-                interval.last_field
-            );
+        // Handle compound intervals like INTERVAL '1-6' YEAR TO MONTH
+        if let (Some(leading), Some(last)) = (&interval.leading_field, &interval.last_field) {
+            let raw_value = interval_literal(*interval.value, negative)?;
+            let compound_value = parse_compound_interval(&raw_value, leading, last)?;
+            let config = IntervalParseConfig::new(IntervalUnit::Second);
+            let val = parse_interval_month_day_nano_config(&compound_value, config)?;
+            return Ok(lit(ScalarValue::IntervalMonthDayNano(Some(val))));
         }
 
         if interval.fractional_seconds_precision.is_some() {
@@ -300,6 +302,149 @@ fn interval_literal(interval_value: SQLExpr, negative: bool) -> Result<String> {
         }
     };
     if negative { Ok(format!("-{s}")) } else { Ok(s) }
+}
+
+/// Parse compound interval literals like "1-6" (YEAR TO MONTH) or "1 12:30:45" (DAY TO SECOND).
+///
+/// Converts SQL standard compound interval formats to DataFusion's interval string format:
+/// - `INTERVAL '1-6' YEAR TO MONTH` -> "1 years 6 months"
+/// - `INTERVAL '2:30' HOUR TO MINUTE` -> "2 hours 30 minutes"
+/// - `INTERVAL '2:30:45' HOUR TO SECOND` -> "2 hours 30 minutes 45 seconds"
+/// - `INTERVAL '30:45' MINUTE TO SECOND` -> "30 minutes 45 seconds"
+/// - `INTERVAL '1 12:30:45' DAY TO SECOND` -> "1 days 12 hours 30 minutes 45 seconds"
+/// - `INTERVAL '1 12:30' DAY TO MINUTE` -> "1 days 12 hours 30 minutes"
+/// - `INTERVAL '1 12' DAY TO HOUR` -> "1 days 12 hours"
+fn parse_compound_interval(
+    value: &str,
+    leading: &DateTimeField,
+    last: &DateTimeField,
+) -> Result<String> {
+    use DateTimeField::*;
+
+    match (leading, last) {
+        (Year, Month) => {
+            // Format: "Y-M" e.g., "1-6" -> "1 years 6 months"
+            let parts: Vec<&str> = value.split('-').collect();
+            if parts.len() != 2 {
+                return plan_err!(
+                    "Invalid YEAR TO MONTH interval format: '{}'. Expected 'Y-M'",
+                    value
+                );
+            }
+            let years = parts[0].trim();
+            let months = parts[1].trim();
+            Ok(format!("{} years {} months", years, months))
+        }
+        (Day, Hour) => {
+            // Format: "D H" e.g., "1 12" -> "1 days 12 hours"
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            if parts.len() != 2 {
+                return plan_err!(
+                    "Invalid DAY TO HOUR interval format: '{}'. Expected 'D H'",
+                    value
+                );
+            }
+            let days = parts[0].trim();
+            let hours = parts[1].trim();
+            Ok(format!("{} days {} hours", days, hours))
+        }
+        (Day, Minute) => {
+            // Format: "D H:M" e.g., "1 12:30" -> "1 days 12 hours 30 minutes"
+            let space_parts: Vec<&str> = value.splitn(2, ' ').collect();
+            if space_parts.len() != 2 {
+                return plan_err!(
+                    "Invalid DAY TO MINUTE interval format: '{}'. Expected 'D H:M'",
+                    value
+                );
+            }
+            let days = space_parts[0].trim();
+            let time_parts: Vec<&str> = space_parts[1].split(':').collect();
+            if time_parts.len() != 2 {
+                return plan_err!(
+                    "Invalid DAY TO MINUTE interval format: '{}'. Expected 'D H:M'",
+                    value
+                );
+            }
+            let hours = time_parts[0].trim();
+            let minutes = time_parts[1].trim();
+            Ok(format!("{} days {} hours {} minutes", days, hours, minutes))
+        }
+        (Day, Second) => {
+            // Format: "D H:M:S" or "D H:M:S.f" e.g., "1 12:30:45" -> "1 days 12 hours 30 minutes 45 seconds"
+            let space_parts: Vec<&str> = value.splitn(2, ' ').collect();
+            if space_parts.len() != 2 {
+                return plan_err!(
+                    "Invalid DAY TO SECOND interval format: '{}'. Expected 'D H:M:S'",
+                    value
+                );
+            }
+            let days = space_parts[0].trim();
+            let time_parts: Vec<&str> = space_parts[1].split(':').collect();
+            if time_parts.len() != 3 {
+                return plan_err!(
+                    "Invalid DAY TO SECOND interval format: '{}'. Expected 'D H:M:S'",
+                    value
+                );
+            }
+            let hours = time_parts[0].trim();
+            let minutes = time_parts[1].trim();
+            let seconds = time_parts[2].trim();
+            Ok(format!(
+                "{} days {} hours {} minutes {} seconds",
+                days, hours, minutes, seconds
+            ))
+        }
+        (Hour, Minute) => {
+            // Format: "H:M" e.g., "2:30" -> "2 hours 30 minutes"
+            let parts: Vec<&str> = value.split(':').collect();
+            if parts.len() != 2 {
+                return plan_err!(
+                    "Invalid HOUR TO MINUTE interval format: '{}'. Expected 'H:M'",
+                    value
+                );
+            }
+            let hours = parts[0].trim();
+            let minutes = parts[1].trim();
+            Ok(format!("{} hours {} minutes", hours, minutes))
+        }
+        (Hour, Second) => {
+            // Format: "H:M:S" or "H:M:S.f" e.g., "2:30:45" -> "2 hours 30 minutes 45 seconds"
+            let parts: Vec<&str> = value.split(':').collect();
+            if parts.len() != 3 {
+                return plan_err!(
+                    "Invalid HOUR TO SECOND interval format: '{}'. Expected 'H:M:S'",
+                    value
+                );
+            }
+            let hours = parts[0].trim();
+            let minutes = parts[1].trim();
+            let seconds = parts[2].trim();
+            Ok(format!(
+                "{} hours {} minutes {} seconds",
+                hours, minutes, seconds
+            ))
+        }
+        (Minute, Second) => {
+            // Format: "M:S" or "M:S.f" e.g., "30:45" -> "30 minutes 45 seconds"
+            let parts: Vec<&str> = value.split(':').collect();
+            if parts.len() != 2 {
+                return plan_err!(
+                    "Invalid MINUTE TO SECOND interval format: '{}'. Expected 'M:S'",
+                    value
+                );
+            }
+            let minutes = parts[0].trim();
+            let seconds = parts[1].trim();
+            Ok(format!("{} minutes {} seconds", minutes, seconds))
+        }
+        _ => {
+            not_impl_err!(
+                "Unsupported compound interval: {:?} TO {:?}",
+                leading,
+                last
+            )
+        }
+    }
 }
 
 /// Try to decode bytes from hex literal string.

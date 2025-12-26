@@ -74,6 +74,10 @@ pub enum DdlStatement {
     CreateProcedure(CreateProcedure),
     /// DROP PROCEDURE (SQL:2016 Part 4 - PSM)
     DropProcedure(DropProcedure),
+    /// CREATE ROLE
+    CreateRole(CreateRole),
+    /// DROP ROLE
+    DropRole(DropRole),
 }
 
 impl DdlStatement {
@@ -100,7 +104,9 @@ impl DdlStatement {
             | DdlStatement::DropDomain(_)
             | DdlStatement::DropSequence(_)
             | DdlStatement::CreateProcedure(_)
-            | DdlStatement::DropProcedure(_) => &DDL_EMPTY_SCHEMA,
+            | DdlStatement::DropProcedure(_)
+            | DdlStatement::CreateRole(_)
+            | DdlStatement::DropRole(_) => &DDL_EMPTY_SCHEMA,
         }
     }
 
@@ -125,6 +131,8 @@ impl DdlStatement {
             DdlStatement::DropSequence(_) => "DropSequence",
             DdlStatement::CreateProcedure(_) => "CreateProcedure",
             DdlStatement::DropProcedure(_) => "DropProcedure",
+            DdlStatement::CreateRole(_) => "CreateRole",
+            DdlStatement::DropRole(_) => "DropRole",
         }
     }
 
@@ -150,6 +158,8 @@ impl DdlStatement {
             DdlStatement::DropSequence(_) => vec![],
             DdlStatement::CreateProcedure(_) => vec![],
             DdlStatement::DropProcedure(_) => vec![],
+            DdlStatement::CreateRole(_) => vec![],
+            DdlStatement::DropRole(_) => vec![],
         }
     }
 
@@ -256,6 +266,25 @@ impl DdlStatement {
                     }
                     DdlStatement::DropProcedure(DropProcedure { name, if_exists, .. }) => {
                         write!(f, "DropProcedure: name {name:?} if not exist:={if_exists}")
+                    }
+                    DdlStatement::CreateRole(CreateRole {
+                        name,
+                        if_not_exists,
+                    }) => {
+                        write!(
+                            f,
+                            "CreateRole: {name:?} if not exist:={if_not_exists}"
+                        )
+                    }
+                    DdlStatement::DropRole(DropRole {
+                        name,
+                        if_exists,
+                        cascade,
+                    }) => {
+                        write!(
+                            f,
+                            "DropRole: {name:?} if not exist:={if_exists} cascade:={cascade}"
+                        )
                     }
                 }
             }
@@ -880,6 +909,26 @@ pub struct DropProcedure {
     pub name: String,
     /// IF EXISTS clause.
     pub if_exists: bool,
+}
+
+/// CREATE ROLE statement.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct CreateRole {
+    /// The role name.
+    pub name: String,
+    /// IF NOT EXISTS clause.
+    pub if_not_exists: bool,
+}
+
+/// DROP ROLE statement.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct DropRole {
+    /// The role name.
+    pub name: String,
+    /// IF EXISTS clause.
+    pub if_exists: bool,
+    /// CASCADE option.
+    pub cascade: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

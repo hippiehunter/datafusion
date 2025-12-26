@@ -286,6 +286,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         .build()?;
                 (plan, alias)
             }
+            TableFactor::MatchRecognize { .. } => {
+                return not_impl_err!(
+                    "MATCH_RECOGNIZE (Row Pattern Recognition) is not yet implemented"
+                );
+            }
             // @todo Support TableFactory::TableFunction?
             _ => {
                 return not_impl_err!(

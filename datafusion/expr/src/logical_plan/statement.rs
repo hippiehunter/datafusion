@@ -67,6 +67,14 @@ pub enum Statement {
     Deallocate(Deallocate),
     /// CALL a stored procedure (SQL:2016 Part 4 - PSM).
     Call(Call),
+    /// ANALYZE TABLE statement.
+    AnalyzeTable(AnalyzeTable),
+    /// TRUNCATE TABLE statement.
+    TruncateTable(TruncateTable),
+    /// VACUUM statement.
+    Vacuum(Vacuum),
+    /// USE DATABASE statement.
+    UseDatabase(UseDatabase),
 }
 
 impl Statement {
@@ -97,6 +105,10 @@ impl Statement {
             Statement::Execute(_) => "Execute",
             Statement::Deallocate(_) => "Deallocate",
             Statement::Call(_) => "Call",
+            Statement::AnalyzeTable(_) => "AnalyzeTable",
+            Statement::TruncateTable(_) => "TruncateTable",
+            Statement::Vacuum(_) => "Vacuum",
+            Statement::UseDatabase(_) => "UseDatabase",
         }
     }
 
@@ -202,6 +214,18 @@ impl Statement {
                             procedure_name,
                             expr_vec_fmt!(args)
                         )
+                    }
+                    Statement::AnalyzeTable(AnalyzeTable { table_name }) => {
+                        write!(f, "AnalyzeTable: {table_name}")
+                    }
+                    Statement::TruncateTable(TruncateTable { table_name }) => {
+                        write!(f, "TruncateTable: {table_name}")
+                    }
+                    Statement::Vacuum(Vacuum { table_name }) => {
+                        write!(f, "Vacuum: {:?}", table_name)
+                    }
+                    Statement::UseDatabase(UseDatabase { db_name }) => {
+                        write!(f, "UseDatabase: {db_name}")
                     }
                 }
             }
@@ -352,4 +376,32 @@ pub struct Call {
     pub procedure_name: String,
     /// The arguments to pass to the procedure.
     pub args: Vec<Expr>,
+}
+
+/// ANALYZE TABLE statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct AnalyzeTable {
+    /// The table name to analyze.
+    pub table_name: String,
+}
+
+/// TRUNCATE TABLE statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct TruncateTable {
+    /// The table name to truncate.
+    pub table_name: String,
+}
+
+/// VACUUM statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct Vacuum {
+    /// Optional table name to vacuum (None means vacuum all).
+    pub table_name: Option<String>,
+}
+
+/// USE DATABASE statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct UseDatabase {
+    /// The database name to use.
+    pub db_name: String,
 }

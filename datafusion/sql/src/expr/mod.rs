@@ -450,6 +450,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 planner_context,
             ),
 
+            SQLExpr::RLike { .. } => {
+                // RLIKE and REGEXP are aliases for regular expression matching
+                // We don't support regex patterns yet, so return not implemented
+                not_impl_err!(
+                    "RLIKE/REGEXP operator is not yet supported. Use SIMILAR TO for SQL standard pattern matching."
+                )
+            }
+
             SQLExpr::BinaryOp { .. } => {
                 internal_err!("binary_op should be handled by sql_expr_to_logical_expr.")
             }
@@ -1139,27 +1147,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             upper_bound,
                             stride,
                         } => {
-                            // Means access like [:2]
+                            // Handle array slice with optional bounds:
+                            // [:3] - slice from beginning (default start to 1, SQL arrays are 1-indexed)
+                            // [2:] - slice to end (default stop to i64::MAX for "to the end")
+                            // [::2] - slice with stride (both bounds default)
                             let lower_bound = if let Some(lower_bound) = lower_bound {
                                 self.sql_expr_to_logical_expr(
                                     lower_bound,
                                     schema,
                                     planner_context,
-                                )
+                                )?
                             } else {
-                                not_impl_err!("Slice subscript requires a lower bound")
-                            }?;
+                                // SQL arrays are 1-indexed, so start from 1
+                                lit(1i64)
+                            };
 
-                            // means access like [2:]
                             let upper_bound = if let Some(upper_bound) = upper_bound {
                                 self.sql_expr_to_logical_expr(
                                     upper_bound,
                                     schema,
                                     planner_context,
-                                )
+                                )?
                             } else {
-                                not_impl_err!("Slice subscript requires an upper bound")
-                            }?;
+                                // Use i64::MAX to indicate "to the end"
+                                // The array_slice function will handle this appropriately
+                                lit(i64::MAX)
+                            };
 
                             // stride, default to 1
                             let stride = if let Some(stride) = stride {
@@ -1171,6 +1184,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             } else {
                                 lit(1i64)
                             };
+
+                            // Validate stride is not zero (would cause infinite loop)
+                            if let Expr::Literal(ScalarValue::Int64(Some(0)), _) = &stride {
+                                return plan_err!("Array slice stride cannot be zero");
+                            }
 
                             Ok(Some(GetFieldAccess::ListRange {
                                 start: Box::new(lower_bound),
