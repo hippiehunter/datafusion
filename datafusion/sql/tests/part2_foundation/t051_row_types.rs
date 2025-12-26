@@ -662,7 +662,7 @@ fn t053_all_fields_alias_basic() {
 #[test]
 fn t053_all_fields_alias_specific_table() {
     assert_feature_supported!(
-        "SELECT person.* AS (pid, fname, lname, age_val, state_val, sal, bdate) FROM person",
+        "SELECT person.* AS (pid, fname, lname, fullname, age_val, state_val, sal, bdate, first_delim, last_delim) FROM person",
         "T053",
         "All-fields alias for specific table"
     );

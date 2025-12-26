@@ -143,7 +143,7 @@ fn e031_01_mixed_identifiers() {
 #[test]
 fn e031_01_delimited_in_join() {
     assert_feature_supported!(
-        r#"SELECT * FROM t1 JOIN t2 ON t1."User ID" = t2."User ID""#,
+        r#"SELECT * FROM person p1 JOIN person p2 ON p1."First Name" = p2."First Name""#,
         "E031-01",
         "Delimited identifier in JOIN"
     );
@@ -296,7 +296,7 @@ fn e031_03_multiple_trailing_underscores() {
 #[test]
 fn e031_03_trailing_underscore_select() {
     assert_feature_supported!(
-        "SELECT column_ FROM t",
+        "SELECT column_ FROM t_extended",
         "E031-03",
         "Trailing underscore in SELECT"
     );

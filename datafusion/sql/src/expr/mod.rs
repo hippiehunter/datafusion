@@ -371,6 +371,43 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
+            SQLExpr::IsJson { expr, negated, json_predicate_type, unique_keys } => {
+                let inner_expr = self.sql_expr_to_logical_expr(*expr, schema, planner_context)?;
+
+                // Build function name based on predicate type
+                let func_name = if let Some(pred_type) = json_predicate_type {
+                    match pred_type {
+                        sqlparser::ast::JsonPredicateType::Array => "is_json_array",
+                        sqlparser::ast::JsonPredicateType::Object => {
+                            if unique_keys.is_some() {
+                                "is_json_object_with_unique_keys"
+                            } else {
+                                "is_json_object"
+                            }
+                        },
+                        sqlparser::ast::JsonPredicateType::Scalar => "is_json_scalar",
+                        sqlparser::ast::JsonPredicateType::Value => "is_json_value",
+                    }
+                } else {
+                    "is_json"
+                };
+
+                // Try to get the function from the context provider
+                let is_json_expr = if let Some(func) = self.context_provider.get_function_meta(func_name) {
+                    Expr::ScalarFunction(ScalarFunction::new_udf(func, vec![inner_expr]))
+                } else {
+                    // Fall back to a stub function call if the function is not registered
+                    not_impl_err!("IS JSON predicate function '{func_name}' not registered")?
+                };
+
+                // Apply negation if needed
+                if negated {
+                    Ok(Expr::Not(Box::new(is_json_expr)))
+                } else {
+                    Ok(is_json_expr)
+                }
+            }
+
             SQLExpr::UnaryOp { op, expr } => {
                 self.parse_sql_unary_op(op, *expr, schema, planner_context)
             }
@@ -450,12 +487,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 planner_context,
             ),
 
-            SQLExpr::RLike { .. } => {
+            SQLExpr::RLike {
+                negated,
+                expr,
+                pattern,
+                regexp: _,
+            } => {
                 // RLIKE and REGEXP are aliases for regular expression matching
-                // We don't support regex patterns yet, so return not implemented
-                not_impl_err!(
-                    "RLIKE/REGEXP operator is not yet supported. Use SIMILAR TO for SQL standard pattern matching."
-                )
+                // Convert to REGEXP_LIKE function call
+                let args = vec![
+                    self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
+                    self.sql_expr_to_logical_expr(*pattern, schema, planner_context)?,
+                ];
+
+                let func = self
+                    .context_provider
+                    .get_function_meta("regexp_like")
+                    .ok_or_else(|| {
+                        internal_datafusion_err!("Unable to find expected 'regexp_like' function")
+                    })?;
+
+                let regexp_expr = Expr::ScalarFunction(ScalarFunction::new_udf(func, args));
+
+                if negated {
+                    Ok(Expr::Not(Box::new(regexp_expr)))
+                } else {
+                    Ok(regexp_expr)
+                }
             }
 
             SQLExpr::BinaryOp { .. } => {

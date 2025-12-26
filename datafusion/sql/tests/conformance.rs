@@ -516,6 +516,55 @@ macro_rules! stub_optional_precision_datetime_udf {
     };
 }
 
+/// Macro to create a stub scalar function with custom signature and return type.
+/// This allows precise control over function signatures for type-specific functions.
+macro_rules! stub_typed_udf {
+    ($name:ident, $fn_name:expr, $signature:expr, $return_type:expr) => {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            signature: Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: $signature,
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for $name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+                Ok($return_type)
+            }
+
+            fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                not_impl_err!("stub function {} should not be invoked", $fn_name)
+            }
+        }
+
+        paste::paste! {
+            pub fn [<$name:snake _udf>]() -> Arc<ScalarUDF> {
+                static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+                    std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from($name::default())));
+                Arc::clone(&INSTANCE)
+            }
+        }
+    };
+}
+
 // Nullary datetime functions - can be called as CURRENT_DATE(), NOW(), etc.
 stub_nullary_datetime_udf!(CurrentDate, "current_date", DataType::Date32);
 stub_nullary_datetime_udf!(Now, "now", DataType::Timestamp(TimeUnit::Nanosecond, None));
@@ -540,8 +589,20 @@ stub_scalar_udf!(StartsWith, "starts_with");
 stub_scalar_udf!(EndsWith, "ends_with");
 stub_scalar_udf!(Btrim, "btrim");
 stub_scalar_udf!(Initcap, "initcap");
-stub_scalar_udf!(Ascii, "ascii");
-stub_scalar_udf!(Chr, "chr");
+// ASCII accepts string input and returns the integer ASCII code
+stub_typed_udf!(
+    Ascii,
+    "ascii",
+    Signature::uniform(1, vec![DataType::Utf8], Volatility::Immutable),
+    DataType::Int64
+);
+// CHR converts an integer ASCII code to a character
+stub_typed_udf!(
+    Chr,
+    "chr",
+    Signature::uniform(1, vec![DataType::Int64], Volatility::Immutable),
+    DataType::Utf8
+);
 stub_scalar_udf!(Translate, "translate");
 stub_scalar_udf!(ToHex, "to_hex");
 stub_scalar_udf!(Overlay, "overlay");
@@ -706,16 +767,65 @@ stub_scalar_udf!(Char, "char");
 stub_scalar_udf!(Space, "space");
 
 // Regex functions
-stub_scalar_udf!(RegexpLike, "regexp_like");
+stub_typed_udf!(
+    RegexpLike,
+    "regexp_like",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
 stub_scalar_udf!(RegexpReplace, "regexp_replace");
 stub_scalar_udf!(RegexpSubstr, "regexp_substr");
 
 // JSON functions
 stub_scalar_udf!(JsonArray, "json_array");
-stub_scalar_udf!(JsonExists, "json_exists");
+// JSON_EXISTS returns true/false for path existence checks
+stub_typed_udf!(
+    JsonExists,
+    "json_exists",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
 stub_scalar_udf!(JsonQuery, "json_query");
 stub_scalar_udf!(JsonValue, "json_value");
 stub_scalar_udf!(JsonObject, "json_object");
+
+// IS JSON predicates - all return Boolean
+stub_typed_udf!(
+    IsJson,
+    "is_json",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
+stub_typed_udf!(
+    IsJsonArray,
+    "is_json_array",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
+stub_typed_udf!(
+    IsJsonObject,
+    "is_json_object",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
+stub_typed_udf!(
+    IsJsonScalar,
+    "is_json_scalar",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
+stub_typed_udf!(
+    IsJsonValue,
+    "is_json_value",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
+stub_typed_udf!(
+    IsJsonObjectWithUniqueKeys,
+    "is_json_object_with_unique_keys",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Boolean
+);
 
 // ============================================================================
 // Additional Aggregate Function Stubs
@@ -1092,6 +1202,14 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "json_query" => Some(json_query_udf()),
             "json_value" => Some(json_value_udf()),
             "json_object" => Some(json_object_udf()),
+
+            // IS JSON predicates
+            "is_json" => Some(is_json_udf()),
+            "is_json_array" => Some(is_json_array_udf()),
+            "is_json_object" => Some(is_json_object_udf()),
+            "is_json_scalar" => Some(is_json_scalar_udf()),
+            "is_json_value" => Some(is_json_value_udf()),
+            "is_json_object_with_unique_keys" => Some(is_json_object_with_unique_keys_udf()),
 
             _ => None,
         }
@@ -1751,6 +1869,15 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("c", DataType::Utf8, true),
             ])),
 
+            // Extended test table with additional columns for specific conformance tests
+            "t_extended" => Ok(Schema::new(vec![
+                Field::new("a", DataType::Int32, true),
+                Field::new("b", DataType::Int32, true),
+                Field::new("c", DataType::Utf8, true),
+                Field::new("column_", DataType::Int32, true), // For trailing underscore test
+                Field::new("User ID", DataType::Int32, true), // For delimited identifier tests
+            ])),
+
             // Numeric types test table - with column 'a' as first column
             "numeric_types" => Ok(Schema::new(vec![
                 Field::new("a", DataType::Int32, true),
@@ -1786,11 +1913,12 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 ),
             ])),
 
-            // Standard person table (from existing tests) - exactly 7 columns
+            // Standard person table (from existing tests) with additional columns for conformance
             "person" => Ok(Schema::new(vec![
                 Field::new("id", DataType::UInt32, false),
                 Field::new("first_name", DataType::Utf8, false),
                 Field::new("last_name", DataType::Utf8, false),
+                Field::new("name", DataType::Utf8, false), // For E091 aggregate tests
                 Field::new("age", DataType::Int32, false),
                 Field::new("state", DataType::Utf8, false),
                 Field::new("salary", DataType::Float64, false),
@@ -1799,10 +1927,13 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                     DataType::Timestamp(TimeUnit::Nanosecond, None),
                     false,
                 ),
+                Field::new("First Name", DataType::Utf8, true), // Delimited identifier test
+                Field::new("Last Name", DataType::Utf8, true), // Delimited identifier test
             ])),
 
             // Orders table for join tests
             "orders" => Ok(Schema::new(vec![
+                Field::new("id", DataType::UInt32, false), // Alias for order_id
                 Field::new("order_id", DataType::UInt32, false),
                 Field::new("customer_id", DataType::UInt32, false),
                 Field::new("item", DataType::Utf8, false),

@@ -458,7 +458,7 @@ fn e051_combined_query() {
 fn e051_combined_aliases() {
     assert_feature_supported!(
         "SELECT emp.name, emp.pay \
-         FROM person AS emp(id, name, lname, years, loc, pay, dob) \
+         FROM person AS emp(id, fname, lname, name, years, loc, pay, dob, first_delim, last_delim) \
          WHERE emp.years > 30",
         "E051",
         "Table and column aliases"
@@ -472,7 +472,7 @@ fn e051_combined_join_group() {
         "SELECT p.*, COUNT(o.order_id) AS order_count \
          FROM person p \
          LEFT JOIN orders o ON p.id = o.customer_id \
-         GROUP BY p.id, p.first_name, p.last_name, p.age, p.state, p.salary, p.birth_date \
+         GROUP BY p.id, p.first_name, p.last_name, p.name, p.age, p.state, p.salary, p.birth_date, p.\"First Name\", p.\"Last Name\" \
          HAVING COUNT(o.order_id) > 0",
         "E051",
         "Join with qualified asterisk and GROUP BY"
@@ -493,8 +493,8 @@ fn e051_combined_distinct_group_having() {
 #[test]
 fn e051_combined_self_join_rename() {
     assert_feature_supported!(
-        "SELECT mgr.fname AS manager_name, emp.fname AS employee_name \
-         FROM person mgr(eid, fname, lname, yrs, st, sal, bd) \
+        "SELECT mgr.fname AS manager_name, emp.first_name AS employee_name \
+         FROM person mgr(eid, fname, lname, fullname, yrs, st, sal, bd, first_delim, last_delim) \
          JOIN person emp ON mgr.eid = emp.id - 1",
         "E051",
         "Self-join with column renaming"

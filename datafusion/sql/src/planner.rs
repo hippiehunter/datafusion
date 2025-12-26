@@ -853,8 +853,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(DataType::Struct(Fields::from(fields)))
             }
+            SQLDataType::JSON => Ok(DataType::Utf8),
             SQLDataType::Nvarchar(_)
-            | SQLDataType::JSON
             | SQLDataType::Uuid
             | SQLDataType::Binary(_)
             | SQLDataType::Varbinary(_)

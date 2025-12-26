@@ -596,6 +596,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .transpose()?
                     .map(Box::new);
 
+                // Special handling for JSON_OBJECTAGG: convert named args (key: value) to positional args
+                let (args, arg_names) = if fm.name().eq_ignore_ascii_case("json_objectagg")
+                    && arg_names.iter().any(|name| name.is_some())
+                {
+                    // For JSON_OBJECTAGG, named arguments represent key-value pairs
+                    // Convert "key: value" to positional args [key, value]
+                    let mut positional_args = Vec::new();
+                    for (arg, name) in args.into_iter().zip(arg_names.iter()) {
+                        if let Some(key_name) = name {
+                            // Add the key as a string literal
+                            positional_args.push(Expr::Literal(
+                                datafusion_common::ScalarValue::Utf8(Some(key_name.clone())),
+                                None,
+                            ));
+                            // Add the value
+                            positional_args.push(arg);
+                        } else {
+                            // If no name, just add the arg (shouldn't happen for JSON_OBJECTAGG)
+                            positional_args.push(arg);
+                        }
+                    }
+                    let len = positional_args.len();
+                    (positional_args, vec![None; len])
+                } else {
+                    (args, arg_names)
+                };
+
                 let resolved_args = if arg_names.iter().any(|name| name.is_some()) {
                     if let Some(param_names) = &fm.signature().parameter_names {
                         datafusion_expr::arguments::resolve_function_arguments(
