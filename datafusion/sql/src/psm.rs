@@ -21,7 +21,7 @@
 //! DataFusion logical plan representations.
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::{not_impl_err, tree_node::TreeNode, DFSchema, Result};
+use datafusion_common::{not_impl_err, tree_node::TreeNode, Result};
 use datafusion_expr::logical_plan::psm::{
     PsmBlock, PsmCase, PsmElseIf, PsmIf, PsmReturn, PsmSetVariable, PsmStatement,
     PsmStatementKind, PsmVariable, PsmWhen, PsmWhile, RegionInfo,
@@ -124,6 +124,31 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.plan_psm_raise(raise_stmt, planner_context)
             }
 
+            // LOOP ... END LOOP
+            Statement::Loop(loop_stmt) => self.plan_psm_loop(loop_stmt, planner_context),
+
+            // REPEAT ... UNTIL condition END REPEAT
+            Statement::Repeat(repeat_stmt) => {
+                self.plan_psm_repeat(repeat_stmt, planner_context)
+            }
+
+            // LEAVE label (exit loop)
+            Statement::Leave(leave_stmt) => {
+                let label = leave_stmt.label.clone().unwrap_or_else(|| Ident::new(""));
+                Ok(PsmStatement::procedural(PsmStatementKind::Leave(label)))
+            }
+
+            // ITERATE label (continue loop)
+            Statement::Iterate(iterate_stmt) => {
+                let label = iterate_stmt.label.clone().unwrap_or_else(|| Ident::new(""));
+                Ok(PsmStatement::procedural(PsmStatementKind::Iterate(label)))
+            }
+
+            // Labeled block: label: BEGIN ... END
+            Statement::LabeledBlock(labeled) => {
+                self.plan_psm_labeled_block(labeled, planner_context)
+            }
+
             // Embedded SQL - plan as regular statement
             other => {
                 let plan = self.sql_statement_to_plan(other.clone())?;
@@ -154,7 +179,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             );
         }
 
-        let schema = DFSchema::empty();
+        let schema = planner_context.psm_schema();
 
         // Get the data type
         let data_type = decl.data_type.as_ref().ok_or_else(|| {
@@ -201,10 +226,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let var = PsmVariable {
             name: names[0].clone(),
-            data_type: arrow_type,
+            data_type: arrow_type.clone(),
             default: default_expr,
             default_has_subquery: has_subquery,
         };
+
+        // Add the declared variable to the PSM schema so it can be referenced later
+        planner_context.add_psm_variable(&names[0].value, arrow_type)?;
 
         Ok(PsmStatement::new(
             PsmStatementKind::DeclareVariable(var),
@@ -222,7 +250,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             ast::Set::SingleAssignment {
                 variable, values, ..
             } => {
-                let schema = DFSchema::empty();
+                let schema = planner_context.psm_schema();
 
                 // Convert variable name to identifier
                 let targets: Vec<Ident> = variable
@@ -259,7 +287,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 ))
             }
             ast::Set::ParenthesizedAssignments { variables, values } => {
-                let schema = DFSchema::empty();
+                let schema = planner_context.psm_schema();
 
                 // Convert variable names to identifiers
                 let targets: Vec<Ident> = variables
@@ -303,7 +331,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         ret: &ast::ReturnStatement,
         planner_context: &mut PlannerContext,
     ) -> Result<PsmStatement> {
-        let schema = DFSchema::empty();
+        let schema = planner_context.psm_schema();
 
         let (value, has_subquery) = match &ret.value {
             Some(ReturnStatementValue::Expr(expr)) => {
@@ -338,7 +366,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if_stmt: &ast::IfStatement,
         planner_context: &mut PlannerContext,
     ) -> Result<PsmStatement> {
-        let schema = DFSchema::empty();
+        let schema = planner_context.psm_schema();
 
         // Plan condition - required for IF
         let condition_expr = if_stmt.if_block.condition.clone().ok_or_else(|| {
@@ -451,7 +479,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         while_stmt: &ast::WhileStatement,
         planner_context: &mut PlannerContext,
     ) -> Result<PsmStatement> {
-        let schema = DFSchema::empty();
+        let schema = planner_context.psm_schema();
 
         // Plan condition - required for WHILE
         let condition_expr =
@@ -498,7 +526,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         case_stmt: &ast::CaseStatement,
         planner_context: &mut PlannerContext,
     ) -> Result<PsmStatement> {
-        let schema = DFSchema::empty();
+        let schema = planner_context.psm_schema();
 
         // Plan operand if present (simple CASE)
         let (operand, operand_has_subquery) = if let Some(op) = &case_stmt.match_expr {
@@ -598,7 +626,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<PsmStatement> {
         use datafusion_expr::logical_plan::psm::PsmSignal;
 
-        let schema = DFSchema::empty();
+        let schema = planner_context.psm_schema();
 
         // Convert RAISE to a signal-like structure
         let (sqlstate, set_items) = match &raise_stmt.value {
@@ -623,6 +651,107 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(PsmStatement::procedural(PsmStatementKind::Signal(
             PsmSignal { sqlstate, set_items },
         )))
+    }
+
+    /// Plan LOOP statement.
+    fn plan_psm_loop(
+        &self,
+        loop_stmt: &ast::LoopStatement,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmStatement> {
+        use datafusion_expr::logical_plan::psm::PsmLoop;
+
+        let mut body_info = RegionInfo::default();
+        let body: Vec<PsmStatement> = loop_stmt
+            .body
+            .statements()
+            .iter()
+            .map(|s| {
+                let stmt = self.plan_psm_statement(s, planner_context)?;
+                body_info.merge(&stmt.info);
+                Ok(stmt)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(PsmStatement::new(
+            PsmStatementKind::Loop(PsmLoop {
+                label: loop_stmt.label.clone(),
+                body,
+                body_info: body_info.clone(),
+            }),
+            body_info,
+        ))
+    }
+
+    /// Plan REPEAT statement.
+    fn plan_psm_repeat(
+        &self,
+        repeat_stmt: &ast::RepeatStatement,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmStatement> {
+        use datafusion_expr::logical_plan::psm::PsmRepeat;
+
+        let schema = planner_context.psm_schema();
+
+        let mut body_info = RegionInfo::default();
+        let body: Vec<PsmStatement> = repeat_stmt
+            .body
+            .statements()
+            .iter()
+            .map(|s| {
+                let stmt = self.plan_psm_statement(s, planner_context)?;
+                body_info.merge(&stmt.info);
+                Ok(stmt)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Plan UNTIL condition (until is Expr directly, not Option)
+        let until_condition =
+            self.sql_to_expr(repeat_stmt.until.clone(), &schema, planner_context)?;
+        let condition_has_subquery = Self::expr_contains_subquery(&until_condition);
+
+        let mut info = body_info.clone();
+        if condition_has_subquery {
+            info.contains_scalar_subquery = true;
+        }
+
+        Ok(PsmStatement::new(
+            PsmStatementKind::Repeat(PsmRepeat {
+                label: repeat_stmt.label.clone(),
+                body,
+                body_info,
+                until_condition,
+                condition_has_subquery,
+            }),
+            info,
+        ))
+    }
+
+    /// Plan labeled block (label: BEGIN ... END).
+    fn plan_psm_labeled_block(
+        &self,
+        labeled: &ast::LabeledBlock,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmStatement> {
+        let mut info = RegionInfo::default();
+        let statements: Vec<PsmStatement> = labeled
+            .statements
+            .iter()
+            .map(|s| {
+                let stmt = self.plan_psm_statement(s, planner_context)?;
+                info.merge(&stmt.info);
+                Ok(stmt)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(PsmStatement::new(
+            PsmStatementKind::Block(PsmBlock {
+                label: labeled.label.clone(),
+                statements,
+                info: info.clone(),
+            }),
+            info,
+        ))
     }
 
     /// Check if an expression contains a scalar subquery.

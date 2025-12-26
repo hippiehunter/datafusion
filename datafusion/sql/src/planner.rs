@@ -270,6 +270,9 @@ pub struct PlannerContext {
     create_table_schema: Option<DFSchemaRef>,
     /// Default expressions for VALUES planning (e.g. INSERT ... VALUES DEFAULT)
     values_defaults: Option<Vec<Option<Expr>>>,
+    /// Schema for PSM (Persistent Stored Modules) variables and parameters.
+    /// Used to resolve variable references in procedure/function bodies.
+    psm_schema: Option<DFSchemaRef>,
 }
 
 impl Default for PlannerContext {
@@ -288,6 +291,7 @@ impl PlannerContext {
             outer_from_schema: None,
             create_table_schema: None,
             values_defaults: None,
+            psm_schema: None,
         }
     }
 
@@ -391,6 +395,33 @@ impl PlannerContext {
     /// Remove the plan of CTE / Subquery for the specified name
     pub(super) fn remove_cte(&mut self, cte_name: &str) {
         self.ctes.remove(cte_name);
+    }
+
+    /// Returns the PSM schema for variable resolution, or empty schema if not set.
+    pub fn psm_schema(&self) -> DFSchemaRef {
+        self.psm_schema
+            .clone()
+            .unwrap_or_else(|| Arc::new(DFSchema::empty()))
+    }
+
+    /// Sets the PSM schema for variable resolution.
+    pub fn set_psm_schema(&mut self, schema: DFSchemaRef) {
+        self.psm_schema = Some(schema);
+    }
+
+    /// Adds a variable to the PSM schema (used for DECLARE statements).
+    pub fn add_psm_variable(&mut self, name: &str, data_type: DataType) -> Result<()> {
+        let field = Arc::new(Field::new(name, data_type, true));
+        let new_schema = Arc::new(DFSchema::from_unqualified_fields(
+            vec![field].into(),
+            HashMap::new(),
+        )?);
+
+        match self.psm_schema.as_mut() {
+            Some(schema) => Arc::make_mut(schema).merge(&new_schema),
+            None => self.psm_schema = Some(new_schema),
+        }
+        Ok(())
     }
 }
 

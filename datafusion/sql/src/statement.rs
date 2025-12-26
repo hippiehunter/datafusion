@@ -1402,6 +1402,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let mut planner_context = PlannerContext::new()
                     .with_prepare_param_data_types(arg_types.unwrap_or_default());
 
+                // Add function parameters to PSM schema so they can be referenced in the body
+                if let Some(ref function_args) = args {
+                    for arg in function_args {
+                        if let Some(ref param_name) = arg.name {
+                            planner_context
+                                .add_psm_variable(&param_name.value, arg.data_type.clone())?;
+                        }
+                    }
+                }
+
                 let function_body = match function_body {
                     Some(r) => Some(self.sql_to_expr(
                         match r {
@@ -1446,7 +1456,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 )?
                             }
                         },
-                        &DFSchema::empty(),
+                        &planner_context.psm_schema(),
                         &mut planner_context,
                     )?),
                     None => None,
@@ -1644,6 +1654,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Plan the procedure body
                 let mut planner_context = PlannerContext::new();
+
+                // Create a schema from procedure parameters so they can be referenced in the body
+                if let Some(ref procedure_args) = args {
+                    for arg in procedure_args {
+                        if let Some(ref param_name) = arg.name {
+                            planner_context
+                                .add_psm_variable(&param_name.value, arg.data_type.clone())?;
+                        }
+                    }
+                }
+
                 let psm_body =
                     self.plan_psm_block_from_conditional(&body, &mut planner_context)?;
 
