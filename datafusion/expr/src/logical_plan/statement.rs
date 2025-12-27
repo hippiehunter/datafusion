@@ -20,8 +20,7 @@ use datafusion_common::metadata::format_type_and_metadata;
 use datafusion_common::{DFSchema, DFSchemaRef};
 use itertools::Itertools as _;
 use sqlparser::ast::{
-    CascadeOption, CurrentGrantsKind, GrantObjects, Grantee, Ident, Privileges,
-    TransactionMode, Value,
+    CascadeOption, GrantObjects, Grantee, Ident, Privileges, TransactionMode, Value,
 };
 use std::fmt::{self, Display};
 use std::sync::{Arc, LazyLock};
@@ -329,7 +328,6 @@ pub struct Grant {
     pub with_grant_option: bool,
     pub as_grantor: Option<Ident>,
     pub granted_by: Option<Ident>,
-    pub current_grants: Option<CurrentGrantsKind>,
 }
 
 /// REVOKE privileges statement.

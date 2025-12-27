@@ -60,9 +60,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             BinaryOperator::HashLongArrow => Ok(Operator::HashLongArrow),
             BinaryOperator::AtAt => Ok(Operator::AtAt),
             BinaryOperator::Spaceship => Ok(Operator::IsNotDistinctFrom),
-            BinaryOperator::DuckIntegerDivide | BinaryOperator::MyIntegerDivide => {
-                Ok(Operator::IntegerDivide)
-            }
+            BinaryOperator::MyIntegerDivide => Ok(Operator::IntegerDivide),
             BinaryOperator::HashMinus => Ok(Operator::HashMinus),
             BinaryOperator::AtQuestion => Ok(Operator::AtQuestion),
             BinaryOperator::Question => Ok(Operator::Question),

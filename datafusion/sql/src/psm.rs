@@ -21,7 +21,7 @@
 //! DataFusion logical plan representations.
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::{not_impl_err, tree_node::TreeNode, Result};
+use datafusion_common::{not_impl_err, tree_node::TreeNode, Result, ScalarValue};
 use datafusion_expr::logical_plan::psm::{
     PsmBlock, PsmCase, PsmElseIf, PsmIf, PsmReturn, PsmSetVariable, PsmStatement,
     PsmStatementKind, PsmVariable, PsmWhen, PsmWhile, RegionInfo,
@@ -101,7 +101,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             // SET variable = expression
-            Statement::Set(set) => self.plan_psm_set(set, planner_context),
+            Statement::Set(set) => self.plan_psm_set(&set.inner, planner_context),
 
             // RETURN [expression]
             Statement::Return(ret) => self.plan_psm_return(ret, planner_context),
@@ -339,6 +339,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.sql_to_expr(expr.clone(), &schema, planner_context)?;
                 let has_subquery = Self::expr_contains_subquery(&planned);
                 (Some(planned), has_subquery)
+            }
+            Some(ReturnStatementValue::Next(_)) => {
+                // RETURN NEXT is PostgreSQL-specific, not supported yet
+                return not_impl_err!("RETURN NEXT is not supported");
+            }
+            Some(ReturnStatementValue::Query(_)) => {
+                // RETURN QUERY is PostgreSQL-specific, not supported yet
+                return not_impl_err!("RETURN QUERY is not supported");
+            }
+            Some(ReturnStatementValue::QueryExecute { .. }) => {
+                // RETURN QUERY EXECUTE is PostgreSQL-specific, not supported yet
+                return not_impl_err!("RETURN QUERY EXECUTE is not supported");
             }
             None => (None, false),
         };
@@ -628,25 +640,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let schema = planner_context.psm_schema();
 
-        // Convert RAISE to a signal-like structure
-        let (sqlstate, set_items) = match &raise_stmt.value {
-            Some(ast::RaiseStatementValue::Expr(expr)) => {
-                // RAISE expr - treat expr as message
-                let planned = self.sql_to_expr(expr.clone(), &schema, planner_context)?;
-                let message_ident = Ident::new("MESSAGE_TEXT");
-                ("45000".to_string(), vec![(message_ident, planned)])
-            }
-            Some(ast::RaiseStatementValue::UsingMessage(expr)) => {
-                // RAISE USING MESSAGE = expr
-                let planned = self.sql_to_expr(expr.clone(), &schema, planner_context)?;
-                let message_ident = Ident::new("MESSAGE_TEXT");
-                ("45000".to_string(), vec![(message_ident, planned)])
-            }
-            None => {
-                // RAISE without value - generic exception
-                ("45000".to_string(), vec![])
-            }
+        // Extract SQLSTATE from message if it's a Sqlstate, otherwise use default
+        let sqlstate = match &raise_stmt.message {
+            Some(ast::RaiseMessage::Sqlstate(state)) => state.clone(),
+            _ => "45000".to_string(),
         };
+
+        // Convert USING items to set_items
+        let mut set_items = Vec::new();
+
+        // If there's a format string message, add it as MESSAGE_TEXT
+        if let Some(ast::RaiseMessage::FormatString(msg)) = &raise_stmt.message {
+            let message_ident = Ident::new("MESSAGE_TEXT");
+            let planned = Expr::Literal(ScalarValue::Utf8(Some(msg.clone())), None);
+            set_items.push((message_ident, planned));
+        }
+
+        // Process USING clause items
+        for item in &raise_stmt.using {
+            let planned = self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
+            let option_ident = Ident::new(item.option.to_string());
+            set_items.push((option_ident, planned));
+        }
 
         Ok(PsmStatement::procedural(PsmStatementKind::Signal(
             PsmSignal { sqlstate, set_items },

@@ -101,6 +101,7 @@ impl Visitor for RelationVisitor {
         if let Statement::ShowCreate {
             obj_type: ShowCreateObject::Table | ShowCreateObject::View,
             obj_name,
+            ..
         } = statement
         {
             self.insert_relation(obj_name)

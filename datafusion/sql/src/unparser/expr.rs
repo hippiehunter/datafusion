@@ -412,30 +412,38 @@ impl Unparser<'_> {
                     negated: *negated,
                 })
             }
-            Expr::IsNull(expr) => {
-                Ok(ast::Expr::IsNull(Box::new(self.expr_to_sql_inner(expr)?)))
-            }
-            Expr::IsNotNull(expr) => Ok(ast::Expr::IsNotNull(Box::new(
-                self.expr_to_sql_inner(expr)?,
-            ))),
-            Expr::IsTrue(expr) => {
-                Ok(ast::Expr::IsTrue(Box::new(self.expr_to_sql_inner(expr)?)))
-            }
-            Expr::IsNotTrue(expr) => Ok(ast::Expr::IsNotTrue(Box::new(
-                self.expr_to_sql_inner(expr)?,
-            ))),
-            Expr::IsFalse(expr) => {
-                Ok(ast::Expr::IsFalse(Box::new(self.expr_to_sql_inner(expr)?)))
-            }
-            Expr::IsNotFalse(expr) => Ok(ast::Expr::IsNotFalse(Box::new(
-                self.expr_to_sql_inner(expr)?,
-            ))),
-            Expr::IsUnknown(expr) => Ok(ast::Expr::IsUnknown(Box::new(
-                self.expr_to_sql_inner(expr)?,
-            ))),
-            Expr::IsNotUnknown(expr) => Ok(ast::Expr::IsNotUnknown(Box::new(
-                self.expr_to_sql_inner(expr)?,
-            ))),
+            Expr::IsNull(expr) => Ok(ast::Expr::IsNull {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsNotNull(expr) => Ok(ast::Expr::IsNotNull {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsTrue(expr) => Ok(ast::Expr::IsTrue {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsNotTrue(expr) => Ok(ast::Expr::IsNotTrue {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsFalse(expr) => Ok(ast::Expr::IsFalse {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsNotFalse(expr) => Ok(ast::Expr::IsNotFalse {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsUnknown(expr) => Ok(ast::Expr::IsUnknown {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
+            Expr::IsNotUnknown(expr) => Ok(ast::Expr::IsNotUnknown {
+                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                suffix_token: AttachedToken::empty(),
+            }),
             Expr::Not(expr) => {
                 let sql_parser_expr = self.expr_to_sql_inner(expr)?;
                 Ok(AstExpr::UnaryOp {
@@ -675,27 +683,35 @@ impl Unparser<'_> {
     }
 
     fn named_struct_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+        // Convert named_struct to a named_struct function call with all args
         assert_or_internal_err!(
             args.len().is_multiple_of(2),
             "named_struct must have an even number of arguments"
         );
 
-        let args = args
-            .chunks_exact(2)
-            .map(|chunk| {
-                let key = match &chunk[0] {
-                    Expr::Literal(ScalarValue::Utf8(Some(s)), _) => self.new_ident_quoted_if_needs(s.to_string()),
-                    _ => return internal_err!("named_struct expects even arguments to be strings, but received: {:?}", &chunk[0])
-                };
-
-                Ok(ast::DictionaryField {
-                    key,
-                    value: Box::new(self.expr_to_sql(&chunk[1])?),
-                })
+        let struct_args: Vec<ast::FunctionArg> = args
+            .iter()
+            .map(|arg| {
+                let value = self.expr_to_sql(arg)?;
+                Ok(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(value)))
             })
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(ast::Expr::Dictionary(args))
+        Ok(ast::Expr::Function(Function {
+            name: ObjectName::from(vec![Ident::new("named_struct")]),
+            args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                duplicate_treatment: None,
+                args: struct_args,
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: ast::FunctionArguments::None,
+            uses_odbc_syntax: false,
+            nth_value_order: None,
+        }))
     }
 
     fn get_field_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
@@ -750,34 +766,30 @@ impl Unparser<'_> {
     }
 
     fn map_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+        // Convert map to a MAP function call
         assert_eq_or_internal_err!(args.len(), 2, "map must have exactly 2 arguments");
 
-        let ast::Expr::Array(Array { elem: keys, .. }) = self.expr_to_sql(&args[0])?
-        else {
-            return internal_err!(
-                "map expects first argument to be an array, but received: {:?}",
-                &args[0]
-            );
-        };
+        let keys_expr = self.expr_to_sql(&args[0])?;
+        let values_expr = self.expr_to_sql(&args[1])?;
 
-        let ast::Expr::Array(Array { elem: values, .. }) = self.expr_to_sql(&args[1])?
-        else {
-            return internal_err!(
-                "map expects second argument to be an array, but received: {:?}",
-                &args[1]
-            );
-        };
-
-        let entries = keys
-            .into_iter()
-            .zip(values)
-            .map(|(key, value)| ast::MapEntry {
-                key: Box::new(key),
-                value: Box::new(value),
-            })
-            .collect();
-
-        Ok(ast::Expr::Map(ast::Map { entries }))
+        Ok(ast::Expr::Function(Function {
+            name: ObjectName::from(vec![Ident::new("map")]),
+            args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(keys_expr)),
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(values_expr)),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+            parameters: ast::FunctionArguments::None,
+            uses_odbc_syntax: false,
+            nth_value_order: None,
+        }))
     }
 
     pub fn sort_to_sql(&self, sort: &Sort) -> Result<ast::OrderByExpr> {
@@ -973,30 +985,38 @@ impl Unparser<'_> {
                 right: Box::new(self.remove_unnecessary_nesting(*right, &op, right_op)),
                 op,
             },
-            ast::Expr::IsTrue(expr) => ast::Expr::IsTrue(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsNotTrue(expr) => ast::Expr::IsNotTrue(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsFalse(expr) => ast::Expr::IsFalse(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsNotFalse(expr) => ast::Expr::IsNotFalse(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsNull(expr) => ast::Expr::IsNull(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsNotNull(expr) => ast::Expr::IsNotNull(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsUnknown(expr) => ast::Expr::IsUnknown(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
-            ast::Expr::IsNotUnknown(expr) => ast::Expr::IsNotUnknown(Box::new(
-                self.remove_unnecessary_nesting(*expr, left_op, IS),
-            )),
+            ast::Expr::IsTrue { expr, suffix_token } => ast::Expr::IsTrue {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsNotTrue { expr, suffix_token } => ast::Expr::IsNotTrue {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsFalse { expr, suffix_token } => ast::Expr::IsFalse {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsNotFalse { expr, suffix_token } => ast::Expr::IsNotFalse {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsNull { expr, suffix_token } => ast::Expr::IsNull {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsNotNull { expr, suffix_token } => ast::Expr::IsNotNull {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsUnknown { expr, suffix_token } => ast::Expr::IsUnknown {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
+            ast::Expr::IsNotUnknown { expr, suffix_token } => ast::Expr::IsNotUnknown {
+                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                suffix_token,
+            },
             _ => expr,
         }
     }
@@ -1073,9 +1093,7 @@ impl Unparser<'_> {
             BinaryOperator::HashArrow => Ok(Operator::HashArrow),
             BinaryOperator::HashLongArrow => Ok(Operator::HashLongArrow),
             BinaryOperator::AtAt => Ok(Operator::AtAt),
-            BinaryOperator::DuckIntegerDivide | BinaryOperator::MyIntegerDivide => {
-                Ok(Operator::IntegerDivide)
-            }
+            BinaryOperator::MyIntegerDivide => Ok(Operator::IntegerDivide),
             BinaryOperator::HashMinus => Ok(Operator::HashMinus),
             BinaryOperator::AtQuestion => Ok(Operator::AtQuestion),
             BinaryOperator::Question => Ok(Operator::Question),
@@ -1123,7 +1141,7 @@ impl Unparser<'_> {
             Operator::HashArrow => Ok(BinaryOperator::HashArrow),
             Operator::HashLongArrow => Ok(BinaryOperator::HashLongArrow),
             Operator::AtAt => Ok(BinaryOperator::AtAt),
-            Operator::IntegerDivide => Ok(BinaryOperator::DuckIntegerDivide),
+            Operator::IntegerDivide => Ok(BinaryOperator::MyIntegerDivide),
             Operator::HashMinus => Ok(BinaryOperator::HashMinus),
             Operator::AtQuestion => Ok(BinaryOperator::AtQuestion),
             Operator::Question => Ok(BinaryOperator::Question),
@@ -2874,12 +2892,12 @@ mod tests {
     #[test]
     fn custom_dialect_division_operator() -> Result<()> {
         let default_dialect = CustomDialectBuilder::new().build();
-        let duckdb_dialect = CustomDialectBuilder::new()
-            .with_division_operator(BinaryOperator::DuckIntegerDivide)
+        let mysql_dialect = CustomDialectBuilder::new()
+            .with_division_operator(BinaryOperator::MyIntegerDivide)
             .build();
 
         for (dialect, expected) in
-            [(default_dialect, "(a / b)"), (duckdb_dialect, "(a // b)")]
+            [(default_dialect, "(a / b)"), (mysql_dialect, "(a DIV b)")]
         {
             let unparser = Unparser::new(&dialect);
             let expr = Expr::BinaryExpr(BinaryExpr {

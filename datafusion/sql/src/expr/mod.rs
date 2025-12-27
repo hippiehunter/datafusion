@@ -21,8 +21,8 @@ use datafusion_expr::planner::{
 };
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
-    DataType as SQLDataType, DateTimeField, DictionaryField, Expr as SQLExpr,
-    ExprWithAlias as SQLExprWithAlias, MapEntry, StructField, Subscript, TrimWhereField,
+    DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
+    ExprWithAlias as SQLExprWithAlias, StructField, Subscript, TrimWhereField,
     TypedString, Value, ValueWithSpan,
 };
 
@@ -275,7 +275,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             SQLExpr::Cast {
-                kind: CastKind::TryCast | CastKind::SafeCast,
+                kind: CastKind::TryCast,
                 expr,
                 data_type,
                 format,
@@ -307,11 +307,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .clone(),
             ))),
 
-            SQLExpr::IsNull(expr) => Ok(Expr::IsNull(Box::new(
+            SQLExpr::IsNull { expr, .. } => Ok(Expr::IsNull(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsNotNull(expr) => Ok(Expr::IsNotNull(Box::new(
+            SQLExpr::IsNotNull { expr, .. } => Ok(Expr::IsNotNull(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
@@ -347,27 +347,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )))
             }
 
-            SQLExpr::IsTrue(expr) => Ok(Expr::IsTrue(Box::new(
+            SQLExpr::IsTrue { expr, .. } => Ok(Expr::IsTrue(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsFalse(expr) => Ok(Expr::IsFalse(Box::new(
+            SQLExpr::IsFalse { expr, .. } => Ok(Expr::IsFalse(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsNotTrue(expr) => Ok(Expr::IsNotTrue(Box::new(
+            SQLExpr::IsNotTrue { expr, .. } => Ok(Expr::IsNotTrue(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsNotFalse(expr) => Ok(Expr::IsNotFalse(Box::new(
+            SQLExpr::IsNotFalse { expr, .. } => Ok(Expr::IsNotFalse(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsUnknown(expr) => Ok(Expr::IsUnknown(Box::new(
+            SQLExpr::IsUnknown { expr, .. } => Ok(Expr::IsUnknown(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsNotUnknown(expr) => Ok(Expr::IsNotUnknown(Box::new(
+            SQLExpr::IsNotUnknown { expr, .. } => Ok(Expr::IsNotUnknown(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
@@ -648,12 +648,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                 },
             ))),
-            SQLExpr::Dictionary(fields) => {
-                self.try_plan_dictionary_literal(fields, schema, planner_context)
-            }
-            SQLExpr::Map(map) => {
-                self.try_plan_map_literal(map.entries, schema, planner_context)
-            }
             SQLExpr::AnyOp {
                 left,
                 compare_op,
@@ -723,15 +717,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if !fields.is_empty() {
             return not_impl_err!("Struct fields are not supported yet");
         }
-        let is_named_struct = values
-            .iter()
-            .any(|value| matches!(value, SQLExpr::Named { .. }));
-
-        let mut create_struct_args = if is_named_struct {
-            self.create_named_struct_expr(values, schema, planner_context)?
-        } else {
-            self.create_struct_expr(values, schema, planner_context)?
-        };
+        // Named struct syntax removed - always use unnamed struct creation
+        let mut create_struct_args =
+            self.create_struct_expr(values, schema, planner_context)?;
+        let is_named_struct = false;
 
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_struct_literal(create_struct_args, is_named_struct)? {
@@ -782,97 +771,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         not_impl_err!("Position not supported by ExprPlanner: {position_args:?}")
-    }
-
-    fn try_plan_dictionary_literal(
-        &self,
-        fields: Vec<DictionaryField>,
-        schema: &DFSchema,
-        planner_context: &mut PlannerContext,
-    ) -> Result<Expr> {
-        let mut keys = vec![];
-        let mut values = vec![];
-        for field in fields {
-            let key = lit(field.key.value);
-            let value =
-                self.sql_expr_to_logical_expr(*field.value, schema, planner_context)?;
-            keys.push(key);
-            values.push(value);
-        }
-
-        let mut raw_expr = RawDictionaryExpr { keys, values };
-
-        for planner in self.context_provider.get_expr_planners() {
-            match planner.plan_dictionary_literal(raw_expr, schema)? {
-                PlannerResult::Planned(expr) => {
-                    return Ok(expr);
-                }
-                PlannerResult::Original(expr) => raw_expr = expr,
-            }
-        }
-        not_impl_err!("Dictionary not supported by ExprPlanner: {raw_expr:?}")
-    }
-
-    fn try_plan_map_literal(
-        &self,
-        entries: Vec<MapEntry>,
-        schema: &DFSchema,
-        planner_context: &mut PlannerContext,
-    ) -> Result<Expr> {
-        let mut exprs: Vec<_> = entries
-            .into_iter()
-            .flat_map(|entry| vec![entry.key, entry.value].into_iter())
-            .map(|expr| self.sql_expr_to_logical_expr(*expr, schema, planner_context))
-            .collect::<Result<Vec<_>>>()?;
-        for planner in self.context_provider.get_expr_planners() {
-            match planner.plan_make_map(exprs)? {
-                PlannerResult::Planned(expr) => {
-                    return Ok(expr);
-                }
-                PlannerResult::Original(expr) => exprs = expr,
-            }
-        }
-        not_impl_err!("MAP not supported by ExprPlanner: {exprs:?}")
-    }
-
-    // Handles a call to struct(...) where the arguments are named. For example
-    // `struct (v as foo, v2 as bar)` by creating a call to the `named_struct` function
-    fn create_named_struct_expr(
-        &self,
-        values: Vec<SQLExpr>,
-        input_schema: &DFSchema,
-        planner_context: &mut PlannerContext,
-    ) -> Result<Vec<Expr>> {
-        Ok(values
-            .into_iter()
-            .enumerate()
-            .map(|(i, value)| {
-                let args = if let SQLExpr::Named { expr, name } = value {
-                    [
-                        name.value.lit(),
-                        self.sql_expr_to_logical_expr(
-                            *expr,
-                            input_schema,
-                            planner_context,
-                        )?,
-                    ]
-                } else {
-                    [
-                        format!("c{i}").lit(),
-                        self.sql_expr_to_logical_expr(
-                            value,
-                            input_schema,
-                            planner_context,
-                        )?,
-                    ]
-                };
-
-                Ok(args)
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect())
     }
 
     // Handles a call to struct(...) where the arguments are not named. For example

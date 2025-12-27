@@ -141,8 +141,7 @@ pub trait Dialect: Send + Sync {
     }
 
     /// The division operator for the dialect
-    /// Most dialect uses ` BinaryOperator::Divide` (/)
-    /// But DuckDB dialect uses `BinaryOperator::DuckIntegerDivide` (//)
+    /// Most dialects use `BinaryOperator::Divide` (/)
     fn division_operator(&self) -> BinaryOperator {
         BinaryOperator::Divide
     }
@@ -390,7 +389,7 @@ impl Dialect for DuckDBDialect {
     }
 
     fn division_operator(&self) -> BinaryOperator {
-        BinaryOperator::DuckIntegerDivide
+        BinaryOperator::MyIntegerDivide
     }
 
     fn with_custom_scalar_overrides(

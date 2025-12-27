@@ -196,7 +196,6 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                 | ast::ColumnOption::Identity(_)
                 | ast::ColumnOption::OnConflict(_)
                 | ast::ColumnOption::Policy(_)
-                | ast::ColumnOption::Tags(_)
                 | ast::ColumnOption::Alias(_)
                 | ast::ColumnOption::Srid(_)
                 | ast::ColumnOption::Collation(_)
@@ -275,16 +274,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.explain_to_plan(verbose, analyze, format, statement)
             }
             Statement::Query(query) => self.query_to_plan(*query, planner_context),
-            Statement::ShowVariable { variable } => self.show_variable_to_plan(&variable),
-            Statement::Set(statement) => self.set_statement_to_plan(statement),
+            Statement::ShowVariable { variable, .. } => self.show_variable_to_plan(&variable),
+            Statement::Set(statement) => self.set_statement_to_plan(statement.inner),
             Statement::CreateTable(CreateTable {
                 temporary,
                 external,
                 global,
                 transient,
                 volatile,
-                hive_distribution,
-                hive_formats,
                 file_format,
                 location,
                 query,
@@ -303,32 +300,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 order_by,
                 partition_by,
                 cluster_by,
-                clustered_by,
                 strict,
-                copy_grants,
-                enable_schema_evolution,
-                change_tracking,
-                data_retention_time_in_days,
-                max_data_extension_time_in_days,
-                default_ddl_collation,
-                with_aggregation_policy,
-                with_row_access_policy,
-                with_tags,
                 iceberg,
-                external_volume,
-                base_location,
-                catalog,
-                catalog_sync,
-                storage_serialization_policy,
                 inherits,
                 table_options,
                 dynamic,
                 version,
-                target_lag,
-                warehouse,
-                refresh_mode,
-                initialize,
-                require_user,
                 ..
             }) => {
                 if external {
@@ -342,24 +319,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if volatile {
                     return not_impl_err!("Volatile tables not supported")?;
-                }
-                if hive_distribution != ast::HiveDistributionStyle::NONE {
-                    return not_impl_err!(
-                        "Hive distribution not supported: {hive_distribution:?}"
-                    )?;
-                }
-                if !matches!(
-                    hive_formats,
-                    None | Some(ast::HiveFormat {
-                        row_format: None,
-                        serde_properties: None,
-                        storage: None,
-                        location: None,
-                    })
-                ) {
-                    return not_impl_err!(
-                        "Hive formats not supported: {hive_formats:?}"
-                    )?;
                 }
                 if file_format.is_some() {
                     return not_impl_err!("File format not supported")?;
@@ -397,58 +356,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if cluster_by.is_some() {
                     return not_impl_err!("Cluster by not supported")?;
                 }
-                if clustered_by.is_some() {
-                    return not_impl_err!("Clustered by not supported")?;
-                }
                 if strict {
                     return not_impl_err!("Strict not supported")?;
                 }
-                if copy_grants {
-                    return not_impl_err!("Copy grants not supported")?;
-                }
-                if enable_schema_evolution.is_some() {
-                    return not_impl_err!("Enable schema evolution not supported")?;
-                }
-                if change_tracking.is_some() {
-                    return not_impl_err!("Change tracking not supported")?;
-                }
-                if data_retention_time_in_days.is_some() {
-                    return not_impl_err!("Data retention time in days not supported")?;
-                }
-                if max_data_extension_time_in_days.is_some() {
-                    return not_impl_err!(
-                        "Max data extension time in days not supported"
-                    )?;
-                }
-                if default_ddl_collation.is_some() {
-                    return not_impl_err!("Default DDL collation not supported")?;
-                }
-                if with_aggregation_policy.is_some() {
-                    return not_impl_err!("With aggregation policy not supported")?;
-                }
-                if with_row_access_policy.is_some() {
-                    return not_impl_err!("With row access policy not supported")?;
-                }
-                if with_tags.is_some() {
-                    return not_impl_err!("With tags not supported")?;
-                }
                 if iceberg {
                     return not_impl_err!("Iceberg not supported")?;
-                }
-                if external_volume.is_some() {
-                    return not_impl_err!("External volume not supported")?;
-                }
-                if base_location.is_some() {
-                    return not_impl_err!("Base location not supported")?;
-                }
-                if catalog.is_some() {
-                    return not_impl_err!("Catalog not supported")?;
-                }
-                if catalog_sync.is_some() {
-                    return not_impl_err!("Catalog sync not supported")?;
-                }
-                if storage_serialization_policy.is_some() {
-                    return not_impl_err!("Storage serialization policy not supported")?;
                 }
                 if inherits.is_some() {
                     return not_impl_err!("Table inheritance not supported")?;
@@ -458,21 +370,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if version.is_some() {
                     return not_impl_err!("Version not supported")?;
-                }
-                if target_lag.is_some() {
-                    return not_impl_err!("Target lag not supported")?;
-                }
-                if warehouse.is_some() {
-                    return not_impl_err!("Warehouse not supported")?;
-                }
-                if refresh_mode.is_some() {
-                    return not_impl_err!("Refresh mode not supported")?;
-                }
-                if initialize.is_some() {
-                    return not_impl_err!("Initialize not supported")?;
-                }
-                if require_user {
-                    return not_impl_err!("Require user not supported")?;
                 }
                 let storage_parameters = match table_options {
                     CreateTableOptions::None => BTreeMap::new(),
@@ -628,9 +525,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 })))
             }
             Statement::AlterTable(mut alter_table) => {
-                if alter_table.location.is_some() {
-                    return not_impl_err!("ALTER TABLE ... SET LOCATION not supported");
-                }
                 if alter_table.on_cluster.is_some() {
                     return not_impl_err!("ALTER TABLE ... ON CLUSTER not supported");
                 }
@@ -696,7 +590,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::DropDomain(drop_domain) => {
                 Ok(LogicalPlan::Ddl(DdlStatement::DropDomain(drop_domain)))
             }
-            Statement::ShowCreate { obj_type, obj_name } => match obj_type {
+            Statement::ShowCreate { obj_type, obj_name, .. } => match obj_type {
                 ShowCreateObject::Table => self.show_create_table_to_plan(obj_name),
                 _ => {
                     not_impl_err!("Only `SHOW CREATE TABLE  ...` statement is supported")
@@ -733,6 +627,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 purge,
                 temporary,
                 table,
+                ..
             } => {
                 // We don't support multiple object names
                 let object_name = match names.len() {
@@ -822,6 +717,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 name,
                 data_types,
                 statement,
+                ..
             } => {
                 // Convert parser data types to DataFusion data types
                 let mut fields: Vec<FieldRef> = data_types
@@ -868,6 +764,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 into,
                 output,
                 default,
+                ..
             } => {
                 // `USING` is a MySQL-specific syntax and currently not supported.
                 if !using.is_empty() {
@@ -908,6 +805,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 name,
                 // Similar to PostgreSQL, the PREPARE keyword is ignored
                 prepare: _,
+                ..
             } => Ok(LogicalPlan::Statement(PlanStatement::Deallocate(
                 Deallocate {
                     name: ident_to_string(&name),
@@ -920,7 +818,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 with_grant_option,
                 as_grantor,
                 granted_by,
-                current_grants,
+                ..
             } => Ok(LogicalPlan::Statement(PlanStatement::Grant(Grant {
                 privileges,
                 objects,
@@ -928,7 +826,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 with_grant_option,
                 as_grantor,
                 granted_by,
-                current_grants,
             }))),
             Statement::Revoke {
                 privileges,
@@ -952,6 +849,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 history,
                 external,
                 show_options,
+                ..
             } => {
                 // We only support the basic "SHOW TABLES"
                 // https://github.com/apache/datafusion/issues/3188
@@ -999,6 +897,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 extended,
                 full,
                 show_options,
+                ..
             } => {
                 let ShowStatementOptions {
                     show_in,
@@ -1183,7 +1082,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let table_name = self.get_delete_target(from)?;
                 self.delete_to_plan(&table_name, selection)
             }
-            Statement::Merge { into, table, source, on, clauses, output } => {
+            Statement::Merge { into, table, source, on, clauses, output, .. } => {
                 self.merge_to_plan(into, table, source, on, clauses, output, planner_context)
             }
 
@@ -1195,6 +1094,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 statements,
                 has_end_keyword,
                 exception,
+                ..
             } => {
                 if let Some(modifier) = modifier {
                     return not_impl_err!(
@@ -1268,6 +1168,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 chain,
                 end,
                 modifier,
+                ..
             } => {
                 if end {
                     return not_impl_err!("COMMIT AND END not supported");
@@ -1281,13 +1182,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 });
                 Ok(LogicalPlan::Statement(statement))
             }
-            Statement::Savepoint { name } => Ok(LogicalPlan::Statement(
+            Statement::Savepoint { name, .. } => Ok(LogicalPlan::Statement(
                 PlanStatement::Savepoint(Savepoint { name }),
             )),
-            Statement::ReleaseSavepoint { name } => Ok(LogicalPlan::Statement(
+            Statement::ReleaseSavepoint { name, .. } => Ok(LogicalPlan::Statement(
                 PlanStatement::ReleaseSavepoint(ReleaseSavepoint { name }),
             )),
-            Statement::Rollback { chain, savepoint } => {
+            Statement::Rollback { chain, savepoint, .. } => {
                 if let Some(savepoint) = savepoint {
                     let statement =
                         PlanStatement::RollbackToSavepoint(RollbackToSavepoint {
@@ -1607,7 +1508,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     ast::Use::Database(name) => object_name_to_string(&name),
                     ast::Use::Warehouse(name) => object_name_to_string(&name),
                     ast::Use::Role(name) => object_name_to_string(&name),
-                    ast::Use::SecondaryRoles(_) => "secondary_roles".to_string(),
                     ast::Use::Object(name) => object_name_to_string(&name),
                     ast::Use::Default => "default".to_string(),
                 };
@@ -2345,16 +2245,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         match statement {
             Set::SingleAssignment {
                 scope,
-                hivevar,
                 variable,
                 values,
+                ..
             } => {
                 if scope.is_some() {
                     return not_impl_err!("SET with scope modifiers is not supported");
-                }
-
-                if hivevar {
-                    return not_impl_err!("SET HIVEVAR is not supported");
                 }
 
                 let variable = object_name_to_string(&variable);

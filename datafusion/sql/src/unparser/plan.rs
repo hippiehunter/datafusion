@@ -256,7 +256,6 @@ impl Unparser<'_> {
             for_clause: None,
             settings: None,
             format_clause: None,
-            pipe_operators: vec![],
         };
 
         // Create the CTE
@@ -318,7 +317,6 @@ impl Unparser<'_> {
             named_window: vec![],
             qualify: None,
             window_before_qualify: false,
-            value_table_mode: None,
             connect_by: None,
             flavor: ast::SelectFlavor::Standard,
             exclude: None,
@@ -335,7 +333,6 @@ impl Unparser<'_> {
             for_clause: None,
             settings: None,
             format_clause: None,
-            pipe_operators: vec![],
         };
 
         Ok(ast::Statement::Query(Box::new(query)))
@@ -1568,23 +1565,29 @@ impl Unparser<'_> {
         match statement {
             PlanStatement::Savepoint(savepoint) => Ok(ast::Statement::Savepoint {
                 name: savepoint.name.clone(),
+                savepoint_token: AttachedToken::empty(),
             }),
             PlanStatement::ReleaseSavepoint(release) => {
                 Ok(ast::Statement::ReleaseSavepoint {
                     name: release.name.clone(),
+                    release_token: AttachedToken::empty(),
                 })
             }
             PlanStatement::RollbackToSavepoint(rollback) => {
                 Ok(ast::Statement::Rollback {
                     chain: rollback.chain,
                     savepoint: Some(rollback.name.clone()),
+                    rollback_token: AttachedToken::empty(),
                 })
             }
             PlanStatement::SetTransaction(set_txn) => Ok(ast::Statement::Set(
-                ast::Set::SetTransaction {
-                    modes: set_txn.modes.clone(),
-                    snapshot: set_txn.snapshot.clone(),
-                    session: set_txn.session,
+                ast::SetStatement {
+                    token: AttachedToken::empty(),
+                    inner: ast::Set::SetTransaction {
+                        modes: set_txn.modes.clone(),
+                        snapshot: set_txn.snapshot.clone(),
+                        session: set_txn.session,
+                    },
                 },
             )),
             PlanStatement::Grant(grant) => Ok(ast::Statement::Grant {
@@ -1594,7 +1597,7 @@ impl Unparser<'_> {
                 with_grant_option: grant.with_grant_option,
                 as_grantor: grant.as_grantor.clone(),
                 granted_by: grant.granted_by.clone(),
-                current_grants: grant.current_grants.clone(),
+                grant_token: AttachedToken::empty(),
             }),
             PlanStatement::Revoke(revoke) => Ok(ast::Statement::Revoke {
                 privileges: revoke.privileges.clone(),
@@ -1603,6 +1606,7 @@ impl Unparser<'_> {
                 granted_by: revoke.granted_by.clone(),
                 cascade: revoke.cascade.clone(),
                 grant_option_for: false,
+                revoke_token: AttachedToken::empty(),
             }),
             PlanStatement::TransactionStart(start) => {
                 let isolation_level = match start.isolation_level {
@@ -1641,6 +1645,7 @@ impl Unparser<'_> {
                     statements: vec![],
                     exception: None,
                     has_end_keyword: false,
+                    start_token: AttachedToken::empty(),
                 })
             }
             PlanStatement::TransactionEnd(end) => match end.conclusion {
@@ -1649,12 +1654,14 @@ impl Unparser<'_> {
                         chain: end.chain,
                         end: false,
                         modifier: None,
+                        commit_token: AttachedToken::empty(),
                     },
                 ),
                 datafusion_expr::TransactionConclusion::Rollback => Ok(
                     ast::Statement::Rollback {
                         chain: end.chain,
                         savepoint: None,
+                        rollback_token: AttachedToken::empty(),
                     },
                 ),
             },
@@ -1682,6 +1689,7 @@ impl Unparser<'_> {
                 purge: drop_sequence.purge,
                 temporary: drop_sequence.temporary,
                 table: drop_sequence.table.clone(),
+                drop_token: AttachedToken::empty(),
             }),
             other => not_impl_err!("Unsupported DDL plan: {other:?}"),
         }
@@ -1763,6 +1771,7 @@ impl Unparser<'_> {
             on,
             clauses,
             output: None,
+            merge_token: AttachedToken::empty(),
         })
     }
 

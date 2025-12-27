@@ -249,6 +249,7 @@ impl DdlStatement {
                         if_exists,
                         name,
                         drop_behavior,
+                        ..
                     }) => {
                         write!(
                             f,

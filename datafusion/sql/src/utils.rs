@@ -334,15 +334,6 @@ pub(crate) fn value_to_string(value: &Value) -> Option<String> {
         Value::DoubleQuotedString(_)
         | Value::NationalStringLiteral(_)
         | Value::SingleQuotedByteStringLiteral(_)
-        | Value::DoubleQuotedByteStringLiteral(_)
-        | Value::TripleSingleQuotedString(_)
-        | Value::TripleDoubleQuotedString(_)
-        | Value::TripleSingleQuotedByteStringLiteral(_)
-        | Value::TripleDoubleQuotedByteStringLiteral(_)
-        | Value::SingleQuotedRawStringLiteral(_)
-        | Value::DoubleQuotedRawStringLiteral(_)
-        | Value::TripleSingleQuotedRawStringLiteral(_)
-        | Value::TripleDoubleQuotedRawStringLiteral(_)
         | Value::HexStringLiteral(_)
         | Value::Null
         | Value::Placeholder(_) => None,

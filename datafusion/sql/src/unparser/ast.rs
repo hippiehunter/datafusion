@@ -111,7 +111,6 @@ impl QueryBuilder {
             for_clause: self.for_clause.clone(),
             settings: None,
             format_clause: None,
-            pipe_operators: vec![],
         })
     }
     fn create_empty() -> Self {
@@ -151,7 +150,6 @@ pub struct SelectBuilder {
     having: Option<ast::Expr>,
     named_window: Vec<ast::NamedWindowDefinition>,
     qualify: Option<ast::Expr>,
-    value_table_mode: Option<ast::ValueTableMode>,
     flavor: Option<SelectFlavor>,
 }
 
@@ -279,10 +277,6 @@ impl SelectBuilder {
         self.qualify = value;
         self
     }
-    pub fn value_table_mode(&mut self, value: Option<ast::ValueTableMode>) -> &mut Self {
-        self.value_table_mode = value;
-        self
-    }
     pub fn build(&self) -> Result<ast::Select, BuilderError> {
         Ok(ast::Select {
             distinct: self.distinct.clone(),
@@ -309,7 +303,6 @@ impl SelectBuilder {
             having: self.having.clone(),
             named_window: self.named_window.clone(),
             qualify: self.qualify.clone(),
-            value_table_mode: self.value_table_mode,
             connect_by: None,
             window_before_qualify: false,
             prewhere: None,
@@ -337,7 +330,6 @@ impl SelectBuilder {
             having: Default::default(),
             named_window: Default::default(),
             qualify: Default::default(),
-            value_table_mode: Default::default(),
             flavor: Some(SelectFlavor::Standard),
         }
     }

@@ -901,10 +901,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::CharacterLargeObject(_)
             | SQLDataType::CharLargeObject(_)
             | SQLDataType::Timestamp(_, _)
-            | SQLDataType::BigNumeric(_)
-            | SQLDataType::BigDecimal(_)
             | SQLDataType::Clob(_)
-            | SQLDataType::Bytes(_)
             | SQLDataType::Int64
             | SQLDataType::Float64
             | SQLDataType::JSONB
@@ -925,7 +922,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::FixedString(_)
             | SQLDataType::Map(_, _)
             | SQLDataType::Nested(_)
-            | SQLDataType::Union(_)
             | SQLDataType::Nullable(_)
             | SQLDataType::LowCardinality(_)
             | SQLDataType::Trigger
@@ -941,7 +937,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::SignedInteger
             | SQLDataType::Unsigned
             | SQLDataType::UnsignedInteger
-            | SQLDataType::AnyType
             | SQLDataType::Table(_)
             | SQLDataType::VarBit(_)
             | SQLDataType::UTinyInt
