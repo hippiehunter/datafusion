@@ -19,7 +19,9 @@ use crate::TableReference;
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
-use crate::parser::{CopyToSource, CopyToStatement, Statement as DFStatement};
+use crate::parser::{
+    CopyFromStatement, CopyToSource, CopyToStatement, Statement as DFStatement,
+};
 use crate::planner::object_name_to_table_reference;
 use sqlparser::ast::*;
 
@@ -147,6 +149,9 @@ fn visit_statement(statement: &DFStatement, visitor: &mut RelationVisitor) {
                 let _ = query.visit(visitor);
             }
         },
+        DFStatement::CopyFrom(CopyFromStatement { table_name, .. }) => {
+            visitor.insert_relation(table_name);
+        }
         DFStatement::Explain(explain) => visit_statement(&explain.statement, visitor),
         DFStatement::Reset(_) => {}
     }

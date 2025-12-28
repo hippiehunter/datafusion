@@ -40,9 +40,10 @@
 use crate::{
     Aggregate, Analyze, CreateMemoryTable, CreateView, DdlStatement, Distinct,
     DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
-    LogicalPlan, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
+    LogicalPlan, MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
     Projection, RecursiveQuery, Repartition, Sort, Statement, Subquery, SubqueryAlias,
-    TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::CopyTo,
+    TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::{CopyFrom, CopyTo},
+    logical_plan::plan::JsonTable,
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
 
@@ -147,9 +148,9 @@ impl TreeNode for LogicalPlan {
                     null_equality,
                 })
             }),
-            LogicalPlan::Limit(Limit { skip, fetch, input }) => input
+            LogicalPlan::Limit(Limit { skip, fetch, with_ties, input }) => input
                 .map_elements(f)?
-                .update_data(|input| LogicalPlan::Limit(Limit { skip, fetch, input })),
+                .update_data(|input| LogicalPlan::Limit(Limit { skip, fetch, with_ties, input })),
             LogicalPlan::Subquery(Subquery {
                 subquery,
                 outer_ref_columns,
@@ -258,6 +259,21 @@ impl TreeNode for LogicalPlan {
                     })
                 },
             ),
+            LogicalPlan::CopyFrom(CopyFrom {
+                table_name,
+                source_url,
+                columns,
+                file_type,
+                options,
+                output_schema,
+            }) => Transformed::no(LogicalPlan::CopyFrom(CopyFrom {
+                table_name,
+                source_url,
+                columns,
+                file_type,
+                options,
+                output_schema,
+            })),
             LogicalPlan::Copy(CopyTo {
                 input,
                 output_url,
@@ -302,6 +318,7 @@ impl TreeNode for LogicalPlan {
                         name,
                         input,
                         or_replace,
+                        if_not_exists,
                         definition,
                         temporary,
                     }) => input.map_elements(f)?.update_data(|input| {
@@ -309,6 +326,7 @@ impl TreeNode for LogicalPlan {
                             name,
                             input,
                             or_replace,
+                            if_not_exists,
                             definition,
                             temporary,
                         })
@@ -318,6 +336,7 @@ impl TreeNode for LogicalPlan {
                     | DdlStatement::CreateCatalogSchema(_)
                     | DdlStatement::CreateCatalog(_)
                     | DdlStatement::CreateIndex(_)
+                    | DdlStatement::DropIndex(_)
                     | DdlStatement::DropTable(_)
                     | DdlStatement::DropView(_)
                     | DdlStatement::DropCatalogSchema(_)
@@ -376,11 +395,37 @@ impl TreeNode for LogicalPlan {
                 _ => Transformed::no(stmt),
             }
             .update_data(LogicalPlan::Statement),
+            LogicalPlan::MatchRecognize(MatchRecognize {
+                input,
+                partition_by,
+                order_by,
+                measures,
+                rows_per_match,
+                after_match_skip,
+                pattern,
+                subsets,
+                symbols,
+                schema,
+            }) => input.map_elements(f)?.update_data(|input| {
+                LogicalPlan::MatchRecognize(MatchRecognize {
+                    input,
+                    partition_by,
+                    order_by,
+                    measures,
+                    rows_per_match,
+                    after_match_skip,
+                    pattern,
+                    subsets,
+                    symbols,
+                    schema,
+                })
+            }),
             // plans without inputs
             LogicalPlan::TableScan { .. }
             | LogicalPlan::EmptyRelation { .. }
             | LogicalPlan::Values { .. }
-            | LogicalPlan::DescribeTable(_) => Transformed::no(self),
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::JsonTable(_) => Transformed::no(self),
         })
     }
 }
@@ -527,6 +572,34 @@ impl LogicalPlan {
                 }
                 Ok(TreeNodeRecursion::Continue)
             }
+            LogicalPlan::MatchRecognize(MatchRecognize {
+                partition_by,
+                order_by,
+                measures,
+                symbols,
+                ..
+            }) => {
+                // Apply to partition by expressions
+                partition_by.apply_elements(&mut f)?;
+                // Apply to order by expressions (which are Sort expressions)
+                for sort_expr in order_by {
+                    f(&sort_expr.expr)?;
+                }
+                // Apply to measure expressions
+                for measure in measures {
+                    f(&measure.expr)?;
+                }
+                // Apply to symbol definitions
+                for symbol in symbols {
+                    f(&symbol.definition)?;
+                }
+                Ok(TreeNodeRecursion::Continue)
+            }
+            LogicalPlan::JsonTable(JsonTable { json_expr, .. }) => {
+                // Apply to the JSON expression
+                f(json_expr)?;
+                Ok(TreeNodeRecursion::Continue)
+            }
             // plans without expressions
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::RecursiveQuery(_)
@@ -539,6 +612,7 @@ impl LogicalPlan {
             | LogicalPlan::Dml(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
+            | LogicalPlan::CopyFrom(_)
             | LogicalPlan::DescribeTable(_) => Ok(TreeNodeRecursion::Continue),
         }
     }
@@ -692,9 +766,9 @@ impl LogicalPlan {
                         schema,
                     }))
                 }),
-            LogicalPlan::Limit(Limit { skip, fetch, input }) => {
+            LogicalPlan::Limit(Limit { skip, fetch, with_ties, input }) => {
                 (skip, fetch).map_elements(f)?.update_data(|(skip, fetch)| {
-                    LogicalPlan::Limit(Limit { skip, fetch, input })
+                    LogicalPlan::Limit(Limit { skip, fetch, with_ties, input })
                 })
             }
             LogicalPlan::Statement(stmt) => match stmt {
@@ -717,6 +791,21 @@ impl LogicalPlan {
                     .with_new_exprs(exprs.data, inputs)?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }
+            LogicalPlan::MatchRecognize(mr) => {
+                let exprs = LogicalPlan::MatchRecognize(mr.clone()).expressions();
+                let exprs = exprs.map_elements(f)?;
+                let inputs = vec![Arc::unwrap_or_clone(Arc::clone(&mr.input))];
+                let plan = LogicalPlan::MatchRecognize(mr)
+                    .with_new_exprs(exprs.data, inputs)?;
+                Transformed::new(plan, exprs.transformed, exprs.tnr)
+            }
+            LogicalPlan::JsonTable(jt) => {
+                let exprs = LogicalPlan::JsonTable(jt.clone()).expressions();
+                let exprs = exprs.map_elements(f)?;
+                let plan = LogicalPlan::JsonTable(jt)
+                    .with_new_exprs(exprs.data, vec![])?;
+                Transformed::new(plan, exprs.transformed, exprs.tnr)
+            }
             // plans without expressions
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Unnest(_)
@@ -730,6 +819,7 @@ impl LogicalPlan {
             | LogicalPlan::Dml(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
+            | LogicalPlan::CopyFrom(_)
             | LogicalPlan::DescribeTable(_) => Transformed::no(self),
         })
     }

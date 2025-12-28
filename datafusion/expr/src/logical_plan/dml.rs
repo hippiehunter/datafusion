@@ -288,6 +288,93 @@ impl Display for InsertOp {
     }
 }
 
+/// Operator that copies the contents of a file to a database table
+#[derive(Clone)]
+pub struct CopyFrom {
+    /// The table name to insert into
+    pub table_name: TableReference,
+    /// The source URL to read from
+    pub source_url: String,
+    /// Determines which columns to load from the file
+    pub columns: Vec<String>,
+    /// File type trait
+    pub file_type: Arc<dyn FileType>,
+    /// SQL Options that can affect the formats
+    pub options: HashMap<String, String>,
+    /// The schema of the output (a single column "count")
+    pub output_schema: DFSchemaRef,
+}
+
+impl Debug for CopyFrom {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CopyFrom")
+            .field("table_name", &self.table_name)
+            .field("source_url", &self.source_url)
+            .field("columns", &self.columns)
+            .field("file_type", &"...")
+            .field("options", &self.options)
+            .field("output_schema", &self.output_schema)
+            .finish_non_exhaustive()
+    }
+}
+
+// Implement PartialEq manually
+impl PartialEq for CopyFrom {
+    fn eq(&self, other: &Self) -> bool {
+        self.table_name == other.table_name
+            && self.source_url == other.source_url
+            && self.columns == other.columns
+    }
+}
+
+// Implement Eq (no need for additional logic over PartialEq)
+impl Eq for CopyFrom {}
+
+// Manual implementation needed because of `file_type` and `options` fields.
+// Comparison excludes these fields.
+impl PartialOrd for CopyFrom {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.table_name.partial_cmp(&other.table_name) {
+            Some(Ordering::Equal) => match self.source_url.partial_cmp(&other.source_url) {
+                Some(Ordering::Equal) => self.columns.partial_cmp(&other.columns),
+                cmp => cmp,
+            },
+            cmp => cmp,
+        }
+        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+// Implement Hash manually
+impl Hash for CopyFrom {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.table_name.hash(state);
+        self.source_url.hash(state);
+        self.columns.hash(state);
+    }
+}
+
+impl CopyFrom {
+    pub fn new(
+        table_name: TableReference,
+        source_url: String,
+        columns: Vec<String>,
+        file_type: Arc<dyn FileType>,
+        options: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            table_name,
+            source_url,
+            columns,
+            file_type,
+            options,
+            // The output schema is always a single column "count" with the number of rows copied
+            output_schema: make_count_schema(),
+        }
+    }
+}
+
 pub(crate) fn make_count_schema() -> DFSchemaRef {
     Arc::new(
         Schema::new(vec![Field::new("count", DataType::UInt64, false)])

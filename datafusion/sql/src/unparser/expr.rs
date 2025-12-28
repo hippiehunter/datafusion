@@ -1147,6 +1147,7 @@ impl Unparser<'_> {
             Operator::Question => Ok(BinaryOperator::Question),
             Operator::QuestionAnd => Ok(BinaryOperator::QuestionAnd),
             Operator::QuestionPipe => Ok(BinaryOperator::QuestionPipe),
+            Operator::ArrayOverlap => Ok(BinaryOperator::PGOverlap),
         }
     }
 

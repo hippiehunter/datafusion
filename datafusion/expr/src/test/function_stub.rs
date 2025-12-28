@@ -135,6 +135,8 @@ impl AggregateUDFImpl for Sum {
 
         fn coerced_type(data_type: &DataType) -> Result<DataType> {
             match data_type {
+                // Handle NULL type - SUM(NULL) should be allowed and return NULL
+                DataType::Null => Ok(DataType::Null),
                 DataType::Dictionary(_, v) => coerced_type(v),
                 // in the spark, the result type is DECIMAL(min(38,precision+10), s)
                 // ref: https://github.com/apache/spark/blob/fcf636d9eb8d645c24be3db2d599aba2d7e2955a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/aggregate/Sum.scala#L66
@@ -154,6 +156,7 @@ impl AggregateUDFImpl for Sum {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match &arg_types[0] {
+            DataType::Null => Ok(DataType::Null),
             DataType::Int64 => Ok(DataType::Int64),
             DataType::UInt64 => Ok(DataType::UInt64),
             DataType::Float64 => Ok(DataType::Float64),
@@ -346,8 +349,13 @@ impl AggregateUDFImpl for Min {
         &self.signature
     }
 
-    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Int64)
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        // MIN returns the same type as its argument, or NULL if NULL is passed
+        if arg_types.is_empty() {
+            Ok(DataType::Int64)
+        } else {
+            Ok(arg_types[0].clone())
+        }
     }
 
     fn state_fields(&self, _args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
@@ -428,8 +436,13 @@ impl AggregateUDFImpl for Max {
         &self.signature
     }
 
-    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Int64)
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        // MAX returns the same type as its argument, or NULL if NULL is passed
+        if arg_types.is_empty() {
+            Ok(DataType::Int64)
+        } else {
+            Ok(arg_types[0].clone())
+        }
     }
 
     fn state_fields(&self, _args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
@@ -497,6 +510,8 @@ impl AggregateUDFImpl for Avg {
         // Refer to https://www.postgresql.org/docs/8.2/functions-aggregate.html doc
         fn coerced_type(data_type: &DataType) -> Result<DataType> {
             match &data_type {
+                // Handle NULL type - AVG(NULL) should be allowed and return NULL
+                DataType::Null => Ok(DataType::Null),
                 DataType::Decimal32(p, s) => Ok(DataType::Decimal32(*p, *s)),
                 DataType::Decimal64(p, s) => Ok(DataType::Decimal64(*p, *s)),
                 DataType::Decimal128(p, s) => Ok(DataType::Decimal128(*p, *s)),
@@ -514,6 +529,7 @@ impl AggregateUDFImpl for Avg {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match &arg_types[0] {
+            DataType::Null => Ok(DataType::Null),
             DataType::Decimal32(precision, scale) => {
                 // In the spark, the result type is DECIMAL(min(38,precision+4), min(38,scale+4)).
                 // Ref: https://github.com/apache/spark/blob/fcf636d9eb8d645c24be3db2d599aba2d7e2955a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/aggregate/Average.scala#L66

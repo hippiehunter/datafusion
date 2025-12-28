@@ -27,7 +27,7 @@ use datafusion_common::TableReference;
 use datafusion_common::config::SqlParserOptions;
 use datafusion_common::datatype::{DataTypeExt, FieldExt};
 use datafusion_common::error::add_possible_columns_to_diag;
-use datafusion_common::{DFSchema, DataFusionError, Result, not_impl_err, plan_err};
+use datafusion_common::{Column, DFSchema, DataFusionError, Result, not_impl_err, plan_err};
 use datafusion_common::{
     DFSchemaRef, Diagnostic, SchemaError, field_not_found, internal_err,
     plan_datafusion_err,
@@ -557,18 +557,29 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     ) -> Result<LogicalPlan> {
         if idents.is_empty() {
             Ok(plan)
-        } else if idents.len() != plan.schema().fields().len() {
+        } else if idents.len() > plan.schema().fields().len() {
             plan_err!(
-                "Source table contains {} columns but only {} \
+                "Source table contains {} columns but {} \
                 names given as column alias",
                 plan.schema().fields().len(),
                 idents.len()
             )
         } else {
-            let fields = plan.schema().fields().clone();
+            // SQL:2016 E051-09: Allow partial column aliasing
+            // If fewer aliases than columns, only rename the first N columns
+            let schema = plan.schema().clone();
+            let num_fields = schema.fields().len();
             LogicalPlanBuilder::from(plan)
-                .project(fields.iter().zip(idents.into_iter()).map(|(field, ident)| {
-                    col(field.name()).alias(self.ident_normalizer.normalize(ident))
+                .project((0..num_fields).map(|i| {
+                    let (_qualifier, field) = schema.qualified_field(i);
+                    // Use unqualified column references so that SubqueryAlias can
+                    // properly apply the new table qualifier
+                    let col_expr = col(field.name());
+                    if i < idents.len() {
+                        col_expr.alias(self.ident_normalizer.normalize(idents[i].clone()))
+                    } else {
+                        col_expr
+                    }
                 }))?
                 .build()
         }

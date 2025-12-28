@@ -52,6 +52,8 @@ pub enum DdlStatement {
     CreateCatalog(CreateCatalog),
     /// Creates a new index.
     CreateIndex(CreateIndex),
+    /// Drops an index.
+    DropIndex(DropIndex),
     /// Drops a table.
     DropTable(DropTable),
     /// Drops a view.
@@ -94,6 +96,7 @@ impl DdlStatement {
             }
             DdlStatement::CreateCatalog(CreateCatalog { schema, .. }) => schema,
             DdlStatement::CreateIndex(CreateIndex { schema, .. }) => schema,
+            DdlStatement::DropIndex(DropIndex { schema, .. }) => schema,
             DdlStatement::DropTable(DropTable { schema, .. }) => schema,
             DdlStatement::DropView(DropView { schema, .. }) => schema,
             DdlStatement::DropCatalogSchema(DropCatalogSchema { schema, .. }) => schema,
@@ -120,6 +123,7 @@ impl DdlStatement {
             DdlStatement::CreateCatalogSchema(_) => "CreateCatalogSchema",
             DdlStatement::CreateCatalog(_) => "CreateCatalog",
             DdlStatement::CreateIndex(_) => "CreateIndex",
+            DdlStatement::DropIndex(_) => "DropIndex",
             DdlStatement::DropTable(_) => "DropTable",
             DdlStatement::DropView(_) => "DropView",
             DdlStatement::DropCatalogSchema(_) => "DropCatalogSchema",
@@ -147,6 +151,7 @@ impl DdlStatement {
             }
             DdlStatement::CreateView(CreateView { input, .. }) => vec![input],
             DdlStatement::CreateIndex(_) => vec![],
+            DdlStatement::DropIndex(_) => vec![],
             DdlStatement::DropTable(_) => vec![],
             DdlStatement::DropView(_) => vec![],
             DdlStatement::DropCatalogSchema(_) => vec![],
@@ -211,6 +216,11 @@ impl DdlStatement {
                     }
                     DdlStatement::CreateIndex(CreateIndex { name, .. }) => {
                         write!(f, "CreateIndex: {name:?}")
+                    }
+                    DdlStatement::DropIndex(DropIndex {
+                        name, if_exists, ..
+                    }) => {
+                        write!(f, "DropIndex: {name:?} if exists:={if_exists}")
                     }
                     DdlStatement::DropTable(DropTable {
                         name, if_exists, ..
@@ -579,6 +589,8 @@ pub struct CreateView {
     pub input: Arc<LogicalPlan>,
     /// Option to not error if table already exists
     pub or_replace: bool,
+    /// Option to not error if view already exists (IF NOT EXISTS clause)
+    pub if_not_exists: bool,
     /// SQL used to create the view, if available
     pub definition: Option<String>,
     /// Whether the view is ephemeral
@@ -975,6 +987,29 @@ impl PartialOrd for CreateIndex {
             .partial_cmp(&comparable_other)
             // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
             .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+/// Drops an index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DropIndex {
+    /// The index name
+    pub name: String,
+    /// If the index exists
+    pub if_exists: bool,
+    /// Dummy schema
+    pub schema: DFSchemaRef,
+}
+
+// Manual implementation needed because of `schema` field. Comparison excludes this field.
+impl PartialOrd for DropIndex {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.name.partial_cmp(&other.name) {
+            Some(Ordering::Equal) => self.if_exists.partial_cmp(&other.if_exists),
+            cmp => cmp,
+        }
+        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
     }
 }
 

@@ -221,6 +221,7 @@ pub const REQUIRED_SCALAR_FUNCTIONS: &[&str] = &[
     "bit_and",
     "bit_or",
     "bit_xor",
+    "bit_not",
     // Misc
     "to_hex",
     "starts_with",
@@ -368,6 +369,107 @@ macro_rules! stub_scalar_udf {
     };
 }
 
+// Macro for numeric functions that return Float64
+macro_rules! stub_numeric_udf {
+    ($name:ident, $fn_name:expr) => {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            signature: Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: Signature::variadic_any(Volatility::Immutable),
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for $name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+                // Return the first argument's type if numeric, otherwise Float64
+                if !arg_types.is_empty() && arg_types[0].is_numeric() {
+                    Ok(arg_types[0].clone())
+                } else {
+                    Ok(DataType::Float64)
+                }
+            }
+
+            fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                not_impl_err!("stub function {} should not be invoked", $fn_name)
+            }
+        }
+
+        paste::paste! {
+            pub fn [<$name:snake _udf>]() -> Arc<ScalarUDF> {
+                static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+                    std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from($name::default())));
+                Arc::clone(&INSTANCE)
+            }
+        }
+    };
+}
+
+// Macro for string functions that return integers (like POSITION, LENGTH, etc.)
+macro_rules! stub_int_udf {
+    ($name:ident, $fn_name:expr) => {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        pub struct $name {
+            signature: Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    signature: Signature::variadic_any(Volatility::Immutable),
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for $name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+                Ok(DataType::Int32)
+            }
+
+            fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                not_impl_err!("stub function {} should not be invoked", $fn_name)
+            }
+        }
+
+        paste::paste! {
+            pub fn [<$name:snake _udf>]() -> Arc<ScalarUDF> {
+                static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+                    std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from($name::default())));
+                Arc::clone(&INSTANCE)
+            }
+        }
+    };
+}
+
 // String functions (E021)
 stub_scalar_udf!(Upper, "upper");
 stub_scalar_udf!(Lower, "lower");
@@ -375,35 +477,130 @@ stub_scalar_udf!(Substring, "substring");
 stub_scalar_udf!(Trim, "trim");
 stub_scalar_udf!(Ltrim, "ltrim");
 stub_scalar_udf!(Rtrim, "rtrim");
-stub_scalar_udf!(Position, "position");
-stub_scalar_udf!(CharacterLength, "character_length");
-stub_scalar_udf!(CharLength, "char_length");
-stub_scalar_udf!(Length, "length");
-stub_scalar_udf!(OctetLength, "octet_length");
-stub_scalar_udf!(Strpos, "strpos");
+stub_int_udf!(Position, "position");
+stub_int_udf!(CharacterLength, "character_length");
+stub_int_udf!(CharLength, "char_length");
+stub_int_udf!(Length, "length");
+stub_int_udf!(OctetLength, "octet_length");
+stub_int_udf!(Strpos, "strpos");
 stub_scalar_udf!(Concat, "concat");
 stub_scalar_udf!(Substr, "substr");
 
 // Null handling (E131)
-stub_scalar_udf!(Coalesce, "coalesce");
-stub_scalar_udf!(Nullif, "nullif");
+// Custom implementation for Coalesce that returns the first argument's type
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Coalesce {
+    signature: Signature,
+}
+
+impl Default for Coalesce {
+    fn default() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for Coalesce {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "coalesce"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        // COALESCE returns the type of the first non-null argument
+        // For planning purposes, we return the first argument's type
+        if arg_types.is_empty() {
+            Ok(DataType::Null)
+        } else {
+            Ok(arg_types[0].clone())
+        }
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("stub function coalesce should not be invoked")
+    }
+}
+
+pub fn coalesce_udf() -> Arc<ScalarUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(Coalesce::default())));
+    Arc::clone(&INSTANCE)
+}
+
+// Custom implementation for Nullif that returns the first argument's type
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Nullif {
+    signature: Signature,
+}
+
+impl Default for Nullif {
+    fn default() -> Self {
+        Self {
+            signature: Signature::any(2, Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for Nullif {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "nullif"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        // NULLIF returns the type of the first argument
+        if arg_types.is_empty() {
+            Ok(DataType::Null)
+        } else {
+            Ok(arg_types[0].clone())
+        }
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("stub function nullif should not be invoked")
+    }
+}
+
+pub fn nullif_udf() -> Arc<ScalarUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(Nullif::default())));
+    Arc::clone(&INSTANCE)
+}
 
 // Numeric functions (T621)
-stub_scalar_udf!(Abs, "abs");
-stub_scalar_udf!(Mod, "mod");
-stub_scalar_udf!(Ceil, "ceil");
-stub_scalar_udf!(Ceiling, "ceiling");
-stub_scalar_udf!(Floor, "floor");
-stub_scalar_udf!(Round, "round");
-stub_scalar_udf!(Power, "power");
-stub_scalar_udf!(Sqrt, "sqrt");
-stub_scalar_udf!(Exp, "exp");
-stub_scalar_udf!(Ln, "ln");
-stub_scalar_udf!(Log, "log");
-stub_scalar_udf!(Log10, "log10");
-stub_scalar_udf!(Sign, "sign");
-stub_scalar_udf!(Trunc, "trunc");
-stub_scalar_udf!(Truncate, "truncate");
+stub_numeric_udf!(Abs, "abs");
+stub_numeric_udf!(Mod, "mod");
+stub_numeric_udf!(Ceil, "ceil");
+stub_numeric_udf!(Ceiling, "ceiling");
+stub_numeric_udf!(Floor, "floor");
+stub_numeric_udf!(Round, "round");
+stub_numeric_udf!(Power, "power");
+stub_numeric_udf!(Sqrt, "sqrt");
+stub_numeric_udf!(Exp, "exp");
+stub_numeric_udf!(Ln, "ln");
+stub_numeric_udf!(Log, "log");
+stub_numeric_udf!(Log10, "log10");
+stub_numeric_udf!(Sign, "sign");
+stub_numeric_udf!(Trunc, "trunc");
+stub_numeric_udf!(Truncate, "truncate");
+
+// Bitwise functions
+stub_scalar_udf!(BitNot, "bit_not");
 
 // Date/time functions (F051)
 // Note: CurrentDate, CurrentTime, CurrentTimestamp, LocalTime, LocalTimestamp, and Now
@@ -616,35 +813,37 @@ stub_optional_precision_datetime_udf!(LocalTime, "localtime", DataType::Time64(T
 stub_optional_precision_datetime_udf!(LocalTimestamp, "localtimestamp", DataType::Timestamp(TimeUnit::Nanosecond, None));
 
 // Trigonometric functions
-stub_scalar_udf!(Sin, "sin");
-stub_scalar_udf!(Cos, "cos");
-stub_scalar_udf!(Tan, "tan");
-stub_scalar_udf!(Asin, "asin");
-stub_scalar_udf!(Acos, "acos");
-stub_scalar_udf!(Atan, "atan");
-stub_scalar_udf!(Atan2, "atan2");
-stub_scalar_udf!(Sinh, "sinh");
-stub_scalar_udf!(Cosh, "cosh");
-stub_scalar_udf!(Tanh, "tanh");
+stub_numeric_udf!(Sin, "sin");
+stub_numeric_udf!(Cos, "cos");
+stub_numeric_udf!(Tan, "tan");
+stub_numeric_udf!(Asin, "asin");
+stub_numeric_udf!(Acos, "acos");
+stub_numeric_udf!(Atan, "atan");
+stub_numeric_udf!(Atan2, "atan2");
+stub_numeric_udf!(Sinh, "sinh");
+stub_numeric_udf!(Cosh, "cosh");
+stub_numeric_udf!(Tanh, "tanh");
 
 // More math functions
-stub_scalar_udf!(Degrees, "degrees");
-stub_scalar_udf!(Radians, "radians");
-stub_scalar_udf!(Log2, "log2");
-stub_scalar_udf!(WidthBucket, "width_bucket");
-stub_scalar_udf!(Random, "random");
-stub_scalar_udf!(Rand, "rand");
-stub_scalar_udf!(Pi, "pi");
+stub_numeric_udf!(Degrees, "degrees");
+stub_numeric_udf!(Radians, "radians");
+stub_numeric_udf!(Log2, "log2");
+stub_numeric_udf!(WidthBucket, "width_bucket");
+
+// Nullary math functions - can be called without arguments: RANDOM(), RAND(), PI()
+stub_nullary_datetime_udf!(Random, "random", DataType::Float64);
+stub_nullary_datetime_udf!(Rand, "rand", DataType::Float64);
+stub_nullary_datetime_udf!(Pi, "pi", DataType::Float64);
 
 // Comparison functions
-stub_scalar_udf!(Greatest, "greatest");
-stub_scalar_udf!(Least, "least");
+stub_numeric_udf!(Greatest, "greatest");
+stub_numeric_udf!(Least, "least");
 
 // Bit operations (aggregate-like but can be scalar too)
 stub_scalar_udf!(BitAnd, "bit_and");
 stub_scalar_udf!(BitOr, "bit_or");
 stub_scalar_udf!(BitXor, "bit_xor");
-stub_scalar_udf!(BitLength, "bit_length");
+stub_int_udf!(BitLength, "bit_length");
 
 // Array functions
 stub_scalar_udf!(Array, "array");
@@ -660,8 +859,82 @@ stub_scalar_udf!(ArrayUnion, "array_union");
 stub_scalar_udf!(ArraySlice, "array_slice");
 stub_scalar_udf!(ArrayElement, "array_element");
 stub_scalar_udf!(TrimArray, "trim_array");
-stub_scalar_udf!(Cardinality, "cardinality");
-stub_scalar_udf!(GetField, "get_field");
+stub_int_udf!(Cardinality, "cardinality");
+
+/// GetField function that extracts a field from a struct with proper type inference.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct GetField {
+    signature: Signature,
+}
+
+impl Default for GetField {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![TypeSignature::Any(2), TypeSignature::VariadicAny],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for GetField {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "get_field"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        // Fallback - will be overridden by return_field_from_args
+        Ok(DataType::Null)
+    }
+
+    fn return_field_from_args(&self, args: datafusion_expr::ReturnFieldArgs) -> Result<Arc<Field>> {
+        if args.arg_fields.len() != 2 {
+            return plan_err!("get_field requires exactly 2 arguments");
+        }
+
+        // Get the type of the struct expression
+        let struct_type = args.arg_fields[0].data_type();
+
+        // Get the field name from the second argument (should be a scalar string)
+        let field_name = match args.scalar_arguments.get(1) {
+            Some(Some(ScalarValue::Utf8(Some(name)))) => name,
+            Some(Some(ScalarValue::LargeUtf8(Some(name)))) => name,
+            _ => return plan_err!("get_field field name must be a string literal"),
+        };
+
+        // Extract the field type from the struct
+        match struct_type {
+            DataType::Struct(fields) => {
+                for field in fields.iter() {
+                    if field.name() == field_name {
+                        return Ok(field.clone());
+                    }
+                }
+                plan_err!("Field '{}' not found in struct", field_name)
+            }
+            _ => plan_err!("get_field requires a struct type, got {:?}", struct_type),
+        }
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("stub function get_field should not be invoked")
+    }
+}
+
+pub fn get_field_udf() -> Arc<ScalarUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(GetField::default())));
+    Arc::clone(&INSTANCE)
+}
 
 // MakeArray - special stub for array literal construction
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -747,6 +1020,22 @@ impl ScalarUDFImpl for RowConstructor {
         Ok(DataType::Struct(Fields::empty()))
     }
 
+    fn return_field_from_args(&self, args: datafusion_expr::ReturnFieldArgs) -> Result<Arc<Field>> {
+        let fields: Vec<Field> = args.arg_fields
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| {
+                Field::new(format!("c{}", idx), field.data_type().clone(), field.is_nullable())
+            })
+            .collect();
+
+        Ok(Arc::new(Field::new(
+            "row",
+            DataType::Struct(Fields::from(fields)),
+            true,
+        )))
+    }
+
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         not_impl_err!("stub function row should not be invoked")
     }
@@ -755,6 +1044,84 @@ impl ScalarUDFImpl for RowConstructor {
 pub fn row_constructor_udf() -> Arc<ScalarUDF> {
     static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
         std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(RowConstructor::default())));
+    Arc::clone(&INSTANCE)
+}
+
+// Named STRUCT constructor - supports named field syntax STRUCT(name := value, ...)
+// Args are interleaved: [name1, value1, name2, value2, ...]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct NamedStructConstructor {
+    signature: Signature,
+}
+
+impl Default for NamedStructConstructor {
+    fn default() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for NamedStructConstructor {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "named_struct"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        // Return Struct type for named struct constructor
+        Ok(DataType::Struct(Fields::empty()))
+    }
+
+    fn return_field_from_args(&self, args: datafusion_expr::ReturnFieldArgs) -> Result<Arc<Field>> {
+        // Args are interleaved: [name1, value1, name2, value2, ...]
+        // Scalar arguments contains the names (at even indices)
+        // arg_fields contains the field types (at odd indices for values)
+
+        if args.arg_fields.len() % 2 != 0 {
+            return plan_err!("named_struct requires an even number of arguments (name-value pairs)");
+        }
+
+        let mut fields = Vec::new();
+        for i in (0..args.arg_fields.len()).step_by(2) {
+            // Get the field name from scalar arguments
+            let field_name = match args.scalar_arguments.get(i) {
+                Some(Some(ScalarValue::Utf8(Some(name)))) => name.clone(),
+                Some(Some(ScalarValue::LargeUtf8(Some(name)))) => name.clone(),
+                _ => return plan_err!("named_struct field names must be string literals"),
+            };
+
+            // Get the field type from the value at i+1
+            let value_field = &args.arg_fields[i + 1];
+            fields.push(Field::new(
+                field_name,
+                value_field.data_type().clone(),
+                value_field.is_nullable(),
+            ));
+        }
+
+        Ok(Arc::new(Field::new(
+            "named_struct",
+            DataType::Struct(Fields::from(fields)),
+            true,
+        )))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("stub function named_struct should not be invoked")
+    }
+}
+
+pub fn named_struct_constructor_udf() -> Arc<ScalarUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(NamedStructConstructor::default())));
     Arc::clone(&INSTANCE)
 }
 
@@ -904,8 +1271,63 @@ stub_aggregate_udf!(BitXorAgg, "bit_xor_agg");
 
 // Array/list aggregate functions
 stub_aggregate_udf!(ArrayAgg, "array_agg");
-stub_aggregate_udf!(ListAgg, "listagg");
 stub_aggregate_udf!(StringAgg, "string_agg");
+
+// ListAgg needs special handling for WITHIN GROUP support
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ListAgg {
+    signature: Signature,
+}
+
+impl Default for ListAgg {
+    fn default() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl datafusion_expr::AggregateUDFImpl for ListAgg {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "listagg"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn accumulator(
+        &self,
+        _args: datafusion_expr::function::AccumulatorArgs,
+    ) -> Result<Box<dyn datafusion_expr::Accumulator>> {
+        not_impl_err!("stub aggregate listagg should not be invoked")
+    }
+
+    fn state_fields(
+        &self,
+        _args: datafusion_expr::function::StateFieldsArgs,
+    ) -> Result<Vec<Arc<Field>>> {
+        not_impl_err!("stub aggregate listagg should not have state_fields")
+    }
+
+    fn supports_within_group_clause(&self) -> bool {
+        true
+    }
+}
+
+pub fn list_agg_udaf() -> Arc<AggregateUDF> {
+    static INSTANCE: std::sync::LazyLock<Arc<AggregateUDF>> =
+        std::sync::LazyLock::new(|| Arc::new(AggregateUDF::from(ListAgg::default())));
+    Arc::clone(&INSTANCE)
+}
 
 // JSON aggregate functions
 stub_aggregate_udf!(JsonArrayAgg, "json_arrayagg");
@@ -1028,6 +1450,18 @@ stub_window_udf!(FirstValue, "first_value");
 stub_window_udf!(LastValue, "last_value");
 stub_window_udf!(NthValue, "nth_value");
 
+// MATCH_RECOGNIZE navigation functions (T625)
+stub_window_udf!(First, "first");
+stub_window_udf!(Last, "last");
+stub_window_udf!(Prev, "prev");
+stub_window_udf!(Next, "next");
+
+// MATCH_RECOGNIZE navigation functions as scalar UDFs (for use in MEASURES/DEFINE)
+stub_scalar_udf!(FirstScalar, "first");
+stub_scalar_udf!(LastScalar, "last");
+stub_scalar_udf!(PrevScalar, "prev");
+stub_scalar_udf!(NextScalar, "next");
+
 // ============================================================================
 // DataFusionFunctionProvider - Reference Implementation
 // ============================================================================
@@ -1101,6 +1535,9 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "log" | "log10" => Some(log_udf()),
             "sign" => Some(sign_udf()),
             "trunc" | "truncate" => Some(trunc_udf()),
+
+            // Bitwise functions
+            "bit_not" => Some(bit_not_udf()),
 
             // Date/time functions (F051)
             "current_date" => Some(current_date_udf()),
@@ -1211,6 +1648,12 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "is_json_value" => Some(is_json_value_udf()),
             "is_json_object_with_unique_keys" => Some(is_json_object_with_unique_keys_udf()),
 
+            // MATCH_RECOGNIZE navigation functions (T625) - also available as scalars
+            "first" => Some(first_scalar_udf()),
+            "last" => Some(last_scalar_udf()),
+            "prev" => Some(prev_scalar_udf()),
+            "next" => Some(next_scalar_udf()),
+
             _ => None,
         }
     }
@@ -1228,6 +1671,11 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "first_value" => Some(first_value_udwf()),
             "last_value" => Some(last_value_udwf()),
             "nth_value" => Some(nth_value_udwf()),
+            // MATCH_RECOGNIZE navigation functions (T625)
+            "first" => Some(first_udwf()),
+            "last" => Some(last_udwf()),
+            "prev" => Some(prev_udwf()),
+            "next" => Some(next_udwf()),
             _ => None,
         }
     }
@@ -1316,11 +1764,16 @@ impl ExprPlanner for ConformanceExprPlanner {
     fn plan_struct_literal(
         &self,
         args: Vec<Expr>,
-        _is_named_struct: bool,
+        is_named_struct: bool,
     ) -> Result<PlannerResult<Vec<Expr>>> {
-        // Convert ROW(a, b, c) or STRUCT(a, b, c) to a row() function call
-        // The row() function creates a struct with fields named c0, c1, etc.
-        let func = row_constructor_udf();
+        // Convert ROW(a, b, c) or STRUCT(a, b, c) to appropriate function call
+        // - For named structs STRUCT(name := value, ...), use named_struct()
+        // - For positional structs ROW(a, b, c), use row() with c0, c1, etc. field names
+        let func = if is_named_struct {
+            named_struct_constructor_udf()
+        } else {
+            row_constructor_udf()
+        };
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
             datafusion_expr::expr::ScalarFunction::new_udf(func, args),
         )))
@@ -1412,6 +1865,35 @@ impl ExprPlanner for ConformanceExprPlanner {
                 )))
             }
         }
+    }
+
+    fn plan_compound_identifier(
+        &self,
+        field: &Field,
+        qualifier: Option<&TableReference>,
+        nested_names: &[String],
+    ) -> Result<PlannerResult<Vec<Expr>>> {
+        // Handle dot notation for struct field access: struct_col.field_name
+        // For example: SELECT person.name FROM employees
+        // where person is a struct column
+
+        if nested_names.is_empty() {
+            return Ok(PlannerResult::Original(vec![]));
+        }
+
+        // Build the base column expression
+        let mut expr = Expr::Column(datafusion_common::Column::from((qualifier, field)));
+
+        // Chain get_field calls for each nested name
+        for name in nested_names {
+            let func = get_field_udf();
+            let args = vec![expr, datafusion_expr::lit(name.clone())];
+            expr = Expr::ScalarFunction(
+                datafusion_expr::expr::ScalarFunction::new_udf(func, args),
+            );
+        }
+
+        Ok(PlannerResult::Planned(expr))
     }
 }
 
@@ -1760,9 +2242,11 @@ pub struct ConformanceContextProvider<'a, F: ConformanceFunctionProvider> {
 
 impl<'a, F: ConformanceFunctionProvider> ConformanceContextProvider<'a, F> {
     pub fn new(function_provider: &'a F) -> Self {
+        let mut config_options = ConfigOptions::default();
+        config_options.catalog.information_schema = true;
         Self {
             function_provider,
-            config_options: ConfigOptions::default(),
+            config_options,
             expr_planners: vec![Arc::new(ConformanceExprPlanner)],
         }
     }
@@ -1855,6 +2339,10 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                     Field::new("constraint_name", DataType::Utf8, false),
                     Field::new("check_clause", DataType::Utf8, true),
                 ]),
+                "df_settings" => Schema::new(vec![
+                    Field::new("name", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ]),
                 _ => return plan_err!("Table not found: {}.{}", schema_name, table_name),
             };
             return Ok(Arc::new(EmptyTable::new(Arc::new(schema))));
@@ -1862,11 +2350,29 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
 
         // Standard test tables for conformance testing
         let schema = match table_name {
-            // Basic test table with 3 columns (a, b, c)
+            // Basic test table with 4 columns (a, b, c, d) for T151 tests
+            // Also includes common columns for MATCH_RECOGNIZE tests (R010)
             "t" | "t1" | "t2" | "t3" => Ok(Schema::new(vec![
                 Field::new("a", DataType::Int32, true),
                 Field::new("b", DataType::Int32, true),
-                Field::new("c", DataType::Utf8, true),
+                Field::new("c", DataType::Int32, true),
+                Field::new("d", DataType::Int32, true),
+                Field::new("e", DataType::Int32, true), // For F131 tests
+                Field::new("flag", DataType::Boolean, true),
+                Field::new("old_value", DataType::Int32, true),
+                Field::new("new_value", DataType::Int32, true),
+                Field::new("nullable_key", DataType::Int32, true),
+                // Columns for MATCH_RECOGNIZE (R010) conformance tests
+                Field::new("id", DataType::Int32, true),
+                Field::new("value", DataType::Int32, true),
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+                Field::new("category", DataType::Utf8, true),
+                Field::new("region", DataType::Utf8, true),
+                Field::new("price", DataType::Float64, true),
+                Field::new("trade_date", DataType::Date32, true),
+                Field::new("symbol", DataType::Utf8, true),
+                Field::new("action", DataType::Utf8, true),
+                Field::new("amount", DataType::Float64, true),
             ])),
 
             // Extended test table with additional columns for specific conformance tests
@@ -1915,20 +2421,28 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
 
             // Standard person table (from existing tests) with additional columns for conformance
             "person" => Ok(Schema::new(vec![
+                Field::new("a", DataType::Int32, true), // For set operator tests
                 Field::new("id", DataType::UInt32, false),
                 Field::new("first_name", DataType::Utf8, false),
                 Field::new("last_name", DataType::Utf8, false),
                 Field::new("name", DataType::Utf8, false), // For E091 aggregate tests
                 Field::new("age", DataType::Int32, false),
                 Field::new("state", DataType::Utf8, false),
+                Field::new("city", DataType::Utf8, true), // For R010 MATCH_RECOGNIZE tests
                 Field::new("salary", DataType::Float64, false),
                 Field::new(
                     "birth_date",
                     DataType::Timestamp(TimeUnit::Nanosecond, None),
                     false,
                 ),
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None), true), // For R010 tests
                 Field::new("First Name", DataType::Utf8, true), // Delimited identifier test
                 Field::new("Last Name", DataType::Utf8, true), // Delimited identifier test
+                Field::new("middle_name", DataType::Utf8, true), // For T151 tests
+                Field::new("maiden_name", DataType::Utf8, true), // For T151 tests
+                Field::new("spouse_name", DataType::Utf8, true), // For T151 tests
+                Field::new("status", DataType::Utf8, true), // For F031 view tests
+                Field::new("action", DataType::Utf8, true), // For R010 user session pattern tests
             ])),
 
             // Orders table for join tests
@@ -1942,6 +2456,7 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("category", DataType::Utf8, true),
                 Field::new("amount", DataType::Float64, true),
                 Field::new("person_id", DataType::UInt32, true),
+                Field::new("order_date", DataType::Date32, true), // For R010 MATCH_RECOGNIZE tests
             ])),
 
             // Products table for join tests
@@ -1988,6 +2503,9 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("id", DataType::Int32, false),
                 Field::new("event_data", DataType::Utf8, true), // JSON as string
                 Field::new("metadata", DataType::Utf8, true), // JSON as string
+                Field::new("event_date", DataType::Date32, true), // For datetime tests
+                Field::new("event_time", DataType::Time64(TimeUnit::Nanosecond), true), // For datetime tests
+                Field::new("event_timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None), true), // For datetime tests
             ])),
 
             // Stock prices table for financial/analytics tests
@@ -2015,6 +2533,36 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("salary", DataType::Float64, true),
                 Field::new("manager_id", DataType::Int32, true),
                 Field::new("hire_date", DataType::Date32, true),
+            ])),
+
+            // Users table for character type tests (E021)
+            "users" => Ok(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("username", DataType::Utf8, false),
+                Field::new("email", DataType::Utf8, false),
+                Field::new("first_name", DataType::Utf8, true),
+                Field::new("last_name", DataType::Utf8, true),
+            ])),
+
+            // User data table for identifier tests (E031) - with trailing underscore
+            "user_data_" => Ok(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("User Name", DataType::Utf8, false),
+                Field::new("email_address", DataType::Utf8, false),
+                Field::new("created_at_", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+                Field::new("Status", DataType::Utf8, true),
+            ])),
+
+            // View tables for F031 view tests
+            // These views are expected to have person-like schema for view lifecycle tests
+            "v" | "v1" | "v2" => Ok(Schema::new(vec![
+                Field::new("id", DataType::UInt32, false),
+                Field::new("first_name", DataType::Utf8, false),
+                Field::new("last_name", DataType::Utf8, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("age", DataType::Int32, false),
+                Field::new("state", DataType::Utf8, false),
+                Field::new("salary", DataType::Float64, false),
             ])),
 
             _ => plan_err!("Table not found: {}", table_name),

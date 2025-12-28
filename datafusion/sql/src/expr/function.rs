@@ -19,11 +19,12 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
-    DFSchema, Dependency, Diagnostic, Result, Span, internal_datafusion_err,
+    Column, DFSchema, Dependency, Diagnostic, Result, Span, Spans, internal_datafusion_err,
     internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::{
-    Expr, ExprSchemable, SortExpr, WindowFrame, WindowFunctionDefinition, expr,
+    Expr, ExprSchemable, LogicalPlanBuilder, SortExpr, Subquery, WindowFrame,
+    WindowFunctionDefinition, expr,
     expr::{NullTreatment, ScalarFunction, Unnest, WildcardOptions, WindowFunction},
     planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
 };
@@ -242,6 +243,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        // Handle ARRAY subquery constructor (SQL:2016 S095)
+        // Transform ARRAY(SELECT ...) into (SELECT ARRAY_AGG(...) FROM ...)
+        let name = if function.name.0.len() > 1 {
+            function.name.to_string()
+        } else {
+            match function.name.0[0].as_ident() {
+                Some(ident) => crate::utils::normalize_ident(ident.clone()),
+                None => function.name.to_string(),
+            }
+        };
+
+        if name.eq_ignore_ascii_case("array") {
+            if let FunctionArguments::Subquery(query) = &function.args {
+                return self.plan_array_subquery_constructor(
+                    query.as_ref().clone(),
+                    schema,
+                    planner_context,
+                );
+            }
+        }
+
         let function_args = FunctionArgs::try_new(function)?;
         let FunctionArgs {
             name: object_name,
@@ -941,6 +963,88 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         Ok((within_group, args, arg_names))
+    }
+
+    /// Plan an ARRAY subquery constructor (SQL:2016 S095)
+    ///
+    /// Transforms `ARRAY(SELECT col FROM t ORDER BY x)` into:
+    /// `(SELECT ARRAY_AGG(col ORDER BY x) FROM t)` as a ScalarSubquery
+    pub(super) fn plan_array_subquery_constructor(
+        &self,
+        query: sqlparser::ast::Query,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        use crate::query::to_order_by_exprs_with_select;
+
+        // Extract ORDER BY from the original query if present
+        let order_by_exprs = to_order_by_exprs_with_select(query.order_by.clone(), None)?;
+
+        // Plan the subquery to get the logical plan
+        let old_outer_query_schema =
+            planner_context.set_outer_query_schema(Some(schema.clone().into()));
+        let sub_plan = self.query_to_plan(query, planner_context)?;
+        let outer_ref_columns = sub_plan.all_out_ref_exprs();
+        planner_context.set_outer_query_schema(old_outer_query_schema);
+
+        // Validate that the subquery returns exactly one column
+        if sub_plan.schema().fields().len() != 1 {
+            return plan_err!(
+                "ARRAY subquery must return exactly one column, but got {}",
+                sub_plan.schema().fields().len()
+            );
+        }
+
+        // Get the column expression from the subquery
+        let (qualifier, field) = sub_plan.schema().qualified_field(0);
+        let col_expr = Expr::Column(Column::new(
+            qualifier.cloned(),
+            field.name(),
+        ));
+
+        // Get array_agg function
+        let array_agg_fn = self
+            .context_provider
+            .get_aggregate_meta("array_agg")
+            .ok_or_else(|| {
+                internal_datafusion_err!("ARRAY_AGG function not found")
+            })?;
+
+        // Convert ORDER BY to sort expressions if present
+        let order_by_sort_exprs = if !order_by_exprs.is_empty() {
+            self.order_by_to_sort_expr(
+                order_by_exprs,
+                sub_plan.schema(),
+                planner_context,
+                false,
+                None,
+            )?
+        } else {
+            vec![]
+        };
+
+        // Create ARRAY_AGG aggregate expression
+        let array_agg_expr = expr::AggregateFunction::new_udf(
+            array_agg_fn,
+            vec![col_expr],
+            false, // not distinct
+            None,  // no filter
+            order_by_sort_exprs,
+            None,  // no null treatment
+        );
+
+        // Build the new subquery: SELECT ARRAY_AGG(col) FROM (original_query)
+        let group_expr: Vec<Expr> = vec![];
+        let aggregate_plan = LogicalPlanBuilder::from(sub_plan)
+            .aggregate(group_expr, vec![Expr::AggregateFunction(array_agg_expr)])?
+            .build()?;
+
+        // Return as a scalar subquery
+        Ok(Expr::ScalarSubquery(Subquery {
+            subquery: std::sync::Arc::new(aggregate_plan),
+            outer_ref_columns,
+            spans: Spans::new(),
+        }))
     }
 
     pub(crate) fn check_unnest_arg(arg: &Expr, schema: &DFSchema) -> Result<()> {

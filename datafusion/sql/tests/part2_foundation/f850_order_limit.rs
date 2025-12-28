@@ -857,7 +857,7 @@ fn combined_01_full_pagination() {
 #[test]
 fn combined_02_complex_subquery_ordering() {
     assert_feature_supported!(
-        "SELECT * FROM (SELECT first_name, salary, ROW_NUMBER() OVER (PARTITION BY state ORDER BY salary DESC) as rank FROM person) WHERE rank <= 3 ORDER BY state, rank",
+        "SELECT * FROM (SELECT first_name, salary, state, ROW_NUMBER() OVER (PARTITION BY state ORDER BY salary DESC) as rank FROM person) WHERE rank <= 3 ORDER BY state, rank",
         "F850-F855",
         "Complex subquery with ordering and ranking"
     );

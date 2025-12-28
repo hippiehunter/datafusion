@@ -66,6 +66,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             BinaryOperator::Question => Ok(Operator::Question),
             BinaryOperator::QuestionAnd => Ok(Operator::QuestionAnd),
             BinaryOperator::QuestionPipe => Ok(Operator::QuestionPipe),
+            BinaryOperator::PGOverlap => Ok(Operator::ArrayOverlap),
             _ => not_impl_err!("Unsupported binary operator: {:?}", op),
         }
     }

@@ -652,9 +652,22 @@ impl LogicalPlanBuilder {
     ///
     /// Similar to `limit` but uses expressions for `skip` and `fetch`
     pub fn limit_by_expr(self, skip: Option<Expr>, fetch: Option<Expr>) -> Result<Self> {
+        self.limit_by_expr_with_ties(skip, fetch, false)
+    }
+
+    /// Limit the number of rows returned with optional WITH TIES support
+    ///
+    /// Similar to `limit_by_expr` but allows specifying `with_ties` for FETCH WITH TIES semantics
+    pub fn limit_by_expr_with_ties(
+        self,
+        skip: Option<Expr>,
+        fetch: Option<Expr>,
+        with_ties: bool,
+    ) -> Result<Self> {
         Ok(Self::new(LogicalPlan::Limit(Limit {
             skip: skip.map(Box::new),
             fetch: fetch.map(Box::new),
+            with_ties,
             input: self.plan,
         })))
     }

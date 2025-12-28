@@ -56,6 +56,10 @@ pub enum Statement {
     Grant(Grant),
     /// REVOKE privileges
     Revoke(Revoke),
+    /// GRANT role
+    GrantRole(GrantRole),
+    /// REVOKE role
+    RevokeRole(RevokeRole),
     /// Prepare a statement and find any bind parameters
     /// (e.g. `?`). This is used to implement SQL-prepared statements.
     Prepare(Prepare),
@@ -100,6 +104,8 @@ impl Statement {
             Statement::ResetVariable(_) => "ResetVariable",
             Statement::Grant(_) => "Grant",
             Statement::Revoke(_) => "Revoke",
+            Statement::GrantRole(_) => "GrantRole",
+            Statement::RevokeRole(_) => "RevokeRole",
             Statement::Prepare(_) => "Prepare",
             Statement::Execute(_) => "Execute",
             Statement::Deallocate(_) => "Deallocate",
@@ -179,6 +185,12 @@ impl Statement {
                     }
                     Statement::Revoke(Revoke { privileges, .. }) => {
                         write!(f, "Revoke: {privileges}")
+                    }
+                    Statement::GrantRole(GrantRole { roles, .. }) => {
+                        write!(f, "GrantRole: {}", roles.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "))
+                    }
+                    Statement::RevokeRole(RevokeRole { roles, .. }) => {
+                        write!(f, "RevokeRole: {}", roles.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "))
                     }
                     Statement::Prepare(Prepare { name, fields, .. }) => {
                         write!(
@@ -338,6 +350,34 @@ pub struct Revoke {
     pub grantees: Vec<Grantee>,
     pub granted_by: Option<Ident>,
     pub cascade: Option<CascadeOption>,
+}
+
+/// GRANT role TO grantee statement (T332 - Extended roles).
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct GrantRole {
+    /// The roles being granted
+    pub roles: Vec<Ident>,
+    /// The recipients of the role grant
+    pub grantees: Vec<Grantee>,
+    /// If true, the grantee can grant the role to others
+    pub with_admin_option: bool,
+    /// The grantor of the role
+    pub granted_by: Option<Ident>,
+}
+
+/// REVOKE role FROM grantee statement (T332 - Extended roles).
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct RevokeRole {
+    /// The roles being revoked
+    pub roles: Vec<Ident>,
+    /// The recipients of the role revocation
+    pub grantees: Vec<Grantee>,
+    /// The grantor of the role
+    pub granted_by: Option<Ident>,
+    /// Cascade or restrict behavior
+    pub cascade: Option<CascadeOption>,
+    /// If true, this is REVOKE ADMIN OPTION FOR
+    pub admin_option_for: bool,
 }
 /// Prepare a statement but do not execute it. Prepare statements can have 0 or more
 /// `Expr::Placeholder` expressions that are filled in during execution

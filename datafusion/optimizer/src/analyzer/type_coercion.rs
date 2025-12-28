@@ -271,6 +271,7 @@ impl<'a> TypeCoercionRewriter<'a> {
             input: limit.input,
             fetch: new_fetch.map(Box::new),
             skip: new_skip.map(Box::new),
+            with_ties: limit.with_ties,
         }))
     }
 

@@ -284,7 +284,7 @@ fn b021_explain_analyze() {
 #[test]
 fn b021_explain_insert() {
     assert_feature_supported!(
-        "EXPLAIN INSERT INTO t VALUES (1, 2, 'test')",
+        "EXPLAIN INSERT INTO t (a, b, c) VALUES (1, 2, 3)",
         "B021",
         "EXPLAIN INSERT"
     );
@@ -472,19 +472,19 @@ fn b021_deallocate_prepare_all() {
 #[test]
 fn b021_show_variable() {
     assert_feature_supported!(
-        "SHOW max_parallel_workers",
+        "SHOW datafusion.catalog.information_schema",
         "B021",
         "SHOW variable"
     );
 }
 
-/// SHOW: SHOW with quoted variable name
+/// SHOW: SHOW with variable name containing dots
 #[test]
 fn b021_show_quoted_variable() {
     assert_feature_supported!(
-        "SHOW 'datafusion.execution.batch_size'",
+        "SHOW datafusion.execution.batch_size",
         "B021",
-        "SHOW quoted variable"
+        "SHOW variable with dots"
     );
 }
 
@@ -919,7 +919,7 @@ fn b021_multiple_set_operations() {
 #[test]
 fn b021_explain_all_dml() {
     assert_plans!("EXPLAIN SELECT * FROM t");
-    assert_plans!("EXPLAIN INSERT INTO t VALUES (1, 2, 'test')");
+    assert_plans!("EXPLAIN INSERT INTO t (a, b, c) VALUES (1, 2, 3)");
     assert_plans!("EXPLAIN UPDATE t SET a = 10 WHERE b > 5");
     assert_plans!("EXPLAIN DELETE FROM t WHERE a < 0");
 }

@@ -69,6 +69,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.set_operation_to_plan(op, left_plan, right_plan, set_quantifier)
             }
             SetExpr::Query(q) => self.query_to_plan(*q, planner_context),
+            SetExpr::Insert(stmt) => {
+                // Handle INSERT statements within a query (e.g., from WITH clause)
+                self.sql_statement_to_plan_with_context(stmt, planner_context)
+            }
+            SetExpr::Update(stmt) => {
+                // Handle UPDATE statements within a query (e.g., from WITH clause)
+                self.sql_statement_to_plan_with_context(stmt, planner_context)
+            }
+            SetExpr::Delete(stmt) => {
+                // Handle DELETE statements within a query (e.g., from WITH clause)
+                self.sql_statement_to_plan_with_context(stmt, planner_context)
+            }
             _ => not_impl_err!("Query {set_expr} not implemented yet"),
         }
     }

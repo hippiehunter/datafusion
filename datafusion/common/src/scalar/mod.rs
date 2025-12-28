@@ -2359,15 +2359,15 @@ impl ScalarValue {
                 {
                     let array = scalars
                         .map(|sv| {
-                            if let ScalarValue::$SCALAR_TY(v) = sv {
-                                Ok(v)
-                            } else {
-                                _exec_err!(
+                            match sv {
+                                ScalarValue::$SCALAR_TY(v) => Ok(v),
+                                ScalarValue::Null => Ok(None),
+                                _ => _exec_err!(
                                     "Inconsistent types in ScalarValue::iter_to_array. \
                                     Expected {:?}, got {:?}",
                                     data_type,
                                     sv
-                                )
+                                ),
                             }
                         })
                         .collect::<Result<$ARRAY_TY>>()?;
@@ -2381,15 +2381,15 @@ impl ScalarValue {
                 {
                     let array = scalars
                         .map(|sv| {
-                            if let ScalarValue::$SCALAR_TY(v, _) = sv {
-                                Ok(v)
-                            } else {
-                                _exec_err!(
+                            match sv {
+                                ScalarValue::$SCALAR_TY(v, _) => Ok(v),
+                                ScalarValue::Null => Ok(None),
+                                _ => _exec_err!(
                                     "Inconsistent types in ScalarValue::iter_to_array. \
                                     Expected {:?}, got {:?}",
                                     data_type,
                                     sv
-                                )
+                                ),
                             }
                         })
                         .collect::<Result<$ARRAY_TY>>()?;
@@ -2405,15 +2405,15 @@ impl ScalarValue {
                 {
                     let array = scalars
                         .map(|sv| {
-                            if let ScalarValue::$SCALAR_TY(v) = sv {
-                                Ok(v)
-                            } else {
-                                _exec_err!(
+                            match sv {
+                                ScalarValue::$SCALAR_TY(v) => Ok(v),
+                                ScalarValue::Null => Ok(None),
+                                _ => _exec_err!(
                                     "Inconsistent types in ScalarValue::iter_to_array. \
                                     Expected {:?}, got {:?}",
                                     data_type,
                                     sv
-                                )
+                                ),
                             }
                         })
                         .collect::<Result<$ARRAY_TY>>()?;

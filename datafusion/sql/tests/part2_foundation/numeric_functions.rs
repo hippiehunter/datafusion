@@ -1199,7 +1199,7 @@ fn bit_right_shift() {
 #[test]
 fn bit_complex_expression() {
     assert_feature_supported!(
-        "SELECT (a & b) | (c ^ 0xFF) FROM t",
+        "SELECT (a & b) | (a ^ 255) FROM t",
         "T031",
         "Complex bitwise expression"
     );

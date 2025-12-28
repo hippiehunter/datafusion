@@ -472,7 +472,7 @@ fn e051_combined_join_group() {
         "SELECT p.*, COUNT(o.order_id) AS order_count \
          FROM person p \
          LEFT JOIN orders o ON p.id = o.customer_id \
-         GROUP BY p.id, p.first_name, p.last_name, p.name, p.age, p.state, p.salary, p.birth_date, p.\"First Name\", p.\"Last Name\" \
+         GROUP BY p.a, p.id, p.first_name, p.last_name, p.name, p.age, p.state, p.city, p.salary, p.birth_date, p.timestamp, p.\"First Name\", p.\"Last Name\", p.middle_name, p.maiden_name, p.spouse_name, p.status, p.action \
          HAVING COUNT(o.order_id) > 0",
         "E051",
         "Join with qualified asterisk and GROUP BY"

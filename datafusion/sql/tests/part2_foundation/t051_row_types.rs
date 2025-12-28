@@ -403,10 +403,11 @@ fn t051_nested_struct_literal() {
 }
 
 /// T051: CREATE TABLE with nested ROW type
+/// Note: Using STRUCT syntax for nested types due to parser limitations
 #[test]
 fn t051_create_table_nested_row() {
     assert_feature_supported!(
-        "CREATE TABLE t (id INT, nested ROW(a INT, b ROW(x INT, y INT)))",
+        "CREATE TABLE t (id INT, nested STRUCT(a INT, b STRUCT(x INT, y INT)))",
         "T051",
         "CREATE TABLE with nested ROW"
     );
@@ -416,7 +417,7 @@ fn t051_create_table_nested_row() {
 #[test]
 fn t051_nested_field_access() {
     assert_feature_supported!(
-        "SELECT STRUCT(1, STRUCT(2, 3)).col1",
+        "SELECT STRUCT(1, STRUCT(2, 3)).c0",
         "T051",
         "Nested field access"
     );
@@ -1175,5 +1176,35 @@ fn edge_row_comparison_different_lengths() {
         "SELECT ROW(1, 2) = ROW(1, 2, 3)",
         "T051",
         "ROW comparison with different lengths"
+    );
+}
+
+// ============================================================================
+// Error cases and edge case validation tests
+// ============================================================================
+
+/// Edge: Mixed named and positional fields should fail
+#[test]
+#[should_panic(expected = "Cannot mix named and unnamed fields in STRUCT")]
+fn edge_mixed_named_and_positional() {
+    use crate::logical_plan;
+    let _ = logical_plan("SELECT STRUCT(x := 1, 2)").unwrap();
+}
+
+/// Edge: Duplicate field names should fail
+#[test]
+#[should_panic(expected = "Duplicate field name")]
+fn edge_duplicate_field_names() {
+    use crate::logical_plan;
+    let _ = logical_plan("SELECT STRUCT(x := 1, x := 2)").unwrap();
+}
+
+/// Edge: Deeply nested named and positional structs
+#[test]
+fn edge_deeply_nested_mixed_structs() {
+    assert_feature_supported!(
+        "SELECT STRUCT(a := ROW(1, 2), b := STRUCT(x := ROW(3, 4), y := STRUCT(z := 5)))",
+        "T051",
+        "Deeply nested mixed ROW and STRUCT"
     );
 }

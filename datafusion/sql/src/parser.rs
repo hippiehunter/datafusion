@@ -180,6 +180,71 @@ impl fmt::Display for CopyToSource {
     }
 }
 
+/// DataFusion extension DDL for `COPY FROM`
+///
+/// # Syntax:
+///
+/// ```text
+/// COPY <table_name> [(<column_list>)]
+/// FROM
+/// <source_url>
+/// (key_value_list)
+/// ```
+///
+/// # Examples
+///
+/// ```sql
+/// COPY lineitem FROM 'lineitem.csv'
+/// STORED AS CSV (
+///   'format.has_header' 'true',
+///   'format.delimiter' ','
+/// )
+///
+/// COPY person (id, name, age) FROM 'data.parquet' STORED AS PARQUET;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyFromStatement {
+    /// The table to load data into
+    pub table_name: ObjectName,
+    /// Optional list of columns to load
+    pub columns: Vec<String>,
+    /// The URL to load data from
+    pub source: String,
+    /// File type (Parquet, NDJSON, CSV etc.)
+    pub stored_as: Option<String>,
+    /// Source specific options
+    pub options: Vec<(String, Value)>,
+}
+
+impl fmt::Display for CopyFromStatement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            table_name,
+            columns,
+            source,
+            stored_as,
+            options,
+        } = self;
+
+        write!(f, "COPY {table_name}")?;
+        if !columns.is_empty() {
+            write!(f, " ({})", columns.join(", "))?;
+        }
+        write!(f, " FROM {source}")?;
+        if let Some(file_type) = stored_as {
+            write!(f, " STORED AS {file_type}")?;
+        }
+
+        if !options.is_empty() {
+            let opts: Vec<_> =
+                options.iter().map(|(k, v)| format!("'{k}' {v}")).collect();
+            write!(f, " OPTIONS ({})", opts.join(", "))?;
+        }
+
+        Ok(())
+    }
+}
+
 /// This type defines a lexicographical ordering.
 pub(crate) type LexOrdering = Vec<OrderByExpr>;
 
@@ -289,6 +354,8 @@ pub enum Statement {
     CreateExternalTable(CreateExternalTable),
     /// Extension: `COPY TO`
     CopyTo(CopyToStatement),
+    /// Extension: `COPY FROM`
+    CopyFrom(CopyFromStatement),
     /// EXPLAIN for extensions
     Explain(ExplainStatement),
     /// Extension: `RESET`
@@ -301,6 +368,7 @@ impl fmt::Display for Statement {
             Statement::Statement(stmt) => write!(f, "{stmt}"),
             Statement::CreateExternalTable(stmt) => write!(f, "{stmt}"),
             Statement::CopyTo(stmt) => write!(f, "{stmt}"),
+            Statement::CopyFrom(stmt) => write!(f, "{stmt}"),
             Statement::Explain(stmt) => write!(f, "{stmt}"),
             Statement::Reset(stmt) => write!(f, "{stmt}"),
         }
@@ -412,6 +480,12 @@ impl<'a> DFParserBuilder<'a> {
             },
         })
     }
+}
+
+/// Helper enum for parsing COPY statements
+enum CopySource {
+    Table(ObjectName),
+    Query(Box<Query>),
 }
 
 impl<'a> DFParser<'a> {
@@ -544,6 +618,10 @@ impl<'a> DFParser<'a> {
         } else if self.parser.peek_keyword(Keyword::RESET) {
             self.parser.next_token(); // RESET
             self.parse_reset()
+        } else if self.parser.peek_keyword(Keyword::ABORT) {
+            // ABORT is a PostgreSQL extension that is an alias for ROLLBACK
+            self.parser.next_token(); // ABORT
+            self.parse_abort()
         } else {
             // use sqlparser-rs parser for all other statements
             self.parse_and_handle_statement()
@@ -589,18 +667,55 @@ impl<'a> DFParser<'a> {
             })
     }
 
-    /// Parse a SQL `COPY TO` statement
+
+    /// Parse a SQL `COPY TO` or `COPY FROM` statement
     pub fn parse_copy(&mut self) -> Result<Statement, DataFusionError> {
-        // parse as a query
-        let source = if self.parser.consume_token(&Token::LParen) {
+        // First, parse the table name or query
+        // COPY can be followed by:
+        // - (query) TO ... for COPY TO with query
+        // - table_name TO ... for COPY TO with table
+        // - table_name (columns) FROM ... for COPY FROM with columns
+        // - table_name FROM ... for COPY FROM without columns
+
+        let (table_or_query, columns) = if self.parser.consume_token(&Token::LParen) {
+            // Could be a query for COPY TO
             let query = self.parser.parse_query()?;
             self.parser.expect_token(&Token::RParen)?;
-            CopyToSource::Query(query)
+            (CopySource::Query(query), vec![])
         } else {
             // parse as table reference
             let table_name = self.parser.parse_object_name(true)?;
-            CopyToSource::Relation(table_name)
+            // Check if there's a column list
+            let columns = if self.parser.consume_token(&Token::LParen) {
+                let cols = self.parser.parse_comma_separated(|p| {
+                    Ok(p.parse_identifier()?.value)
+                })?;
+                self.parser.expect_token(&Token::RParen)?;
+                cols
+            } else {
+                vec![]
+            };
+            (CopySource::Table(table_name), columns)
         };
+
+        // Now check if it's TO or FROM
+        if self.parser.parse_keyword(Keyword::FROM) {
+            // COPY FROM
+            return self.parse_copy_from(table_or_query, columns);
+        }
+
+        // Must be COPY TO
+        let source = match table_or_query {
+            CopySource::Query(q) => CopyToSource::Query(q),
+            CopySource::Table(t) => CopyToSource::Relation(t),
+        };
+
+        // Note: columns are parsed but currently not used in COPY TO
+        // They are allowed to parse for SQL:2016 conformance
+        if !columns.is_empty() {
+            // For now, just ignore them - they could be used in the future
+            // to specify which columns to copy from the source
+        }
 
         #[derive(Default)]
         struct Builder {
@@ -676,6 +791,71 @@ impl<'a> DFParser<'a> {
             partitioned_by: builder.partitioned_by.unwrap_or(vec![]),
             stored_as: builder.stored_as,
             options: builder.options.unwrap_or(vec![]),
+        }))
+    }
+
+    /// Parse a SQL `COPY FROM` statement
+    fn parse_copy_from(
+        &mut self,
+        table_or_query: CopySource,
+        columns: Vec<String>,
+    ) -> Result<Statement, DataFusionError> {
+        // COPY FROM can only have a table, not a query
+        let table_name = match table_or_query {
+            CopySource::Table(t) => t,
+            CopySource::Query(_) => {
+                return parser_err!("COPY FROM does not support queries")?;
+            }
+        };
+
+        // Parse the source file
+        let source = self.parser.parse_literal_string()?;
+
+        // Check for inline options: COPY t FROM 'file.csv' (FORMAT CSV)
+        let mut stored_as = None;
+        let mut options = None;
+
+        // parse_value_options expects the LParen to NOT be consumed
+        if self.parser.peek_token() == Token::LParen {
+            options = Some(self.parse_value_options()?);
+        }
+
+        // Parse optional STORED AS and OPTIONS clauses
+        loop {
+            if let Some(keyword) = self.parser.parse_one_of_keywords(&[
+                Keyword::STORED,
+                Keyword::OPTIONS,
+            ]) {
+                match keyword {
+                    Keyword::STORED => {
+                        self.parser.expect_keyword(Keyword::AS)?;
+                        ensure_not_set(&stored_as, "STORED AS")?;
+                        stored_as = Some(self.parse_file_format()?);
+                    }
+                    Keyword::OPTIONS => {
+                        ensure_not_set(&options, "OPTIONS")?;
+                        options = Some(self.parse_value_options()?);
+                    }
+                    _ => {
+                        unreachable!()
+                    }
+                }
+            } else {
+                let token = self.parser.next_token();
+                if token == Token::EOF || token == Token::SemiColon {
+                    break;
+                } else {
+                    return self.expected("end of statement or ;", &token)?;
+                }
+            }
+        }
+
+        Ok(Statement::CopyFrom(CopyFromStatement {
+            table_name,
+            columns,
+            source,
+            stored_as,
+            options: options.unwrap_or(vec![]),
         }))
     }
 
@@ -797,6 +977,37 @@ impl<'a> DFParser<'a> {
         let idents: Vec<Ident> = parts.into_iter().map(Ident::new).collect();
         let variable = ObjectName::from(idents);
         Ok(Statement::Reset(ResetStatement::Variable(variable)))
+    }
+
+    /// Parse a SQL `ABORT` statement (PostgreSQL extension, alias for ROLLBACK)
+    ///
+    /// Syntax:
+    /// ```sql
+    /// ABORT [ WORK | TRANSACTION ] [ AND [ NO ] CHAIN ]
+    /// ```
+    pub fn parse_abort(&mut self) -> Result<Statement, DataFusionError> {
+        // ABORT token already consumed by parse_statement()
+
+        // Optional WORK or TRANSACTION keyword
+        let _ = self.parser.parse_one_of_keywords(&[Keyword::WORK, Keyword::TRANSACTION]);
+
+        // Parse optional AND [NO] CHAIN
+        let chain = if self.parser.parse_keyword(Keyword::AND) {
+            let no = self.parser.parse_keyword(Keyword::NO);
+            self.parser.expect_keyword(Keyword::CHAIN)?;
+            !no  // chain = true if AND CHAIN, false if AND NO CHAIN
+        } else {
+            false  // no AND clause means chain = false (default)
+        };
+
+        // Create a Rollback statement (ABORT is equivalent to ROLLBACK in PostgreSQL)
+        use sqlparser::ast::AttachedToken;
+
+        Ok(Statement::Statement(Box::new(SQLStatement::Rollback {
+            rollback_token: AttachedToken::empty(),
+            chain,
+            savepoint: None,
+        })))
     }
 
     pub fn parse_explain_format(&mut self) -> Result<Option<String>, DataFusionError> {

@@ -241,8 +241,9 @@ impl<'a> BinaryTypeCoercer<'a> {
                 )
             })
         }
-        AtArrow | ArrowAt => {
+        AtArrow | ArrowAt | ArrayOverlap => {
             // Array contains or search (similar to LIKE) operation
+            // ArrayOverlap checks if two arrays have any elements in common
             array_coercion(lhs, rhs)
                 .or_else(|| like_coercion(lhs, rhs)).map(Signature::comparison).ok_or_else(|| {
                     plan_datafusion_err!(
@@ -291,6 +292,30 @@ impl<'a> BinaryTypeCoercer<'a> {
                     rhs,
                     ret,
                 })
+            } else if matches!(self.op, Multiply | Divide) && interval_numeric_coercion(lhs, rhs).is_some() {
+                // Interval * numeric or Interval / numeric (e.g., INTERVAL '1' DAY * 2)
+                Ok(Signature{
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                    ret: lhs.clone(),
+                })
+            } else if matches!(self.op, Plus | Minus) {
+                // Time +/- Interval (e.g., TIME '12:00:00' + INTERVAL '1' HOUR)
+                // Check if this is a Time +/- Interval operation
+                if let Some(time_type) = time_interval_coercion(lhs, rhs) {
+                    Ok(Signature{
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        ret: time_type,
+                    })
+                } else if let Some(numeric) = mathematics_numerical_coercion(lhs, rhs) {
+                    // Numeric arithmetic, e.g. Int32 + Int32
+                    Ok(Signature::uniform(numeric))
+                } else {
+                    plan_err!(
+                        "Cannot coerce arithmetic expression {} {} {} to valid types", self.lhs, self.op, self.rhs
+                    )
+                }
             } else if let Some(numeric) = mathematics_numerical_coercion(lhs, rhs) {
                 // Numeric arithmetic, e.g. Int32 + Int32
                 Ok(Signature::uniform(numeric))
@@ -1880,6 +1905,43 @@ fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
         }
         (Timestamp(_, _tz), Date32) | (Date32, Timestamp(_, _tz)) => {
             Some(Timestamp(Nanosecond, None))
+        }
+        _ => None,
+    }
+}
+
+/// Coercion rules for interval arithmetic with numeric types
+/// Supports INTERVAL * numeric and INTERVAL / numeric
+fn interval_numeric_coercion(
+    lhs_type: &DataType,
+    rhs_type: &DataType,
+) -> Option<DataType> {
+    use arrow::datatypes::DataType::*;
+
+    match (lhs_type, rhs_type) {
+        // INTERVAL * numeric or INTERVAL / numeric
+        (Interval(_), rhs) if rhs.is_numeric() => Some(lhs_type.clone()),
+        // numeric * INTERVAL (commutative for multiplication)
+        (lhs, Interval(_)) if lhs.is_numeric() => Some(rhs_type.clone()),
+        _ => None,
+    }
+}
+
+/// Coercion rules for Time +/- Interval operations
+/// Returns the result type (Time) if the operation is valid
+fn time_interval_coercion(
+    lhs_type: &DataType,
+    rhs_type: &DataType,
+) -> Option<DataType> {
+    use arrow::datatypes::DataType::*;
+
+    match (lhs_type, rhs_type) {
+        // Time32/Time64 +/- Interval
+        (Time32(unit), Interval(_)) | (Interval(_), Time32(unit)) => {
+            Some(Time32(*unit))
+        }
+        (Time64(unit), Interval(_)) | (Interval(_), Time64(unit)) => {
+            Some(Time64(*unit))
         }
         _ => None,
     }

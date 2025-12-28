@@ -27,7 +27,7 @@ use crate::{
     Window, expr_vec_fmt,
 };
 
-use crate::dml::CopyTo;
+use crate::dml::{CopyFrom, CopyTo};
 use arrow::datatypes::Schema;
 use datafusion_common::display::GraphvizBuilder;
 use datafusion_common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
@@ -422,6 +422,33 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "Target Table": merge.target_table.table()
                 })
             }
+            LogicalPlan::CopyFrom(CopyFrom {
+                table_name,
+                source_url,
+                columns,
+                file_type,
+                options,
+                output_schema: _,
+            }) => {
+                let op_str = options
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let cols_str = if columns.is_empty() {
+                    "ALL".to_string()
+                } else {
+                    columns.join(", ")
+                };
+                json!({
+                    "Node Type": "CopyFrom",
+                    "Table": table_name.to_string(),
+                    "Source URL": source_url,
+                    "Columns": cols_str,
+                    "File Type": format!("{}", file_type.get_ext()),
+                    "Options": op_str
+                })
+            }
             LogicalPlan::Copy(CopyTo {
                 input: _,
                 output_url,
@@ -644,6 +671,16 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "Node Type": "Unnest",
                     "ListColumn": expr_vec_fmt!(list_type_columns),
                     "StructColumn": expr_vec_fmt!(struct_type_columns),
+                })
+            }
+            LogicalPlan::MatchRecognize(_) => {
+                json!({
+                    "Node Type": "MatchRecognize"
+                })
+            }
+            LogicalPlan::JsonTable(_) => {
+                json!({
+                    "Node Type": "JsonTable"
                 })
             }
         }

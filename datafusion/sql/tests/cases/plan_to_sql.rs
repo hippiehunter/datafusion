@@ -298,6 +298,54 @@ fn plan_create_temporary_table() -> Result<()> {
 }
 
 #[test]
+fn roundtrip_grant_revoke_role() -> Result<()> {
+    let tests: Vec<&str> = vec![
+        // Basic role grant
+        "GRANT reporting_role TO alice",
+        // Role grant with admin option
+        "GRANT reporting_role TO alice WITH ADMIN OPTION",
+        // Multiple roles
+        "GRANT role1, role2 TO alice",
+        // Multiple grantees
+        "GRANT reporting_role TO alice, bob",
+        // Basic revoke
+        "REVOKE reporting_role FROM alice",
+        // Revoke with CASCADE
+        "REVOKE reporting_role FROM alice CASCADE",
+        // Revoke with RESTRICT
+        "REVOKE reporting_role FROM alice RESTRICT",
+        // Revoke admin option
+        "REVOKE ADMIN OPTION FOR reporting_role FROM alice",
+    ];
+
+    // For each test sql string, we transform as follows:
+    // sql -> ast::Statement (s1) -> LogicalPlan (p1) -> ast::Statement (s2) -> LogicalPlan (p2)
+    // We test not that s1==s2, but rather p1==p2. This ensures that unparser preserves the logical
+    // query information of the original sql string and disregards other differences in syntax or
+    // quoting.
+    for query in tests {
+        let dialect = GenericDialect {};
+        let statement = Parser::new(&dialect)
+            .try_with_sql(query)?
+            .parse_statement()?;
+        let state = MockSessionState::default();
+        let context = MockContextProvider { state };
+        let sql_to_rel = SqlToRel::new(&context);
+        let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
+
+        let roundtrip_statement = plan_to_sql(&plan)?;
+
+        let plan_roundtrip = sql_to_rel
+            .sql_statement_to_plan(roundtrip_statement.clone())
+            .unwrap();
+
+        assert_eq!(plan, plan_roundtrip);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn roundtrip_crossjoin() -> Result<()> {
     let query = "select j1.j1_id, j2.j2_string from j1, j2";
 

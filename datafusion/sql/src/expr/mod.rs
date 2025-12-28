@@ -717,10 +717,54 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if !fields.is_empty() {
             return not_impl_err!("Struct fields are not supported yet");
         }
-        // Named struct syntax removed - always use unnamed struct creation
-        let mut create_struct_args =
-            self.create_struct_expr(values, schema, planner_context)?;
-        let is_named_struct = false;
+
+        // Check if ALL values are assignments or NONE are
+        let assignment_count = values.iter().filter(|v| {
+            matches!(v, SQLExpr::BinaryOp { op: BinaryOperator::Assignment, .. })
+        }).count();
+
+        // Validate: either all are assignments or none are
+        if assignment_count > 0 && assignment_count != values.len() {
+            return plan_err!(
+                "Cannot mix named and unnamed fields in STRUCT. Found {} named fields and {} unnamed fields",
+                assignment_count,
+                values.len() - assignment_count
+            );
+        }
+
+        let (mut create_struct_args, is_named_struct) = if assignment_count == values.len() {
+            // Named struct syntax: extract field names and values
+            let mut args = Vec::new();
+            let mut field_names = std::collections::HashSet::new();
+
+            for value in values {
+                if let SQLExpr::BinaryOp { left, op: BinaryOperator::Assignment, right } = value {
+                    // Extract field name from left side
+                    let field_name = match *left {
+                        SQLExpr::Identifier(id) => id.value,
+                        _ => return plan_err!("Expected identifier on left side of := in STRUCT"),
+                    };
+
+                    // Check for duplicate field names
+                    if !field_names.insert(field_name.clone()) {
+                        return plan_err!("Duplicate field name '{}' in STRUCT", field_name);
+                    }
+
+                    // Add field name as string literal
+                    args.push(lit(field_name));
+
+                    // Add field value
+                    args.push(self.sql_expr_to_logical_expr(*right, schema, planner_context)?);
+                } else {
+                    // This should never happen due to our validation above
+                    return plan_err!("Expected assignment operator := in named STRUCT syntax");
+                }
+            }
+            (args, true)
+        } else {
+            // Unnamed struct syntax
+            (self.create_struct_expr(values, schema, planner_context)?, false)
+        };
 
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_struct_literal(create_struct_args, is_named_struct)? {
@@ -1164,6 +1208,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }) => Ok(Some(GetFieldAccess::NamedStructField {
                         name: ScalarValue::from(s),
                     })),
+                    SQLExpr::Identifier(ident) => {
+                        // Support unquoted identifiers for struct field access
+                        let field_name = self.ident_normalizer.normalize(ident.clone());
+                        Ok(Some(GetFieldAccess::NamedStructField {
+                            name: ScalarValue::from(field_name.as_str()),
+                        }))
+                    }
                     _ => {
                         not_impl_err!(
                             "Dot access not supported for non-string expr: {expr:?}"

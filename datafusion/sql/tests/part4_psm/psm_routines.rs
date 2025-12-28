@@ -1174,7 +1174,6 @@ fn complex_procedure_transaction() {
 // ============================================================================
 
 #[test]
-#[should_panic]
 fn psm_summary_basic_routine_lifecycle() {
     // Most basic PSM operations
     assert_parses!("CREATE PROCEDURE test_proc() BEGIN END");
@@ -1186,26 +1185,23 @@ fn psm_summary_basic_routine_lifecycle() {
 }
 
 #[test]
-#[should_panic]
 fn psm_summary_control_flow() {
-    // Control flow statements are not supported yet
+    // Control flow statements are now supported
     assert_parses!("CREATE PROCEDURE cf() BEGIN IF 1=1 THEN SELECT 1; END IF; END");
     assert_parses!("CREATE PROCEDURE cf() BEGIN WHILE 1=1 DO SELECT 1; END WHILE; END");
     assert_parses!("CREATE PROCEDURE cf() BEGIN LOOP LEAVE; END LOOP; END");
 }
 
 #[test]
-#[should_panic]
 fn psm_summary_variables() {
-    // Variable handling is not supported yet
+    // Variable handling is now supported
     assert_parses!("CREATE PROCEDURE v() BEGIN DECLARE x INT; SET x = 1; END");
     assert_parses!("CREATE PROCEDURE v() BEGIN DECLARE x INT; SELECT a INTO x FROM t; END");
 }
 
 #[test]
-#[should_panic]
 fn psm_summary_exception_handling() {
-    // Exception handling is not supported yet
+    // Exception handling is now supported
     assert_parses!("CREATE PROCEDURE eh() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN END; END");
     assert_parses!("CREATE PROCEDURE eh() BEGIN SIGNAL SQLSTATE '45000'; END");
 }

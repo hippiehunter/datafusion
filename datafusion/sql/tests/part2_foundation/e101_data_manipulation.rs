@@ -46,7 +46,7 @@ use crate::{assert_parses, assert_plans, assert_feature_supported};
 #[test]
 fn e101_01_insert_values_basic() {
     assert_feature_supported!(
-        "INSERT INTO t VALUES (1, 2, 'abc')",
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3)",
         "E101-01",
         "Basic INSERT with VALUES"
     );
@@ -77,7 +77,7 @@ fn e101_01_insert_column_subset() {
 #[test]
 fn e101_01_insert_multi_row() {
     assert_feature_supported!(
-        "INSERT INTO t VALUES (1, 2, 'a'), (3, 4, 'b'), (5, 6, 'c')",
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3), (4, 5, 6), (7, 8, 9)",
         "E101-01",
         "Multi-row INSERT"
     );
@@ -107,7 +107,7 @@ fn e101_01_insert_with_expressions() {
 #[test]
 fn e101_01_insert_arithmetic_expressions() {
     assert_feature_supported!(
-        "INSERT INTO t VALUES (10 + 5, 20 - 3, 'result')",
+        "INSERT INTO t (a, b, c) VALUES (10 + 5, 20 - 3, 25 + 25)",
         "E101-01",
         "INSERT with arithmetic expressions"
     );
@@ -701,7 +701,7 @@ fn e101_summary_all_dml_operations() {
     // in realistic scenarios
 
     // Test INSERT variations
-    assert_plans!("INSERT INTO t VALUES (1, 2, 'a')");
+    assert_plans!("INSERT INTO t (a, b, c) VALUES (1, 2, 3)");
     assert_plans!("INSERT INTO t (a, b) VALUES (1, 2)");
     assert_plans!("INSERT INTO t1 SELECT * FROM t2");
 
@@ -764,7 +764,7 @@ fn e101_summary_insert_select_combinations() {
 
     // With UNION
     assert_plans!(
-        "INSERT INTO t1
+        "INSERT INTO t1 (a, b, c)
          SELECT a, b, c FROM t2 WHERE a > 0
          UNION ALL
          SELECT a, b, c FROM t3 WHERE a < 0"

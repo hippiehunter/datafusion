@@ -38,7 +38,7 @@
 //!
 //! E151 and E152 are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::{assert_parses, assert_plans, assert_feature_supported, assert_parse_error};
 
 // ============================================================================
 // E151-01: COMMIT statement
@@ -528,6 +528,153 @@ fn abort_work() {
         "E151",
         "ABORT WORK statement"
     );
+}
+
+/// ABORT AND CHAIN (starts new transaction after abort)
+#[test]
+fn abort_and_chain() {
+    assert_feature_supported!(
+        "ABORT AND CHAIN",
+        "E151",
+        "ABORT AND CHAIN statement"
+    );
+}
+
+/// ABORT AND NO CHAIN (does not start new transaction)
+#[test]
+fn abort_and_no_chain() {
+    assert_feature_supported!(
+        "ABORT AND NO CHAIN",
+        "E151",
+        "ABORT AND NO CHAIN statement"
+    );
+}
+
+/// ABORT WORK AND CHAIN
+#[test]
+fn abort_work_and_chain() {
+    assert_feature_supported!(
+        "ABORT WORK AND CHAIN",
+        "E151",
+        "ABORT WORK AND CHAIN statement"
+    );
+}
+
+/// ABORT WORK AND NO CHAIN
+#[test]
+fn abort_work_and_no_chain() {
+    assert_feature_supported!(
+        "ABORT WORK AND NO CHAIN",
+        "E151",
+        "ABORT WORK AND NO CHAIN statement"
+    );
+}
+
+/// ABORT TRANSACTION AND CHAIN
+#[test]
+fn abort_transaction_and_chain() {
+    assert_feature_supported!(
+        "ABORT TRANSACTION AND CHAIN",
+        "E151",
+        "ABORT TRANSACTION AND CHAIN statement"
+    );
+}
+
+/// ABORT TRANSACTION AND NO CHAIN
+#[test]
+fn abort_transaction_and_no_chain() {
+    assert_feature_supported!(
+        "ABORT TRANSACTION AND NO CHAIN",
+        "E151",
+        "ABORT TRANSACTION AND NO CHAIN statement"
+    );
+}
+
+// ============================================================================
+// ABORT Edge Cases and Error Handling
+// ============================================================================
+
+/// Edge case: ABORT AND (missing CHAIN keyword)
+#[test]
+fn abort_edge_case_and_missing_chain() {
+    assert_parse_error!("ABORT AND", "CHAIN");
+}
+
+/// Edge case: ABORT AND NO (missing CHAIN keyword)
+#[test]
+fn abort_edge_case_and_no_missing_chain() {
+    assert_parse_error!("ABORT AND NO", "CHAIN");
+}
+
+/// Edge case: ABORT NO CHAIN (missing AND keyword)
+#[test]
+fn abort_edge_case_no_chain_missing_and() {
+    // NO is treated as unexpected token
+    assert_parse_error!("ABORT NO CHAIN");
+}
+
+/// Edge case: ABORT CHAIN (missing AND keyword)
+#[test]
+fn abort_edge_case_chain_missing_and() {
+    // CHAIN is treated as unexpected token
+    assert_parse_error!("ABORT CHAIN");
+}
+
+/// Edge case: ABORT AND AND CHAIN (duplicate AND)
+#[test]
+fn abort_edge_case_duplicate_and() {
+    // Second AND causes parse error
+    assert_parse_error!("ABORT AND AND CHAIN");
+}
+
+/// Edge case: ABORT AND NO NO CHAIN (duplicate NO)
+#[test]
+fn abort_edge_case_duplicate_no() {
+    // Second NO causes parse error
+    assert_parse_error!("ABORT AND NO NO CHAIN");
+}
+
+/// Edge case: ABORT WORK NO CHAIN (missing AND)
+#[test]
+fn abort_edge_case_work_no_chain_missing_and() {
+    // NO is unexpected after WORK
+    assert_parse_error!("ABORT WORK NO CHAIN");
+}
+
+/// Edge case: ABORT TRANSACTION CHAIN (missing AND)
+#[test]
+fn abort_edge_case_transaction_chain_missing_and() {
+    // CHAIN is unexpected after TRANSACTION
+    assert_parse_error!("ABORT TRANSACTION CHAIN");
+}
+
+/// Edge case: ABORT WORK TRANSACTION (conflicting keywords)
+#[test]
+fn abort_edge_case_work_transaction() {
+    // TRANSACTION is unexpected after WORK
+    assert_parse_error!("ABORT WORK TRANSACTION");
+}
+
+/// Edge case: ABORT AND CHAIN AND NO CHAIN (conflicting options)
+#[test]
+fn abort_edge_case_conflicting_chain() {
+    // Second AND is unexpected
+    assert_parse_error!("ABORT AND CHAIN AND NO CHAIN");
+}
+
+/// Whitespace handling: Multiple spaces should work
+#[test]
+fn abort_whitespace_multiple_spaces() {
+    assert_parses!("ABORT    AND    CHAIN");
+    assert_parses!("ABORT   WORK   AND   NO   CHAIN");
+}
+
+/// Case sensitivity: Mixed case should work
+#[test]
+fn abort_case_insensitivity() {
+    assert_parses!("abort");
+    assert_parses!("aBorT aNd ChAiN");
+    assert_parses!("ABORT work AND no CHAIN");
 }
 
 // ============================================================================

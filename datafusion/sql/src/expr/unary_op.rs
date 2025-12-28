@@ -19,6 +19,7 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_common::{DFSchema, Diagnostic, Result, not_impl_err, plan_err};
 use datafusion_expr::{
     Expr, ExprSchemable,
+    expr::ScalarFunction,
     type_coercion::{is_interval, is_timestamp},
 };
 use sqlparser::ast::{Expr as SQLExpr, UnaryOperator, Value, ValueWithSpan};
@@ -77,6 +78,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         schema,
                         planner_context,
                     )?))),
+                }
+            }
+            UnaryOperator::BitwiseNot => {
+                // Bitwise NOT operator (~)
+                // Use a scalar function call to implement bitwise NOT
+                let operand = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+
+                // Try to get the bit_not function from the context provider
+                if let Some(func) = self.context_provider.get_function_meta("bit_not") {
+                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        func,
+                        vec![operand],
+                    )))
+                } else {
+                    // Fall back to not_impl_err if the function is not registered
+                    not_impl_err!("Bitwise NOT operator (~) requires 'bit_not' function to be registered")
                 }
             }
             _ => not_impl_err!("Unsupported SQL unary operator {op:?}"),

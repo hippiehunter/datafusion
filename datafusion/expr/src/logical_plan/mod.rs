@@ -37,7 +37,8 @@ pub use ddl::{
     AlterTable, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
     CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateProcedure,
     CreateRole, CreateView, DdlStatement, DropCatalogSchema, DropDomain, DropFunction,
-    DropProcedure, DropRole, DropSequence, DropTable, DropView, OperateFunctionArg,
+    DropIndex, DropProcedure, DropRole, DropSequence, DropTable, DropView,
+    OperateFunctionArg,
 };
 pub use dml::{DmlStatement, WriteOp};
 pub use merge::{
@@ -45,16 +46,18 @@ pub use merge::{
     MergeUpdateExpr,
 };
 pub use plan::{
-    Aggregate, Analyze, ColumnUnnestList, DescribeTable, Distinct, DistinctOn,
-    EmptyRelation, Explain, ExplainOption, Extension, FetchType, Filter, Join,
-    JoinConstraint, JoinType, Limit, LogicalPlan, Partitioning, PlanType, Projection,
-    RecursiveQuery, Repartition, SkipType, Sort, StringifiedPlan, Subquery,
-    SubqueryAlias, TableScan, ToStringifiedPlan, Union, Unnest, Values, Window,
-    projection_schema,
+    AfterMatchSkipOption, Aggregate, Analyze, ColumnUnnestList, DescribeTable, Distinct,
+    DistinctOn, EmptyMatchesMode, EmptyRelation, Explain, ExplainOption, Extension,
+    FetchType, Filter, Join, JoinConstraint, JoinType, JsonTable, JsonTableColumnDef,
+    JsonTableErrorHandling, Limit, LogicalPlan, MatchRecognize, MeasureExpr, Partitioning,
+    Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
+    RepetitionQuantifier, RowsPerMatchOption, SkipType, Sort, StringifiedPlan, Subquery,
+    SubqueryAlias, SubsetDef, SymbolDef, TableScan, ToStringifiedPlan, Union, Unnest,
+    Values, Window, projection_schema,
 };
 pub use statement::{
-    AnalyzeTable, Call, Deallocate, Execute, Grant, Prepare, ReleaseSavepoint,
-    ResetVariable, Revoke, RollbackToSavepoint, Savepoint, SetTransaction, SetVariable,
+    AnalyzeTable, Call, Deallocate, Execute, Grant, GrantRole, Prepare, ReleaseSavepoint,
+    ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint, SetTransaction, SetVariable,
     Statement, TransactionAccessMode, TransactionConclusion, TransactionEnd,
     TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
 };

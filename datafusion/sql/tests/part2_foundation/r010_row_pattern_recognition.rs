@@ -342,7 +342,7 @@ fn r010_skip_to_variable() {
          MATCH_RECOGNIZE ( \
              ORDER BY id \
              MEASURES A.value AS start \
-             AFTER MATCH SKIP TO B \
+             AFTER MATCH SKIP TO FIRST B \
              PATTERN (A B+ C) \
              DEFINE \
                  A AS value = 1, \

@@ -3946,11 +3946,11 @@ fn test_fetch_percent_not_supported() {
 }
 
 #[test]
-fn test_fetch_with_ties_not_supported() {
-    // FETCH WITH TIES is not yet supported
-    let sql = "SELECT id FROM person ORDER BY id FETCH FIRST 5 ROWS WITH TIES";
+fn test_fetch_with_ties_requires_order_by() {
+    // FETCH WITH TIES requires ORDER BY
+    let sql = "SELECT id FROM person FETCH FIRST 5 ROWS WITH TIES";
     let err = logical_plan(sql).unwrap_err();
-    assert_contains!(err.to_string(), "FETCH WITH TIES is not supported");
+    assert_contains!(err.to_string(), "FETCH WITH TIES requires an ORDER BY clause");
 }
 
 #[test]

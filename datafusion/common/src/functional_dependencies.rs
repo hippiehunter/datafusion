@@ -77,6 +77,17 @@ pub enum Constraint {
         /// Match type for the foreign key
         match_type: MatchType,
     },
+    /// Check constraint with a boolean expression.
+    /// The expression is stored as a string since it may reference columns
+    /// that don't yet exist during constraint creation.
+    Check {
+        /// Optional name for the check constraint
+        name: Option<String>,
+        /// The check expression as a string
+        expr: String,
+        /// Whether the constraint is enforced (optional, defaults to true)
+        enforced: Option<bool>,
+    },
 }
 
 /// This object encapsulates a list of functional constraints:
@@ -129,6 +140,12 @@ impl Constraints {
                         // Foreign keys cannot be projected as they use column names,
                         // not indices. They would need to be re-resolved after projection.
                         // For now, we drop foreign key constraints during projection.
+                        None
+                    }
+                    Constraint::Check { .. } => {
+                        // Check constraints cannot be projected as they use expressions
+                        // that may reference columns not in the projection.
+                        // For now, we drop check constraints during projection.
                         None
                     }
                 }
@@ -271,6 +288,9 @@ impl FunctionalDependencies {
                         // Foreign keys don't create functional dependencies
                         // as they reference another table
                         Constraint::ForeignKey { .. } => None,
+                        // Check constraints don't create functional dependencies
+                        // as they only enforce data validity, not uniqueness
+                        Constraint::Check { .. } => None,
                     };
                     // As primary keys are guaranteed to be unique, set the
                     // functional dependency mode to `Dependency::Single`:

@@ -737,6 +737,8 @@ impl EquivalenceProperties {
             }
             // Foreign keys don't affect sort order satisfaction
             Constraint::ForeignKey { .. } => false,
+            // Check constraints don't affect sort order satisfaction
+            Constraint::Check { .. } => false,
         })
     }
 
@@ -784,6 +786,8 @@ impl EquivalenceProperties {
             }
             // Foreign keys don't affect sort requirements satisfaction
             Constraint::ForeignKey { .. } => false,
+            // Check constraints don't affect sort requirements satisfaction
+            Constraint::Check { .. } => false,
         })
     }
 

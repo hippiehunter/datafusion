@@ -20,11 +20,14 @@
 //! This module converts PSM (Persistent Stored Modules) AST nodes into
 //! DataFusion logical plan representations.
 
+use std::sync::Arc;
+
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_common::{not_impl_err, tree_node::TreeNode, Result, ScalarValue};
 use datafusion_expr::logical_plan::psm::{
-    PsmBlock, PsmCase, PsmElseIf, PsmIf, PsmReturn, PsmSetVariable, PsmStatement,
-    PsmStatementKind, PsmVariable, PsmWhen, PsmWhile, RegionInfo,
+    HandlerCondition, HandlerType, PsmBlock, PsmCase, PsmElseIf, PsmHandler, PsmIf,
+    PsmReturn, PsmSetVariable, PsmStatement, PsmStatementKind, PsmVariable, PsmWhen,
+    PsmWhile, RegionInfo,
 };
 use datafusion_expr::Expr;
 use sqlparser::ast::{
@@ -124,6 +127,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.plan_psm_raise(raise_stmt, planner_context)
             }
 
+            // SIGNAL statement (SQL standard exception signaling)
+            Statement::Signal(signal_stmt) => {
+                self.plan_psm_signal(signal_stmt, planner_context)
+            }
+
+            // RESIGNAL statement (SQL standard exception re-signaling)
+            Statement::Resignal(resignal_stmt) => {
+                self.plan_psm_resignal(resignal_stmt, planner_context)
+            }
+
             // LOOP ... END LOOP
             Statement::Loop(loop_stmt) => self.plan_psm_loop(loop_stmt, planner_context),
 
@@ -151,7 +164,36 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
             // Embedded SQL - plan as regular statement
             other => {
-                let plan = self.sql_statement_to_plan(other.clone())?;
+                // Merge PSM schema into outer query schema so PSM variables/parameters
+                // are visible when resolving column references in the SQL statement
+                let psm_schema = planner_context.psm_schema();
+
+                // Build a new outer schema that includes PSM variables
+                let new_outer = if !psm_schema.fields().is_empty() {
+                    match planner_context.outer_query_schema() {
+                        Some(outer) => {
+                            let mut merged = psm_schema.as_ref().clone();
+                            merged.merge(outer);
+                            Some(Arc::new(merged))
+                        }
+                        None => Some(psm_schema),
+                    }
+                } else {
+                    None
+                };
+
+                // Set the new outer schema if we created one
+                let old_outer = if let Some(new) = new_outer {
+                    planner_context.set_outer_query_schema(Some(new))
+                } else {
+                    None
+                };
+
+                let plan = self.sql_statement_to_plan_with_context(other.clone(), planner_context)?;
+
+                // Restore the old outer query schema
+                planner_context.set_outer_query_schema(old_outer);
+
                 let info = RegionInfo::relational();
                 Ok(PsmStatement::new(PsmStatementKind::Sql(plan), info))
             }
@@ -171,12 +213,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             )
         })?;
 
-        // Check if this is a variable declaration (not cursor, handler, etc.)
-        if decl.declare_type.is_some() {
-            return not_impl_err!(
-                "DECLARE {:?} not yet supported",
-                decl.declare_type
-            );
+        // Check if this is a handler declaration
+        if let Some(ref declare_type) = decl.declare_type {
+            // Pattern match on the DeclareType
+            // Based on the error message, it's structured as Handler { handler_type: ... }
+            return self.plan_psm_handler(declare_type, decl, planner_context);
         }
 
         let schema = planner_context.psm_schema();
@@ -238,6 +279,75 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             PsmStatementKind::DeclareVariable(var),
             info,
         ))
+    }
+
+    /// Plan DECLARE HANDLER statement.
+    fn plan_psm_handler(
+        &self,
+        declare_type: &ast::DeclareType,
+        decl: &ast::Declare,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmStatement> {
+        // Extract handler information from declare_type
+        // Pattern match on the DeclareType enum
+        let (handler_type, condition, statement) = match declare_type {
+            ast::DeclareType::Handler { handler_type: sql_handler_type } => {
+                // Map sqlparser handler type to DataFusion HandlerType
+                let handler_type = match sql_handler_type {
+                    ast::DeclareHandlerType::Continue => HandlerType::Continue,
+                    ast::DeclareHandlerType::Exit => HandlerType::Exit,
+                    ast::DeclareHandlerType::Undo => {
+                        // UNDO is not supported in most SQL implementations
+                        return not_impl_err!("UNDO handler type not supported");
+                    }
+                };
+
+                // The handler condition is stored in the names field
+                // It's one of: SQLEXCEPTION, SQLWARNING, NOT FOUND, SQLSTATE '...', or condition name
+                let condition = if let Some(first_name) = decl.names.first() {
+                    let cond_str = first_name.value.as_str();
+                    match cond_str {
+                        "SQLEXCEPTION" => HandlerCondition::SqlException,
+                        "SQLWARNING" => HandlerCondition::SqlWarning,
+                        "NOT FOUND" => HandlerCondition::NotFound,
+                        // Check if it's SQLSTATE (would be parsed with the state value)
+                        // For SQLSTATE '23000', the name will contain just the identifier
+                        // and we need to look at the pattern differently
+                        _ => {
+                            // Assume it's either a condition name or we need to handle SQLSTATE differently
+                            // For now, treat as condition name
+                            HandlerCondition::ConditionName(first_name.clone())
+                        }
+                    }
+                } else {
+                    return Err(datafusion_common::DataFusionError::Plan(
+                        "Handler must have a condition".to_string(),
+                    ));
+                };
+
+                // Plan the handler body statement (stored in handler_body field)
+                let statement = if let Some(ref stmt) = decl.handler_body {
+                    Box::new(self.plan_psm_statement(stmt, planner_context)?)
+                } else {
+                    return Err(datafusion_common::DataFusionError::Plan(
+                        "Handler must have a body statement".to_string(),
+                    ));
+                };
+
+                (handler_type, condition, statement)
+            }
+            other => {
+                return not_impl_err!("DECLARE {:?} not yet supported", other);
+            }
+        };
+
+        Ok(PsmStatement::procedural(PsmStatementKind::DeclareHandler(
+            PsmHandler {
+                handler_type,
+                condition,
+                statement,
+            },
+        )))
     }
 
     /// Plan SET statement (variable assignment).
@@ -665,6 +775,56 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         Ok(PsmStatement::procedural(PsmStatementKind::Signal(
             PsmSignal { sqlstate, set_items },
+        )))
+    }
+
+    /// Plan SIGNAL statement (SQL standard exception signaling).
+    fn plan_psm_signal(
+        &self,
+        signal_stmt: &ast::SignalStatement,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmStatement> {
+        use datafusion_expr::logical_plan::psm::PsmSignal;
+
+        let schema = planner_context.psm_schema();
+
+        // Extract SQLSTATE value
+        let sqlstate = signal_stmt.sqlstate.clone();
+
+        // Process SET items
+        let mut set_items = Vec::new();
+        for item in &signal_stmt.set_items {
+            let planned = self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
+            set_items.push((item.name.clone(), planned));
+        }
+
+        Ok(PsmStatement::procedural(PsmStatementKind::Signal(
+            PsmSignal { sqlstate, set_items },
+        )))
+    }
+
+    /// Plan RESIGNAL statement (SQL standard exception re-signaling).
+    fn plan_psm_resignal(
+        &self,
+        resignal_stmt: &ast::ResignalStatement,
+        planner_context: &mut PlannerContext,
+    ) -> Result<PsmStatement> {
+        use datafusion_expr::logical_plan::psm::PsmResignal;
+
+        let schema = planner_context.psm_schema();
+
+        // Extract optional SQLSTATE value
+        let sqlstate = resignal_stmt.sqlstate.clone();
+
+        // Process SET items
+        let mut set_items = Vec::new();
+        for item in &resignal_stmt.set_items {
+            let planned = self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
+            set_items.push((item.name.clone(), planned));
+        }
+
+        Ok(PsmStatement::procedural(PsmStatementKind::Resignal(
+            PsmResignal { sqlstate, set_items },
         )))
     }
 

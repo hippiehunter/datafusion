@@ -95,6 +95,7 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
                     return Ok(Transformed::yes(LogicalPlan::Limit(Limit {
                         skip: None,
                         fetch: Some(Box::new(lit(1i64))),
+                        with_ties: false,
                         input,
                     })));
                 }

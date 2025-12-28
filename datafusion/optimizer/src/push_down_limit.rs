@@ -56,6 +56,13 @@ impl OptimizerRule for PushDownLimit {
             return Ok(Transformed::no(plan));
         };
 
+        // Skip optimization for WITH TIES to preserve correctness
+        // WITH TIES requires special handling with ORDER BY that would be
+        // broken by limit pushdown
+        if limit.with_ties {
+            return Ok(Transformed::no(LogicalPlan::Limit(limit)));
+        }
+
         // Currently only rewrite if skip and fetch are both literals
         let SkipType::Literal(skip) = limit.get_skip_type()? else {
             return Ok(Transformed::no(LogicalPlan::Limit(limit)));
@@ -77,6 +84,7 @@ impl OptimizerRule for PushDownLimit {
             let plan = LogicalPlan::Limit(Limit {
                 skip: Some(Box::new(lit(skip as i64))),
                 fetch: fetch.map(|f| Box::new(lit(f as i64))),
+                with_ties: false,
                 input: Arc::clone(&child.input),
             });
 
@@ -165,6 +173,7 @@ impl OptimizerRule for PushDownLimit {
                         LogicalPlan::Limit(Limit {
                             skip: None,
                             fetch: Some(Box::new(lit((fetch + skip) as i64))),
+                            with_ties: false,
                             input: Arc::new(child.clone()),
                         })
                     })
@@ -206,6 +215,7 @@ fn make_limit(skip: usize, fetch: usize, input: Arc<LogicalPlan>) -> LogicalPlan
     LogicalPlan::Limit(Limit {
         skip: Some(Box::new(lit(skip as i64))),
         fetch: Some(Box::new(lit(fetch as i64))),
+        with_ties: false,
         input,
     })
 }

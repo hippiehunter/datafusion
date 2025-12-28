@@ -140,6 +140,13 @@ pub enum Operator {
     ///
     /// Not implemented in DataFusion yet.
     QuestionPipe,
+    /// Array overlap, like `&&`
+    ///
+    /// Returns true if arrays have any elements in common:
+    /// ```sql
+    /// select ARRAY[1,2,3] && ARRAY[2,3,4]  -- returns true
+    /// ```
+    ArrayOverlap,
 }
 
 impl Operator {
@@ -188,7 +195,8 @@ impl Operator {
             | Operator::AtQuestion
             | Operator::Question
             | Operator::QuestionAnd
-            | Operator::QuestionPipe => None,
+            | Operator::QuestionPipe
+            | Operator::ArrayOverlap => None,
         }
     }
 
@@ -283,7 +291,8 @@ impl Operator {
             | Operator::AtQuestion
             | Operator::Question
             | Operator::QuestionAnd
-            | Operator::QuestionPipe => None,
+            | Operator::QuestionPipe
+            | Operator::ArrayOverlap => None,
         }
     }
 
@@ -323,7 +332,8 @@ impl Operator {
             | Operator::AtQuestion
             | Operator::Question
             | Operator::QuestionAnd
-            | Operator::QuestionPipe => 30,
+            | Operator::QuestionPipe
+            | Operator::ArrayOverlap => 30,
             Operator::Plus | Operator::Minus => 40,
             Operator::Multiply | Operator::Divide | Operator::Modulo => 45,
         }
@@ -369,7 +379,8 @@ impl Operator {
             | Operator::AtQuestion
             | Operator::Question
             | Operator::QuestionAnd
-            | Operator::QuestionPipe => true,
+            | Operator::QuestionPipe
+            | Operator::ArrayOverlap => true,
 
             // E.g. `TRUE OR NULL` is `TRUE`
             Operator::Or
@@ -429,6 +440,7 @@ impl fmt::Display for Operator {
             Operator::Question => "?",
             Operator::QuestionAnd => "?&",
             Operator::QuestionPipe => "?|",
+            Operator::ArrayOverlap => "&&",
         };
         write!(f, "{display}")
     }

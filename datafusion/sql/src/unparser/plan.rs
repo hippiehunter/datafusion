@@ -133,8 +133,11 @@ impl Unparser<'_> {
             LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Copy(_)
+            | LogicalPlan::CopyFrom(_)
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::Unnest(_) => not_impl_err!("Unsupported plan: {plan:?}"),
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::MatchRecognize(_)
+            | LogicalPlan::JsonTable(_) => not_impl_err!("Unsupported plan: {plan:?}"),
         }
     }
 
@@ -1606,6 +1609,21 @@ impl Unparser<'_> {
                 granted_by: revoke.granted_by.clone(),
                 cascade: revoke.cascade.clone(),
                 grant_option_for: false,
+                revoke_token: AttachedToken::empty(),
+            }),
+            PlanStatement::GrantRole(grant_role) => Ok(ast::Statement::GrantRole {
+                roles: grant_role.roles.clone(),
+                grantees: grant_role.grantees.clone(),
+                with_admin_option: grant_role.with_admin_option,
+                granted_by: grant_role.granted_by.clone(),
+                grant_token: AttachedToken::empty(),
+            }),
+            PlanStatement::RevokeRole(revoke_role) => Ok(ast::Statement::RevokeRole {
+                roles: revoke_role.roles.clone(),
+                grantees: revoke_role.grantees.clone(),
+                granted_by: revoke_role.granted_by.clone(),
+                cascade: revoke_role.cascade.clone(),
+                admin_option_for: revoke_role.admin_option_for,
                 revoke_token: AttachedToken::empty(),
             }),
             PlanStatement::TransactionStart(start) => {

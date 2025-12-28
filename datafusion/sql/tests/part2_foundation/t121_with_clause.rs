@@ -225,7 +225,7 @@ fn t121_cte_with_union() {
 fn t121_cte_in_insert() {
     assert_feature_supported!(
         "WITH cte AS (SELECT a, b FROM t1) \
-         INSERT INTO t2 SELECT * FROM cte",
+         INSERT INTO t2 (a, b) SELECT * FROM cte",
         "T121",
         "CTE in INSERT"
     );
