@@ -212,7 +212,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         //       more context.
         match sql {
             SQLExpr::Value(value) => {
-                self.parse_value(value.into(), planner_context.prepare_param_data_types())
+                self.parse_value(value.into(), planner_context.prepare_param_data_types(), planner_context)
             }
             SQLExpr::Extract { field, expr, .. } => {
                 let mut extract_args = vec![

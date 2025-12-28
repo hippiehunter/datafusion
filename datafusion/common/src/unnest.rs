@@ -74,6 +74,8 @@ pub struct UnnestOptions {
     /// declare them here. Any unnested columns not being mentioned inside this option
     /// will be unnested with depth = 1
     pub recursions: Vec<RecursionUnnestOption>,
+    /// Whether to add an ordinality (row number) column. Defaults to false
+    pub with_ordinality: bool,
 }
 
 /// Instruction on how to unnest a column (mostly with a list type)
@@ -91,6 +93,7 @@ impl Default for UnnestOptions {
             // default to true to maintain backwards compatible behavior
             preserve_nulls: true,
             recursions: vec![],
+            with_ordinality: false,
         }
     }
 }
@@ -111,6 +114,13 @@ impl UnnestOptions {
     /// Set the recursions for the unnest operation
     pub fn with_recursions(mut self, recursion: RecursionUnnestOption) -> Self {
         self.recursions.push(recursion);
+        self
+    }
+
+    /// Set whether to add an ordinality column as described on
+    /// [`Self`]
+    pub fn with_ordinality(mut self, with_ordinality: bool) -> Self {
+        self.with_ordinality = with_ordinality;
         self
     }
 }

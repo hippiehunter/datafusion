@@ -46,6 +46,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         value: Value,
         param_data_types: &[FieldRef],
+        planner_context: &PlannerContext,
     ) -> Result<Expr> {
         match value {
             Value::Number(n, _) => self.parse_sql_number(&n, false),
@@ -53,7 +54,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Value::Null => Ok(Expr::Literal(ScalarValue::Null, None)),
             Value::Boolean(n) => Ok(lit(n)),
             Value::Placeholder(param) => {
-                Self::create_placeholder_expr(param, param_data_types)
+                Self::create_placeholder_expr(param, param_data_types, planner_context)
             }
             Value::HexStringLiteral(s) => {
                 if let Some(v) = try_decode_hex_literal(&s) {
@@ -103,10 +104,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     /// Create a placeholder expression
     /// Both named (`$foo`) and positional (`$1`, `$2`, ...) placeholder styles are supported.
+    /// Anonymous placeholders (`?`) are converted to unique positional placeholders (`$1`, `$2`, etc.)
     fn create_placeholder_expr(
         param: String,
         param_data_types: &[FieldRef],
+        planner_context: &PlannerContext,
     ) -> Result<Expr> {
+        // Convert anonymous placeholder `?` to unique positional placeholder
+        let param = if param == "?" {
+            let num = planner_context.next_anonymous_placeholder_number();
+            format!("${}", num)
+        } else {
+            param
+        };
+
         // Try to parse the placeholder as a number. If the placeholder does not have a valid
         // positional value, assume we have a named placeholder.
         let index = param[1..].parse::<usize>();

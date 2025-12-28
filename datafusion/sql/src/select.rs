@@ -29,7 +29,7 @@ use crate::utils::{
 
 use datafusion_common::error::DataFusionErrorBuilder;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{RecursionUnnestOption, UnnestOptions};
+use datafusion_common::{Column, RecursionUnnestOption, UnnestOptions};
 use datafusion_common::{Result, not_impl_err, plan_err};
 use datafusion_expr::expr::{Alias, PlannedReplaceSelectItem, WildcardOptions};
 use datafusion_expr::expr_rewriter::{
@@ -418,6 +418,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         input: LogicalPlan,
         select_exprs: Vec<Expr>,
     ) -> Result<LogicalPlan> {
+        self.try_process_unnest_with_options(input, select_exprs, None)
+    }
+
+    /// Try converting Expr(Unnest(Expr)) to Projection/Unnest/Projection with custom options
+    pub(super) fn try_process_unnest_with_options(
+        &self,
+        input: LogicalPlan,
+        select_exprs: Vec<Expr>,
+        custom_options: Option<UnnestOptions>,
+    ) -> Result<LogicalPlan> {
         // Try process group by unnest
         let input = self.try_process_aggregate_unnest(input)?;
 
@@ -465,7 +475,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 break;
             } else {
                 // Set preserve_nulls to false to ensure compatibility with DuckDB and PostgreSQL
-                let mut unnest_options = UnnestOptions::new().with_preserve_nulls(false);
+                // Use custom_options if provided, otherwise use defaults
+                let mut unnest_options = if let Some(custom) = custom_options.clone() {
+                    custom
+                } else {
+                    UnnestOptions::new().with_preserve_nulls(false)
+                };
                 let mut unnest_col_vec = vec![];
 
                 for (col, maybe_list_unnest) in unnest_columns.into_iter() {
@@ -492,8 +507,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
 
+        // If we used custom options with ordinality, we need to include the ordinality column
+        // in the final projection
+        let mut final_projection = intermediate_select_exprs;
+        if let Some(opts) = &custom_options {
+            if opts.with_ordinality {
+                // Add the ordinality column to the projection
+                final_projection.push(Expr::Column(Column::from_name("ordinality")));
+            }
+        }
+
         LogicalPlanBuilder::from(intermediate_plan)
-            .project(intermediate_select_exprs)?
+            .project(final_projection)?
             .build()
     }
 
@@ -1064,27 +1089,31 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             })
             .collect::<Result<Vec<SortExpr>>>()?;
 
-        let all_valid_exprs: Vec<Expr> = column_exprs_post_aggr
-            .iter()
-            .cloned()
-            .chain(select_exprs_post_aggr.iter().filter_map(|e| {
-                if let Expr::Alias(alias) = e {
-                    Some(Expr::Column(alias.name.clone().into()))
-                } else {
-                    None
-                }
-            }))
-            .collect();
+        // For scalar aggregates (no GROUP BY), ORDER BY is a no-op since only one row
+        // is produced. Skip validation in this case.
+        if !group_by_exprs.is_empty() {
+            let all_valid_exprs: Vec<Expr> = column_exprs_post_aggr
+                .iter()
+                .cloned()
+                .chain(select_exprs_post_aggr.iter().filter_map(|e| {
+                    if let Expr::Alias(alias) = e {
+                        Some(Expr::Column(alias.name.clone().into()))
+                    } else {
+                        None
+                    }
+                }))
+                .collect();
 
-        let order_by_exprs_only: Vec<Expr> =
-            order_by_post_aggr.iter().map(|s| s.expr.clone()).collect();
-        check_columns_satisfy_exprs(
-            &all_valid_exprs,
-            &order_by_exprs_only,
-            CheckColumnsSatisfyExprsPurpose::Aggregate(
-                CheckColumnsMustReferenceAggregatePurpose::OrderBy,
-            ),
-        )?;
+            let order_by_exprs_only: Vec<Expr> =
+                order_by_post_aggr.iter().map(|s| s.expr.clone()).collect();
+            check_columns_satisfy_exprs(
+                &all_valid_exprs,
+                &order_by_exprs_only,
+                CheckColumnsSatisfyExprsPurpose::Aggregate(
+                    CheckColumnsMustReferenceAggregatePurpose::OrderBy,
+                ),
+            )?;
+        }
 
         Ok(AggregatePlanResult {
             plan,

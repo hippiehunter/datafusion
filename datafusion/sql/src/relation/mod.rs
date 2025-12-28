@@ -22,7 +22,7 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use arrow::datatypes::Field;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, Diagnostic, Result, Span, Spans, TableReference, not_impl_err, plan_err,
+    Column, DFSchema, Diagnostic, Result, Span, Spans, TableReference, UnnestOptions, not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::planner::{
@@ -354,10 +354,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 with_offset_alias: None,
                 with_ordinality,
             } => {
-                if with_ordinality {
-                    return not_impl_err!("UNNEST with ordinality is not supported yet");
-                }
-
                 // Unnest table factor has empty input
                 let schema = DFSchema::empty();
                 let input = LogicalPlanBuilder::empty(true).build()?;
@@ -378,7 +374,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if unnest_exprs.is_empty() {
                     return plan_err!("UNNEST must have at least one argument");
                 }
-                let logical_plan = self.try_process_unnest(input, unnest_exprs)?;
+
+                // Create options with ordinality if requested
+                let options = if with_ordinality {
+                    Some(UnnestOptions::new()
+                        .with_preserve_nulls(false)
+                        .with_ordinality(true))
+                } else {
+                    None
+                };
+
+                let logical_plan = self.try_process_unnest_with_options(input, unnest_exprs, options)?;
                 (logical_plan, alias)
             }
             TableFactor::UNNEST { .. } => {

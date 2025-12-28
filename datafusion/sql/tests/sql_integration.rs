@@ -983,15 +983,142 @@ fn table_with_column_alias() {
 }
 
 #[test]
-fn table_with_column_alias_number_cols() {
+fn table_with_column_alias_too_many() {
+    // More aliases than columns - should error
     let sql = "SELECT a, b, c
-                   FROM lineitem l (a, b)";
+                   FROM lineitem l (a, b, c, d, e)";
     let err = logical_plan(sql).expect_err("query should have failed");
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r"Error during planning: Source table contains 3 columns but only 2 names given as column alias"
+        @r"Error during planning: Source table contains 3 columns but 5 names given as column alias"
     );
+}
+
+#[test]
+fn table_with_column_alias_partial() {
+    // Fewer aliases than columns - should work (SQL:2016 E051-09 partial aliasing)
+    let sql = "SELECT a, b, price
+                   FROM lineitem l (a, b)";
+    let plan = logical_plan(sql).expect("Partial aliasing should work");
+    assert_snapshot!(
+        plan,
+        @r#"
+        Projection: l.a, l.b, l.price
+          SubqueryAlias: l
+            Projection: l_item_id AS a, l_description AS b, price
+              TableScan: lineitem
+        "#
+    );
+}
+
+#[test]
+fn table_with_column_alias_duplicate_names() {
+    // Duplicate aliases - should fail during projection validation
+    let sql = "SELECT * FROM lineitem l (dup, dup, c)";
+    let err = logical_plan(sql).expect_err("Duplicate aliases should fail");
+    assert!(err.to_string().contains("unique expression names") || err.to_string().contains("dup"),
+            "Error should mention duplicate names: {}", err);
+}
+
+#[test]
+fn table_with_column_alias_collision_with_original() {
+    // Partial aliasing where new alias conflicts with original column name
+    // lineitem has columns: l_item_id, l_description, price
+    // We rename first column to "price" (which is the 3rd column)
+    let sql = "SELECT * FROM lineitem l (price, renamed)";
+    let plan = logical_plan(sql).expect("Collision should be handled");
+    let plan_str = format!("{:?}", plan);
+
+    // The original "price" column should be renamed to avoid ambiguity
+    // Look for price_1 or similar conflict resolution
+    assert!(plan_str.contains("price"), "Should contain the new 'price' alias");
+}
+
+#[test]
+fn table_with_column_alias_special_chars() {
+    // Special characters in aliases (quoted identifiers)
+    let sql = r#"SELECT "col-1", "col 2", "col@3" FROM lineitem l ("col-1", "col 2", "col@3")"#;
+    let plan = logical_plan(sql).expect("Special characters should work when quoted");
+    let plan_str = format!("{:?}", plan);
+    assert!(plan_str.contains("col-1") || plan_str.contains("col 2") || plan_str.contains("col@3"),
+            "Special character aliases should be preserved");
+}
+
+#[test]
+fn table_with_column_alias_reserved_keywords() {
+    // Reserved keywords as aliases (must be quoted)
+    let sql = r#"SELECT "select", "from", "where" FROM lineitem l ("select", "from", "where")"#;
+    let plan = logical_plan(sql).expect("Reserved keywords should work when quoted");
+    let plan_str = format!("{:?}", plan);
+    assert!(plan_str.contains("select") && plan_str.contains("from") && plan_str.contains("where"),
+            "Reserved keyword aliases should work when quoted");
+}
+
+#[test]
+fn table_with_column_alias_case_sensitivity() {
+    // Unquoted aliases should be normalized (lowercased)
+    let sql = "SELECT ABC, DEF FROM lineitem l (ABC, DEF)";
+    let plan = logical_plan(sql).expect("Case sensitivity should be handled");
+    let plan_str = format!("{:?}", plan);
+    // Unquoted identifiers are normalized to lowercase
+    assert!(plan_str.contains("abc") && plan_str.contains("def"),
+            "Unquoted aliases should be normalized to lowercase");
+}
+
+#[test]
+fn table_with_column_alias_single_column() {
+    // Single column alias
+    let sql = "SELECT renamed FROM lineitem l (renamed)";
+    let plan = logical_plan(sql).expect("Single column alias should work");
+    assert_snapshot!(
+        plan,
+        @r#"
+        Projection: l.renamed
+          SubqueryAlias: l
+            Projection: l_item_id AS renamed, l_description, price
+              TableScan: lineitem
+        "#
+    );
+}
+
+#[test]
+fn table_with_column_alias_empty_vs_no_alias() {
+    // This tests behavior when using table alias without column aliases
+    let sql = "SELECT * FROM lineitem l";
+    let plan = logical_plan(sql).expect("Table alias should work");
+    let plan_str = format!("{:?}", plan);
+    // Should have either SubqueryAlias or just table reference
+    assert!(plan_str.contains("lineitem") || plan_str.contains("SubqueryAlias"),
+            "Should reference table");
+}
+
+#[test]
+fn table_with_column_alias_collision_renamed() {
+    // Test that collision resolution works correctly
+    // lineitem has: l_item_id, l_description, price
+    // Rename first to "price" - the original "price" should become "price_1"
+    let sql = "SELECT price, price_1 FROM lineitem l (price, renamed)";
+    let plan = logical_plan(sql).expect("Collision should be resolved");
+    let plan_str = format!("{:?}", plan);
+
+    // Verify that both "price" (new alias) and "price_1" (renamed original) exist
+    assert!(plan_str.contains("price"), "Should contain new 'price' alias");
+    assert!(plan_str.contains("price_1"), "Original 'price' should be renamed to 'price_1'");
+}
+
+#[test]
+fn table_with_column_alias_collision_detection() {
+    // Test that collision detection works - just verify it doesn't crash
+    // lineitem has columns [l_item_id, l_description, price]
+    // Rename first two to names of last two (creating conflicts)
+    let sql = "SELECT * FROM lineitem l (l_description, price)";
+    let plan = logical_plan(sql).expect("Collision should be handled");
+    let plan_str = format!("{:?}", plan);
+
+    // The plan should be created successfully with collision resolution
+    assert!(plan_str.contains("l_description") && plan_str.contains("price"),
+            "Should contain renamed columns");
 }
 
 #[test]

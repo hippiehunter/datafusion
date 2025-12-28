@@ -16,6 +16,7 @@
 // under the License.
 
 //! [`SqlToRel`]: SQL Query Planner (produces [`LogicalPlan`] from SQL AST)
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -273,6 +274,9 @@ pub struct PlannerContext {
     /// Schema for PSM (Persistent Stored Modules) variables and parameters.
     /// Used to resolve variable references in procedure/function bodies.
     psm_schema: Option<DFSchemaRef>,
+    /// Counter for generating unique IDs for anonymous placeholders (?)
+    /// Each ? is converted to $1, $2, etc.
+    next_anonymous_placeholder: Cell<usize>,
 }
 
 impl Default for PlannerContext {
@@ -292,6 +296,7 @@ impl PlannerContext {
             create_table_schema: None,
             values_defaults: None,
             psm_schema: None,
+            next_anonymous_placeholder: Cell::new(1),
         }
     }
 
@@ -422,6 +427,14 @@ impl PlannerContext {
             None => self.psm_schema = Some(new_schema),
         }
         Ok(())
+    }
+
+    /// Get the next anonymous placeholder number and increment the counter.
+    /// Used to convert `?` placeholders to unique `$N` format.
+    pub fn next_anonymous_placeholder_number(&self) -> usize {
+        let current = self.next_anonymous_placeholder.get();
+        self.next_anonymous_placeholder.set(current + 1);
+        current
     }
 }
 
@@ -569,18 +582,48 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             // If fewer aliases than columns, only rename the first N columns
             let schema = plan.schema().clone();
             let num_fields = schema.fields().len();
-            LogicalPlanBuilder::from(plan)
-                .project((0..num_fields).map(|i| {
-                    let (_qualifier, field) = schema.qualified_field(i);
-                    // Use unqualified column references so that SubqueryAlias can
-                    // properly apply the new table qualifier
-                    let col_expr = col(field.name());
-                    if i < idents.len() {
-                        col_expr.alias(self.ident_normalizer.normalize(idents[i].clone()))
+
+            // Collect the new column names for the renamed columns
+            let mut new_names: std::collections::HashSet<String> = idents
+                .iter()
+                .map(|id| self.ident_normalizer.normalize(id.clone()))
+                .collect();
+
+            // Create projection expressions without validation to prevent
+            // normalization which would re-qualify columns with their original
+            // table names. We need unqualified columns so that SubqueryAlias
+            // can properly apply the new table qualifier.
+            let mut exprs: Vec<_> = Vec::with_capacity(num_fields);
+            for i in 0..num_fields {
+                let (_qualifier, field) = schema.qualified_field(i);
+                let col_expr = col(field.name());
+                let expr = if i < idents.len() {
+                    // Rename this column
+                    col_expr.alias(self.ident_normalizer.normalize(idents[i].clone()))
+                } else {
+                    // Keep original name, but check for conflicts with renamed columns
+                    let original_name = field.name();
+                    if new_names.contains(original_name) {
+                        // Conflict detected: this column's original name matches a renamed column
+                        // Rename it to avoid ambiguity by adding a unique suffix
+                        let mut unique_name = format!("{}_1", original_name);
+                        let mut counter = 2;
+                        while new_names.contains(&unique_name) {
+                            unique_name = format!("{}_{}", original_name, counter);
+                            counter += 1;
+                        }
+                        new_names.insert(unique_name.clone());
+                        col_expr.alias(unique_name)
                     } else {
+                        new_names.insert(original_name.to_string());
                         col_expr
                     }
-                }))?
+                };
+                // Don't validate/normalize to keep columns unqualified
+                exprs.push((expr, false));
+            }
+            LogicalPlanBuilder::from(plan)
+                .project_with_validation(exprs)?
                 .build()
         }
     }

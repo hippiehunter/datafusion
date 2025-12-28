@@ -4872,7 +4872,7 @@ impl Unnest {
         // 4.unnest_col2_depth_1: int
         // Meaning the placeholder column will be replaced by its unnested variation(s), note
         // the plural.
-        let fields = input_schema
+        let mut fields = input_schema
             .iter()
             .enumerate()
             .map(|(index, (original_qualifier, original_field))| {
@@ -4955,6 +4955,16 @@ impl Unnest {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+
+        // Add ordinality column if requested
+        if options.with_ordinality {
+            let ordinality_field = Arc::new(Field::new("ordinality", DataType::Int64, false));
+            fields.push((None, ordinality_field));
+            // Track dependency for ordinality column
+            // The ordinality column doesn't depend on any specific input column,
+            // so we use index 0 as a placeholder or the first output column index
+            dependency_indices.push(if dependency_indices.is_empty() { 0 } else { dependency_indices[0] });
+        }
 
         let metadata = input_schema.metadata().clone();
         let df_schema = DFSchema::new_with_metadata(fields, metadata)?;

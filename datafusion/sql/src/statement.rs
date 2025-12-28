@@ -1128,8 +1128,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("Delete-limit clause not yet supported")?;
                 }
 
-                let table_name = self.get_delete_target(from)?;
-                self.delete_to_plan(&table_name, selection, planner_context)
+                let table = self.get_delete_target(from)?;
+                self.delete_to_plan(table, selection, planner_context)
             }
             Statement::Merge { into, table, source, on, clauses, output, .. } => {
                 self.merge_to_plan(into, table, source, on, clauses, output, planner_context)
@@ -1700,7 +1700,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
     }
 
-    fn get_delete_target(&self, from: FromTable) -> Result<ObjectName> {
+    fn get_delete_target(&self, from: FromTable) -> Result<TableWithJoins> {
         let mut from = match from {
             FromTable::WithFromKeyword(v) => v,
             FromTable::WithoutKeyword(v) => v,
@@ -1712,17 +1712,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 from.len()
             );
         }
-        let table_factor = from.pop().unwrap();
-        if !table_factor.joins.is_empty() {
+        let table_with_joins = from.pop().unwrap();
+        if !table_with_joins.joins.is_empty() {
             return not_impl_err!("DELETE FROM only supports single table, got: joins");
         }
-        let TableFactor::Table { name, .. } = table_factor.relation else {
-            return not_impl_err!(
-                "DELETE FROM only supports single table, got: {table_factor:?}"
-            );
-        };
 
-        Ok(name)
+        Ok(table_with_joins)
     }
 
     /// Generate a logical plan from a "SHOW TABLES" query
@@ -2431,34 +2426,39 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn delete_to_plan(
         &self,
-        table_name: &ObjectName,
+        table: TableWithJoins,
         predicate_expr: Option<SQLExpr>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        // Extract table name from the TableWithJoins
+        let table_name = match &table.relation {
+            TableFactor::Table { name, .. } => name.clone(),
+            _ => plan_err!("Cannot delete from non-table relation!")?,
+        };
+
         // Do a table lookup to verify the table exists
-        let table_ref = self.object_name_to_table_reference(table_name.clone())?;
+        let table_ref = self.object_name_to_table_reference(table_name)?;
         let table_source = self.context_provider.get_table_source(table_ref.clone())?;
-        let schema = DFSchema::try_from_qualified_schema(
-            table_ref.clone(),
-            &table_source.schema(),
-        )?;
-        let scan =
-            LogicalPlanBuilder::scan(table_ref.clone(), Arc::clone(&table_source), None)?
-                .build()?;
+
         // Clone the outer planner context to inherit CTEs
         let mut planner_context = outer_planner_context.clone();
+
+        // Build scan using plan_from_tables to properly apply the alias
+        let scan = self.plan_from_tables(vec![table], &mut planner_context)?;
 
         let source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
-                let filter_expr =
-                    self.sql_to_expr(predicate_expr, &schema, &mut planner_context)?;
-                let schema = Arc::new(schema);
+                let filter_expr = self.sql_to_expr(
+                    predicate_expr,
+                    scan.schema(),
+                    &mut planner_context,
+                )?;
                 let mut using_columns = HashSet::new();
                 expr_to_columns(&filter_expr, &mut using_columns)?;
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
                     filter_expr,
-                    &[&[&schema]],
+                    &[&[scan.schema()]],
                     &[using_columns],
                 )?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)

@@ -1169,8 +1169,10 @@ fn edge_struct_field_special_chars() {
     );
 }
 
-/// Edge: ROW comparison with different lengths
+/// Edge: ROW comparison with different lengths should fail
+/// SQL standard requires ROWs to have identical structure for comparison
 #[test]
+#[should_panic(expected = "Cannot infer common argument type")]
 fn edge_row_comparison_different_lengths() {
     assert_feature_supported!(
         "SELECT ROW(1, 2) = ROW(1, 2, 3)",
