@@ -866,7 +866,7 @@ dependencies = [
  "insta",
  "libc",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "parquet",
  "paste",
  "rand",
@@ -893,7 +893,7 @@ dependencies = [
  "futures",
  "insta",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "parking_lot",
  "parquet",
  "rand",
@@ -1894,6 +1894,29 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
+name = "object_store"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d180d5469872facb82dec7e233ff850d615330ea3044a7813550b22ffa4f05ce"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "humantime",
+ "itertools 0.14.0",
+ "parking_lot",
+ "percent-encoding",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
  "walkdir",
  "wasm-bindgen-futures",
  "web-time",
@@ -1985,7 +2008,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
- "object_store",
+ "object_store 0.12.4",
  "paste",
  "ring",
  "seq-macro",
