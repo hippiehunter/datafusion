@@ -62,9 +62,10 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::{
     Column, Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
-    FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues, Result,
-    ScalarValue, Spans, TableReference, UnnestOptions, aggregate_functional_dependencies,
-    assert_eq_or_internal_err, assert_or_internal_err, internal_err, plan_err,
+    FunctionalDependence, FunctionalDependencies, NullEquality, NullsDistinct, ParamValues,
+    Result, ScalarValue, Spans, TableReference, UnnestOptions,
+    aggregate_functional_dependencies, assert_eq_or_internal_err, assert_or_internal_err,
+    internal_err, plan_err,
 };
 use indexmap::IndexSet;
 
@@ -5734,9 +5735,10 @@ mod tests {
                 .clone()
                 .with_functional_dependencies(
                     FunctionalDependencies::new_from_constraints(
-                        Some(&Constraints::new_unverified(vec![Constraint::Unique(
-                            vec![0],
-                        )])),
+                        Some(&Constraints::new_unverified(vec![Constraint::Unique {
+                            columns: vec![0],
+                            nulls_distinct: NullsDistinct::Distinct,
+                        }])),
                         1,
                     ),
                 )

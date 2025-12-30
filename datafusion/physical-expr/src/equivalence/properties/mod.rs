@@ -700,8 +700,8 @@ impl EquivalenceProperties {
         normal_exprs: &[PhysicalSortExpr],
     ) -> bool {
         self.constraints.iter().any(|constraint| match constraint {
-            Constraint::PrimaryKey(indices) | Constraint::Unique(indices) => {
-                let check_null = matches!(constraint, Constraint::Unique(_));
+            Constraint::PrimaryKey(indices) => {
+                let check_null = false;
                 let normalized_size = normal_exprs.len();
                 indices.len() <= normalized_size
                     && self.oeq_class.iter().any(|ordering| {
@@ -735,6 +735,41 @@ impl EquivalenceProperties {
                         })
                     })
             }
+            Constraint::Unique { columns, .. } => {
+                let check_null = true;
+                let normalized_size = normal_exprs.len();
+                columns.len() <= normalized_size
+                    && self.oeq_class.iter().any(|ordering| {
+                        let length = ordering.len();
+                        if columns.len() > length || normalized_size < length {
+                            return false;
+                        }
+                        // Build a map of column positions in the ordering:
+                        let mut col_positions = HashMap::with_capacity(length);
+                        for (pos, req) in ordering.iter().enumerate() {
+                            if let Some(col) = req.expr.as_any().downcast_ref::<Column>()
+                            {
+                                let nullable = col.nullable(&self.schema).unwrap_or(true);
+                                col_positions.insert(col.index(), (pos, nullable));
+                            }
+                        }
+                        // Check if all constraint indices appear in valid positions:
+                        if !columns.iter().all(|idx| {
+                            col_positions.get(idx).is_some_and(|&(pos, nullable)| {
+                                // For unique constraints, verify column is not nullable if it's first/last:
+                                !check_null
+                                    || !nullable
+                                    || (pos != 0 && pos != length - 1)
+                            })
+                        }) {
+                            return false;
+                        }
+                        // Check if this ordering matches the prefix:
+                        normal_exprs.iter().zip(ordering).all(|(given, existing)| {
+                            existing.satisfy_expr(given, &self.schema)
+                        })
+                    })
+            }
             // Foreign keys don't affect sort order satisfaction
             Constraint::ForeignKey { .. } => false,
             // Check constraints don't affect sort order satisfaction
@@ -749,8 +784,8 @@ impl EquivalenceProperties {
     /// unique constraints, also verifies nullable columns.
     fn satisfied_by_constraints(&self, normal_reqs: &[PhysicalSortRequirement]) -> bool {
         self.constraints.iter().any(|constraint| match constraint {
-            Constraint::PrimaryKey(indices) | Constraint::Unique(indices) => {
-                let check_null = matches!(constraint, Constraint::Unique(_));
+            Constraint::PrimaryKey(indices) => {
+                let check_null = false;
                 let normalized_size = normal_reqs.len();
                 indices.len() <= normalized_size
                     && self.oeq_class.iter().any(|ordering| {
@@ -769,6 +804,40 @@ impl EquivalenceProperties {
                         }
                         // Check if all constraint indices appear in valid positions:
                         if !indices.iter().all(|idx| {
+                            col_positions.get(idx).is_some_and(|&(pos, nullable)| {
+                                !check_null
+                                    || !nullable
+                                    || (pos != 0 && pos != length - 1)
+                            })
+                        }) {
+                            return false;
+                        }
+                        // Check if requirements are satisfied:
+                        normal_reqs.iter().zip(ordering).all(|(req, existing)| {
+                            existing.satisfy(req, &self.schema)
+                        })
+                    })
+            }
+            Constraint::Unique { columns, .. } => {
+                let check_null = true;
+                let normalized_size = normal_reqs.len();
+                columns.len() <= normalized_size
+                    && self.oeq_class.iter().any(|ordering| {
+                        let length = ordering.len();
+                        if columns.len() > length || normalized_size < length {
+                            return false;
+                        }
+                        // Build a map of column positions in the ordering:
+                        let mut col_positions = HashMap::with_capacity(length);
+                        for (pos, req) in ordering.iter().enumerate() {
+                            if let Some(col) = req.expr.as_any().downcast_ref::<Column>()
+                            {
+                                let nullable = col.nullable(&self.schema).unwrap_or(true);
+                                col_positions.insert(col.index(), (pos, nullable));
+                            }
+                        }
+                        // Check if all constraint indices appear in valid positions:
+                        if !columns.iter().all(|idx| {
                             col_positions.get(idx).is_some_and(|&(pos, nullable)| {
                                 // For unique constraints, verify column is not nullable if it's first/last:
                                 !check_null

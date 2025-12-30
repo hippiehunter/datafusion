@@ -398,7 +398,7 @@ mod tests {
     use arrow::compute::SortOptions;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion_common::config::ConfigOptions;
-    use datafusion_common::{Constraint, Constraints, Result};
+    use datafusion_common::{Constraint, Constraints, NullsDistinct, Result};
     use datafusion_expr::Operator;
     use datafusion_expr::ScalarUDF;
     use datafusion_expr::sort_properties::SortProperties;
@@ -1402,7 +1402,10 @@ mod tests {
             (
                 "single column unique",
                 &unique_schema,
-                vec![Constraint::Unique(vec![0])],
+                vec![Constraint::Unique {
+                    columns: vec![0],
+                    nulls_distinct: NullsDistinct::Distinct,
+                }],
                 vec!["a"], // base ordering
                 vec![vec!["a", "b"], vec!["a", "c", "d"]],
                 vec![vec!["b", "a"], vec!["c", "a"]],
@@ -1418,7 +1421,10 @@ mod tests {
             (
                 "multi-column unique",
                 &unique_schema,
-                vec![Constraint::Unique(vec![0, 1])],
+                vec![Constraint::Unique {
+                    columns: vec![0, 1],
+                    nulls_distinct: NullsDistinct::Distinct,
+                }],
                 vec!["a", "b"], // base ordering
                 vec![vec!["a", "b", "c"], vec!["a", "b", "d"]],
                 vec![vec!["b", "a"], vec!["c", "a", "b"]],
@@ -1426,7 +1432,10 @@ mod tests {
             (
                 "nullable unique",
                 &unique_schema,
-                vec![Constraint::Unique(vec![2, 3])],
+                vec![Constraint::Unique {
+                    columns: vec![2, 3],
+                    nulls_distinct: NullsDistinct::Distinct,
+                }],
                 vec!["c", "d"], // base ordering
                 vec![],
                 vec![vec!["c", "d", "a"]],
@@ -1434,7 +1443,10 @@ mod tests {
             (
                 "ordering with arbitrary column unique",
                 &unique_schema,
-                vec![Constraint::Unique(vec![0, 1])],
+                vec![Constraint::Unique {
+                    columns: vec![0, 1],
+                    nulls_distinct: NullsDistinct::Distinct,
+                }],
                 vec!["a", "c", "b"], // base ordering
                 vec![vec!["a", "c", "b", "d"]],
                 vec![vec!["a", "b", "d"]],

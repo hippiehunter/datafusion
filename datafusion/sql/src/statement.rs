@@ -35,9 +35,9 @@ use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::{
     Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, MatchType,
-    ReferentialAction, Result, ScalarValue, SchemaError, SchemaReference, TableReference,
-    ToDFSchema, exec_err, not_impl_err, plan_datafusion_err, plan_err, schema_err,
-    unqualified_field_not_found,
+    NullsDistinct, ReferentialAction, Result, ScalarValue, SchemaError, SchemaReference,
+    TableReference, ToDFSchema, exec_err, not_impl_err, plan_datafusion_err, plan_err,
+    schema_err, unqualified_field_not_found,
 };
 use datafusion_expr::dml::{CopyFrom, CopyTo, InsertOp};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -2054,7 +2054,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         &unique.columns,
                         constraint_name,
                     )?;
-                    Ok(Constraint::Unique(indices))
+
+                    // Convert sqlparser NullsDistinctOption to DataFusion NullsDistinct
+                    let nulls_distinct = match &unique.nulls_distinct {
+                        ast::NullsDistinctOption::Distinct => NullsDistinct::Distinct,
+                        ast::NullsDistinctOption::NotDistinct => NullsDistinct::NotDistinct,
+                        ast::NullsDistinctOption::None => NullsDistinct::Distinct, // SQL default
+                    };
+
+                    Ok(Constraint::Unique {
+                        columns: indices,
+                        nulls_distinct,
+                    })
                 }
                 TableConstraint::PrimaryKey(pk) => {
                     // Get primary key indices in the schema

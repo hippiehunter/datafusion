@@ -361,6 +361,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             let (args, arg_names) =
                 self.function_args_to_expr_with_names(args, schema, planner_context)?;
 
+            // Special handling for JSON_OBJECT: convert named args (key: value) to positional args
+            let (args, arg_names) = if fm.name().eq_ignore_ascii_case("json_object")
+                && arg_names.iter().any(|name| name.is_some())
+            {
+                // For JSON_OBJECT, named arguments represent key-value pairs
+                // Convert "key: value" to positional args [key, value]
+                let mut positional_args = Vec::new();
+                for (arg, name) in args.into_iter().zip(arg_names.iter()) {
+                    if let Some(key_name) = name {
+                        // Add the key as a string literal
+                        positional_args.push(Expr::Literal(
+                            datafusion_common::ScalarValue::Utf8(Some(key_name.clone())),
+                            None,
+                        ));
+                        // Add the value
+                        positional_args.push(arg);
+                    } else {
+                        // If no name, just add the arg
+                        positional_args.push(arg);
+                    }
+                }
+                let len = positional_args.len();
+                (positional_args, vec![None; len])
+            } else {
+                (args, arg_names)
+            };
+
             let resolved_args = if arg_names.iter().any(|name| name.is_some()) {
                 if let Some(param_names) = &fm.signature().parameter_names {
                     datafusion_expr::arguments::resolve_function_arguments(
@@ -885,20 +912,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok((expr, Some(arg_name)))
             }
             // JSON_OBJECT uses string literal as key name: JSON_OBJECT('key': value)
-            // For JSON functions, the key:value should be treated as two positional arguments
-            // rather than a named argument. We ignore the name and just return the value expression.
-            // The actual key literal needs to be added separately when building JSON function calls.
+            // Extract the key from the string literal and return it as the argument name
             FunctionArg::ExprNamed {
-                name: SQLExpr::Value(sqlparser::ast::ValueWithSpan { value: _, .. }),
+                name: SQLExpr::Value(sqlparser::ast::ValueWithSpan { value, .. }),
                 arg: FunctionArgExpr::Expr(arg),
                 operator: _,
             } => {
-                // Convert both the key (name) and value (arg) to expressions
-                // This allows JSON_OBJECT('key': value) to work as json_object(key_expr, value_expr)
                 let value_expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
-                // For now, we just return the value without the name
-                // A proper JSON_OBJECT implementation would need special handling
-                Ok((value_expr, None))
+                // Extract the string value from the literal to use as the key name
+                let key_name = match value {
+                    sqlparser::ast::Value::SingleQuotedString(s) => Some(s),
+                    sqlparser::ast::Value::DoubleQuotedString(s) => Some(s),
+                    _ => None,
+                };
+                Ok((value_expr, key_name))
             }
             _ => not_impl_err!("Unsupported qualified wildcard argument: {sql:?}"),
         }
