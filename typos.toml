@@ -49,6 +49,5 @@ extend-exclude = [
     "docs/source/contributor-guide/governance.md",
     # submodules
     "parquet-testing/**",
-    "datafusion-testing/**",
     "testing/**",
 ]
