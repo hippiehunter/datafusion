@@ -102,6 +102,7 @@ pub mod f041_joined_tables;
 pub mod f051_datetime;
 pub mod f201_cast_function;
 pub mod f261_case_expression;
+pub mod f292_unique_nulls;
 pub mod f471_scalar_subquery_values;
 pub mod f591_derived_tables;
 pub mod f850_order_limit;

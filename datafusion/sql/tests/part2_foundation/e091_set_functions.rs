@@ -1000,3 +1000,167 @@ fn edge_aggregate_with_coalesce() {
         "Aggregate with COALESCE"
     );
 }
+
+// ============================================================================
+// SQL:2023 ANY_VALUE aggregate function
+// ============================================================================
+
+/// SQL:2023: Basic ANY_VALUE function
+#[test]
+fn sql2023_any_value_basic() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(a) FROM t",
+        "SQL:2023",
+        "ANY_VALUE function"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with GROUP BY - typical use case
+#[test]
+fn sql2023_any_value_with_group_by() {
+    assert_feature_supported!(
+        "SELECT department, ANY_VALUE(name), COUNT(*) FROM employees GROUP BY department",
+        "SQL:2023",
+        "ANY_VALUE with GROUP BY"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with WHERE clause
+#[test]
+fn sql2023_any_value_with_where() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(a) FROM t WHERE a > 10",
+        "SQL:2023",
+        "ANY_VALUE with WHERE clause"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with HAVING
+#[test]
+fn sql2023_any_value_with_having() {
+    assert_feature_supported!(
+        "SELECT category, ANY_VALUE(item) FROM orders GROUP BY category HAVING COUNT(*) > 5",
+        "SQL:2023",
+        "ANY_VALUE with HAVING"
+    );
+}
+
+/// SQL:2023: ANY_VALUE of different data types
+#[test]
+fn sql2023_any_value_integer() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(id) FROM person",
+        "SQL:2023",
+        "ANY_VALUE of integer column"
+    );
+}
+
+/// SQL:2023: ANY_VALUE of string column
+#[test]
+fn sql2023_any_value_string() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(name) FROM person",
+        "SQL:2023",
+        "ANY_VALUE of string column"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with expression
+#[test]
+fn sql2023_any_value_expression() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(a * 2 + b) FROM t",
+        "SQL:2023",
+        "ANY_VALUE with expression"
+    );
+}
+
+/// SQL:2023: Multiple ANY_VALUE functions
+#[test]
+fn sql2023_any_value_multiple() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(a), ANY_VALUE(b) FROM t",
+        "SQL:2023",
+        "Multiple ANY_VALUE functions"
+    );
+}
+
+/// SQL:2023: ANY_VALUE in subquery
+#[test]
+fn sql2023_any_value_in_subquery() {
+    assert_feature_supported!(
+        "SELECT * FROM t WHERE a = (SELECT ANY_VALUE(a) FROM t1)",
+        "SQL:2023",
+        "ANY_VALUE in subquery"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with JOIN
+#[test]
+fn sql2023_any_value_with_join() {
+    assert_feature_supported!(
+        "SELECT p.name, ANY_VALUE(o.item) FROM person p JOIN orders o ON p.id = o.customer_id GROUP BY p.name",
+        "SQL:2023",
+        "ANY_VALUE with JOIN"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with DISTINCT (should still return any single value)
+#[test]
+fn sql2023_any_value_distinct() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(DISTINCT a) FROM t",
+        "SQL:2023",
+        "ANY_VALUE with DISTINCT"
+    );
+}
+
+/// SQL:2023: ANY_VALUE combined with other aggregates
+#[test]
+fn sql2023_any_value_mixed_aggregates() {
+    assert_feature_supported!(
+        "SELECT category, ANY_VALUE(item), COUNT(*), AVG(price) FROM orders GROUP BY category",
+        "SQL:2023",
+        "ANY_VALUE with other aggregates"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with FILTER clause
+#[test]
+fn sql2023_any_value_with_filter() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(name) FILTER (WHERE age > 30) FROM person",
+        "SQL:2023",
+        "ANY_VALUE with FILTER clause"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with CASE expression
+#[test]
+fn sql2023_any_value_case() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(CASE WHEN a > 10 THEN 'high' ELSE 'low' END) FROM t",
+        "SQL:2023",
+        "ANY_VALUE with CASE expression"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with NULLIF
+#[test]
+fn sql2023_any_value_nullif() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(NULLIF(a, 0)) FROM t",
+        "SQL:2023",
+        "ANY_VALUE with NULLIF"
+    );
+}
+
+/// SQL:2023: ANY_VALUE with COALESCE
+#[test]
+fn sql2023_any_value_coalesce() {
+    assert_feature_supported!(
+        "SELECT ANY_VALUE(COALESCE(a, b)) FROM t",
+        "SQL:2023",
+        "ANY_VALUE with COALESCE"
+    );
+}

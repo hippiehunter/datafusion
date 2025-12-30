@@ -88,40 +88,32 @@ fn t803_multiple_json_columns() {
 /// T811: JSON_OBJECT basic constructor with single key-value pair
 #[test]
 fn t811_json_object_basic() {
-    assert_feature_supported!(
-        "SELECT JSON_OBJECT('name': 'test')",
-        "T811",
-        "JSON_OBJECT basic constructor"
+    assert_plans!(
+        "SELECT JSON_OBJECT('name': 'test')"
     );
 }
 
 /// T811: JSON_OBJECT with multiple key-value pairs
 #[test]
 fn t811_json_object_multiple_pairs() {
-    assert_feature_supported!(
-        "SELECT JSON_OBJECT('name': 'Alice', 'age': 30, 'active': true)",
-        "T811",
-        "JSON_OBJECT with multiple pairs"
+    assert_plans!(
+        "SELECT JSON_OBJECT('name': 'Alice', 'age': 30, 'active': true)"
     );
 }
 
 /// T811: JSON_OBJECT with column values
 #[test]
 fn t811_json_object_from_columns() {
-    assert_feature_supported!(
-        "SELECT JSON_OBJECT('id': id, 'name': first_name) FROM person",
-        "T811",
-        "JSON_OBJECT from table columns"
+    assert_plans!(
+        "SELECT JSON_OBJECT('id': id, 'name': first_name) FROM person"
     );
 }
 
 /// T811: JSON_OBJECT with nested expressions
 #[test]
 fn t811_json_object_nested_expression() {
-    assert_feature_supported!(
-        "SELECT JSON_OBJECT('total': price * qty, 'discount': price * 0.1) FROM orders",
-        "T811",
-        "JSON_OBJECT with expressions"
+    assert_plans!(
+        "SELECT JSON_OBJECT('total': price * qty, 'discount': price * 0.1) FROM orders"
     );
 }
 
@@ -152,20 +144,16 @@ fn t811_json_object_absent_on_null() {
 /// T812: JSON_OBJECTAGG basic aggregation
 #[test]
 fn t812_json_objectagg_basic() {
-    assert_feature_supported!(
-        "SELECT JSON_OBJECTAGG(first_name: age) FROM person",
-        "T812",
-        "JSON_OBJECTAGG basic aggregation"
+    assert_plans!(
+        "SELECT JSON_OBJECTAGG(first_name: age) FROM person"
     );
 }
 
 /// T812: JSON_OBJECTAGG with GROUP BY
 #[test]
 fn t812_json_objectagg_group_by() {
-    assert_feature_supported!(
-        "SELECT state, JSON_OBJECTAGG(first_name: salary) FROM person GROUP BY state",
-        "T812",
-        "JSON_OBJECTAGG with GROUP BY"
+    assert_plans!(
+        "SELECT state, JSON_OBJECTAGG(first_name: salary) FROM person GROUP BY state"
     );
 }
 
@@ -196,30 +184,24 @@ fn t812_json_objectagg_absent_on_null() {
 /// T813: JSON_ARRAYAGG basic aggregation
 #[test]
 fn t813_json_arrayagg_basic() {
-    assert_feature_supported!(
-        "SELECT JSON_ARRAYAGG(first_name) FROM person",
-        "T813",
-        "JSON_ARRAYAGG basic aggregation"
+    assert_plans!(
+        "SELECT JSON_ARRAYAGG(first_name) FROM person"
     );
 }
 
 /// T813: JSON_ARRAYAGG with GROUP BY
 #[test]
 fn t813_json_arrayagg_group_by() {
-    assert_feature_supported!(
-        "SELECT state, JSON_ARRAYAGG(first_name) FROM person GROUP BY state",
-        "T813",
-        "JSON_ARRAYAGG with GROUP BY"
+    assert_plans!(
+        "SELECT state, JSON_ARRAYAGG(first_name) FROM person GROUP BY state"
     );
 }
 
 /// T813: JSON_ARRAYAGG with ORDER BY clause
 #[test]
 fn t813_json_arrayagg_order_by() {
-    assert_feature_supported!(
-        "SELECT JSON_ARRAYAGG(first_name ORDER BY age DESC) FROM person",
-        "T813",
-        "JSON_ARRAYAGG with ORDER BY"
+    assert_plans!(
+        "SELECT JSON_ARRAYAGG(first_name ORDER BY age DESC) FROM person"
     );
 }
 
@@ -250,40 +232,32 @@ fn t813_json_arrayagg_absent_on_null() {
 /// T814: JSON_ARRAY basic constructor with literals
 #[test]
 fn t814_json_array_basic() {
-    assert_feature_supported!(
-        "SELECT JSON_ARRAY(1, 2, 3)",
-        "T814",
-        "JSON_ARRAY basic constructor"
+    assert_plans!(
+        "SELECT JSON_ARRAY(1, 2, 3)"
     );
 }
 
 /// T814: JSON_ARRAY with mixed types
 #[test]
 fn t814_json_array_mixed_types() {
-    assert_feature_supported!(
-        "SELECT JSON_ARRAY('text', 42, true, 3.14)",
-        "T814",
-        "JSON_ARRAY with mixed types"
+    assert_plans!(
+        "SELECT JSON_ARRAY('text', 42, true, 3.14)"
     );
 }
 
 /// T814: JSON_ARRAY with column values
 #[test]
 fn t814_json_array_from_columns() {
-    assert_feature_supported!(
-        "SELECT JSON_ARRAY(first_name, last_name, age) FROM person",
-        "T814",
-        "JSON_ARRAY from columns"
+    assert_plans!(
+        "SELECT JSON_ARRAY(first_name, last_name, age) FROM person"
     );
 }
 
 /// T814: JSON_ARRAY with expressions
 #[test]
 fn t814_json_array_expressions() {
-    assert_feature_supported!(
-        "SELECT JSON_ARRAY(price, qty, price * qty) FROM orders",
-        "T814",
-        "JSON_ARRAY with expressions"
+    assert_plans!(
+        "SELECT JSON_ARRAY(price, qty, price * qty) FROM orders"
     );
 }
 
@@ -314,10 +288,8 @@ fn t814_json_array_absent_on_null() {
 /// T821: JSON_EXISTS basic path check
 #[test]
 fn t821_json_exists_basic() {
-    assert_feature_supported!(
-        "SELECT * FROM json_data WHERE JSON_EXISTS(data, '$.name')",
-        "T821",
-        "JSON_EXISTS basic path check"
+    assert_plans!(
+        "SELECT * FROM json_data WHERE JSON_EXISTS(data, '$.name')"
     );
 }
 
@@ -442,20 +414,16 @@ fn t822_is_json_unique_keys() {
 /// T823: JSON_VALUE basic extraction
 #[test]
 fn t823_json_value_basic() {
-    assert_feature_supported!(
-        "SELECT JSON_VALUE(data, '$.name') FROM json_data",
-        "T823",
-        "JSON_VALUE basic extraction"
+    assert_plans!(
+        "SELECT JSON_VALUE(data, '$.name') FROM json_data"
     );
 }
 
 /// T823: JSON_VALUE with nested path
 #[test]
 fn t823_json_value_nested() {
-    assert_feature_supported!(
-        "SELECT JSON_VALUE(data, '$.address.city') FROM json_data",
-        "T823",
-        "JSON_VALUE nested path"
+    assert_plans!(
+        "SELECT JSON_VALUE(data, '$.address.city') FROM json_data"
     );
 }
 
@@ -516,20 +484,16 @@ fn t823_json_value_default_on_error() {
 /// T824: JSON_QUERY basic extraction
 #[test]
 fn t824_json_query_basic() {
-    assert_feature_supported!(
-        "SELECT JSON_QUERY(data, '$.address') FROM json_data",
-        "T824",
-        "JSON_QUERY basic extraction"
+    assert_plans!(
+        "SELECT JSON_QUERY(data, '$.address') FROM json_data"
     );
 }
 
 /// T824: JSON_QUERY extracting array
 #[test]
 fn t824_json_query_array() {
-    assert_feature_supported!(
-        "SELECT JSON_QUERY(data, '$.items') FROM json_data",
-        "T824",
-        "JSON_QUERY array extraction"
+    assert_plans!(
+        "SELECT JSON_QUERY(data, '$.items') FROM json_data"
     );
 }
 

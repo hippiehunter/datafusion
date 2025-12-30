@@ -49,6 +49,18 @@ pub enum MatchType {
     Full,
 }
 
+/// Specifies how NULL values are treated in UNIQUE constraints (SQL:2023 Feature F292)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash, Default)]
+pub enum NullsDistinct {
+    /// NULL values are considered distinct (default SQL behavior)
+    /// Multiple NULL values are allowed in the unique constraint
+    #[default]
+    Distinct,
+    /// NULL values are considered equal
+    /// Only one NULL value is allowed in the unique constraint
+    NotDistinct,
+}
+
 /// This object defines a constraint on a table.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum Constraint {
@@ -56,7 +68,12 @@ pub enum Constraint {
     /// jointly unique and not nullable):
     PrimaryKey(Vec<usize>),
     /// Columns with the given indices form a composite unique key:
-    Unique(Vec<usize>),
+    Unique {
+        /// Column indices that form the unique key
+        columns: Vec<usize>,
+        /// How NULL values are treated (SQL:2023 Feature F292)
+        nulls_distinct: NullsDistinct,
+    },
     /// Foreign key constraint that references another table.
     /// Note: Unlike other constraints, foreign key constraints store column names
     /// rather than indices, as the referenced table may not be available when
@@ -129,12 +146,17 @@ impl Constraints {
                         (new_indices.len() == indices.len())
                             .then_some(Constraint::PrimaryKey(new_indices))
                     }
-                    Constraint::Unique(indices) => {
+                    Constraint::Unique {
+                        columns,
+                        nulls_distinct,
+                    } => {
                         let new_indices =
-                            update_elements_with_matching_indices(indices, proj_indices);
+                            update_elements_with_matching_indices(columns, proj_indices);
                         // Only keep the constraint if all columns are preserved:
-                        (new_indices.len() == indices.len())
-                            .then_some(Constraint::Unique(new_indices))
+                        (new_indices.len() == columns.len()).then_some(Constraint::Unique {
+                            columns: new_indices,
+                            nulls_distinct: *nulls_distinct,
+                        })
                     }
                     Constraint::ForeignKey { .. } => {
                         // Foreign keys cannot be projected as they use column names,
@@ -204,7 +226,7 @@ pub struct FunctionalDependence {
     // Column indices of dependent column(s):
     pub target_indices: Vec<usize>,
     /// Flag indicating whether one of the `source_indices` can receive NULL values.
-    /// For a data source, if the constraint in question is `Constraint::Unique`,
+    /// For a data source, if the constraint in question is `Constraint::Unique {...}`,
     /// this flag is `true`. If the constraint in question is `Constraint::PrimaryKey`,
     /// this flag is `false`.
     /// Note that as the schema changes between different stages in a plan,
@@ -280,8 +302,8 @@ impl FunctionalDependencies {
                             (0..n_field).collect::<Vec<_>>(),
                             false,
                         )),
-                        Constraint::Unique(indices) => Some(FunctionalDependence::new(
-                            indices.to_vec(),
+                        Constraint::Unique { columns, .. } => Some(FunctionalDependence::new(
+                            columns.to_vec(),
                             (0..n_field).collect::<Vec<_>>(),
                             true,
                         )),
@@ -691,11 +713,20 @@ mod tests {
     fn constraints_iter() {
         let constraints = Constraints::new_unverified(vec![
             Constraint::PrimaryKey(vec![10]),
-            Constraint::Unique(vec![20]),
+            Constraint::Unique {
+                columns: vec![20],
+                nulls_distinct: NullsDistinct::Distinct,
+            },
         ]);
         let mut iter = constraints.iter();
         assert_eq!(iter.next(), Some(&Constraint::PrimaryKey(vec![10])));
-        assert_eq!(iter.next(), Some(&Constraint::Unique(vec![20])));
+        assert_eq!(
+            iter.next(),
+            Some(&Constraint::Unique {
+                columns: vec![20],
+                nulls_distinct: NullsDistinct::Distinct,
+            })
+        );
         assert_eq!(iter.next(), None);
     }
 
@@ -703,7 +734,10 @@ mod tests {
     fn test_project_constraints() {
         let constraints = Constraints::new_unverified(vec![
             Constraint::PrimaryKey(vec![1, 2]),
-            Constraint::Unique(vec![0, 3]),
+            Constraint::Unique {
+                columns: vec![0, 3],
+                nulls_distinct: NullsDistinct::Distinct,
+            },
         ]);
 
         // Project keeping columns 1,2,3

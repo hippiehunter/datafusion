@@ -1333,6 +1333,9 @@ pub fn list_agg_udaf() -> Arc<AggregateUDF> {
 stub_aggregate_udf!(JsonArrayAgg, "json_arrayagg");
 stub_aggregate_udf!(JsonObjectAgg, "json_objectagg");
 
+// SQL:2023 aggregate functions
+stub_aggregate_udf!(AnyValue, "any_value");
+
 // ============================================================================
 // Window Function Stubs for Conformance Testing
 // ============================================================================
@@ -1500,6 +1503,8 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             // JSON aggregates
             "json_arrayagg" => Some(json_array_agg_udaf()),
             "json_objectagg" => Some(json_object_agg_udaf()),
+            // SQL:2023 aggregates
+            "any_value" => Some(any_value_udaf()),
             _ => None,
         }
     }
