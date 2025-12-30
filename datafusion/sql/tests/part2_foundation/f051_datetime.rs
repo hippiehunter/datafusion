@@ -54,7 +54,7 @@
 //!
 //! F051 is a CORE feature (mandatory for SQL:2016 conformance).
 
-use crate::{assert_feature_supported, assert_parses, assert_plans};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // F051-01: DATE data type (including DATE literal)

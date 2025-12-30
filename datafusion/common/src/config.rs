@@ -22,15 +22,11 @@ use crate::format::{ExplainAnalyzeLevel, ExplainFormat};
 use crate::parsers::CompressionTypeVariant;
 use crate::utils::get_available_parallelism;
 use crate::{DataFusionError, Result};
-#[cfg(feature = "parquet_encryption")]
-use hex;
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::str::FromStr;
-#[cfg(feature = "parquet_encryption")]
-use std::sync::Arc;
 
 /// A macro that wraps a configuration struct and automatically derives
 /// [`Default`] and [`ConfigField`] for it, allowing it to be used
@@ -1912,8 +1908,6 @@ macro_rules! extensions_options {
 #[derive(Debug, Clone)]
 pub enum ConfigFileType {
     CSV,
-    #[cfg(feature = "parquet")]
-    PARQUET,
     JSON,
 }
 
@@ -1952,8 +1946,6 @@ impl ConfigField for TableOptions {
     fn visit<V: Visit>(&self, v: &mut V, _key_prefix: &str, _description: &'static str) {
         if let Some(file_type) = &self.current_format {
             match file_type {
-                #[cfg(feature = "parquet")]
-                ConfigFileType::PARQUET => self.parquet.visit(v, "format", ""),
                 ConfigFileType::CSV => self.csv.visit(v, "format", ""),
                 ConfigFileType::JSON => self.json.visit(v, "format", ""),
             }
@@ -1988,8 +1980,6 @@ impl ConfigField for TableOptions {
                     return _config_err!("Specify a format for TableOptions");
                 };
                 match format {
-                    #[cfg(feature = "parquet")]
-                    ConfigFileType::PARQUET => self.parquet.set(rem, value),
                     ConfigFileType::CSV => self.csv.set(rem, value),
                     ConfigFileType::JSON => self.json.set(rem, value),
                 }
@@ -2169,10 +2159,6 @@ impl TableOptions {
 
 /// Options that control how Parquet files are read, including global options
 /// that apply to all columns and optional column-specific overrides
-///
-/// Closely tied to [`ParquetWriterOptions`](crate::file_options::parquet_writer::ParquetWriterOptions).
-/// Properties not included in [`TableParquetOptions`] may not be configurable at the external API
-/// (e.g. sorting_columns).
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct TableParquetOptions {
     /// Global Parquet options that propagates to all columns.
@@ -2536,92 +2522,6 @@ impl ConfigField for ConfigFileEncryptionProperties {
     }
 }
 
-#[cfg(feature = "parquet_encryption")]
-impl From<ConfigFileEncryptionProperties> for FileEncryptionProperties {
-    fn from(val: ConfigFileEncryptionProperties) -> Self {
-        let mut fep = FileEncryptionProperties::builder(
-            hex::decode(val.footer_key_as_hex).unwrap(),
-        )
-        .with_plaintext_footer(!val.encrypt_footer)
-        .with_aad_prefix_storage(val.store_aad_prefix);
-
-        if !val.footer_key_metadata_as_hex.is_empty() {
-            fep = fep.with_footer_key_metadata(
-                hex::decode(&val.footer_key_metadata_as_hex)
-                    .expect("Invalid footer key metadata"),
-            );
-        }
-
-        for (column_name, encryption_props) in val.column_encryption_properties.iter() {
-            let encryption_key = hex::decode(&encryption_props.column_key_as_hex)
-                .expect("Invalid column encryption key");
-            let key_metadata = encryption_props
-                .column_metadata_as_hex
-                .as_ref()
-                .map(|x| hex::decode(x).expect("Invalid column metadata"));
-            match key_metadata {
-                Some(key_metadata) => {
-                    fep = fep.with_column_key_and_metadata(
-                        column_name,
-                        encryption_key,
-                        key_metadata,
-                    );
-                }
-                None => {
-                    fep = fep.with_column_key(column_name, encryption_key);
-                }
-            }
-        }
-
-        if !val.aad_prefix_as_hex.is_empty() {
-            let aad_prefix: Vec<u8> =
-                hex::decode(&val.aad_prefix_as_hex).expect("Invalid AAD prefix");
-            fep = fep.with_aad_prefix(aad_prefix);
-        }
-        Arc::unwrap_or_clone(fep.build().unwrap())
-    }
-}
-
-#[cfg(feature = "parquet_encryption")]
-impl From<&Arc<FileEncryptionProperties>> for ConfigFileEncryptionProperties {
-    fn from(f: &Arc<FileEncryptionProperties>) -> Self {
-        let (column_names_vec, column_keys_vec, column_metas_vec) = f.column_keys();
-
-        let mut column_encryption_properties: HashMap<
-            String,
-            ColumnEncryptionProperties,
-        > = HashMap::new();
-
-        for (i, column_name) in column_names_vec.iter().enumerate() {
-            let column_key_as_hex = hex::encode(&column_keys_vec[i]);
-            let column_metadata_as_hex: Option<String> =
-                column_metas_vec.get(i).map(hex::encode);
-            column_encryption_properties.insert(
-                column_name.clone(),
-                ColumnEncryptionProperties {
-                    column_key_as_hex,
-                    column_metadata_as_hex,
-                },
-            );
-        }
-        let mut aad_prefix: Vec<u8> = Vec::new();
-        if let Some(prefix) = f.aad_prefix() {
-            aad_prefix = prefix.clone();
-        }
-        ConfigFileEncryptionProperties {
-            encrypt_footer: f.encrypt_footer(),
-            footer_key_as_hex: hex::encode(f.footer_key()),
-            footer_key_metadata_as_hex: f
-                .footer_key_metadata()
-                .map(hex::encode)
-                .unwrap_or_default(),
-            column_encryption_properties,
-            aad_prefix_as_hex: hex::encode(aad_prefix),
-            store_aad_prefix: f.store_aad_prefix(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigFileDecryptionProperties {
     /// Binary string to use for the parquet footer encoded in hex format
@@ -2692,70 +2592,6 @@ impl ConfigField for ConfigFileDecryptionProperties {
                 "Config value \"{}\" not found on ConfigFileDecryptionProperties",
                 key
             ),
-        }
-    }
-}
-
-#[cfg(feature = "parquet_encryption")]
-impl From<ConfigFileDecryptionProperties> for FileDecryptionProperties {
-    fn from(val: ConfigFileDecryptionProperties) -> Self {
-        let mut column_names: Vec<&str> = Vec::new();
-        let mut column_keys: Vec<Vec<u8>> = Vec::new();
-
-        for (col_name, decryption_properties) in val.column_decryption_properties.iter() {
-            column_names.push(col_name.as_str());
-            column_keys.push(
-                hex::decode(&decryption_properties.column_key_as_hex)
-                    .expect("Invalid column decryption key"),
-            );
-        }
-
-        let mut fep = FileDecryptionProperties::builder(
-            hex::decode(val.footer_key_as_hex).expect("Invalid footer key"),
-        )
-        .with_column_keys(column_names, column_keys)
-        .unwrap();
-
-        if !val.footer_signature_verification {
-            fep = fep.disable_footer_signature_verification();
-        }
-
-        if !val.aad_prefix_as_hex.is_empty() {
-            let aad_prefix =
-                hex::decode(&val.aad_prefix_as_hex).expect("Invalid AAD prefix");
-            fep = fep.with_aad_prefix(aad_prefix);
-        }
-
-        Arc::unwrap_or_clone(fep.build().unwrap())
-    }
-}
-
-#[cfg(feature = "parquet_encryption")]
-impl From<&Arc<FileDecryptionProperties>> for ConfigFileDecryptionProperties {
-    fn from(f: &Arc<FileDecryptionProperties>) -> Self {
-        let (column_names_vec, column_keys_vec) = f.column_keys();
-        let mut column_decryption_properties: HashMap<
-            String,
-            ColumnDecryptionProperties,
-        > = HashMap::new();
-        for (i, column_name) in column_names_vec.iter().enumerate() {
-            let props = ColumnDecryptionProperties {
-                column_key_as_hex: hex::encode(column_keys_vec[i].clone()),
-            };
-            column_decryption_properties.insert(column_name.clone(), props);
-        }
-
-        let mut aad_prefix: Vec<u8> = Vec::new();
-        if let Some(prefix) = f.aad_prefix() {
-            aad_prefix = prefix.clone();
-        }
-        ConfigFileDecryptionProperties {
-            footer_key_as_hex: hex::encode(
-                f.footer_key(None).unwrap_or_default().as_ref(),
-            ),
-            column_decryption_properties,
-            aad_prefix_as_hex: hex::encode(aad_prefix),
-            footer_signature_verification: f.check_plaintext_footer_integrity(),
         }
     }
 }
@@ -2969,12 +2805,9 @@ config_namespace! {
 pub trait OutputFormatExt: Display {}
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "parquet", expect(clippy::large_enum_variant))]
 pub enum OutputFormat {
     CSV(CsvOptions),
     JSON(JsonOptions),
-    #[cfg(feature = "parquet")]
-    PARQUET(TableParquetOptions),
     AVRO,
     ARROW,
 }
@@ -2984,8 +2817,6 @@ impl Display for OutputFormat {
         let out = match self {
             OutputFormat::CSV(_) => "csv",
             OutputFormat::JSON(_) => "json",
-            #[cfg(feature = "parquet")]
-            OutputFormat::PARQUET(_) => "parquet",
             OutputFormat::AVRO => "avro",
             OutputFormat::ARROW => "arrow",
         };
@@ -2995,8 +2826,6 @@ impl Display for OutputFormat {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "parquet")]
-    use crate::config::TableParquetOptions;
     use crate::config::{
         ConfigEntry, ConfigExtension, ConfigField, ConfigFileType, ExtensionOptions,
         Extensions, TableOptions,
@@ -3138,239 +2967,5 @@ mod tests {
             ),
             "unexpected error message: {message}"
         );
-    }
-
-    #[cfg(feature = "parquet")]
-    #[test]
-    fn parquet_table_options() {
-        let mut table_config = TableOptions::new();
-        table_config.set_config_format(ConfigFileType::PARQUET);
-        table_config
-            .set("format.bloom_filter_enabled::col1", "true")
-            .unwrap();
-        assert_eq!(
-            table_config.parquet.column_specific_options["col1"].bloom_filter_enabled,
-            Some(true)
-        );
-    }
-
-    #[cfg(feature = "parquet_encryption")]
-    #[test]
-    fn parquet_table_encryption() {
-        use crate::config::{
-            ConfigFileDecryptionProperties, ConfigFileEncryptionProperties,
-        };
-        use parquet::encryption::decrypt::FileDecryptionProperties;
-        use parquet::encryption::encrypt::FileEncryptionProperties;
-        use std::sync::Arc;
-
-        let footer_key = b"0123456789012345".to_vec(); // 128bit/16
-        let column_names = vec!["double_field", "float_field"];
-        let column_keys =
-            vec![b"1234567890123450".to_vec(), b"1234567890123451".to_vec()];
-
-        let file_encryption_properties =
-            FileEncryptionProperties::builder(footer_key.clone())
-                .with_column_keys(column_names.clone(), column_keys.clone())
-                .unwrap()
-                .build()
-                .unwrap();
-
-        let decryption_properties = FileDecryptionProperties::builder(footer_key.clone())
-            .with_column_keys(column_names.clone(), column_keys.clone())
-            .unwrap()
-            .build()
-            .unwrap();
-
-        // Test round-trip
-        let config_encrypt =
-            ConfigFileEncryptionProperties::from(&file_encryption_properties);
-        let encryption_properties_built =
-            Arc::new(FileEncryptionProperties::from(config_encrypt.clone()));
-        assert_eq!(file_encryption_properties, encryption_properties_built);
-
-        let config_decrypt = ConfigFileDecryptionProperties::from(&decryption_properties);
-        let decryption_properties_built =
-            Arc::new(FileDecryptionProperties::from(config_decrypt.clone()));
-        assert_eq!(decryption_properties, decryption_properties_built);
-
-        ///////////////////////////////////////////////////////////////////////////////////
-        // Test encryption config
-
-        // Display original encryption config
-        // println!("{:#?}", config_encrypt);
-
-        let mut table_config = TableOptions::new();
-        table_config.set_config_format(ConfigFileType::PARQUET);
-        table_config
-            .parquet
-            .set(
-                "crypto.file_encryption.encrypt_footer",
-                config_encrypt.encrypt_footer.to_string().as_str(),
-            )
-            .unwrap();
-        table_config
-            .parquet
-            .set(
-                "crypto.file_encryption.footer_key_as_hex",
-                config_encrypt.footer_key_as_hex.as_str(),
-            )
-            .unwrap();
-
-        for (i, col_name) in column_names.iter().enumerate() {
-            let key = format!("crypto.file_encryption.column_key_as_hex::{col_name}");
-            let value = hex::encode(column_keys[i].clone());
-            table_config
-                .parquet
-                .set(key.as_str(), value.as_str())
-                .unwrap();
-        }
-
-        // Print matching final encryption config
-        // println!("{:#?}", table_config.parquet.crypto.file_encryption);
-
-        assert_eq!(
-            table_config.parquet.crypto.file_encryption,
-            Some(config_encrypt)
-        );
-
-        ///////////////////////////////////////////////////////////////////////////////////
-        // Test decryption config
-
-        // Display original decryption config
-        // println!("{:#?}", config_decrypt);
-
-        let mut table_config = TableOptions::new();
-        table_config.set_config_format(ConfigFileType::PARQUET);
-        table_config
-            .parquet
-            .set(
-                "crypto.file_decryption.footer_key_as_hex",
-                config_decrypt.footer_key_as_hex.as_str(),
-            )
-            .unwrap();
-
-        for (i, col_name) in column_names.iter().enumerate() {
-            let key = format!("crypto.file_decryption.column_key_as_hex::{col_name}");
-            let value = hex::encode(column_keys[i].clone());
-            table_config
-                .parquet
-                .set(key.as_str(), value.as_str())
-                .unwrap();
-        }
-
-        // Print matching final decryption config
-        // println!("{:#?}", table_config.parquet.crypto.file_decryption);
-
-        assert_eq!(
-            table_config.parquet.crypto.file_decryption,
-            Some(config_decrypt.clone())
-        );
-
-        // Set config directly
-        let mut table_config = TableOptions::new();
-        table_config.set_config_format(ConfigFileType::PARQUET);
-        table_config.parquet.crypto.file_decryption = Some(config_decrypt.clone());
-        assert_eq!(
-            table_config.parquet.crypto.file_decryption,
-            Some(config_decrypt.clone())
-        );
-    }
-
-    #[cfg(feature = "parquet_encryption")]
-    #[test]
-    fn parquet_encryption_factory_config() {
-        let mut parquet_options = TableParquetOptions::default();
-
-        assert_eq!(parquet_options.crypto.factory_id, None);
-        assert_eq!(parquet_options.crypto.factory_options.options.len(), 0);
-
-        let mut input_config = TestExtensionConfig::default();
-        input_config
-            .properties
-            .insert("key1".to_string(), "value 1".to_string());
-        input_config
-            .properties
-            .insert("key2".to_string(), "value 2".to_string());
-
-        parquet_options
-            .crypto
-            .configure_factory("example_factory", &input_config);
-
-        assert_eq!(
-            parquet_options.crypto.factory_id,
-            Some("example_factory".to_string())
-        );
-        let factory_options = &parquet_options.crypto.factory_options.options;
-        assert_eq!(factory_options.len(), 2);
-        assert_eq!(factory_options.get("key1"), Some(&"value 1".to_string()));
-        assert_eq!(factory_options.get("key2"), Some(&"value 2".to_string()));
-    }
-
-    #[cfg(feature = "parquet")]
-    #[test]
-    fn parquet_table_options_config_entry() {
-        let mut table_config = TableOptions::new();
-        table_config.set_config_format(ConfigFileType::PARQUET);
-        table_config
-            .set("format.bloom_filter_enabled::col1", "true")
-            .unwrap();
-        let entries = table_config.entries();
-        assert!(
-            entries
-                .iter()
-                .any(|item| item.key == "format.bloom_filter_enabled::col1")
-        )
-    }
-
-    #[cfg(feature = "parquet")]
-    #[test]
-    fn parquet_table_parquet_options_config_entry() {
-        let mut table_parquet_options = TableParquetOptions::new();
-        table_parquet_options
-            .set(
-                "crypto.file_encryption.column_key_as_hex::double_field",
-                "31323334353637383930313233343530",
-            )
-            .unwrap();
-        let entries = table_parquet_options.entries();
-        assert!(
-            entries.iter().any(|item| item.key
-                == "crypto.file_encryption.column_key_as_hex::double_field")
-        )
-    }
-
-    #[cfg(feature = "parquet")]
-    #[test]
-    fn parquet_table_options_config_metadata_entry() {
-        let mut table_config = TableOptions::new();
-        table_config.set_config_format(ConfigFileType::PARQUET);
-        table_config.set("format.metadata::key1", "").unwrap();
-        table_config.set("format.metadata::key2", "value2").unwrap();
-        table_config
-            .set("format.metadata::key3", "value with spaces ")
-            .unwrap();
-        table_config
-            .set("format.metadata::key4", "value with special chars :: :")
-            .unwrap();
-
-        let parsed_metadata = table_config.parquet.key_value_metadata.clone();
-        assert_eq!(parsed_metadata.get("should not exist1"), None);
-        assert_eq!(parsed_metadata.get("key1"), Some(&Some("".into())));
-        assert_eq!(parsed_metadata.get("key2"), Some(&Some("value2".into())));
-        assert_eq!(
-            parsed_metadata.get("key3"),
-            Some(&Some("value with spaces ".into()))
-        );
-        assert_eq!(
-            parsed_metadata.get("key4"),
-            Some(&Some("value with special chars :: :".into()))
-        );
-
-        // duplicate keys are overwritten
-        table_config.set("format.metadata::key_dupe", "A").unwrap();
-        table_config.set("format.metadata::key_dupe", "B").unwrap();
-        let parsed_metadata = table_config.parquet.key_value_metadata;
-        assert_eq!(parsed_metadata.get("key_dupe"), Some(&Some("B".into())));
     }
 }

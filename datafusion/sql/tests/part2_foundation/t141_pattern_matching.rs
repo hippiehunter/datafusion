@@ -58,7 +58,7 @@
 //! | T581    | Regular expression substring | Not Implemented |
 //! | F281    | LIKE enhancements | Partial (basic LIKE supported) |
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // T141: SIMILAR TO predicate - Basic syntax

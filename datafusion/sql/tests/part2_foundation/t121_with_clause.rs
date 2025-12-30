@@ -67,7 +67,7 @@
 //! SELECT * FROM cte;
 //! ```
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // T121: WITH clause (non-recursive CTEs)

@@ -37,7 +37,7 @@
 //! - F571: Truth value tests (IS TRUE, IS FALSE, IS UNKNOWN)
 //! - F481: Expanded NULL predicate
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // F591: Derived tables (subqueries in FROM clause)

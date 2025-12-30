@@ -72,7 +72,7 @@
 //! supported and tested. The failures are due to the test framework not registering
 //! built-in aggregate functions, not due to join-related conformance issues.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // F041-01: Inner join (but not necessarily the INNER keyword)

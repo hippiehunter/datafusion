@@ -37,7 +37,7 @@
 //! - F304: EXCEPT ALL table operator
 //! - F305: INTERSECT ALL table operator
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // E071-01: UNION DISTINCT table operator

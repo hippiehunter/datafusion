@@ -17,8 +17,6 @@
 
 //! Edge case tests for MATCH_RECOGNIZE implementation
 
-use datafusion_sql::planner::SqlToRel;
-use datafusion_sql::unparser::dialect::CustomDialectBuilder;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 

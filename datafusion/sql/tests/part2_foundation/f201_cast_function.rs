@@ -28,7 +28,7 @@
 //!
 //! F201 is a CORE feature (mandatory for SQL:2016 conformance).
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // F201: Basic CAST syntax

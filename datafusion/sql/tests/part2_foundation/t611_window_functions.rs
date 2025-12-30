@@ -59,7 +59,7 @@
 //!
 //! Window functions are not Core SQL features but are widely used for analytical queries.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // T611: Elementary OLAP operations

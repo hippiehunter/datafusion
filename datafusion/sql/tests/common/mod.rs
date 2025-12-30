@@ -18,15 +18,15 @@
 use std::any::Any;
 #[cfg(test)]
 use std::collections::HashMap;
-use std::fmt::{Debug, Display};
+use std::fmt::Display;
 use std::{sync::Arc, vec};
 
 use arrow::datatypes::*;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{DFSchema, GetExt, Result, TableReference, plan_err};
-use datafusion_expr::planner::{ExprPlanner, PlannerResult, TypePlanner};
-use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
+use datafusion_common::{GetExt, Result, TableReference, plan_err};
+use datafusion_expr::planner::{ExprPlanner, TypePlanner};
+use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::ContextProvider;
 
 // Note: make_array from datafusion_functions_nested was removed
@@ -62,16 +62,6 @@ pub(crate) struct MockSessionState {
 }
 
 impl MockSessionState {
-    pub fn with_expr_planner(mut self, expr_planner: Arc<dyn ExprPlanner>) -> Self {
-        self.expr_planners.push(expr_planner);
-        self
-    }
-
-    pub fn with_type_planner(mut self, type_planner: Arc<dyn TypePlanner>) -> Self {
-        self.type_planner = Some(type_planner);
-        self
-    }
-
     pub fn with_scalar_function(mut self, scalar_function: Arc<ScalarUDF>) -> Self {
         self.scalar_functions
             .insert(scalar_function.name().to_string(), scalar_function);
@@ -312,41 +302,5 @@ impl TableSource for EmptyTable {
 
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.table_schema)
-    }
-}
-
-#[derive(Debug)]
-pub struct CustomTypePlanner {}
-
-impl TypePlanner for CustomTypePlanner {
-    fn plan_type(&self, sql_type: &sqlparser::ast::DataType) -> Result<Option<DataType>> {
-        match sql_type {
-            sqlparser::ast::DataType::Datetime(precision) => {
-                let precision = match precision {
-                    Some(0) => TimeUnit::Second,
-                    Some(3) => TimeUnit::Millisecond,
-                    Some(6) => TimeUnit::Microsecond,
-                    None | Some(9) => TimeUnit::Nanosecond,
-                    _ => unreachable!(),
-                };
-                Ok(Some(DataType::Timestamp(precision, None)))
-            }
-            _ => Ok(None),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct CustomExprPlanner {}
-
-impl ExprPlanner for CustomExprPlanner {
-    fn plan_array_literal(
-        &self,
-        exprs: Vec<Expr>,
-        _schema: &DFSchema,
-    ) -> Result<PlannerResult<Vec<Expr>>> {
-        // make_array was from datafusion_functions_nested which was removed
-        // Return Original to let the default behavior handle it
-        Ok(PlannerResult::Original(exprs))
     }
 }

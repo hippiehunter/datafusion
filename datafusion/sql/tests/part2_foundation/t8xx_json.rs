@@ -45,7 +45,7 @@
 //! These tests document the conformance gaps and serve as a roadmap for
 //! future JSON support implementation.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::{assert_plans, assert_feature_supported};
 
 // ============================================================================
 // T803: String-based JSON storage

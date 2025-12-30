@@ -49,7 +49,7 @@
 //! - REFERENTIAL_CONSTRAINTS: Information about foreign key constraints
 //! - CHECK_CONSTRAINTS: Information about check constraints
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // F021-01: INFORMATION_SCHEMA.COLUMNS view

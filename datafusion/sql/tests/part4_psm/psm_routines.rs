@@ -49,7 +49,7 @@
 //! PostgreSQL-style tests with standard variable names are included where applicable.
 
 use crate::{
-    assert_parses, assert_plans, assert_feature_supported, assert_postgres_parses,
+    assert_parses, assert_feature_supported, assert_postgres_parses,
     assert_psm_feature_supported, assert_psm_parses,
 };
 

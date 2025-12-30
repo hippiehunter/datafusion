@@ -22,16 +22,14 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use crate::stack::StackGuard;
 use datafusion_common::{Constraints, DFSchema, Result, not_impl_err, plan_err};
-use datafusion_expr::expr::{Sort, WildcardOptions};
+use datafusion_expr::expr::Sort;
 
-use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{
     CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, ExprWithAliasAndOrderBy, Fetch, Ident, LimitClause, Offset,
-    OffsetRows, OrderBy, OrderByExpr, OrderByKind, Query, SelectInto,
-    SetExpr, SetOperator, SetQuantifier, TableAlias,
+    Expr as SQLExpr, Fetch, Ident, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
+    SelectInto, SetExpr,
 };
 use sqlparser::tokenizer::Span;
 

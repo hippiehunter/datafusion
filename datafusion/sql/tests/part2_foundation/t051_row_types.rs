@@ -66,7 +66,7 @@
 //! - OVERLAY with various data types
 //! - OVERLAY with expressions
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // T051: Row types - Basic ROW constructor

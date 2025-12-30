@@ -51,7 +51,7 @@
 //!
 //! Each test verifies basic usage, NULL handling, and integration with expressions.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // Basic Mathematical Functions

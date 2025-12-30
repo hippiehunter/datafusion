@@ -2173,7 +2173,6 @@ pub struct ConformanceSessionState {
     scalar_functions: HashMap<String, Arc<ScalarUDF>>,
     aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
     window_functions: HashMap<String, Arc<WindowUDF>>,
-    config_options: ConfigOptions,
 }
 
 impl ConformanceSessionState {

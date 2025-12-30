@@ -34,7 +34,7 @@
 //!
 //! All F261 subfeatures are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // F261-01: Simple CASE

@@ -62,7 +62,7 @@
 //! All tests in this module are expected to FAIL as DataFusion does not currently
 //! implement MATCH_RECOGNIZE. These tests document the conformance gap.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // R010: Basic MATCH_RECOGNIZE structure

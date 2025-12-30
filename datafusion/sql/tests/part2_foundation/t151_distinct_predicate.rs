@@ -41,7 +41,7 @@
 //! All tests in this module are expected to FAIL as DataFusion does not currently
 //! implement the DISTINCT predicate. These tests document the conformance gap.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // T151: Basic DISTINCT predicate

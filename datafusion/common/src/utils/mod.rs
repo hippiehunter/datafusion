@@ -276,7 +276,7 @@ fn needs_quotes(s: &str) -> bool {
 
 pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<Ident>> {
     let dialect = GenericDialect;
-    let mut parser = Parser::new(&dialect).try_with_sql(s)?;
+    let parser = Parser::new(&dialect).try_with_sql(s)?;
     let idents = parser.parse_multipart_identifier()?;
 
     // Validate that parsing didn't incorrectly split on dots inside parentheses.

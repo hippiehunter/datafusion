@@ -889,7 +889,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // rather than a named argument. We ignore the name and just return the value expression.
             // The actual key literal needs to be added separately when building JSON function calls.
             FunctionArg::ExprNamed {
-                name: SQLExpr::Value(sqlparser::ast::ValueWithSpan { value, .. }),
+                name: SQLExpr::Value(sqlparser::ast::ValueWithSpan { value: _, .. }),
                 arg: FunctionArgExpr::Expr(arg),
                 operator: _,
             } => {

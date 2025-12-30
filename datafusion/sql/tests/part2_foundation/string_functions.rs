@@ -45,7 +45,7 @@
 //! Each test uses `assert_feature_supported!` macro which fails if the
 //! feature is not implemented - thus identifying conformance gaps.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // CHARACTER_LENGTH / CHAR_LENGTH / LENGTH

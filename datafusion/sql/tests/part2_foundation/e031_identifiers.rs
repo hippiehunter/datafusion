@@ -42,7 +42,7 @@
 //! - Can contain spaces and special characters
 //! - Can be reserved words
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::{assert_plans, assert_feature_supported};
 
 // ============================================================================
 // E031-01: Delimited identifiers

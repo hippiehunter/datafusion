@@ -247,25 +247,6 @@ pub fn arrow_test_data() -> String {
 /// panics when the directory can not be found.
 ///
 /// Example:
-/// ```
-/// let testdata = datafusion_common::test_util::parquet_test_data();
-/// let filename = format!("{}/binary.parquet", testdata);
-/// assert!(std::path::PathBuf::from(filename).exists());
-/// ```
-#[cfg(feature = "parquet")]
-pub fn parquet_test_data() -> String {
-    match get_data_dir("PARQUET_TEST_DATA", "../../parquet-testing/data") {
-        Ok(pb) => {
-            let mut path = pb.display().to_string();
-            if cfg!(target_os = "windows") {
-                // Replace backslashes (Windows paths; avoids some test issues).
-                path = path.replace("\\", "/");
-            }
-            path
-        }
-        Err(err) => panic!("failed to get parquet data dir: {err}"),
-    }
-}
 
 /// Returns a directory path for finding test data.
 ///
@@ -763,16 +744,6 @@ mod tests {
             assert!(res.is_ok());
             assert_eq!(res.unwrap(), existing_pb);
         }
-    }
-
-    #[test]
-    #[cfg(feature = "parquet")]
-    fn test_happy() {
-        let res = arrow_test_data();
-        assert!(PathBuf::from(res).is_dir());
-
-        let res = parquet_test_data();
-        assert!(PathBuf::from(res).is_dir());
     }
 
     #[test]

@@ -38,7 +38,7 @@ use datafusion_sql::{
     planner::{NullOrdering, ParserOptions, SqlToRel},
 };
 
-use crate::common::{CustomExprPlanner, CustomTypePlanner, MockSessionState};
+use crate::common::MockSessionState;
 use datafusion_functions_aggregate::{
     approx_median::approx_median_udaf,
     average::avg_udaf,

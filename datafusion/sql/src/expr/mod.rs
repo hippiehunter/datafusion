@@ -16,9 +16,7 @@
 // under the License.
 
 use arrow::datatypes::{DataType, TimeUnit};
-use datafusion_expr::planner::{
-    PlannerResult, RawBinaryExpr, RawDictionaryExpr, RawFieldAccessExpr,
-};
+use datafusion_expr::planner::{PlannerResult, RawBinaryExpr, RawFieldAccessExpr};
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
@@ -34,8 +32,8 @@ use datafusion_common::{
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::expr::{AnyExpr, AllExpr, InList, QuantifiedSource, WildcardOptions};
 use datafusion_expr::{
-    Between, BinaryExpr, Cast, Expr, ExprSchemable, GetFieldAccess, Like, Literal,
-    Operator, TryCast, lit,
+    Between, BinaryExpr, Cast, Expr, ExprSchemable, GetFieldAccess, Like, Operator,
+    TryCast, lit,
 };
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -1348,7 +1346,7 @@ mod tests {
                         .join(" OR ");
 
                     let dialect = GenericDialect{};
-                    let mut parser = Parser::new(&dialect)
+                    let parser = Parser::new(&dialect)
                         .try_with_sql(expr_str.as_str())
                         .unwrap();
                     let sql_expr = parser.parse_expr().unwrap();
@@ -1383,7 +1381,7 @@ mod tests {
         let expr_str = "SUM(int_col) as sum_int_col";
 
         let dialect = GenericDialect {};
-        let mut parser = Parser::new(&dialect).try_with_sql(expr_str).unwrap();
+        let parser = Parser::new(&dialect).try_with_sql(expr_str).unwrap();
         // from sqlparser
         let sql_expr = parser.parse_expr_with_alias().unwrap();
 

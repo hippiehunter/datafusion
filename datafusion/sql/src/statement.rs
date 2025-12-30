@@ -70,10 +70,9 @@ use sqlparser::ast::{
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr,
     ForeignKeyColumnOrPeriod, FromTable, Ident, Insert, ObjectName, ObjectType, Query,
     SchemaName, SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
-    Subscript, TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
+    TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
-use sqlparser::tokenizer::Span;
 
 fn ident_to_string(ident: &Ident) -> String {
     normalize_ident(ident.to_owned())

@@ -44,7 +44,7 @@
 //! | F865 | Dynamic offset row count | Not Tested |
 //! | F867 | FETCH FIRST WITH TIES option | Not Tested |
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // F850: Top-level ORDER BY in query expression

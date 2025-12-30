@@ -48,11 +48,7 @@ use std::sync::Arc;
 use crate::utils::datafusion_strsim::normalized_levenshtein;
 use crate::utils::quote_identifier;
 use crate::{Column, DFSchema, Diagnostic, TableReference};
-#[cfg(feature = "avro")]
-use apache_avro::Error as AvroError;
 use arrow::error::ArrowError;
-#[cfg(feature = "parquet")]
-use parquet::errors::ParquetError;
 
 use sqlparser::parser::ParserError;
 use tokio::task::JoinError;
@@ -73,15 +69,6 @@ pub enum DataFusionError {
     ///
     /// 2nd argument is for optional backtrace
     ArrowError(Box<ArrowError>, Option<String>),
-    /// Error when reading / writing Parquet data.
-    #[cfg(feature = "parquet")]
-    ParquetError(Box<ParquetError>),
-    /// Error when reading Avro data.
-    #[cfg(feature = "avro")]
-    AvroError(Box<AvroError>),
-    /// Error when reading / writing to / from an object_store (e.g. S3 or LocalFile)
-    #[cfg(feature = "object_store")]
-    ObjectStore(Box<object_store::Error>),
     /// Error when an I/O operation fails
     IoError(io::Error),
     /// Error when SQL is syntactically incorrect.
@@ -325,35 +312,6 @@ impl From<&Arc<DataFusionError>> for DataFusionError {
     }
 }
 
-#[cfg(feature = "parquet")]
-impl From<ParquetError> for DataFusionError {
-    fn from(e: ParquetError) -> Self {
-        DataFusionError::ParquetError(Box::new(e))
-    }
-}
-
-#[cfg(feature = "avro")]
-impl From<AvroError> for DataFusionError {
-    fn from(e: AvroError) -> Self {
-        DataFusionError::AvroError(Box::new(e))
-    }
-}
-
-#[cfg(feature = "object_store")]
-impl From<object_store::Error> for DataFusionError {
-    fn from(e: object_store::Error) -> Self {
-        DataFusionError::ObjectStore(Box::new(e))
-    }
-}
-
-#[cfg(feature = "object_store")]
-impl From<object_store::path::Error> for DataFusionError {
-    fn from(e: object_store::path::Error) -> Self {
-        DataFusionError::ObjectStore(Box::new(e.into()))
-    }
-}
-
-
 impl From<ParserError> for DataFusionError {
     fn from(e: ParserError) -> Self {
         DataFusionError::SQL(Box::new(e), None)
@@ -387,12 +345,6 @@ impl Error for DataFusionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             DataFusionError::ArrowError(e, _) => Some(e.as_ref()),
-            #[cfg(feature = "parquet")]
-            DataFusionError::ParquetError(e) => Some(e.as_ref()),
-            #[cfg(feature = "avro")]
-            DataFusionError::AvroError(e) => Some(e.as_ref()),
-            #[cfg(feature = "object_store")]
-            DataFusionError::ObjectStore(e) => Some(e.as_ref()),
             DataFusionError::IoError(e) => Some(e),
             
             DataFusionError::SQL(e, _) => Some(e.as_ref()),
@@ -518,12 +470,6 @@ impl DataFusionError {
     fn error_prefix(&self) -> &'static str {
         match self {
             DataFusionError::ArrowError(_, _) => "Arrow error: ",
-            #[cfg(feature = "parquet")]
-            DataFusionError::ParquetError(_) => "Parquet error: ",
-            #[cfg(feature = "avro")]
-            DataFusionError::AvroError(_) => "Avro error: ",
-            #[cfg(feature = "object_store")]
-            DataFusionError::ObjectStore(_) => "Object Store error: ",
             DataFusionError::IoError(_) => "IO error: ",
             
             DataFusionError::SQL(_, _) => "SQL error: ",
@@ -559,10 +505,6 @@ impl DataFusionError {
                 let backtrace = backtrace.clone().unwrap_or_else(|| "".to_owned());
                 Cow::Owned(format!("{desc}{backtrace}"))
             }
-            #[cfg(feature = "parquet")]
-            DataFusionError::ParquetError(ref desc) => Cow::Owned(desc.to_string()),
-            #[cfg(feature = "avro")]
-            DataFusionError::AvroError(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::IoError(ref desc) => Cow::Owned(desc.to_string()),
             
             DataFusionError::SQL(ref desc, ref backtrace) => {
@@ -587,8 +529,6 @@ impl DataFusionError {
             DataFusionError::ExecutionJoin(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::ResourcesExhausted(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::External(ref desc) => Cow::Owned(desc.to_string()),
-            #[cfg(feature = "object_store")]
-            DataFusionError::ObjectStore(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::Context(ref desc, ref err) => {
                 Cow::Owned(format!("{desc}\ncaused by\n{}", *err))
             }

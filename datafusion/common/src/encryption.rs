@@ -18,15 +18,8 @@
 // Support optional features for encryption in Parquet files.
 //! This module provides types and functions related to encryption in Parquet files.
 
-#[cfg(feature = "parquet_encryption")]
-pub use parquet::encryption::decrypt::FileDecryptionProperties;
-#[cfg(feature = "parquet_encryption")]
-pub use parquet::encryption::encrypt::FileEncryptionProperties;
-
-#[cfg(not(feature = "parquet_encryption"))]
 #[derive(Default, Clone, Debug)]
 pub struct FileDecryptionProperties;
-#[cfg(not(feature = "parquet_encryption"))]
 #[derive(Default, Clone, Debug)]
 pub struct FileEncryptionProperties;
 

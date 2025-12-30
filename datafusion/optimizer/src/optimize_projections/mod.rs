@@ -323,7 +323,8 @@ fn optimize_projections(
         | LogicalPlan::Analyze(_)
         | LogicalPlan::Subquery(_)
         | LogicalPlan::Statement(_)
-        | LogicalPlan::Distinct(Distinct::All(_)) => {
+        | LogicalPlan::Distinct(Distinct::All(_))
+        | LogicalPlan::MatchRecognize(_) => {
             // These plans require all their fields, and their children should
             // be treated as final plans -- otherwise, we may have schema a
             // mismatch.
@@ -362,7 +363,8 @@ fn optimize_projections(
         LogicalPlan::EmptyRelation(_)
         | LogicalPlan::Values(_)
         | LogicalPlan::DescribeTable(_)
-        | LogicalPlan::CopyFrom(_) => {
+        | LogicalPlan::CopyFrom(_)
+        | LogicalPlan::JsonTable(_) => {
             // These operators have no inputs, so stop the optimization process.
             return Ok(Transformed::no(plan));
         }

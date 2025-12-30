@@ -43,7 +43,7 @@
 //!
 //! Note: Tests that fail indicate conformance gaps in DataFusion's array support.
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::assert_feature_supported;
 
 // ============================================================================
 // S091-01: Arrays of built-in data types
