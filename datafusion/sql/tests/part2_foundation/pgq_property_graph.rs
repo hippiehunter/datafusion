@@ -28,18 +28,19 @@
 //!
 //! | Feature | Description | Status |
 //! |---------|-------------|--------|
-//! | PGQ001 | CREATE PROPERTY GRAPH | Planned |
-//! | PGQ002 | DROP PROPERTY GRAPH | Planned |
-//! | PGQ003 | GRAPH_TABLE function | Planned |
-//! | PGQ004 | Graph pattern matching | Planned |
-//! | PGQ005 | Path patterns | Planned |
-//! | PGQ006 | Label expressions | Planned |
-//! | PGQ007 | Property access | Planned |
+//! | PGQ001 | CREATE PROPERTY GRAPH | Supported |
+//! | PGQ002 | DROP PROPERTY GRAPH | Supported |
+//! | PGQ003 | GRAPH_TABLE function | Supported |
+//! | PGQ004 | Graph pattern matching | Supported |
+//! | PGQ005 | Path patterns | Supported |
+//! | PGQ006 | Label expressions | Supported |
+//! | PGQ007 | Property access | Supported |
+//! | PGQ008 | Row limiting options | Supported |
 //!
 //! Note: SQL/PGQ is defined in ISO/IEC 9075-16:2023 and is an optional
 //! extension to the SQL standard.
 
-use crate::{assert_plans, assert_feature_supported, assert_not_implemented};
+use crate::assert_plans;
 
 // ============================================================================
 // PGQ001: CREATE PROPERTY GRAPH
@@ -554,53 +555,41 @@ fn pgq007_pattern_alternation() {
 }
 
 // ============================================================================
-// PGQ008: Row Limiting Options (Parser not yet implemented)
+// PGQ008: Row Limiting Options
 // ============================================================================
 
-/// PGQ008: ONE ROW PER MATCH (Parser not yet implemented)
+/// PGQ008: ONE ROW PER MATCH
 #[test]
 fn pgq008_one_row_per_match() {
-    // Row limiting syntax after MATCH is not yet supported by sqlparser
-    assert_not_implemented!(
+    assert_plans!(
         "SELECT * FROM GRAPH_TABLE (
            social_network
-           MATCH (a:Person)-[e:KNOWS*]->(b:Person)
-           ONE ROW PER MATCH
+           MATCH ONE ROW PER MATCH (a:Person)-[e:KNOWS*]->(b:Person)
            COLUMNS (a.name, b.name)
-         ) AS gt",
-        "PGQ008",
-        "ONE ROW PER MATCH"
+         ) AS gt"
     );
 }
 
-/// PGQ008: ONE ROW PER VERTEX (Parser not yet implemented)
+/// PGQ008: ONE ROW PER VERTEX
 #[test]
 fn pgq008_one_row_per_vertex() {
-    // Row limiting syntax after MATCH is not yet supported by sqlparser
-    assert_not_implemented!(
+    assert_plans!(
         "SELECT * FROM GRAPH_TABLE (
            social_network
-           MATCH (a:Person)-[e:KNOWS*]->(b:Person)
-           ONE ROW PER VERTEX
+           MATCH ONE ROW PER VERTEX (a:Person)-[e:KNOWS*]->(b:Person)
            COLUMNS (a.name)
-         ) AS gt",
-        "PGQ008",
-        "ONE ROW PER VERTEX"
+         ) AS gt"
     );
 }
 
-/// PGQ008: ONE ROW PER STEP (Parser not yet implemented)
+/// PGQ008: ONE ROW PER STEP
 #[test]
 fn pgq008_one_row_per_step() {
-    // Row limiting syntax after MATCH is not yet supported by sqlparser
-    assert_not_implemented!(
+    assert_plans!(
         "SELECT * FROM GRAPH_TABLE (
            social_network
-           MATCH (a:Person)-[e:KNOWS*]->(b:Person)
-           ONE ROW PER STEP
+           MATCH ONE ROW PER STEP (a:Person)-[e:KNOWS*]->(b:Person)
            COLUMNS (a.name, e.since)
-         ) AS gt",
-        "PGQ008",
-        "ONE ROW PER STEP"
+         ) AS gt"
     );
 }
