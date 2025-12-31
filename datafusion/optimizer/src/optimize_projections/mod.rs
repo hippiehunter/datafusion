@@ -364,7 +364,8 @@ fn optimize_projections(
         | LogicalPlan::Values(_)
         | LogicalPlan::DescribeTable(_)
         | LogicalPlan::CopyFrom(_)
-        | LogicalPlan::JsonTable(_) => {
+        | LogicalPlan::JsonTable(_)
+        | LogicalPlan::GraphTable(_) => {
             // These operators have no inputs, so stop the optimization process.
             return Ok(Transformed::no(plan));
         }

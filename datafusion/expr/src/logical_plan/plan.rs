@@ -62,7 +62,7 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::{
     Column, Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
-    FunctionalDependence, FunctionalDependencies, NullEquality, NullsDistinct, ParamValues,
+    FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues,
     Result, ScalarValue, Spans, TableReference, UnnestOptions,
     aggregate_functional_dependencies, assert_eq_or_internal_err, assert_or_internal_err,
     internal_err, plan_err,

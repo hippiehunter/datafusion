@@ -1009,6 +1009,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::DecUnsigned(_) // deprecated mysql type
             | SQLDataType::DoubleUnsigned(_) // deprecated mysql type
             | SQLDataType::DoublePrecisionUnsigned // deprecated mysql type
+            | SQLDataType::MdArray(_) // multi-dimensional array type
             => {
                 not_impl_err!("Unsupported SQL type {sql_type}")
             }

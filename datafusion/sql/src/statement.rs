@@ -49,7 +49,7 @@ use datafusion_expr::{
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
     CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateProcedure,
     CreatePropertyGraph, CreateRole, CreateView, Deallocate, DescribeTable, DmlStatement,
-    DropBehavior, DropCatalogSchema, DropFunction, DropIndex, DropPropertyGraph, DropRole,
+    DropCatalogSchema, DropFunction, DropIndex, DropPropertyGraph, DropRole,
     DropSequence, DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr,
     ExprSchemable, Filter, Grant, GrantRole, GraphEdgeEndpoint, GraphEdgeTableDefinition,
     GraphKeyClause, GraphPropertiesClause, GraphVertexTableDefinition, JoinType, LogicalPlan,
