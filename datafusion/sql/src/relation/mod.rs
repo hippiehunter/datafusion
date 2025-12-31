@@ -29,7 +29,12 @@ use datafusion_expr::planner::{
     PlannedRelation, RelationPlannerContext, RelationPlanning,
 };
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, expr::Unnest};
-use datafusion_expr::{JsonTable, JsonTableColumnDef, JsonTableErrorHandling, Subquery, SubqueryAlias};
+use datafusion_expr::{
+    EdgeDirection, EdgePattern, GraphColumn, GraphPattern, GraphPatternElement,
+    GraphPatternExpr, GraphTable, JsonTable, JsonTableColumnDef, JsonTableErrorHandling,
+    LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier, RowLimiting,
+    Subquery, SubqueryAlias,
+};
 use sqlparser::ast::{FunctionArg, FunctionArgExpr, Ident, Spanned, TableFactor};
 
 mod join;
@@ -680,6 +685,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )?;
                 (plan, alias)
             }
+            TableFactor::GraphTable {
+                graph_name,
+                match_clause,
+                alias,
+            } => {
+                // Plan GRAPH_TABLE function
+                let plan = self.plan_graph_table(
+                    graph_name,
+                    match_clause,
+                    planner_context,
+                )?;
+                (plan, alias)
+            }
             // @todo Support TableFactory::TableFunction?
             _ => {
                 return not_impl_err!(
@@ -913,5 +931,354 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(JsonTableErrorHandling::Default(scalar))
             }
         }
+    }
+
+    /// Plan GRAPH_TABLE table factor (SQL/PGQ).
+    ///
+    /// GRAPH_TABLE performs pattern matching on property graphs and returns
+    /// results as a relational table.
+    /// Syntax: GRAPH_TABLE(graph_name MATCH pattern WHERE ... COLUMNS(...))
+    fn plan_graph_table(
+        &self,
+        graph_name: sqlparser::ast::ObjectName,
+        match_clause: sqlparser::ast::GraphMatchClause,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        // Convert graph name to table reference
+        let graph_ref = self.object_name_to_table_reference(graph_name)?;
+
+        // Convert path finding algorithm
+        let path_finding = match_clause
+            .path_finding
+            .map(|pf| self.convert_path_finding(pf))
+            .transpose()?;
+
+        // Convert path mode
+        let path_mode = match_clause.path_mode.map(|pm| self.convert_path_mode(pm));
+
+        // Convert row limiting
+        let row_limiting = match_clause
+            .row_limiting
+            .map(|rl| self.convert_row_limiting(rl));
+
+        // Convert graph patterns
+        let patterns = match_clause
+            .patterns
+            .into_iter()
+            .map(|p| self.convert_graph_pattern(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Convert WHERE clause if present
+        // Use an empty schema initially - schema will be computed based on patterns
+        let empty_schema = DFSchema::empty();
+        let where_clause = match_clause
+            .where_clause
+            .map(|expr| {
+                self.sql_expr_to_logical_expr(expr, &empty_schema, planner_context)
+            })
+            .transpose()?;
+
+        // Convert COLUMNS clause
+        let columns = match_clause
+            .columns
+            .map(|cols| {
+                cols.columns
+                    .into_iter()
+                    .map(|col| {
+                        let expr = self.sql_expr_to_logical_expr(
+                            col.expr,
+                            &empty_schema,
+                            planner_context,
+                        )?;
+                        Ok(GraphColumn {
+                            expr,
+                            alias: col.alias.map(|a| self.ident_normalizer.normalize(a)),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        // Build schema from columns
+        let schema = self.build_graph_table_schema(&columns, &empty_schema)?;
+
+        // Create the GraphTable logical plan node
+        let graph_table = GraphTable::try_new(
+            graph_ref,
+            path_finding,
+            path_mode,
+            row_limiting,
+            patterns,
+            where_clause,
+            columns,
+            Arc::new(schema),
+        )?;
+
+        Ok(LogicalPlan::GraphTable(graph_table))
+    }
+
+    /// Convert sqlparser path finding to DataFusion PathFinding
+    fn convert_path_finding(
+        &self,
+        pf: sqlparser::ast::PathFinding,
+    ) -> Result<PathFinding> {
+        use sqlparser::ast::PathFinding as SqlPF;
+        use sqlparser::ast::PathVariant;
+        Ok(match pf {
+            SqlPF::Any => PathFinding::Any,
+            SqlPF::AnyShortest => PathFinding::AnyShortest,
+            SqlPF::AllShortest => PathFinding::AllShortest,
+            SqlPF::Shortest { k, variant } => PathFinding::Shortest {
+                k,
+                groups: matches!(variant, Some(PathVariant::PathGroups)),
+            },
+            SqlPF::AnyCheapest => PathFinding::AnyCheapest,
+            SqlPF::AllCheapest => PathFinding::AllCheapest,
+            SqlPF::Cheapest { k, variant } => PathFinding::Cheapest {
+                k,
+                groups: matches!(variant, Some(PathVariant::PathGroups)),
+            },
+            SqlPF::All => PathFinding::All,
+        })
+    }
+
+    /// Convert sqlparser path mode to DataFusion PathMode
+    fn convert_path_mode(&self, pm: sqlparser::ast::PathMode) -> PathMode {
+        use sqlparser::ast::PathMode as SqlPM;
+        match pm {
+            SqlPM::Walk => PathMode::Walk,
+            SqlPM::Trail => PathMode::Trail,
+            SqlPM::Acyclic => PathMode::Acyclic,
+            SqlPM::Simple => PathMode::Simple,
+        }
+    }
+
+    /// Convert sqlparser row limiting to DataFusion RowLimiting
+    fn convert_row_limiting(&self, rl: sqlparser::ast::RowLimiting) -> RowLimiting {
+        use sqlparser::ast::RowLimiting as SqlRL;
+        match rl {
+            SqlRL::OneRowPerMatch => RowLimiting::OneRowPerMatch,
+            SqlRL::OneRowPerVertex => RowLimiting::OneRowPerVertex,
+            SqlRL::OneRowPerStep => RowLimiting::OneRowPerStep,
+        }
+    }
+
+    /// Convert sqlparser GraphPattern to DataFusion GraphPattern
+    fn convert_graph_pattern(
+        &self,
+        pattern: sqlparser::ast::GraphPattern,
+    ) -> Result<GraphPattern> {
+        Ok(GraphPattern {
+            path_variable: pattern
+                .path_variable
+                .map(|v| self.ident_normalizer.normalize(v)),
+            expr: self.convert_graph_pattern_expr(pattern.expr)?,
+        })
+    }
+
+    /// Convert sqlparser GraphPatternExpr to DataFusion GraphPatternExpr
+    fn convert_graph_pattern_expr(
+        &self,
+        expr: sqlparser::ast::GraphPatternExpr,
+    ) -> Result<GraphPatternExpr> {
+        use sqlparser::ast::GraphPatternExpr as SqlGPE;
+        Ok(match expr {
+            SqlGPE::Chain(elements) => GraphPatternExpr::Chain(
+                elements
+                    .into_iter()
+                    .map(|e| self.convert_graph_pattern_element(e))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            SqlGPE::Alternation(patterns) => GraphPatternExpr::Alternation(
+                patterns
+                    .into_iter()
+                    .map(|p| self.convert_graph_pattern_expr(p))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            SqlGPE::Group { pattern, quantifier } => GraphPatternExpr::Group {
+                pattern: Box::new(self.convert_graph_pattern_expr(*pattern)?),
+                quantifier: quantifier.map(|q| self.convert_quantifier(q)),
+            },
+        })
+    }
+
+    /// Convert sqlparser GraphPatternElement to DataFusion GraphPatternElement
+    fn convert_graph_pattern_element(
+        &self,
+        element: sqlparser::ast::GraphPatternElement,
+    ) -> Result<GraphPatternElement> {
+        use sqlparser::ast::GraphPatternElement as SqlGPE;
+        Ok(match element {
+            SqlGPE::Node(node) => {
+                GraphPatternElement::Node(self.convert_node_pattern(node)?)
+            }
+            SqlGPE::Edge(edge) => {
+                GraphPatternElement::Edge(self.convert_edge_pattern(edge)?)
+            }
+            SqlGPE::Subpattern(expr) => {
+                GraphPatternElement::Subpattern(Box::new(self.convert_graph_pattern_expr(expr)?))
+            }
+        })
+    }
+
+    /// Convert sqlparser NodePattern to DataFusion NodePattern
+    fn convert_node_pattern(
+        &self,
+        node: sqlparser::ast::NodePattern,
+    ) -> Result<NodePattern> {
+        let empty_schema = DFSchema::empty();
+        let mut planner_context = PlannerContext::new();
+
+        Ok(NodePattern {
+            variable: node
+                .variable
+                .map(|v| self.ident_normalizer.normalize(v)),
+            labels: node
+                .labels
+                .into_iter()
+                .map(|l| self.convert_label_expression(l))
+                .collect(),
+            properties: node
+                .properties
+                .into_iter()
+                .map(|p| {
+                    let key = self.ident_normalizer.normalize(p.key);
+                    let value = self.sql_expr_to_logical_expr(
+                        p.value,
+                        &empty_schema,
+                        &mut planner_context,
+                    )?;
+                    Ok((key, value))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            where_clause: node
+                .where_clause
+                .map(|e| {
+                    self.sql_expr_to_logical_expr(e, &empty_schema, &mut planner_context)
+                })
+                .transpose()?,
+        })
+    }
+
+    /// Convert sqlparser EdgePattern to DataFusion EdgePattern
+    fn convert_edge_pattern(
+        &self,
+        edge: sqlparser::ast::EdgePattern,
+    ) -> Result<EdgePattern> {
+        let empty_schema = DFSchema::empty();
+        let mut planner_context = PlannerContext::new();
+
+        Ok(EdgePattern {
+            variable: edge
+                .variable
+                .map(|v| self.ident_normalizer.normalize(v)),
+            labels: edge
+                .labels
+                .into_iter()
+                .map(|l| self.convert_label_expression(l))
+                .collect(),
+            properties: edge
+                .properties
+                .into_iter()
+                .map(|p| {
+                    let key = self.ident_normalizer.normalize(p.key);
+                    let value = self.sql_expr_to_logical_expr(
+                        p.value,
+                        &empty_schema,
+                        &mut planner_context,
+                    )?;
+                    Ok((key, value))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            where_clause: edge
+                .where_clause
+                .map(|e| {
+                    self.sql_expr_to_logical_expr(e, &empty_schema, &mut planner_context)
+                })
+                .transpose()?,
+            direction: self.convert_edge_direction(edge.direction),
+            quantifier: edge.quantifier.map(|q| self.convert_quantifier(q)),
+        })
+    }
+
+    /// Convert sqlparser EdgeDirection to DataFusion EdgeDirection
+    fn convert_edge_direction(&self, dir: sqlparser::ast::EdgeDirection) -> EdgeDirection {
+        use sqlparser::ast::EdgeDirection as SqlED;
+        match dir {
+            SqlED::Right => EdgeDirection::Right,
+            SqlED::Left => EdgeDirection::Left,
+            SqlED::Undirected => EdgeDirection::Undirected,
+            SqlED::Any => EdgeDirection::Any,
+        }
+    }
+
+    /// Convert sqlparser LabelExpression to DataFusion LabelExpression
+    fn convert_label_expression(
+        &self,
+        label: sqlparser::ast::LabelExpression,
+    ) -> LabelExpression {
+        use sqlparser::ast::LabelExpression as SqlLE;
+        match label {
+            SqlLE::Label(ident) => {
+                LabelExpression::Label(self.ident_normalizer.normalize(ident))
+            }
+            SqlLE::Wildcard => LabelExpression::Wildcard,
+            SqlLE::Not(expr) => {
+                LabelExpression::Not(Box::new(self.convert_label_expression(*expr)))
+            }
+            SqlLE::And(left, right) => LabelExpression::And(
+                Box::new(self.convert_label_expression(*left)),
+                Box::new(self.convert_label_expression(*right)),
+            ),
+            SqlLE::Or(left, right) => LabelExpression::Or(
+                Box::new(self.convert_label_expression(*left)),
+                Box::new(self.convert_label_expression(*right)),
+            ),
+            SqlLE::Group(expr) => self.convert_label_expression(*expr),
+        }
+    }
+
+    /// Convert sqlparser RepetitionQuantifier to DataFusion RepetitionQuantifier
+    fn convert_quantifier(
+        &self,
+        q: sqlparser::ast::RepetitionQuantifier,
+    ) -> RepetitionQuantifier {
+        use sqlparser::ast::RepetitionQuantifier as SqlRQ;
+        match q {
+            SqlRQ::ZeroOrMore => RepetitionQuantifier::ZeroOrMore,
+            SqlRQ::OneOrMore => RepetitionQuantifier::OneOrMore,
+            SqlRQ::AtMostOne => RepetitionQuantifier::AtMostOne,
+            SqlRQ::Exactly(n) => RepetitionQuantifier::Exactly(n),
+            SqlRQ::AtLeast(n) => RepetitionQuantifier::AtLeast(n),
+            SqlRQ::AtMost(n) => RepetitionQuantifier::AtMost(n),
+            SqlRQ::Range(min, max) => RepetitionQuantifier::Range(min, max),
+        }
+    }
+
+    /// Build schema from GRAPH_TABLE COLUMNS clause
+    fn build_graph_table_schema(
+        &self,
+        columns: &[GraphColumn],
+        _input_schema: &DFSchema,
+    ) -> Result<DFSchema> {
+        use std::collections::HashMap;
+        use arrow::datatypes::DataType;
+
+        // For now, create a schema with Utf8 columns (in practice, this would
+        // need type inference from the property graph schema)
+        let fields: Vec<Arc<Field>> = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| {
+                let name = col
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("col{}", idx));
+                Arc::new(Field::new(name, DataType::Utf8, true))
+            })
+            .collect();
+
+        DFSchema::from_unqualified_fields(fields.into(), HashMap::new())
     }
 }

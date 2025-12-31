@@ -116,3 +116,6 @@ pub mod t141_pattern_matching;
 pub mod t151_distinct_predicate;
 pub mod t611_window_functions;
 pub mod t8xx_json;
+
+// SQL/PGQ (Part 16) - Property Graph Queries
+pub mod pgq_property_graph;

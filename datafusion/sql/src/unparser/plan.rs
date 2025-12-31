@@ -137,7 +137,8 @@ impl Unparser<'_> {
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_)
             | LogicalPlan::MatchRecognize(_)
-            | LogicalPlan::JsonTable(_) => not_impl_err!("Unsupported plan: {plan:?}"),
+            | LogicalPlan::JsonTable(_)
+            | LogicalPlan::GraphTable(_) => not_impl_err!("Unsupported plan: {plan:?}"),
         }
     }
 

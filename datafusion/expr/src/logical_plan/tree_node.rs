@@ -43,7 +43,7 @@ use crate::{
     LogicalPlan, MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
     Projection, RecursiveQuery, Repartition, Sort, Statement, Subquery, SubqueryAlias,
     TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::{CopyFrom, CopyTo},
-    logical_plan::plan::JsonTable,
+    logical_plan::plan::{GraphTable, JsonTable},
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
 
@@ -349,7 +349,9 @@ impl TreeNode for LogicalPlan {
                     | DdlStatement::CreateProcedure(_)
                     | DdlStatement::DropProcedure(_)
                     | DdlStatement::CreateRole(_)
-                    | DdlStatement::DropRole(_) => Transformed::no(ddl),
+                    | DdlStatement::DropRole(_)
+                    | DdlStatement::CreatePropertyGraph(_)
+                    | DdlStatement::DropPropertyGraph(_) => Transformed::no(ddl),
                 }
                 .update_data(LogicalPlan::Ddl)
             }
@@ -425,7 +427,8 @@ impl TreeNode for LogicalPlan {
             | LogicalPlan::EmptyRelation { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::JsonTable(_) => Transformed::no(self),
+            | LogicalPlan::JsonTable(_)
+            | LogicalPlan::GraphTable(_) => Transformed::no(self),
         })
     }
 }
@@ -598,6 +601,17 @@ impl LogicalPlan {
             LogicalPlan::JsonTable(JsonTable { json_expr, .. }) => {
                 // Apply to the JSON expression
                 f(json_expr)?;
+                Ok(TreeNodeRecursion::Continue)
+            }
+            LogicalPlan::GraphTable(GraphTable { where_clause, columns, .. }) => {
+                // Apply to the where clause if present
+                if let Some(where_expr) = where_clause {
+                    f(where_expr)?;
+                }
+                // Apply to column expressions
+                for col in columns {
+                    f(&col.expr)?;
+                }
                 Ok(TreeNodeRecursion::Continue)
             }
             // plans without expressions
@@ -803,6 +817,13 @@ impl LogicalPlan {
                 let exprs = LogicalPlan::JsonTable(jt.clone()).expressions();
                 let exprs = exprs.map_elements(f)?;
                 let plan = LogicalPlan::JsonTable(jt)
+                    .with_new_exprs(exprs.data, vec![])?;
+                Transformed::new(plan, exprs.transformed, exprs.tnr)
+            }
+            LogicalPlan::GraphTable(gt) => {
+                let exprs = LogicalPlan::GraphTable(gt.clone()).expressions();
+                let exprs = exprs.map_elements(f)?;
+                let plan = LogicalPlan::GraphTable(gt)
                     .with_new_exprs(exprs.data, vec![])?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }

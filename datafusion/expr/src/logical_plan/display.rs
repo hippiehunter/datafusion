@@ -683,6 +683,11 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "Node Type": "JsonTable"
                 })
             }
+            LogicalPlan::GraphTable(_) => {
+                json!({
+                    "Node Type": "GraphTable"
+                })
+            }
         }
     }
 }

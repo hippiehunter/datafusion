@@ -36,9 +36,11 @@ pub use builder::{
 pub use ddl::{
     AlterTable, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
     CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateProcedure,
-    CreateRole, CreateView, DdlStatement, DropCatalogSchema, DropDomain, DropFunction,
-    DropIndex, DropProcedure, DropRole, DropSequence, DropTable, DropView,
-    OperateFunctionArg,
+    CreatePropertyGraph, CreateRole, CreateView, DdlStatement, DropBehavior,
+    DropCatalogSchema, DropDomain, DropFunction, DropIndex, DropProcedure,
+    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, GraphEdgeEndpoint,
+    GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause,
+    GraphVertexTableDefinition, OperateFunctionArg,
 };
 pub use dml::{DmlStatement, WriteOp};
 pub use merge::{
@@ -47,13 +49,15 @@ pub use merge::{
 };
 pub use plan::{
     AfterMatchSkipOption, Aggregate, Analyze, ColumnUnnestList, DescribeTable, Distinct,
-    DistinctOn, EmptyMatchesMode, EmptyRelation, Explain, ExplainOption, Extension,
-    FetchType, Filter, Join, JoinConstraint, JoinType, JsonTable, JsonTableColumnDef,
-    JsonTableErrorHandling, Limit, LogicalPlan, MatchRecognize, MeasureExpr, Partitioning,
-    Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
-    RepetitionQuantifier, RowsPerMatchOption, SkipType, Sort, StringifiedPlan, Subquery,
-    SubqueryAlias, SubsetDef, SymbolDef, TableScan, ToStringifiedPlan, Union, Unnest,
-    Values, Window, projection_schema,
+    DistinctOn, EdgeDirection, EdgePattern, EmptyMatchesMode, EmptyRelation, Explain,
+    ExplainOption, Extension, FetchType, Filter, GraphColumn, GraphPattern,
+    GraphPatternElement, GraphPatternExpr, GraphTable, Join, JoinConstraint, JoinType,
+    JsonTable, JsonTableColumnDef, JsonTableErrorHandling, LabelExpression, Limit,
+    LogicalPlan, MatchRecognize, MeasureExpr, NodePattern, Partitioning, PathFinding,
+    PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
+    RepetitionQuantifier, RowLimiting, RowsPerMatchOption, SkipType, Sort, StringifiedPlan,
+    Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan, ToStringifiedPlan, Union,
+    Unnest, Values, Window, projection_schema,
 };
 pub use statement::{
     AnalyzeTable, Call, Deallocate, Execute, Grant, GrantRole, Prepare, ReleaseSavepoint,
