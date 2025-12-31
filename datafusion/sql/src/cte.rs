@@ -19,12 +19,13 @@ use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion_common::{
     Result, not_impl_err, plan_err,
     tree_node::{TreeNode, TreeNodeRecursion},
 };
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, TableSource};
-use sqlparser::ast::{Query, SetExpr, SetOperator, With};
+use sqlparser::ast::{Ident, Query, SelectItem, SetExpr, SetOperator, With};
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn plan_with_clause(
@@ -44,14 +45,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             // Create a logical plan for the CTE
+            // For recursive CTEs, we need to extract column aliases early and pass them
+            // to recursive_cte() so the work table has the correct schema for self-references.
             let cte_plan = if is_recursive {
-                self.recursive_cte(&cte_name, *cte.query, planner_context)?
+                // Extract column aliases from cte.alias.columns
+                let column_aliases: Vec<Ident> =
+                    cte.alias.columns.iter().map(|c| c.name.clone()).collect();
+                self.recursive_cte(&cte_name, *cte.query, column_aliases, planner_context)?
             } else {
                 self.non_recursive_cte(*cte.query, planner_context)?
             };
 
             // Each `WITH` block can change the column names in the last
             // projection (e.g. "WITH table(t1, t2) AS SELECT 1, 2").
+            // For recursive CTEs, column aliases have already been applied within recursive_cte(),
+            // but apply_table_alias will still apply the table name alias.
             let final_plan = self.apply_table_alias(cte_plan, cte.alias)?;
             // Export the CTE to the outer query
             planner_context.insert_cte(cte_name, final_plan);
@@ -71,6 +79,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         cte_name: &str,
         mut cte_query: Query,
+        column_aliases: Vec<Ident>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         if !self
@@ -108,7 +117,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // allow us to infer the schema to be used in the recursive term.
 
         // ---------- Step 1: Compile the static term ------------------
-        let static_plan = self.set_expr_to_plan(*left_expr, planner_context)?;
+        // If column aliases are provided, inject them into the AST before compiling.
+        // This ensures columns get unique names even if the SELECT has duplicate literals
+        // (e.g., SELECT 1, 0, 1 with aliases (n, a, b) becomes SELECT 1 AS n, 0 AS a, 1 AS b).
+        let left_expr = if !column_aliases.is_empty() {
+            self.inject_column_aliases_into_set_expr(*left_expr, &column_aliases)?
+        } else {
+            *left_expr
+        };
+        let static_plan = self.set_expr_to_plan(left_expr, planner_context)?;
 
         // Since the recursive CTEs include a component that references a
         // table with its name, like the example below:
@@ -132,12 +149,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // bound to.
 
         // ---------- Step 2: Create a temporary relation ------------------
-        // Step 2.1: Create a table source for the temporary relation
+        // Step 2.1: Create the schema for the work table
+        // If column aliases are provided, we need to apply them to the schema
+        // so that the recursive term can reference columns by their alias names.
+        let work_table_schema: SchemaRef = if !column_aliases.is_empty() {
+            // Create a new schema with aliased column names
+            self.apply_column_aliases_to_schema(
+                Arc::clone(static_plan.schema().inner()),
+                &column_aliases,
+            )?
+        } else {
+            Arc::clone(static_plan.schema().inner())
+        };
+
+        // Step 2.2: Create a table source for the temporary relation
         let work_table_source = self
             .context_provider
-            .create_cte_work_table(cte_name, Arc::clone(static_plan.schema().inner()))?;
+            .create_cte_work_table(cte_name, work_table_schema)?;
 
-        // Step 2.2: Create a temporary relation logical plan that will be used
+        // Step 2.3: Create a temporary relation logical plan that will be used
         // as the input to the recursive term
         let work_table_plan = LogicalPlanBuilder::scan(
             cte_name.to_string(),
@@ -148,7 +178,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let name = cte_name.to_string();
 
-        // Step 2.3: Register the temporary relation in the planning context
+        // Step 2.4: Register the temporary relation in the planning context
         // For all the self references in the variadic term, we'll replace it
         // with the temporary relation we created above by temporarily registering
         // it as a CTE. This temporary relation in the planning context will be
@@ -176,11 +206,94 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         // ---------- Step 4: Create the final plan ------------------
-        // Step 4.1: Compile the final plan
         let distinct = !Self::is_union_all(set_quantifier)?;
         LogicalPlanBuilder::from(static_plan)
             .to_recursive_query(name, recursive_plan, distinct)?
             .build()
+    }
+
+    /// Apply column aliases to a schema, returning a new schema with the aliased names
+    fn apply_column_aliases_to_schema(
+        &self,
+        schema: SchemaRef,
+        column_aliases: &[Ident],
+    ) -> Result<SchemaRef> {
+        let fields = schema.fields();
+        if column_aliases.len() > fields.len() {
+            return plan_err!(
+                "Source table contains {} columns but {} names given as column alias",
+                fields.len(),
+                column_aliases.len()
+            );
+        }
+
+        let new_fields: Vec<Field> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| {
+                if i < column_aliases.len() {
+                    let new_name =
+                        self.ident_normalizer.normalize(column_aliases[i].clone());
+                    Field::new(new_name, field.data_type().clone(), field.is_nullable())
+                        .with_metadata(field.metadata().clone())
+                } else {
+                    field.as_ref().clone()
+                }
+            })
+            .collect();
+
+        Ok(Arc::new(Schema::new_with_metadata(
+            new_fields,
+            schema.metadata().clone(),
+        )))
+    }
+
+    /// Inject column aliases into a SetExpr's projection items.
+    /// This modifies the AST so that SELECT items get unique names based on the provided aliases.
+    /// For example, `SELECT 1, 0, 1` with aliases `(n, a, b)` becomes `SELECT 1 AS n, 0 AS a, 1 AS b`.
+    fn inject_column_aliases_into_set_expr(
+        &self,
+        mut set_expr: SetExpr,
+        column_aliases: &[Ident],
+    ) -> Result<SetExpr> {
+        match &mut set_expr {
+            SetExpr::Select(select) => {
+                let projection = &mut select.projection;
+                // Apply aliases to projection items by position
+                for (i, alias) in column_aliases.iter().enumerate() {
+                    if i < projection.len() {
+                        let item = &mut projection[i];
+                        // Convert the item to have an alias
+                        *item = match std::mem::replace(item, SelectItem::Wildcard(Default::default())) {
+                            SelectItem::UnnamedExpr(expr) => {
+                                SelectItem::ExprWithAlias {
+                                    expr,
+                                    alias: alias.clone(),
+                                }
+                            }
+                            SelectItem::ExprWithAlias { expr, alias: _ } => {
+                                // Replace existing alias with the CTE column alias
+                                SelectItem::ExprWithAlias {
+                                    expr,
+                                    alias: alias.clone(),
+                                }
+                            }
+                            other => other, // Keep wildcards and qualified wildcards as-is
+                        };
+                    }
+                }
+                Ok(set_expr)
+            }
+            SetExpr::Values(_) => {
+                // For VALUES, we can't easily inject aliases at the AST level.
+                // The caller will need to handle aliasing after compilation.
+                Ok(set_expr)
+            }
+            _ => {
+                // For other SetExpr types (nested set operations), return as-is
+                Ok(set_expr)
+            }
+        }
     }
 }
 

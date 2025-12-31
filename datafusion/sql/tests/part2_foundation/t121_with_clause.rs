@@ -633,6 +633,38 @@ fn t131_multiple_recursive_ctes() {
     );
 }
 
+/// T131: Recursive CTE with column alias in definition
+/// Tests that WITH RECURSIVE nums(n) AS (...) properly applies the alias 'n'
+/// to the work table so the recursive term can reference nums.n
+#[test]
+fn t131_recursive_with_column_alias() {
+    assert_feature_supported!(
+        "WITH RECURSIVE nums(n) AS (
+           SELECT 1
+           UNION ALL
+           SELECT n + 1 FROM nums WHERE n < 10
+         ) \
+         SELECT * FROM nums",
+        "T131",
+        "Recursive CTE with column alias in definition"
+    );
+}
+
+/// T131: Recursive CTE with multiple column aliases
+#[test]
+fn t131_recursive_with_multiple_column_aliases() {
+    assert_feature_supported!(
+        "WITH RECURSIVE fib(n, a, b) AS (
+           SELECT 1, 0, 1
+           UNION ALL
+           SELECT n + 1, b, a + b FROM fib WHERE n < 10
+         ) \
+         SELECT n, a FROM fib",
+        "T131",
+        "Recursive CTE with multiple column aliases"
+    );
+}
+
 // ============================================================================
 // Combined T121/T131 Tests
 // ============================================================================
