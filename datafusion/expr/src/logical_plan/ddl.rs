@@ -31,7 +31,7 @@ use datafusion_common::tree_node::{Transformed, TreeNodeContainer, TreeNodeRecur
 use datafusion_common::{
     Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
 };
-pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain};
+pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain, DropBehavior};
 use sqlparser::ast::{Ident, ObjectName};
 
 static DDL_EMPTY_SCHEMA: LazyLock<DFSchemaRef> =
@@ -80,6 +80,10 @@ pub enum DdlStatement {
     CreateRole(CreateRole),
     /// DROP ROLE
     DropRole(DropRole),
+    /// CREATE PROPERTY GRAPH (SQL/PGQ)
+    CreatePropertyGraph(CreatePropertyGraph),
+    /// DROP PROPERTY GRAPH (SQL/PGQ)
+    DropPropertyGraph(DropPropertyGraph),
 }
 
 impl DdlStatement {
@@ -109,7 +113,9 @@ impl DdlStatement {
             | DdlStatement::CreateProcedure(_)
             | DdlStatement::DropProcedure(_)
             | DdlStatement::CreateRole(_)
-            | DdlStatement::DropRole(_) => &DDL_EMPTY_SCHEMA,
+            | DdlStatement::DropRole(_)
+            | DdlStatement::CreatePropertyGraph(_)
+            | DdlStatement::DropPropertyGraph(_) => &DDL_EMPTY_SCHEMA,
         }
     }
 
@@ -137,6 +143,8 @@ impl DdlStatement {
             DdlStatement::DropProcedure(_) => "DropProcedure",
             DdlStatement::CreateRole(_) => "CreateRole",
             DdlStatement::DropRole(_) => "DropRole",
+            DdlStatement::CreatePropertyGraph(_) => "CreatePropertyGraph",
+            DdlStatement::DropPropertyGraph(_) => "DropPropertyGraph",
         }
     }
 
@@ -165,6 +173,8 @@ impl DdlStatement {
             DdlStatement::DropProcedure(_) => vec![],
             DdlStatement::CreateRole(_) => vec![],
             DdlStatement::DropRole(_) => vec![],
+            DdlStatement::CreatePropertyGraph(_) => vec![],
+            DdlStatement::DropPropertyGraph(_) => vec![],
         }
     }
 
@@ -295,6 +305,27 @@ impl DdlStatement {
                         write!(
                             f,
                             "DropRole: {name:?} if not exist:={if_exists} cascade:={cascade}"
+                        )
+                    }
+                    DdlStatement::CreatePropertyGraph(CreatePropertyGraph {
+                        name,
+                        or_replace,
+                        if_not_exists,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "CreatePropertyGraph: {name:?} or_replace:={or_replace} if_not_exists:={if_not_exists}"
+                        )
+                    }
+                    DdlStatement::DropPropertyGraph(DropPropertyGraph {
+                        name,
+                        if_exists,
+                        drop_behavior,
+                    }) => {
+                        write!(
+                            f,
+                            "DropPropertyGraph: {name:?} if_exists:={if_exists} drop_behavior:={drop_behavior:?}"
                         )
                     }
                 }
@@ -1011,6 +1042,113 @@ impl PartialOrd for DropIndex {
         // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
         .filter(|cmp| *cmp != Ordering::Equal || self == other)
     }
+}
+
+// =============================================================================
+// SQL/PGQ (Property Graph Query) Support - ISO/IEC 9075-16:2023
+// =============================================================================
+
+/// A key clause in a property graph vertex or edge table definition.
+/// Example: `KEY (id)`
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct GraphKeyClause {
+    /// The columns that form the key
+    pub columns: Vec<String>,
+}
+
+/// A properties clause in a property graph vertex or edge table definition.
+/// Example: `PROPERTIES (name, age)`
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct GraphPropertiesClause {
+    /// The columns exposed as properties
+    pub columns: Vec<String>,
+}
+
+/// An endpoint definition for an edge in a property graph.
+/// Example: `KEY (src_id) REFERENCES Person`
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct GraphEdgeEndpoint {
+    /// Optional key columns for this endpoint
+    pub key: Option<GraphKeyClause>,
+    /// The vertex table this endpoint references
+    pub references: TableReference,
+}
+
+/// A vertex table definition in CREATE PROPERTY GRAPH.
+/// Example: `Person KEY (id) LABEL Person PROPERTIES (name, age)`
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct GraphVertexTableDefinition {
+    /// The underlying table name
+    pub table: TableReference,
+    /// Optional key clause
+    pub key: Option<GraphKeyClause>,
+    /// Optional label for the vertex type
+    pub label: Option<String>,
+    /// Optional properties clause
+    pub properties: Option<GraphPropertiesClause>,
+}
+
+/// An edge table definition in CREATE PROPERTY GRAPH.
+/// Example: `Knows SOURCE KEY (src_id) REFERENCES Person DESTINATION KEY (dst_id) REFERENCES Person`
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct GraphEdgeTableDefinition {
+    /// The underlying table name
+    pub table: TableReference,
+    /// Source endpoint definition
+    pub source: GraphEdgeEndpoint,
+    /// Destination endpoint definition
+    pub destination: GraphEdgeEndpoint,
+    /// Optional key clause
+    pub key: Option<GraphKeyClause>,
+    /// Optional label for the edge type
+    pub label: Option<String>,
+    /// Optional properties clause
+    pub properties: Option<GraphPropertiesClause>,
+}
+
+/// CREATE PROPERTY GRAPH statement (SQL/PGQ).
+///
+/// Creates a property graph from vertex and edge tables.
+///
+/// Example:
+/// ```sql
+/// CREATE PROPERTY GRAPH social_network
+///   VERTEX TABLES (
+///     Person KEY (id) PROPERTIES (name, age)
+///   )
+///   EDGE TABLES (
+///     Knows SOURCE KEY (src_id) REFERENCES Person
+///           DESTINATION KEY (dst_id) REFERENCES Person
+///   )
+/// ```
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct CreatePropertyGraph {
+    /// The name of the property graph
+    pub name: TableReference,
+    /// Whether to replace an existing graph with the same name
+    pub or_replace: bool,
+    /// Whether to skip if the graph already exists
+    pub if_not_exists: bool,
+    /// Vertex table definitions
+    pub vertex_tables: Vec<GraphVertexTableDefinition>,
+    /// Edge table definitions
+    pub edge_tables: Vec<GraphEdgeTableDefinition>,
+}
+
+/// DROP PROPERTY GRAPH statement (SQL/PGQ).
+///
+/// Example:
+/// ```sql
+/// DROP PROPERTY GRAPH IF EXISTS social_network CASCADE
+/// ```
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct DropPropertyGraph {
+    /// The name of the property graph to drop
+    pub name: TableReference,
+    /// Whether to skip if the graph doesn't exist
+    pub if_exists: bool,
+    /// Drop behavior (CASCADE or RESTRICT)
+    pub drop_behavior: Option<DropBehavior>,
 }
 
 #[cfg(test)]

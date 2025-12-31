@@ -455,6 +455,235 @@ impl PartialOrd for JsonTable {
     }
 }
 
+// ============================================================================
+// GRAPH_TABLE: Property Graph Queries (SQL/PGQ - ISO/IEC 9075-16:2023)
+// ============================================================================
+
+/// Edge direction in a graph pattern (SQL/PGQ)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum EdgeDirection {
+    /// `-[e]->` (outgoing edge)
+    Right,
+    /// `<-[e]-` (incoming edge)
+    Left,
+    /// `-[e]-` (undirected edge)
+    Undirected,
+    /// `<-[e]->` (any direction)
+    Any,
+}
+
+/// Label expression in graph patterns (SQL/PGQ)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum LabelExpression {
+    /// A single label name
+    Label(String),
+    /// Wildcard `%`
+    Wildcard,
+    /// Negation `!expr`
+    Not(Box<LabelExpression>),
+    /// Conjunction `expr & expr`
+    And(Box<LabelExpression>, Box<LabelExpression>),
+    /// Disjunction `expr | expr`
+    Or(Box<LabelExpression>, Box<LabelExpression>),
+}
+
+/// Node pattern in a graph query (SQL/PGQ)
+/// Example: `(a:Person {age: 30})`
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct NodePattern {
+    /// Optional variable name binding
+    pub variable: Option<String>,
+    /// Optional label expression(s)
+    pub labels: Vec<LabelExpression>,
+    /// Optional property constraints (key-value pairs as Expr)
+    pub properties: Vec<(String, Expr)>,
+    /// Optional WHERE clause within the node pattern
+    pub where_clause: Option<Expr>,
+}
+
+/// Quantifier for path patterns (same as MATCH_RECOGNIZE)
+/// Already defined as RepetitionQuantifier in this module
+
+/// Edge pattern in a graph query (SQL/PGQ)
+/// Example: `-[e:KNOWS*1..3]->`
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct EdgePattern {
+    /// Optional variable name binding
+    pub variable: Option<String>,
+    /// Optional label expression(s)
+    pub labels: Vec<LabelExpression>,
+    /// Optional property constraints (key-value pairs as Expr)
+    pub properties: Vec<(String, Expr)>,
+    /// Optional WHERE clause within the edge pattern
+    pub where_clause: Option<Expr>,
+    /// Edge direction
+    pub direction: EdgeDirection,
+    /// Optional quantifier for path patterns
+    pub quantifier: Option<RepetitionQuantifier>,
+}
+
+/// A graph pattern element (node or edge)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum GraphPatternElement {
+    /// Node pattern: `(a:Person)`
+    Node(NodePattern),
+    /// Edge pattern: `-[e:KNOWS]->`
+    Edge(EdgePattern),
+    /// Subpattern (grouped or alternation)
+    Subpattern(Box<GraphPatternExpr>),
+}
+
+/// Graph pattern expression (SQL/PGQ)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum GraphPatternExpr {
+    /// Chain of nodes and edges: `(a)-[e]->(b)`
+    Chain(Vec<GraphPatternElement>),
+    /// Alternation of patterns: `pattern1 | pattern2`
+    Alternation(Vec<GraphPatternExpr>),
+    /// Grouped pattern with optional quantifier: `((pattern)){n,m}`
+    Group {
+        pattern: Box<GraphPatternExpr>,
+        quantifier: Option<RepetitionQuantifier>,
+    },
+}
+
+/// A graph pattern with optional path variable binding
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct GraphPattern {
+    /// Optional path variable binding (e.g., `p` in `p = (a)-[]->(b)`)
+    pub path_variable: Option<String>,
+    /// The pattern expression
+    pub expr: GraphPatternExpr,
+}
+
+/// Path finding algorithm for MATCH clause
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum PathFinding {
+    /// ANY - any path
+    Any,
+    /// ANY SHORTEST - any shortest path
+    AnyShortest,
+    /// ALL SHORTEST - all shortest paths
+    AllShortest,
+    /// SHORTEST k [PATHS|PATH GROUPS]
+    Shortest { k: u64, groups: bool },
+    /// ANY CHEAPEST - any cheapest path
+    AnyCheapest,
+    /// ALL CHEAPEST - all cheapest paths
+    AllCheapest,
+    /// CHEAPEST k [PATHS|PATH GROUPS]
+    Cheapest { k: u64, groups: bool },
+    /// ALL - all paths
+    All,
+}
+
+/// Path mode for MATCH clause
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum PathMode {
+    /// WALK - allows repeated vertices and edges
+    Walk,
+    /// TRAIL - no repeated edges
+    Trail,
+    /// ACYCLIC - no repeated vertices (except start = end for cycles)
+    Acyclic,
+    /// SIMPLE - no repeated vertices at all
+    Simple,
+}
+
+/// Row limiting mode for graph pattern matching results
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum RowLimiting {
+    /// ONE ROW PER MATCH - return one row per complete match
+    OneRowPerMatch,
+    /// ONE ROW PER VERTEX - return one row per vertex in the path
+    OneRowPerVertex,
+    /// ONE ROW PER STEP - return one row per edge in the path
+    OneRowPerStep,
+}
+
+/// Column output specification for GRAPH_TABLE
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct GraphColumn {
+    /// The expression to output
+    pub expr: Expr,
+    /// Optional column alias
+    pub alias: Option<String>,
+}
+
+/// GRAPH_TABLE: Property Graph Queries (SQL/PGQ - ISO/IEC 9075-16:2023)
+///
+/// Performs pattern matching on property graphs and returns results as a table.
+///
+/// Example SQL:
+/// ```sql
+/// SELECT *
+/// FROM GRAPH_TABLE (
+///     social_network
+///     MATCH (a:Person)-[e:KNOWS]->(b:Person)
+///     WHERE a.name = 'Alice'
+///     COLUMNS (a.name AS person1, b.name AS person2, e.since)
+/// ) AS gt
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GraphTable {
+    /// The name of the property graph to query
+    pub graph_name: TableReference,
+    /// Path finding algorithm
+    pub path_finding: Option<PathFinding>,
+    /// Path mode
+    pub path_mode: Option<PathMode>,
+    /// Row limiting mode
+    pub row_limiting: Option<RowLimiting>,
+    /// The graph patterns to match
+    pub patterns: Vec<GraphPattern>,
+    /// WHERE clause for pattern filtering
+    pub where_clause: Option<Expr>,
+    /// COLUMNS clause specifying output columns
+    pub columns: Vec<GraphColumn>,
+    /// The schema of the output
+    pub schema: DFSchemaRef,
+}
+
+impl GraphTable {
+    /// Create a new GraphTable node
+    pub fn try_new(
+        graph_name: TableReference,
+        path_finding: Option<PathFinding>,
+        path_mode: Option<PathMode>,
+        row_limiting: Option<RowLimiting>,
+        patterns: Vec<GraphPattern>,
+        where_clause: Option<Expr>,
+        columns: Vec<GraphColumn>,
+        schema: DFSchemaRef,
+    ) -> Result<Self> {
+        Ok(Self {
+            graph_name,
+            path_finding,
+            path_mode,
+            row_limiting,
+            patterns,
+            where_clause,
+            columns,
+            schema,
+        })
+    }
+}
+
+impl PartialOrd for GraphTable {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.graph_name.partial_cmp(&other.graph_name) {
+            Some(Ordering::Equal) => {
+                match self.patterns.partial_cmp(&other.patterns) {
+                    Some(Ordering::Equal) => None, // schemas don't matter for ordering
+                    cmp => cmp,
+                }
+            }
+            cmp => cmp,
+        }
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
 /// MATCH_RECOGNIZE: Row Pattern Recognition (SQL:2016)
 ///
 /// Performs pattern matching on ordered rows within partitions to detect
@@ -674,6 +903,8 @@ pub enum LogicalPlan {
     MatchRecognize(MatchRecognize),
     /// JSON_TABLE function to transform JSON to relational format (SQL:2016 T827)
     JsonTable(JsonTable),
+    /// GRAPH_TABLE function for property graph queries (SQL/PGQ - ISO/IEC 9075-16:2023)
+    GraphTable(GraphTable),
 }
 
 impl Default for LogicalPlan {
@@ -742,6 +973,7 @@ impl LogicalPlan {
             }
             LogicalPlan::MatchRecognize(MatchRecognize { schema, .. }) => schema,
             LogicalPlan::JsonTable(JsonTable { schema, .. }) => schema,
+            LogicalPlan::GraphTable(GraphTable { schema, .. }) => schema,
         }
     }
 
@@ -875,7 +1107,8 @@ impl LogicalPlan {
             | LogicalPlan::Values { .. }
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::CopyFrom(_)
-            | LogicalPlan::JsonTable(_) => vec![],
+            | LogicalPlan::JsonTable(_)
+            | LogicalPlan::GraphTable(_) => vec![],
         }
     }
 
@@ -981,6 +1214,9 @@ impl LogicalPlan {
             LogicalPlan::Subquery(_) => Ok(None),
             LogicalPlan::JsonTable(json_table) => Ok(Some(Expr::Column(Column::from(
                 json_table.schema.qualified_field(0),
+            )))),
+            LogicalPlan::GraphTable(graph_table) => Ok(Some(Expr::Column(Column::from(
+                graph_table.schema.qualified_field(0),
             )))),
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Statement(_)
@@ -1185,6 +1421,29 @@ impl LogicalPlan {
                 // Rebuild JsonTable to recompute schema
                 JsonTable::try_new(json_expr, json_path, columns)
                     .map(LogicalPlan::JsonTable)
+            }
+            LogicalPlan::GraphTable(GraphTable {
+                graph_name,
+                path_finding,
+                path_mode,
+                row_limiting,
+                patterns,
+                where_clause,
+                columns,
+                schema,
+            }) => {
+                // GraphTable schema is determined by COLUMNS clause, not inputs
+                GraphTable::try_new(
+                    graph_name,
+                    path_finding,
+                    path_mode,
+                    row_limiting,
+                    patterns,
+                    where_clause,
+                    columns,
+                    Arc::clone(&schema),
+                )
+                .map(LogicalPlan::GraphTable)
             }
         }
     }
@@ -1821,6 +2080,43 @@ impl LogicalPlan {
                 JsonTable::try_new(json_expr, json_path.clone(), columns.clone())
                     .map(LogicalPlan::JsonTable)
             }
+            LogicalPlan::GraphTable(GraphTable {
+                graph_name,
+                path_finding,
+                path_mode,
+                row_limiting,
+                patterns,
+                where_clause: _,
+                columns,
+                schema,
+            }) => {
+                // GraphTable has where_clause + column expressions, no inputs
+                self.assert_no_inputs(inputs)?;
+                // Expression layout: [where_clause] + [column exprs]
+                let col_count = columns.len();
+                let where_clause = if expr.len() > col_count {
+                    Some(expr.remove(0))
+                } else {
+                    None
+                };
+                let new_columns = columns.iter().zip(expr.into_iter())
+                    .map(|(old_col, new_expr)| GraphColumn {
+                        expr: new_expr,
+                        alias: old_col.alias.clone(),
+                    })
+                    .collect();
+                GraphTable::try_new(
+                    graph_name.clone(),
+                    path_finding.clone(),
+                    path_mode.clone(),
+                    row_limiting.clone(),
+                    patterns.clone(),
+                    where_clause,
+                    new_columns,
+                    Arc::clone(schema),
+                )
+                .map(LogicalPlan::GraphTable)
+            }
         }
     }
 
@@ -2075,6 +2371,7 @@ impl LogicalPlan {
             LogicalPlan::Unnest(_) => None,
             LogicalPlan::MatchRecognize(MatchRecognize { input, .. }) => input.max_rows(),
             LogicalPlan::JsonTable(_) => None, // JSON_TABLE output size depends on JSON content
+            LogicalPlan::GraphTable(_) => None, // GRAPH_TABLE output size depends on graph data
             LogicalPlan::Ddl(_)
             | LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
@@ -2836,6 +3133,9 @@ impl LogicalPlan {
                     }
                     LogicalPlan::JsonTable(JsonTable { json_path, .. }) => {
                         write!(f, "JsonTable: path={}", json_path)
+                    }
+                    LogicalPlan::GraphTable(GraphTable { graph_name, .. }) => {
+                        write!(f, "GraphTable: graph={}", graph_name)
                     }
                 }
             }
