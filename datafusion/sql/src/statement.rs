@@ -45,18 +45,18 @@ use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
-    Analyze, AnalyzeTable, Call, CreateCatalog, CreateCatalogSchema,
-    CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
-    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateProcedure,
-    CreatePropertyGraph, CreateRole, CreateView, Deallocate, DescribeTable, DmlStatement,
-    DropCatalogSchema, DropFunction, DropIndex, DropPropertyGraph, DropRole,
-    DropSequence, DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr,
-    ExprSchemable, Filter, Grant, GrantRole, GraphEdgeEndpoint, GraphEdgeTableDefinition,
-    GraphKeyClause, GraphPropertiesClause, GraphVertexTableDefinition, JoinType, LogicalPlan,
-    LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr,
-    MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare, ReleaseSavepoint,
-    ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint, SetTransaction,
-    SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
+    AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
+    CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
+    CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateProcedure,
+    CreatePropertyGraph, CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable,
+    DmlStatement, DropAssertion, DropCatalogSchema, DropFunction, DropIndex,
+    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation, Execute,
+    Explain, ExplainFormat, Expr, ExprSchemable, Filter, Grant, GrantRole, GraphEdgeEndpoint,
+    GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause, GraphVertexTableDefinition,
+    JoinType, LogicalPlan, LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause,
+    MergeInsertExpr, MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare,
+    ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint,
+    SetTransaction, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
     TransactionAccessMode, TransactionConclusion, TransactionEnd, TransactionIsolationLevel,
     TransactionStart, TruncateTable, UseDatabase, Vacuum, Volatility, WriteOp, cast, col,
 };
@@ -596,6 +596,48 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::DropDomain(drop_domain) => {
                 Ok(LogicalPlan::Ddl(DdlStatement::DropDomain(drop_domain)))
             }
+            Statement::CreateSequence {
+                temporary,
+                if_not_exists,
+                name,
+                data_type,
+                sequence_options,
+                owned_by,
+                ..
+            } => Ok(LogicalPlan::Ddl(DdlStatement::CreateSequence(
+                CreateSequence {
+                    name,
+                    temporary,
+                    if_not_exists,
+                    data_type,
+                    sequence_options,
+                    owned_by,
+                },
+            ))),
+            Statement::AlterSequence {
+                name,
+                if_exists,
+                sequence_options,
+                owned_by,
+                ..
+            } => Ok(LogicalPlan::Ddl(DdlStatement::AlterSequence(
+                AlterSequence {
+                    name,
+                    if_exists,
+                    sequence_options,
+                    owned_by,
+                },
+            ))),
+            Statement::CreateAssertion(ast::CreateAssertion {
+                name, expr, ..
+            }) => Ok(LogicalPlan::Ddl(DdlStatement::CreateAssertion(
+                CreateAssertion { name, expr },
+            ))),
+            Statement::DropAssertion(ast::DropAssertion {
+                name, if_exists, ..
+            }) => Ok(LogicalPlan::Ddl(DdlStatement::DropAssertion(
+                DropAssertion { name, if_exists },
+            ))),
             Statement::ShowCreate { obj_type, obj_name, .. } => match obj_type {
                 ShowCreateObject::Table => self.show_create_table_to_plan(obj_name),
                 _ => {

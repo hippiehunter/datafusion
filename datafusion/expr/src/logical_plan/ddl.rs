@@ -31,8 +31,8 @@ use datafusion_common::tree_node::{Transformed, TreeNodeContainer, TreeNodeRecur
 use datafusion_common::{
     Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
 };
-pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain, DropBehavior};
-use sqlparser::ast::{Ident, ObjectName};
+pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain, DropBehavior, SequenceOptions};
+use sqlparser::ast::{DataType as SqlDataType, Expr as SqlExpr, Ident, ObjectName};
 
 static DDL_EMPTY_SCHEMA: LazyLock<DFSchemaRef> =
     LazyLock::new(|| Arc::new(DFSchema::empty()));
@@ -72,6 +72,14 @@ pub enum DdlStatement {
     DropDomain(DropDomain),
     /// DROP SEQUENCE
     DropSequence(DropSequence),
+    /// CREATE SEQUENCE (SQL:2016 T174)
+    CreateSequence(CreateSequence),
+    /// ALTER SEQUENCE (SQL:2016 T174)
+    AlterSequence(AlterSequence),
+    /// CREATE ASSERTION (SQL:2016 F491)
+    CreateAssertion(CreateAssertion),
+    /// DROP ASSERTION (SQL:2016 F491)
+    DropAssertion(DropAssertion),
     /// CREATE PROCEDURE (SQL:2016 Part 4 - PSM)
     CreateProcedure(CreateProcedure),
     /// DROP PROCEDURE (SQL:2016 Part 4 - PSM)
@@ -110,6 +118,10 @@ impl DdlStatement {
             | DdlStatement::CreateDomain(_)
             | DdlStatement::DropDomain(_)
             | DdlStatement::DropSequence(_)
+            | DdlStatement::CreateSequence(_)
+            | DdlStatement::AlterSequence(_)
+            | DdlStatement::CreateAssertion(_)
+            | DdlStatement::DropAssertion(_)
             | DdlStatement::CreateProcedure(_)
             | DdlStatement::DropProcedure(_)
             | DdlStatement::CreateRole(_)
@@ -139,6 +151,10 @@ impl DdlStatement {
             DdlStatement::CreateDomain(_) => "CreateDomain",
             DdlStatement::DropDomain(_) => "DropDomain",
             DdlStatement::DropSequence(_) => "DropSequence",
+            DdlStatement::CreateSequence(_) => "CreateSequence",
+            DdlStatement::AlterSequence(_) => "AlterSequence",
+            DdlStatement::CreateAssertion(_) => "CreateAssertion",
+            DdlStatement::DropAssertion(_) => "DropAssertion",
             DdlStatement::CreateProcedure(_) => "CreateProcedure",
             DdlStatement::DropProcedure(_) => "DropProcedure",
             DdlStatement::CreateRole(_) => "CreateRole",
@@ -169,6 +185,10 @@ impl DdlStatement {
             DdlStatement::CreateDomain(_) => vec![],
             DdlStatement::DropDomain(_) => vec![],
             DdlStatement::DropSequence(_) => vec![],
+            DdlStatement::CreateSequence(_) => vec![],
+            DdlStatement::AlterSequence(_) => vec![],
+            DdlStatement::CreateAssertion(_) => vec![],
+            DdlStatement::DropAssertion(_) => vec![],
             DdlStatement::CreateProcedure(_) => vec![],
             DdlStatement::DropProcedure(_) => vec![],
             DdlStatement::CreateRole(_) => vec![],
@@ -280,6 +300,36 @@ impl DdlStatement {
                         write!(
                             f,
                             "DropSequence: {name:?} if not exist:={if_exists}"
+                        )
+                    }
+                    DdlStatement::CreateSequence(CreateSequence {
+                        name,
+                        if_not_exists,
+                        temporary,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "CreateSequence: {name:?} if_not_exists:={if_not_exists} temporary:={temporary}"
+                        )
+                    }
+                    DdlStatement::AlterSequence(AlterSequence {
+                        name,
+                        if_exists,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "AlterSequence: {name:?} if_exists:={if_exists}"
+                        )
+                    }
+                    DdlStatement::CreateAssertion(CreateAssertion { name, .. }) => {
+                        write!(f, "CreateAssertion: {name:?}")
+                    }
+                    DdlStatement::DropAssertion(DropAssertion { name, if_exists }) => {
+                        write!(
+                            f,
+                            "DropAssertion: {name:?} if_exists:={if_exists}"
                         )
                     }
                     DdlStatement::CreateProcedure(CreateProcedure { name, .. }) => {
@@ -737,6 +787,74 @@ pub struct DropSequence {
     pub temporary: bool,
     /// Optional table qualifier (dialect-specific)
     pub table: Option<ObjectName>,
+}
+
+/// Creates a sequence (SQL:2016 T174: Sequence generator support).
+///
+/// Example:
+/// ```sql
+/// CREATE SEQUENCE seq_core INCREMENT 1 START WITH 1
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateSequence {
+    /// The sequence name
+    pub name: ObjectName,
+    /// Whether to create as temporary sequence
+    pub temporary: bool,
+    /// IF NOT EXISTS clause
+    pub if_not_exists: bool,
+    /// Optional data type for the sequence
+    pub data_type: Option<SqlDataType>,
+    /// Sequence options (INCREMENT, START, etc.)
+    pub sequence_options: Vec<SequenceOptions>,
+    /// OWNED BY clause
+    pub owned_by: Option<ObjectName>,
+}
+
+/// Alters a sequence (SQL:2016 T174: Sequence generator support).
+///
+/// Example:
+/// ```sql
+/// ALTER SEQUENCE seq_core RESTART WITH 100
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct AlterSequence {
+    /// The sequence name
+    pub name: ObjectName,
+    /// IF EXISTS clause
+    pub if_exists: bool,
+    /// Sequence options to alter
+    pub sequence_options: Vec<SequenceOptions>,
+    /// OWNED BY clause
+    pub owned_by: Option<ObjectName>,
+}
+
+/// Creates an assertion (SQL:2016 F491: Schema-level CHECK constraint).
+///
+/// Example:
+/// ```sql
+/// CREATE ASSERTION salary_check CHECK (NOT EXISTS (SELECT 1 FROM employees WHERE salary < 0))
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateAssertion {
+    /// The assertion name
+    pub name: ObjectName,
+    /// The CHECK constraint expression
+    pub expr: Box<SqlExpr>,
+}
+
+/// Drops an assertion (SQL:2016 F491: Schema-level CHECK constraint).
+///
+/// Example:
+/// ```sql
+/// DROP ASSERTION salary_check
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct DropAssertion {
+    /// The assertion name
+    pub name: ObjectName,
+    /// IF EXISTS clause
+    pub if_exists: bool,
 }
 
 /// Drops a schema
