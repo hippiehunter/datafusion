@@ -262,8 +262,12 @@ pub struct PlannerContext {
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
     ctes: HashMap<String, Arc<LogicalPlan>>,
-    /// The query schema of the outer query plan, used to resolve the columns in subquery
-    outer_query_schema: Option<DFSchemaRef>,
+    /// Stack of outer query schemas for resolving columns in nested subqueries.
+    /// The last element is the immediate outer query's schema.
+    /// Earlier elements are schemas from further ancestor queries.
+    /// This enables multi-level correlation where a deeply nested subquery
+    /// can reference columns from any ancestor query.
+    outer_query_schema_stack: Vec<DFSchemaRef>,
     /// The joined schemas of all FROM clauses planned so far. When planning LATERAL
     /// FROM clauses, this should become a suffix of the `outer_query_schema`.
     outer_from_schema: Option<DFSchemaRef>,
@@ -291,7 +295,7 @@ impl PlannerContext {
         Self {
             prepare_param_data_types: Arc::new(vec![]),
             ctes: HashMap::new(),
-            outer_query_schema: None,
+            outer_query_schema_stack: Vec::new(),
             outer_from_schema: None,
             create_table_schema: None,
             values_defaults: None,
@@ -309,19 +313,49 @@ impl PlannerContext {
         self
     }
 
-    // Return a reference to the outer query's schema
+    /// Return a reference to the immediate outer query's schema (if any).
+    /// This is the last element in the outer query schema stack.
     pub fn outer_query_schema(&self) -> Option<&DFSchema> {
-        self.outer_query_schema.as_ref().map(|s| s.as_ref())
+        self.outer_query_schema_stack.last().map(|s| s.as_ref())
     }
 
-    /// Sets the outer query schema, returning the existing one, if
-    /// any
+    /// Return the full stack of outer query schemas for multi-level correlation.
+    /// The last element is the immediate outer query's schema.
+    /// Earlier elements are schemas from further ancestor queries.
+    pub fn outer_query_schema_stack(&self) -> &[DFSchemaRef] {
+        &self.outer_query_schema_stack
+    }
+
+    /// Pushes a new outer query schema onto the stack for subquery planning.
+    /// Returns the previous stack length so that `pop_outer_query_schema` can
+    /// restore the stack to its previous state.
+    ///
+    /// When entering a subquery, the current query's schema should be pushed
+    /// so that the subquery can reference columns from any ancestor query.
+    pub fn push_outer_query_schema(&mut self, schema: DFSchemaRef) -> usize {
+        let prev_len = self.outer_query_schema_stack.len();
+        self.outer_query_schema_stack.push(schema);
+        prev_len
+    }
+
+    /// Pops outer query schemas from the stack back to the given length.
+    /// This is used to restore the stack after subquery planning.
+    pub fn pop_outer_query_schema(&mut self, target_len: usize) {
+        self.outer_query_schema_stack.truncate(target_len);
+    }
+
+    /// Sets the outer query schema, returning the existing one, if any.
+    /// This replaces the entire stack with a single schema (for backwards compatibility).
+    /// For multi-level correlation support, prefer `push_outer_query_schema` and `pop_outer_query_schema`.
     pub fn set_outer_query_schema(
         &mut self,
-        mut schema: Option<DFSchemaRef>,
+        schema: Option<DFSchemaRef>,
     ) -> Option<DFSchemaRef> {
-        std::mem::swap(&mut self.outer_query_schema, &mut schema);
-        schema
+        let old = self.outer_query_schema_stack.pop();
+        if let Some(s) = schema {
+            self.outer_query_schema_stack.push(s);
+        }
+        old
     }
 
     pub fn set_table_schema(

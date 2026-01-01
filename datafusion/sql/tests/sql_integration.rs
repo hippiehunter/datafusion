@@ -5051,3 +5051,167 @@ fn sqlmed_alter_user_mapping() {
         _ => panic!("Expected AlterUserMapping DDL statement"),
     }
 }
+
+// =============================================================================
+// Multi-level correlation tests
+// =============================================================================
+
+#[test]
+fn multi_level_correlated_scalar_subquery_inside_exists() {
+    // Test case where a scalar subquery inside an EXISTS subquery
+    // references a column from the outermost query (2 levels up)
+    let sql = "SELECT p.first_name FROM person p \
+               WHERE EXISTS ( \
+                   SELECT 1 FROM orders o \
+                   WHERE o.customer_id = p.id \
+                   AND o.price > ( \
+                       SELECT AVG(price) FROM orders o2 \
+                       WHERE o2.customer_id = p.id \
+                   ) \
+               )";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Projection: p.first_name
+  Filter: EXISTS (<subquery>)
+    Subquery:
+      Projection: Int64(1)
+        Filter: o.customer_id = outer_ref(p.id) AND o.price > (<subquery>)
+          Subquery:
+            Projection: avg(o2.price)
+              Aggregate: groupBy=[[]], aggr=[[avg(o2.price)]]
+                Filter: o2.customer_id = outer_ref(p.id)
+                  SubqueryAlias: o2
+                    TableScan: orders
+          SubqueryAlias: o
+            TableScan: orders
+    SubqueryAlias: p
+      TableScan: person
+"#
+    );
+}
+
+#[test]
+fn multi_level_correlated_scalar_in_scalar() {
+    // Test nested scalar subqueries where inner references outer's outer
+    let sql = "SELECT p1.first_name, \
+               (SELECT AVG(salary) FROM person p2 \
+                WHERE p2.state = p1.state \
+                AND p2.age > (SELECT AVG(age) FROM person p3 WHERE p3.state = p1.state)) \
+               FROM person p1";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Projection: p1.first_name, (<subquery>)
+  Subquery:
+    Projection: avg(p2.salary)
+      Aggregate: groupBy=[[]], aggr=[[avg(p2.salary)]]
+        Filter: p2.state = outer_ref(p1.state) AND p2.age > (<subquery>)
+          Subquery:
+            Projection: avg(p3.age)
+              Aggregate: groupBy=[[]], aggr=[[avg(p3.age)]]
+                Filter: p3.state = outer_ref(p1.state)
+                  SubqueryAlias: p3
+                    TableScan: person
+          SubqueryAlias: p2
+            TableScan: person
+  SubqueryAlias: p1
+    TableScan: person
+"#
+    );
+}
+
+#[test]
+fn multi_level_correlated_in_subquery_with_scalar() {
+    // Test IN subquery containing a scalar subquery that references outermost query
+    let sql = "SELECT p.first_name FROM person p \
+               WHERE p.id IN ( \
+                   SELECT o.customer_id FROM orders o \
+                   WHERE o.price > ( \
+                       SELECT AVG(salary) FROM person WHERE state = p.state \
+                   ) \
+               )";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Projection: p.first_name
+  Filter: p.id IN (<subquery>)
+    Subquery:
+      Projection: o.customer_id
+        Filter: o.price > (<subquery>)
+          Subquery:
+            Projection: avg(person.salary)
+              Aggregate: groupBy=[[]], aggr=[[avg(person.salary)]]
+                Filter: person.state = outer_ref(p.state)
+                  TableScan: person
+          SubqueryAlias: o
+            TableScan: orders
+    SubqueryAlias: p
+      TableScan: person
+"#
+    );
+}
+
+// =============================================================================
+// DELETE USING clause tests
+// =============================================================================
+
+#[test]
+fn plan_delete_using() {
+    // Test DELETE with USING clause (PostgreSQL syntax)
+    let sql = "DELETE FROM orders o USING person p WHERE o.customer_id = p.id AND p.state = 'CA'";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Dml: op=[Delete] table=[orders]
+  Filter: o.customer_id = p.id AND p.state = Utf8("CA")
+    Cross Join: 
+      SubqueryAlias: o
+        TableScan: orders
+      SubqueryAlias: p
+        TableScan: person
+"#
+    );
+}
+
+#[test]
+fn plan_delete_using_multiple_tables() {
+    // Test DELETE with multiple tables in USING clause
+    let sql = "DELETE FROM orders o USING person p, j1 WHERE o.customer_id = p.id AND p.id = j1.j1_id";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Dml: op=[Delete] table=[orders]
+  Filter: o.customer_id = p.id AND p.id = j1.j1_id
+    Cross Join: 
+      Cross Join: 
+        SubqueryAlias: o
+          TableScan: orders
+        SubqueryAlias: p
+          TableScan: person
+      TableScan: j1
+"#
+    );
+}
+
+#[test]
+fn plan_delete_using_no_alias() {
+    // Test DELETE USING without table aliases
+    let sql = "DELETE FROM orders USING person WHERE orders.customer_id = person.id";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Dml: op=[Delete] table=[orders]
+  Filter: orders.customer_id = person.id
+    Cross Join: 
+      TableScan: orders
+      TableScan: person
+"#
+    );
+}
