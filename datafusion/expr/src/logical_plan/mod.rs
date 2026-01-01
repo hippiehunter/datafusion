@@ -34,13 +34,13 @@ pub use builder::{
     wrap_projection_for_join_if_necessary,
 };
 pub use ddl::{
-    AlterTable, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
-    CreateFunction, CreateFunctionBody, CreateIndex, CreateMemoryTable, CreateProcedure,
-    CreatePropertyGraph, CreateRole, CreateView, DdlStatement, DropBehavior,
-    DropCatalogSchema, DropDomain, DropFunction, DropIndex, DropProcedure,
-    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, GraphEdgeEndpoint,
-    GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause,
-    GraphVertexTableDefinition, OperateFunctionArg,
+    AlterSequence, AlterTable, CreateAssertion, CreateCatalog, CreateCatalogSchema,
+    CreateDomain, CreateExternalTable, CreateFunction, CreateFunctionBody, CreateIndex,
+    CreateMemoryTable, CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence,
+    CreateView, DdlStatement, DropAssertion, DropBehavior, DropCatalogSchema, DropDomain,
+    DropFunction, DropIndex, DropProcedure, DropPropertyGraph, DropRole, DropSequence,
+    DropTable, DropView, GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause,
+    GraphPropertiesClause, GraphVertexTableDefinition, OperateFunctionArg, SequenceOptions,
 };
 pub use dml::{DmlStatement, WriteOp};
 pub use merge::{
