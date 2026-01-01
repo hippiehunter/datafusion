@@ -41,6 +41,14 @@ pub use ddl::{
     DropFunction, DropIndex, DropProcedure, DropPropertyGraph, DropRole, DropSequence,
     DropTable, DropView, GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause,
     GraphPropertiesClause, GraphVertexTableDefinition, OperateFunctionArg, SequenceOptions,
+    // SQL/MED (Management of External Data) types
+    AlterForeignDataWrapperOperation, AlterForeignDataWrapperStatement,
+    AlterForeignTableOperation, AlterForeignTableStatement, AlterServerOperation,
+    AlterServerStatement, CreateForeignDataWrapperStatement, CreateForeignTableStatement,
+    CreateServerOption, CreateServerStatement, CreateUserMappingStatement,
+    DropForeignDataWrapperStatement, DropForeignTableStatement, DropServerStatement,
+    DropUserMappingStatement, ImportForeignSchemaLimitType, ImportForeignSchemaStatement,
+    AlterUserMappingStatement, UserMappingUser,
 };
 pub use dml::{DmlStatement, WriteOp};
 pub use merge::{

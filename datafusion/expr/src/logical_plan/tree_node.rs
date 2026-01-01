@@ -355,7 +355,21 @@ impl TreeNode for LogicalPlan {
                     | DdlStatement::CreateRole(_)
                     | DdlStatement::DropRole(_)
                     | DdlStatement::CreatePropertyGraph(_)
-                    | DdlStatement::DropPropertyGraph(_) => Transformed::no(ddl),
+                    | DdlStatement::DropPropertyGraph(_)
+                    // SQL/MED statements have no child plans to transform
+                    | DdlStatement::CreateServer(_)
+                    | DdlStatement::AlterServer(_)
+                    | DdlStatement::DropServer(_)
+                    | DdlStatement::CreateForeignDataWrapper(_)
+                    | DdlStatement::AlterForeignDataWrapper(_)
+                    | DdlStatement::DropForeignDataWrapper(_)
+                    | DdlStatement::CreateForeignTable(_)
+                    | DdlStatement::AlterForeignTable(_)
+                    | DdlStatement::DropForeignTable(_)
+                    | DdlStatement::CreateUserMapping(_)
+                    | DdlStatement::AlterUserMapping(_)
+                    | DdlStatement::DropUserMapping(_)
+                    | DdlStatement::ImportForeignSchema(_) => Transformed::no(ddl),
                 }
                 .update_data(LogicalPlan::Ddl)
             }
