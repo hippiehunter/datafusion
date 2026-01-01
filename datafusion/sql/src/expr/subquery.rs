@@ -31,11 +31,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let old_outer_query_schema =
-            planner_context.set_outer_query_schema(Some(input_schema.clone().into()));
+        // Push current schema onto stack to enable multi-level correlation
+        let prev_stack_len =
+            planner_context.push_outer_query_schema(input_schema.clone().into());
         let sub_plan = self.query_to_plan(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        planner_context.set_outer_query_schema(old_outer_query_schema);
+        // Restore the stack to its previous state
+        planner_context.pop_outer_query_schema(prev_stack_len);
         Ok(Expr::Exists(Exists {
             subquery: Subquery {
                 subquery: Arc::new(sub_plan),
@@ -54,8 +56,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let old_outer_query_schema =
-            planner_context.set_outer_query_schema(Some(input_schema.clone().into()));
+        // Push current schema onto stack to enable multi-level correlation
+        let prev_stack_len =
+            planner_context.push_outer_query_schema(input_schema.clone().into());
 
         let mut spans = Spans::new();
         if let SetExpr::Select(select) = &subquery.body.as_ref() {
@@ -70,7 +73,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let sub_plan = self.query_to_plan(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        planner_context.set_outer_query_schema(old_outer_query_schema);
+        // Restore the stack to its previous state
+        planner_context.pop_outer_query_schema(prev_stack_len);
 
         self.validate_single_column(
             &sub_plan,
@@ -98,8 +102,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let old_outer_query_schema =
-            planner_context.set_outer_query_schema(Some(input_schema.clone().into()));
+        // Push current schema onto stack to enable multi-level correlation
+        let prev_stack_len =
+            planner_context.push_outer_query_schema(input_schema.clone().into());
         let mut spans = Spans::new();
         if let SetExpr::Select(select) = subquery.body.as_ref() {
             for item in &select.projection {
@@ -112,7 +117,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
         let sub_plan = self.query_to_plan(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        planner_context.set_outer_query_schema(old_outer_query_schema);
+        // Restore the stack to its previous state
+        planner_context.pop_outer_query_schema(prev_stack_len);
 
         self.validate_single_column(
             &sub_plan,
@@ -137,8 +143,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let old_outer_query_schema =
-            planner_context.set_outer_query_schema(Some(input_schema.clone().into()));
+        // Push current schema onto stack to enable multi-level correlation
+        let prev_stack_len =
+            planner_context.push_outer_query_schema(input_schema.clone().into());
 
         let mut spans = Spans::new();
         if let SetExpr::Select(select) = &subquery.body.as_ref() {
@@ -153,7 +160,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let sub_plan = self.query_to_plan(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        planner_context.set_outer_query_schema(old_outer_query_schema);
+        // Restore the stack to its previous state
+        planner_context.pop_outer_query_schema(prev_stack_len);
 
         self.validate_single_column(
             &sub_plan,
@@ -184,8 +192,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let old_outer_query_schema =
-            planner_context.set_outer_query_schema(Some(input_schema.clone().into()));
+        // Push current schema onto stack to enable multi-level correlation
+        let prev_stack_len =
+            planner_context.push_outer_query_schema(input_schema.clone().into());
 
         let mut spans = Spans::new();
         if let SetExpr::Select(select) = &subquery.body.as_ref() {
@@ -200,7 +209,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let sub_plan = self.query_to_plan(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        planner_context.set_outer_query_schema(old_outer_query_schema);
+        // Restore the stack to its previous state
+        planner_context.pop_outer_query_schema(prev_stack_len);
 
         self.validate_single_column(
             &sub_plan,

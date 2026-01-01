@@ -1194,10 +1194,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("DELETE <TABLE> not supported")?;
                 }
 
-                if using.is_some() {
-                    plan_err!("Using clause not supported")?;
-                }
-
                 if returning.is_some() {
                     plan_err!("Delete-returning clause not yet supported")?;
                 }
@@ -1211,7 +1207,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
 
                 let table = self.get_delete_target(from)?;
-                self.delete_to_plan(table, selection, planner_context)
+                self.delete_to_plan(table, using, selection, planner_context)
             }
             Statement::Merge { into, table, source, on, clauses, output, .. } => {
                 self.merge_to_plan(into, table, source, on, clauses, output, planner_context)
@@ -2614,6 +2610,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     fn delete_to_plan(
         &self,
         table: TableWithJoins,
+        using: Option<Vec<TableWithJoins>>,
         predicate_expr: Option<SQLExpr>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
@@ -2630,8 +2627,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Clone the outer planner context to inherit CTEs
         let mut planner_context = outer_planner_context.clone();
 
-        // Build scan using plan_from_tables to properly apply the alias
-        let scan = self.plan_from_tables(vec![table], &mut planner_context)?;
+        // Build scan, joining with USING tables if present (similar to UPDATE FROM)
+        // This implements PostgreSQL's DELETE ... USING syntax where additional
+        // tables can be specified to form joins for the WHERE clause.
+        let mut input_tables = vec![table];
+        if let Some(using_tables) = using {
+            input_tables.extend(using_tables);
+        }
+        let scan = self.plan_from_tables(input_tables, &mut planner_context)?;
 
         let source = match predicate_expr {
             None => scan,
