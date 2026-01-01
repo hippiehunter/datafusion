@@ -32,6 +32,16 @@ use datafusion_common::{
     Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
 };
 pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain, DropBehavior, SequenceOptions};
+// SQL/MED (Management of External Data) statement types - ISO/IEC 9075-9
+pub use sqlparser::ast::{
+    AlterForeignDataWrapperOperation, AlterForeignDataWrapperStatement,
+    AlterForeignTableOperation, AlterForeignTableStatement, AlterServerOperation,
+    AlterServerStatement, CreateForeignDataWrapperStatement, CreateForeignTableStatement,
+    CreateServerOption, CreateServerStatement, CreateUserMappingStatement,
+    DropForeignDataWrapperStatement, DropForeignTableStatement, DropServerStatement,
+    DropUserMappingStatement, ImportForeignSchemaLimitType, ImportForeignSchemaStatement,
+    AlterUserMappingStatement, UserMappingUser,
+};
 use sqlparser::ast::{DataType as SqlDataType, Expr as SqlExpr, Ident, ObjectName};
 
 static DDL_EMPTY_SCHEMA: LazyLock<DFSchemaRef> =
@@ -92,6 +102,33 @@ pub enum DdlStatement {
     CreatePropertyGraph(CreatePropertyGraph),
     /// DROP PROPERTY GRAPH (SQL/PGQ)
     DropPropertyGraph(DropPropertyGraph),
+    // SQL/MED (Management of External Data) - ISO/IEC 9075-9
+    /// CREATE SERVER
+    CreateServer(CreateServerStatement),
+    /// ALTER SERVER
+    AlterServer(AlterServerStatement),
+    /// DROP SERVER
+    DropServer(DropServerStatement),
+    /// CREATE FOREIGN DATA WRAPPER
+    CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
+    /// ALTER FOREIGN DATA WRAPPER
+    AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
+    /// DROP FOREIGN DATA WRAPPER
+    DropForeignDataWrapper(DropForeignDataWrapperStatement),
+    /// CREATE FOREIGN TABLE
+    CreateForeignTable(CreateForeignTableStatement),
+    /// ALTER FOREIGN TABLE
+    AlterForeignTable(AlterForeignTableStatement),
+    /// DROP FOREIGN TABLE
+    DropForeignTable(DropForeignTableStatement),
+    /// CREATE USER MAPPING
+    CreateUserMapping(CreateUserMappingStatement),
+    /// ALTER USER MAPPING
+    AlterUserMapping(AlterUserMappingStatement),
+    /// DROP USER MAPPING
+    DropUserMapping(DropUserMappingStatement),
+    /// IMPORT FOREIGN SCHEMA
+    ImportForeignSchema(ImportForeignSchemaStatement),
 }
 
 impl DdlStatement {
@@ -127,7 +164,21 @@ impl DdlStatement {
             | DdlStatement::CreateRole(_)
             | DdlStatement::DropRole(_)
             | DdlStatement::CreatePropertyGraph(_)
-            | DdlStatement::DropPropertyGraph(_) => &DDL_EMPTY_SCHEMA,
+            | DdlStatement::DropPropertyGraph(_)
+            // SQL/MED statements return empty schema
+            | DdlStatement::CreateServer(_)
+            | DdlStatement::AlterServer(_)
+            | DdlStatement::DropServer(_)
+            | DdlStatement::CreateForeignDataWrapper(_)
+            | DdlStatement::AlterForeignDataWrapper(_)
+            | DdlStatement::DropForeignDataWrapper(_)
+            | DdlStatement::CreateForeignTable(_)
+            | DdlStatement::AlterForeignTable(_)
+            | DdlStatement::DropForeignTable(_)
+            | DdlStatement::CreateUserMapping(_)
+            | DdlStatement::AlterUserMapping(_)
+            | DdlStatement::DropUserMapping(_)
+            | DdlStatement::ImportForeignSchema(_) => &DDL_EMPTY_SCHEMA,
         }
     }
 
@@ -161,6 +212,20 @@ impl DdlStatement {
             DdlStatement::DropRole(_) => "DropRole",
             DdlStatement::CreatePropertyGraph(_) => "CreatePropertyGraph",
             DdlStatement::DropPropertyGraph(_) => "DropPropertyGraph",
+            // SQL/MED statements
+            DdlStatement::CreateServer(_) => "CreateServer",
+            DdlStatement::AlterServer(_) => "AlterServer",
+            DdlStatement::DropServer(_) => "DropServer",
+            DdlStatement::CreateForeignDataWrapper(_) => "CreateForeignDataWrapper",
+            DdlStatement::AlterForeignDataWrapper(_) => "AlterForeignDataWrapper",
+            DdlStatement::DropForeignDataWrapper(_) => "DropForeignDataWrapper",
+            DdlStatement::CreateForeignTable(_) => "CreateForeignTable",
+            DdlStatement::AlterForeignTable(_) => "AlterForeignTable",
+            DdlStatement::DropForeignTable(_) => "DropForeignTable",
+            DdlStatement::CreateUserMapping(_) => "CreateUserMapping",
+            DdlStatement::AlterUserMapping(_) => "AlterUserMapping",
+            DdlStatement::DropUserMapping(_) => "DropUserMapping",
+            DdlStatement::ImportForeignSchema(_) => "ImportForeignSchema",
         }
     }
 
@@ -195,6 +260,20 @@ impl DdlStatement {
             DdlStatement::DropRole(_) => vec![],
             DdlStatement::CreatePropertyGraph(_) => vec![],
             DdlStatement::DropPropertyGraph(_) => vec![],
+            // SQL/MED statements have no inputs
+            DdlStatement::CreateServer(_) => vec![],
+            DdlStatement::AlterServer(_) => vec![],
+            DdlStatement::DropServer(_) => vec![],
+            DdlStatement::CreateForeignDataWrapper(_) => vec![],
+            DdlStatement::AlterForeignDataWrapper(_) => vec![],
+            DdlStatement::DropForeignDataWrapper(_) => vec![],
+            DdlStatement::CreateForeignTable(_) => vec![],
+            DdlStatement::AlterForeignTable(_) => vec![],
+            DdlStatement::DropForeignTable(_) => vec![],
+            DdlStatement::CreateUserMapping(_) => vec![],
+            DdlStatement::AlterUserMapping(_) => vec![],
+            DdlStatement::DropUserMapping(_) => vec![],
+            DdlStatement::ImportForeignSchema(_) => vec![],
         }
     }
 
@@ -377,6 +456,46 @@ impl DdlStatement {
                             f,
                             "DropPropertyGraph: {name:?} if_exists:={if_exists} drop_behavior:={drop_behavior:?}"
                         )
+                    }
+                    // SQL/MED statements - use the Display impl from sqlparser
+                    DdlStatement::CreateServer(stmt) => {
+                        write!(f, "CreateServer: {stmt}")
+                    }
+                    DdlStatement::AlterServer(stmt) => {
+                        write!(f, "AlterServer: {stmt}")
+                    }
+                    DdlStatement::DropServer(stmt) => {
+                        write!(f, "DropServer: {stmt}")
+                    }
+                    DdlStatement::CreateForeignDataWrapper(stmt) => {
+                        write!(f, "CreateForeignDataWrapper: {stmt}")
+                    }
+                    DdlStatement::AlterForeignDataWrapper(stmt) => {
+                        write!(f, "AlterForeignDataWrapper: {stmt}")
+                    }
+                    DdlStatement::DropForeignDataWrapper(stmt) => {
+                        write!(f, "DropForeignDataWrapper: {stmt}")
+                    }
+                    DdlStatement::CreateForeignTable(stmt) => {
+                        write!(f, "CreateForeignTable: {stmt}")
+                    }
+                    DdlStatement::AlterForeignTable(stmt) => {
+                        write!(f, "AlterForeignTable: {stmt}")
+                    }
+                    DdlStatement::DropForeignTable(stmt) => {
+                        write!(f, "DropForeignTable: {stmt}")
+                    }
+                    DdlStatement::CreateUserMapping(stmt) => {
+                        write!(f, "CreateUserMapping: {stmt}")
+                    }
+                    DdlStatement::AlterUserMapping(stmt) => {
+                        write!(f, "AlterUserMapping: {stmt}")
+                    }
+                    DdlStatement::DropUserMapping(stmt) => {
+                        write!(f, "DropUserMapping: {stmt}")
+                    }
+                    DdlStatement::ImportForeignSchema(stmt) => {
+                        write!(f, "ImportForeignSchema: {stmt}")
                     }
                 }
             }

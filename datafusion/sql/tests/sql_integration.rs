@@ -4919,3 +4919,135 @@ fn test_using_join_wildcard_schema() {
         ]
     );
 }
+
+// ==================== SQL/MED (Management of External Data) Tests ====================
+
+#[test]
+fn sqlmed_create_server() {
+    let sql = "CREATE SERVER myserver FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'localhost', port '5432')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateServer(_)) => {}
+        _ => panic!("Expected CreateServer DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_create_foreign_data_wrapper() {
+    let sql = "CREATE FOREIGN DATA WRAPPER postgres_fdw HANDLER postgres_fdw_handler VALIDATOR postgres_fdw_validator";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateForeignDataWrapper(_)) => {}
+        _ => panic!("Expected CreateForeignDataWrapper DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_create_foreign_table() {
+    let sql = "CREATE FOREIGN TABLE remote_users (id INT, name VARCHAR(100)) SERVER myserver OPTIONS (table_name 'users')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateForeignTable(_)) => {}
+        _ => panic!("Expected CreateForeignTable DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_create_user_mapping() {
+    let sql = "CREATE USER MAPPING FOR current_user SERVER myserver OPTIONS (user 'remote_user', password 'secret')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateUserMapping(_)) => {}
+        _ => panic!("Expected CreateUserMapping DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_import_foreign_schema() {
+    let sql = "IMPORT FOREIGN SCHEMA public FROM SERVER myserver INTO local_schema";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::ImportForeignSchema(_)) => {}
+        _ => panic!("Expected ImportForeignSchema DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_drop_server() {
+    let sql = "DROP SERVER IF EXISTS myserver CASCADE";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::DropServer(_)) => {}
+        _ => panic!("Expected DropServer DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_drop_foreign_data_wrapper() {
+    let sql = "DROP FOREIGN DATA WRAPPER IF EXISTS postgres_fdw CASCADE";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::DropForeignDataWrapper(_)) => {}
+        _ => panic!("Expected DropForeignDataWrapper DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_drop_foreign_table() {
+    let sql = "DROP FOREIGN TABLE IF EXISTS remote_users";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::DropForeignTable(_)) => {}
+        _ => panic!("Expected DropForeignTable DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_drop_user_mapping() {
+    let sql = "DROP USER MAPPING IF EXISTS FOR current_user SERVER myserver";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::DropUserMapping(_)) => {}
+        _ => panic!("Expected DropUserMapping DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_alter_server() {
+    let sql = "ALTER SERVER myserver OPTIONS (SET host 'newhost')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::AlterServer(_)) => {}
+        _ => panic!("Expected AlterServer DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_alter_foreign_data_wrapper() {
+    let sql = "ALTER FOREIGN DATA WRAPPER postgres_fdw OPTIONS (SET debug 'true')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::AlterForeignDataWrapper(_)) => {}
+        _ => panic!("Expected AlterForeignDataWrapper DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_alter_foreign_table() {
+    let sql = "ALTER FOREIGN TABLE remote_users OPTIONS (SET table_name 'new_users')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::AlterForeignTable(_)) => {}
+        _ => panic!("Expected AlterForeignTable DDL statement"),
+    }
+}
+
+#[test]
+fn sqlmed_alter_user_mapping() {
+    let sql = "ALTER USER MAPPING FOR current_user SERVER myserver OPTIONS (SET password 'newsecret')";
+    let plan = logical_plan(sql).unwrap();
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::AlterUserMapping(_)) => {}
+        _ => panic!("Expected AlterUserMapping DDL statement"),
+    }
+}

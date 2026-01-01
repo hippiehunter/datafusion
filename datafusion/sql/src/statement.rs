@@ -638,6 +638,46 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }) => Ok(LogicalPlan::Ddl(DdlStatement::DropAssertion(
                 DropAssertion { name, if_exists },
             ))),
+            // SQL/MED (Management of External Data) statements
+            Statement::CreateServer(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateServer(stmt)))
+            }
+            Statement::AlterServer(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::AlterServer(stmt)))
+            }
+            Statement::DropServer(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::DropServer(stmt)))
+            }
+            Statement::CreateForeignDataWrapper(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateForeignDataWrapper(stmt)))
+            }
+            Statement::AlterForeignDataWrapper(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::AlterForeignDataWrapper(stmt)))
+            }
+            Statement::DropForeignDataWrapper(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::DropForeignDataWrapper(stmt)))
+            }
+            Statement::CreateForeignTable(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateForeignTable(stmt)))
+            }
+            Statement::AlterForeignTable(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::AlterForeignTable(stmt)))
+            }
+            Statement::DropForeignTable(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::DropForeignTable(stmt)))
+            }
+            Statement::CreateUserMapping(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateUserMapping(stmt)))
+            }
+            Statement::AlterUserMapping(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::AlterUserMapping(stmt)))
+            }
+            Statement::DropUserMapping(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::DropUserMapping(stmt)))
+            }
+            Statement::ImportForeignSchema(stmt) => {
+                Ok(LogicalPlan::Ddl(DdlStatement::ImportForeignSchema(stmt)))
+            }
             Statement::ShowCreate { obj_type, obj_name, .. } => match obj_type {
                 ShowCreateObject::Table => self.show_create_table_to_plan(obj_name),
                 _ => {
