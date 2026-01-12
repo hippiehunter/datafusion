@@ -52,7 +52,7 @@ chrono = { workspace = true }
 half = { workspace = true }
 hashbrown = { workspace = true }
 indexmap = { workspace = true }
-libc = "0.2.177"
+libc = "0.2.180"
 log = { workspace = true }
 paste = { workspace = true }
 recursive = { workspace = true, optional = true }
