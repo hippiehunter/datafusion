@@ -692,6 +692,115 @@ fn f312_merge_update_expressions() {
 }
 
 // ============================================================================
+// ON CONFLICT clause (PostgreSQL/SQLite upsert syntax)
+// ============================================================================
+
+/// ON CONFLICT DO NOTHING - silently skip conflicting rows
+#[test]
+fn on_conflict_do_nothing_basic() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT DO NOTHING",
+        "E101-01+",
+        "INSERT with ON CONFLICT DO NOTHING"
+    );
+}
+
+/// ON CONFLICT (column) DO NOTHING - skip on specific column conflict
+#[test]
+fn on_conflict_column_do_nothing() {
+    assert_feature_supported!(
+        "INSERT INTO person (id, first_name, last_name) VALUES (1, 'John', 'Doe') ON CONFLICT (id) DO NOTHING",
+        "E101-01+",
+        "INSERT with ON CONFLICT (column) DO NOTHING"
+    );
+}
+
+/// ON CONFLICT DO UPDATE - update conflicting rows
+#[test]
+fn on_conflict_do_update_basic() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT (a) DO UPDATE SET b = 10",
+        "E101-01+",
+        "INSERT with ON CONFLICT DO UPDATE"
+    );
+}
+
+/// ON CONFLICT DO UPDATE with EXCLUDED pseudo-table
+#[test]
+fn on_conflict_do_update_excluded() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT (a) DO UPDATE SET b = EXCLUDED.b, c = EXCLUDED.c",
+        "E101-01+",
+        "INSERT with ON CONFLICT DO UPDATE using EXCLUDED"
+    );
+}
+
+/// ON CONFLICT DO UPDATE with expression
+#[test]
+fn on_conflict_do_update_expression() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT (a) DO UPDATE SET b = t.b + EXCLUDED.b",
+        "E101-01+",
+        "INSERT with ON CONFLICT DO UPDATE expression"
+    );
+}
+
+/// ON CONFLICT DO UPDATE with WHERE clause
+#[test]
+fn on_conflict_do_update_where() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT (a) DO UPDATE SET b = EXCLUDED.b WHERE t.c > 0",
+        "E101-01+",
+        "INSERT with ON CONFLICT DO UPDATE WHERE"
+    );
+}
+
+/// ON CONFLICT with multiple conflict columns
+#[test]
+fn on_conflict_multiple_columns() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT (a, b) DO UPDATE SET c = EXCLUDED.c",
+        "E101-01+",
+        "INSERT with ON CONFLICT multiple columns"
+    );
+}
+
+/// ON CONFLICT DO UPDATE with multiple assignments
+#[test]
+fn on_conflict_multiple_assignments() {
+    assert_feature_supported!(
+        "INSERT INTO person (id, first_name, last_name, age)
+         VALUES (1, 'John', 'Doe', 30)
+         ON CONFLICT (id) DO UPDATE SET
+            first_name = EXCLUDED.first_name,
+            last_name = EXCLUDED.last_name,
+            age = EXCLUDED.age",
+        "E101-01+",
+        "INSERT with ON CONFLICT multiple assignments"
+    );
+}
+
+/// ON CONFLICT with multi-row INSERT
+#[test]
+fn on_conflict_multi_row() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3), (4, 5, 6) ON CONFLICT (a) DO NOTHING",
+        "E101-01+",
+        "Multi-row INSERT with ON CONFLICT"
+    );
+}
+
+/// ON CONFLICT with INSERT ... SELECT
+#[test]
+fn on_conflict_insert_select() {
+    assert_feature_supported!(
+        "INSERT INTO t1 (a, b, c) SELECT a, b, c FROM t2 ON CONFLICT (a) DO UPDATE SET b = EXCLUDED.b",
+        "E101-01+",
+        "INSERT SELECT with ON CONFLICT"
+    );
+}
+
+// ============================================================================
 // Summary Tests - Verify overall E101 support
 // ============================================================================
 

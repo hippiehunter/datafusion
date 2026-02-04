@@ -39,7 +39,10 @@ use datafusion_common::{
     TableReference, ToDFSchema, exec_err, not_impl_err, plan_datafusion_err, plan_err,
     schema_err, unqualified_field_not_found,
 };
-use datafusion_expr::dml::{CopyFrom, CopyTo, InsertOp};
+use datafusion_expr::dml::{
+    ConflictAssignment, CopyFrom, CopyTo, DoUpdateAction, InsertOp, OnConflict,
+    OnConflictAction,
+};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::logical_plan::builder::project;
@@ -62,7 +65,8 @@ use datafusion_expr::{
 };
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use sqlparser::ast::{
-    self, BeginTransactionKind, IndexColumn, IndexType, OrderByExpr, OrderByOptions, Set,
+    self, BeginTransactionKind, IndexColumn, IndexType, OnConflict as SqlOnConflict,
+    OnConflictAction as SqlOnConflictAction, OnInsert, OrderByExpr, OrderByOptions, Set,
     ShowStatementIn, ShowStatementOptions, SqliteOnConflict, TableObject,
     UpdateTableFromKind, ValueWithSpan,
 };
@@ -1115,9 +1119,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if !after_columns.is_empty() {
                     plan_err!("After-columns clause not supported")?;
                 }
-                if on.is_some() {
-                    plan_err!("Insert-on clause not supported")?;
-                }
+                // ON CONFLICT (PostgreSQL/SQLite) and ON DUPLICATE KEY (MySQL) support
+                let on_conflict = match on {
+                    Some(OnInsert::OnConflict(conflict)) => Some(conflict),
+                    Some(OnInsert::DuplicateKeyUpdate(_)) => {
+                        return plan_err!("ON DUPLICATE KEY UPDATE not supported");
+                    }
+                    Some(other) => {
+                        return plan_err!("Unsupported INSERT ON clause: {other:?}");
+                    }
+                    None => None,
+                };
                 if returning.is_some() {
                     plan_err!("Insert-returning clause not supported")?;
                 }
@@ -1152,9 +1164,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Handle INSERT DEFAULT VALUES
                 if source.is_none() {
-                    self.insert_default_values_to_plan(table_name, columns, overwrite, replace_into, planner_context)
+                    self.insert_default_values_to_plan(table_name, columns, overwrite, replace_into, on_conflict, planner_context)
                 } else {
-                    self.insert_to_plan(table_name, columns, source.unwrap(), overwrite, replace_into, planner_context)
+                    self.insert_to_plan(table_name, columns, source.unwrap(), overwrite, replace_into, on_conflict, planner_context)
                 }
             }
             Statement::Update(update) => {
@@ -3044,6 +3056,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(plan)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_to_plan(
         &self,
         table_name: ObjectName,
@@ -3051,6 +3064,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         source: Box<Query>,
         overwrite: bool,
         replace_into: bool,
+        on_conflict: Option<SqlOnConflict>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Do a table lookup to verify the table exists
@@ -3169,11 +3183,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .collect::<Result<Vec<Expr>>>()?;
         let source = project(source, exprs)?;
 
-        let insert_op = match (overwrite, replace_into) {
-            (false, false) => InsertOp::Append,
-            (true, false) => InsertOp::Overwrite,
-            (false, true) => InsertOp::Replace,
-            (true, true) => plan_err!(
+        let insert_op = match (overwrite, replace_into, on_conflict) {
+            (false, false, None) => InsertOp::Append,
+            (true, false, None) => InsertOp::Overwrite,
+            (false, true, None) => InsertOp::Replace,
+            (false, false, Some(conflict)) => {
+                // Convert sqlparser's OnConflict to DataFusion's OnConflict
+                let planned_conflict = self.plan_on_conflict(
+                    conflict,
+                    &table_name,
+                    &table_schema,
+                    outer_planner_context,
+                )?;
+                InsertOp::WithConflictClause(planned_conflict)
+            }
+            (true, _, Some(_)) => plan_err!(
+                "ON CONFLICT clause cannot be used with INSERT OVERWRITE"
+            )?,
+            (_, true, Some(_)) => plan_err!(
+                "ON CONFLICT clause cannot be used with REPLACE INTO"
+            )?,
+            (true, true, None) => plan_err!(
                 "Conflicting insert operations: `overwrite` and `replace_into` cannot both be true"
             )?,
         };
@@ -3187,12 +3217,99 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(plan)
     }
 
+    /// Converts a sqlparser OnConflict clause to a DataFusion OnConflict.
+    ///
+    /// For DO UPDATE SET expressions, we need to plan them in a context that includes
+    /// both the target table columns and the EXCLUDED pseudo-table (which contains
+    /// the values that would have been inserted).
+    fn plan_on_conflict(
+        &self,
+        conflict: SqlOnConflict,
+        table_name: &TableReference,
+        table_schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<OnConflict> {
+        // Plan the action
+        let action = match conflict.action {
+            SqlOnConflictAction::DoNothing => OnConflictAction::DoNothing,
+            SqlOnConflictAction::DoUpdate(do_update) => {
+                // Create qualified schemas for both the target table and EXCLUDED pseudo-table.
+                // The EXCLUDED table has the same columns as the target table and represents
+                // the row that would have been inserted.
+
+                // Qualify the table schema with the table name (just the table part, not full path)
+                // This allows expressions like `t.column` to resolve correctly
+                let table_ref = TableReference::bare(table_name.table());
+                let qualified_table_schema = DFSchema::try_from_qualified_schema(
+                    table_ref,
+                    &table_schema.as_arrow().clone(),
+                )?;
+
+                let excluded_schema = DFSchema::try_from_qualified_schema(
+                    TableReference::bare("excluded"),
+                    &table_schema.as_arrow().clone(),
+                )?;
+
+                // Build a combined schema for expression planning:
+                // target table columns + EXCLUDED columns
+                let combined_schema = qualified_table_schema.join(&excluded_schema)?;
+
+                // Plan the assignments
+                let mut assignments = Vec::with_capacity(do_update.assignments.len());
+                for assignment in do_update.assignments {
+                    let value = self.sql_to_expr(
+                        assignment.value,
+                        &combined_schema,
+                        planner_context,
+                    )?;
+                    // Normalize column references
+                    let mut using_columns = HashSet::new();
+                    expr_to_columns(&value, &mut using_columns)?;
+                    let value = normalize_col_with_schemas_and_ambiguity_check(
+                        value,
+                        &[&[&combined_schema]],
+                        &[using_columns],
+                    )?;
+
+                    assignments.push(ConflictAssignment {
+                        target: assignment.target,
+                        value,
+                    });
+                }
+
+                // Plan the optional WHERE clause
+                let selection = if let Some(selection) = do_update.selection {
+                    let expr = self.sql_to_expr(
+                        selection,
+                        &combined_schema,
+                        planner_context,
+                    )?;
+                    let mut using_columns = HashSet::new();
+                    expr_to_columns(&expr, &mut using_columns)?;
+                    Some(normalize_col_with_schemas_and_ambiguity_check(
+                        expr,
+                        &[&[&combined_schema]],
+                        &[using_columns],
+                    )?)
+                } else {
+                    None
+                };
+
+                OnConflictAction::DoUpdate(DoUpdateAction::new(assignments, selection))
+            }
+        };
+
+        Ok(OnConflict::new(conflict.conflict_target, action))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn insert_default_values_to_plan(
         &self,
         table_name: ObjectName,
         columns: Vec<Ident>,
         overwrite: bool,
         replace_into: bool,
+        on_conflict: Option<SqlOnConflict>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Do a table lookup to verify the table exists
@@ -3256,6 +3373,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             source,
             overwrite,
             replace_into,
+            on_conflict,
             planner_context,
         )
     }

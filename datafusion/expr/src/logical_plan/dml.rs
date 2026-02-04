@@ -24,8 +24,12 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::{DFSchemaRef, TableReference};
+use sqlparser::ast::AssignmentTarget;
 
-use crate::{LogicalPlan, TableSource};
+// Re-export ConflictTarget from sqlparser for ON CONFLICT clause
+pub use sqlparser::ast::ConflictTarget;
+
+use crate::{Expr, LogicalPlan, TableSource};
 
 /// Operator that copies the contents of a database to file(s)
 #[derive(Clone)]
@@ -257,7 +261,7 @@ impl Display for WriteOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum InsertOp {
     /// Appends new rows to the existing table without modifying any
     /// existing rows. This corresponds to the SQL `INSERT INTO` query.
@@ -269,6 +273,9 @@ pub enum InsertOp {
     /// on a unique key or primary key), those existing rows are replaced.
     /// This corresponds to the SQL `REPLACE INTO` query and its equivalents.
     Replace,
+    /// Insert with ON CONFLICT clause (PostgreSQL/SQLite upsert syntax).
+    /// The OnConflict specifies what to do when a uniqueness constraint is violated.
+    WithConflictClause(OnConflict),
 }
 
 impl InsertOp {
@@ -278,6 +285,10 @@ impl InsertOp {
             InsertOp::Append => "Insert Into",
             InsertOp::Overwrite => "Insert Overwrite",
             InsertOp::Replace => "Replace Into",
+            InsertOp::WithConflictClause(on_conflict) => match &on_conflict.action {
+                OnConflictAction::DoNothing => "Insert On Conflict Do Nothing",
+                OnConflictAction::DoUpdate(_) => "Insert On Conflict Do Update",
+            },
         }
     }
 }
@@ -286,6 +297,144 @@ impl Display for InsertOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.name())
     }
+}
+
+/// ON CONFLICT clause for INSERT statements.
+///
+/// This represents the PostgreSQL/SQLite ON CONFLICT clause which specifies
+/// what to do when an INSERT would violate a uniqueness constraint.
+///
+/// Examples:
+/// ```sql
+/// -- DO NOTHING: silently skip conflicting rows
+/// INSERT INTO t (id, name) VALUES (1, 'bob') ON CONFLICT DO NOTHING;
+///
+/// -- DO UPDATE: update conflicting rows with new values
+/// INSERT INTO t (id, name, value) VALUES (1, 'bob', 200)
+/// ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, value = EXCLUDED.value;
+///
+/// -- With constraint name
+/// INSERT INTO t (id, name) VALUES (1, 'bob')
+/// ON CONFLICT ON CONSTRAINT pk_t DO UPDATE SET name = EXCLUDED.name;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct OnConflict {
+    /// The conflict target - either column list or constraint name.
+    /// If None, applies to any constraint conflict.
+    pub conflict_target: Option<ConflictTarget>,
+    /// The action to take on conflict.
+    pub action: OnConflictAction,
+}
+
+impl OnConflict {
+    /// Creates a new ON CONFLICT clause.
+    pub fn new(conflict_target: Option<ConflictTarget>, action: OnConflictAction) -> Self {
+        Self {
+            conflict_target,
+            action,
+        }
+    }
+
+    /// Creates an ON CONFLICT DO NOTHING clause.
+    pub fn do_nothing(conflict_target: Option<ConflictTarget>) -> Self {
+        Self::new(conflict_target, OnConflictAction::DoNothing)
+    }
+
+    /// Creates an ON CONFLICT DO UPDATE clause.
+    pub fn do_update(
+        conflict_target: Option<ConflictTarget>,
+        update: DoUpdateAction,
+    ) -> Self {
+        Self::new(conflict_target, OnConflictAction::DoUpdate(update))
+    }
+}
+
+impl Display for OnConflict {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "ON CONFLICT")?;
+        if let Some(target) = &self.conflict_target {
+            match target {
+                ConflictTarget::Columns(cols) => {
+                    write!(f, " (")?;
+                    for (i, col) in cols.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", col)?;
+                    }
+                    write!(f, ")")?;
+                }
+                ConflictTarget::OnConstraint(name) => {
+                    write!(f, " ON CONSTRAINT {}", name)?;
+                }
+            }
+        }
+        write!(f, " {}", self.action)
+    }
+}
+
+/// The action to take when a conflict is detected during INSERT.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum OnConflictAction {
+    /// DO NOTHING: silently skip the conflicting row.
+    DoNothing,
+    /// DO UPDATE: update the existing row with new values.
+    DoUpdate(DoUpdateAction),
+}
+
+impl Display for OnConflictAction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            OnConflictAction::DoNothing => write!(f, "DO NOTHING"),
+            OnConflictAction::DoUpdate(update) => {
+                write!(f, "DO UPDATE SET ")?;
+                for (i, assignment) in update.assignments.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} = {}", assignment.target, assignment.value)?;
+                }
+                if let Some(selection) = &update.selection {
+                    write!(f, " WHERE {}", selection)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The update action for ON CONFLICT DO UPDATE.
+///
+/// Contains the assignments to apply when updating a conflicting row.
+/// The EXCLUDED pseudo-table refers to the row that would have been inserted.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct DoUpdateAction {
+    /// Column assignments in the form `column = expression`.
+    /// Expressions may reference EXCLUDED.column to get the value
+    /// that would have been inserted.
+    pub assignments: Vec<ConflictAssignment>,
+    /// Optional WHERE clause to filter which conflicts are updated.
+    /// If the WHERE condition is not met, the conflicting row is left unchanged.
+    pub selection: Option<Expr>,
+}
+
+impl DoUpdateAction {
+    /// Creates a new DO UPDATE action with the given assignments.
+    pub fn new(assignments: Vec<ConflictAssignment>, selection: Option<Expr>) -> Self {
+        Self {
+            assignments,
+            selection,
+        }
+    }
+}
+
+/// A column assignment in an ON CONFLICT DO UPDATE clause.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct ConflictAssignment {
+    /// The target column to update.
+    pub target: AssignmentTarget,
+    /// The value expression (may reference EXCLUDED.column).
+    pub value: Expr,
 }
 
 /// Operator that copies the contents of a file to a database table
