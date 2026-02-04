@@ -50,7 +50,10 @@ pub use ddl::{
     DropUserMappingStatement, ImportForeignSchemaLimitType, ImportForeignSchemaStatement,
     AlterUserMappingStatement, UserMappingUser,
 };
-pub use dml::{DmlStatement, WriteOp};
+pub use dml::{
+    ConflictAssignment, ConflictTarget, DmlStatement, DoUpdateAction, InsertOp, OnConflict,
+    OnConflictAction, WriteOp,
+};
 pub use merge::{
     Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
     MergeUpdateExpr,
