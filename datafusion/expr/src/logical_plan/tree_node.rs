@@ -41,7 +41,7 @@ use crate::{
     Aggregate, Analyze, CreateMemoryTable, CreateView, DdlStatement, Distinct,
     DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
     LogicalPlan, MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
-    Projection, RecursiveQuery, Repartition, Sort, Statement, Subquery, SubqueryAlias,
+    Projection, RecursiveQuery, Repartition, RowLock, Sort, Statement, Subquery, SubqueryAlias,
     TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::{CopyFrom, CopyTo},
     logical_plan::plan::{GraphTable, JsonTable},
 };
@@ -231,6 +231,8 @@ impl TreeNode for LogicalPlan {
                 op,
                 input,
                 output_schema,
+                returning,
+                target_columns,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
                     table_name,
@@ -238,6 +240,8 @@ impl TreeNode for LogicalPlan {
                     op,
                     input,
                     output_schema,
+                    returning,
+                    target_columns,
                 })
             }),
             LogicalPlan::Merge(Merge {
@@ -302,6 +306,7 @@ impl TreeNode for LogicalPlan {
                         column_defaults,
                         temporary,
                         storage_parameters,
+                        column_auto_generates,
                     }) => input.map_elements(f)?.update_data(|input| {
                         DdlStatement::CreateMemoryTable(CreateMemoryTable {
                             name,
@@ -312,6 +317,7 @@ impl TreeNode for LogicalPlan {
                             column_defaults,
                             temporary,
                             storage_parameters,
+                            column_auto_generates,
                         })
                     }),
                     DdlStatement::CreateView(CreateView {
@@ -440,6 +446,11 @@ impl TreeNode for LogicalPlan {
                     schema,
                 })
             }),
+            LogicalPlan::RowLock(RowLock { input, locks }) => {
+                input.map_elements(f)?.update_data(|input| {
+                    LogicalPlan::RowLock(RowLock { input, locks })
+                })
+            }
             // plans without inputs
             LogicalPlan::TableScan { .. }
             | LogicalPlan::EmptyRelation { .. }
@@ -645,7 +656,8 @@ impl LogicalPlan {
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::CopyFrom(_)
-            | LogicalPlan::DescribeTable(_) => Ok(TreeNodeRecursion::Continue),
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::RowLock(_) => Ok(TreeNodeRecursion::Continue),
         }
     }
 
@@ -859,7 +871,8 @@ impl LogicalPlan {
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::CopyFrom(_)
-            | LogicalPlan::DescribeTable(_) => Transformed::no(self),
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::RowLock(_) => Transformed::no(self),
         })
     }
 

@@ -34,7 +34,7 @@ pub use builder::{
     wrap_projection_for_join_if_necessary,
 };
 pub use ddl::{
-    AlterSequence, AlterTable, CreateAssertion, CreateCatalog, CreateCatalogSchema,
+    AlterSequence, AlterTable, AutoGenerate, CreateAssertion, CreateCatalog, CreateCatalogSchema,
     CreateDomain, CreateExternalTable, CreateFunction, CreateFunctionBody, CreateIndex,
     CreateMemoryTable, CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence,
     CreateView, DdlStatement, DropAssertion, DropBehavior, DropCatalogSchema, DropDomain,
@@ -68,7 +68,7 @@ pub use plan::{
     PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
     RepetitionQuantifier, RowLimiting, RowsPerMatchOption, SkipType, Sort, StringifiedPlan,
     Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan, ToStringifiedPlan, Union,
-    Unnest, Values, Window, projection_schema,
+    Unnest, Values, Window, projection_schema, LockType, WaitPolicy, RowLockClause, RowLock,
 };
 pub use statement::{
     AnalyzeTable, Call, Deallocate, Execute, Grant, GrantRole, Prepare, ReleaseSavepoint,

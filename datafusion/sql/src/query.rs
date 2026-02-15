@@ -25,11 +25,12 @@ use datafusion_common::{Constraints, DFSchema, Result, not_impl_err, plan_err};
 use datafusion_expr::expr::Sort;
 
 use datafusion_expr::{
-    CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
+    CreateMemoryTable, DdlStatement, Distinct, Expr, LockType, LogicalPlan,
+    LogicalPlanBuilder, RowLock, RowLockClause, WaitPolicy,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, Fetch, Ident, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
-    SelectInto, SetExpr,
+    Expr as SQLExpr, Fetch, Ident, LimitClause, LockClause, LockType as SqlLockType, OrderBy,
+    OrderByExpr, OrderByKind, Query, SelectInto, SetExpr,
 };
 use sqlparser::tokenizer::Span;
 
@@ -60,7 +61,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             order_by,
             limit_clause,
             fetch,
-            locks: _,
+            locks,
             for_clause: _,
             settings: _,
             format_clause: _,
@@ -75,14 +76,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         let set_expr = *body;
-        match set_expr {
+        let plan = match set_expr {
             SetExpr::Select(mut select) => {
                 let select_into = select.into.take();
                 let plan =
                     self.select_to_plan(*select, order_by.clone(), planner_context)?;
                 let plan = self.limit(plan, limit_info.clone(), planner_context)?;
                 // Process the `SELECT INTO` after `LIMIT`.
-                self.select_into(plan, select_into)
+                self.select_into(plan, select_into)?
             }
             other => {
                 // The functions called from `set_expr_to_plan()` need more than 128KB
@@ -102,9 +103,57 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     None,
                 )?;
                 let plan = self.order_by(plan, order_by_rex)?;
-                self.limit(plan, limit_info, planner_context)
+                self.limit(plan, limit_info, planner_context)?
             }
+        };
+
+        // Wrap with RowLock if FOR UPDATE/SHARE lock clauses are present
+        self.wrap_with_locks(plan, locks)
+    }
+
+    /// Wraps a plan with a RowLock node if lock clauses are present.
+    fn wrap_with_locks(
+        &self,
+        plan: LogicalPlan,
+        locks: Vec<LockClause>,
+    ) -> Result<LogicalPlan> {
+        if locks.is_empty() {
+            return Ok(plan);
         }
+
+        let row_lock_clauses = locks
+            .into_iter()
+            .map(|lock| {
+                let lock_type = match lock.lock_type {
+                    SqlLockType::Update => LockType::ForUpdate,
+                    SqlLockType::Share => LockType::ForShare,
+                };
+
+                let wait_policy = if lock.nonblock == Some(sqlparser::ast::NonBlock::Nowait) {
+                    WaitPolicy::NoWait
+                } else if lock.nonblock == Some(sqlparser::ast::NonBlock::SkipLocked) {
+                    WaitPolicy::SkipLocked
+                } else {
+                    WaitPolicy::Block
+                };
+
+                let tables = lock
+                    .of
+                    .map(|of| vec![of.to_string()])
+                    .unwrap_or_default();
+
+                RowLockClause {
+                    lock_type,
+                    tables,
+                    wait_policy,
+                }
+            })
+            .collect();
+
+        Ok(LogicalPlan::RowLock(RowLock::new(
+            Arc::new(plan),
+            row_lock_clauses,
+        )))
     }
 
     /// Combines FETCH clause with LIMIT/OFFSET into a single LimitInfo.
@@ -310,6 +359,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     temporary: false,
                     column_defaults: vec![],
                     storage_parameters: BTreeMap::new(),
+                    column_auto_generates: vec![],
                 },
             ))),
             _ => Ok(plan),

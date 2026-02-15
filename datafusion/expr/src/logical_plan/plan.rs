@@ -807,6 +807,64 @@ impl PartialOrd for MatchRecognize {
     }
 }
 
+/// The type of row-level lock to acquire.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum LockType {
+    /// FOR UPDATE - exclusive lock for modification
+    ForUpdate,
+    /// FOR SHARE - shared lock for reading
+    ForShare,
+    /// FOR NO KEY UPDATE - weaker exclusive lock (PostgreSQL)
+    ForNoKeyUpdate,
+    /// FOR KEY SHARE - weakest shared lock (PostgreSQL)
+    ForKeyShare,
+}
+
+/// Wait policy when acquiring row-level locks.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum WaitPolicy {
+    /// Block until lock is available (default)
+    Block,
+    /// Error immediately if lock is not available
+    NoWait,
+    /// Skip rows that are locked
+    SkipLocked,
+}
+
+/// A single row-level lock clause from a SELECT ... FOR UPDATE/SHARE statement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct RowLockClause {
+    /// The type of lock to acquire.
+    pub lock_type: LockType,
+    /// Optional list of tables to lock (empty = all tables in the query).
+    pub tables: Vec<String>,
+    /// The wait policy when the lock cannot be immediately acquired.
+    pub wait_policy: WaitPolicy,
+}
+
+/// Row-level lock plan node wrapping a SELECT query.
+///
+/// This represents SQL statements like:
+/// ```sql
+/// SELECT * FROM t FOR UPDATE;
+/// SELECT * FROM t FOR SHARE NOWAIT;
+/// SELECT * FROM t FOR UPDATE OF t SKIP LOCKED;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct RowLock {
+    /// The input query plan to lock rows from.
+    pub input: Arc<LogicalPlan>,
+    /// One or more lock clauses (SQL allows multiple, e.g., FOR UPDATE OF t1 FOR SHARE OF t2).
+    pub locks: Vec<RowLockClause>,
+}
+
+impl RowLock {
+    /// Creates a new RowLock node wrapping the given plan with the specified lock clauses.
+    pub fn new(input: Arc<LogicalPlan>, locks: Vec<RowLockClause>) -> Self {
+        Self { input, locks }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum LogicalPlan {
     /// Evaluates an arbitrary list of expressions (essentially a
@@ -905,6 +963,9 @@ pub enum LogicalPlan {
     JsonTable(JsonTable),
     /// GRAPH_TABLE function for property graph queries (SQL/PGQ - ISO/IEC 9075-16:2023)
     GraphTable(GraphTable),
+    /// Row-level lock clause from SELECT ... FOR UPDATE / FOR SHARE.
+    /// Wraps a query plan to indicate that selected rows should be locked.
+    RowLock(RowLock),
 }
 
 impl Default for LogicalPlan {
@@ -974,6 +1035,7 @@ impl LogicalPlan {
             LogicalPlan::MatchRecognize(MatchRecognize { schema, .. }) => schema,
             LogicalPlan::JsonTable(JsonTable { schema, .. }) => schema,
             LogicalPlan::GraphTable(GraphTable { schema, .. }) => schema,
+            LogicalPlan::RowLock(RowLock { input, .. }) => input.schema(),
         }
     }
 
@@ -1109,6 +1171,7 @@ impl LogicalPlan {
             | LogicalPlan::CopyFrom(_)
             | LogicalPlan::JsonTable(_)
             | LogicalPlan::GraphTable(_) => vec![],
+            LogicalPlan::RowLock(RowLock { input, .. }) => vec![input],
         }
     }
 
@@ -1218,6 +1281,7 @@ impl LogicalPlan {
             LogicalPlan::GraphTable(graph_table) => Ok(Some(Expr::Column(Column::from(
                 graph_table.schema.qualified_field(0),
             )))),
+            LogicalPlan::RowLock(RowLock { input, .. }) => input.head_output_expr(),
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Statement(_)
             | LogicalPlan::Values(_)
@@ -1269,6 +1333,7 @@ impl LogicalPlan {
             LogicalPlan::Merge(_) => Ok(self),
             LogicalPlan::Copy(_) => Ok(self),
             LogicalPlan::CopyFrom(_) => Ok(self),
+            LogicalPlan::RowLock(_) => Ok(self),
             LogicalPlan::Values(Values { schema, values }) => {
                 // todo it isn't clear why the schema is not recomputed here
                 Ok(LogicalPlan::Values(Values { schema, values }))
@@ -1489,16 +1554,22 @@ impl LogicalPlan {
                 table_name,
                 target,
                 op,
+                returning,
+                target_columns,
                 ..
             }) => {
                 self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
-                Ok(LogicalPlan::Dml(DmlStatement::new(
-                    table_name.clone(),
-                    Arc::clone(target),
-                    op.clone(),
-                    Arc::new(input),
-                )))
+                Ok(LogicalPlan::Dml(
+                    DmlStatement::new(
+                        table_name.clone(),
+                        Arc::clone(target),
+                        op.clone(),
+                        Arc::new(input),
+                    )
+                    .with_returning(returning.clone())
+                    .with_target_columns(target_columns.clone()),
+                ))
             }
             LogicalPlan::Merge(merge) => {
                 let (target, source) = self.only_two_inputs(inputs)?;
@@ -1838,6 +1909,7 @@ impl LogicalPlan {
                 column_defaults,
                 temporary,
                 storage_parameters,
+                column_auto_generates,
                 ..
             })) => {
                 self.assert_no_expressions(expr)?;
@@ -1852,6 +1924,7 @@ impl LogicalPlan {
                         column_defaults: column_defaults.clone(),
                         temporary: *temporary,
                         storage_parameters: storage_parameters.clone(),
+                        column_auto_generates: column_auto_generates.clone(),
                     },
                 )))
             }
@@ -2117,6 +2190,13 @@ impl LogicalPlan {
                 )
                 .map(LogicalPlan::GraphTable)
             }
+            LogicalPlan::RowLock(RowLock { locks, .. }) => {
+                let input = self.only_input(inputs)?;
+                Ok(LogicalPlan::RowLock(RowLock::new(
+                    Arc::new(input),
+                    locks.clone(),
+                )))
+            }
         }
     }
 
@@ -2372,6 +2452,7 @@ impl LogicalPlan {
             LogicalPlan::MatchRecognize(MatchRecognize { input, .. }) => input.max_rows(),
             LogicalPlan::JsonTable(_) => None, // JSON_TABLE output size depends on JSON content
             LogicalPlan::GraphTable(_) => None, // GRAPH_TABLE output size depends on graph data
+            LogicalPlan::RowLock(RowLock { input, .. }) => input.max_rows(),
             LogicalPlan::Ddl(_)
             | LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
@@ -3136,6 +3217,24 @@ impl LogicalPlan {
                     }
                     LogicalPlan::GraphTable(GraphTable { graph_name, .. }) => {
                         write!(f, "GraphTable: graph={}", graph_name)
+                    }
+                    LogicalPlan::RowLock(RowLock { locks, .. }) => {
+                        write!(f, "RowLock: ")?;
+                        for (i, lock) in locks.iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{:?}", lock.lock_type)?;
+                            if !lock.tables.is_empty() {
+                                write!(f, " OF {}", lock.tables.join(", "))?;
+                            }
+                            match &lock.wait_policy {
+                                WaitPolicy::NoWait => write!(f, " NOWAIT")?,
+                                WaitPolicy::SkipLocked => write!(f, " SKIP LOCKED")?,
+                                WaitPolicy::Block => {}
+                            }
+                        }
+                        Ok(())
                     }
                 }
             }
