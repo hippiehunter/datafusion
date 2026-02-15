@@ -50,7 +50,7 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
     AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
     CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
-    CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateProcedure,
+    CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateTable, CreateProcedure,
     CreatePropertyGraph, CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable,
     DmlStatement, DropAssertion, DropCatalogSchema, DropFunction, DropIndex,
     DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation, Execute,
@@ -72,7 +72,7 @@ use sqlparser::ast::{
     UpdateTableFromKind, ValueWithSpan,
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
+    Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable as SqlCreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr,
     ForeignKeyColumnOrPeriod, FromTable, Ident, Insert, ObjectName, ObjectType, Query,
     SchemaName, SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
@@ -284,7 +284,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::Query(query) => self.query_to_plan(*query, planner_context),
             Statement::ShowVariable { variable, .. } => self.show_variable_to_plan(&variable),
             Statement::Set(statement) => self.set_statement_to_plan(statement.inner),
-            Statement::CreateTable(CreateTable {
+            Statement::CreateTable(SqlCreateTable {
                 temporary,
                 external,
                 global,
@@ -445,8 +445,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             plan.schema(),
                         )?;
 
-                        Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                            CreateMemoryTable {
+                        Ok(LogicalPlan::Ddl(DdlStatement::CreateTable(
+                            CreateTable {
                                 name: self.object_name_to_table_reference(name)?,
                                 constraints,
                                 input: Arc::new(plan),
@@ -470,8 +470,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             &all_constraints,
                             plan.schema(),
                         )?;
-                        Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                            CreateMemoryTable {
+                        Ok(LogicalPlan::Ddl(DdlStatement::CreateTable(
+                            CreateTable {
                                 name: self.object_name_to_table_reference(name)?,
                                 constraints,
                                 input: Arc::new(plan),

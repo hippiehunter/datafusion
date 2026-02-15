@@ -25,7 +25,7 @@ use datafusion_expr::test::function_stub::{
     count_udaf, max_udaf, min_udaf, sum, sum_udaf,
 };
 use datafusion_expr::{
-    CreateMemoryTable, DdlStatement, EmptyRelation, Expr, Extension, LogicalPlan,
+    CreateTable, DdlStatement, EmptyRelation, Expr, Extension, LogicalPlan,
     LogicalPlanBuilder, Union, UserDefinedLogicalNode, UserDefinedLogicalNodeCore, cast,
     col, lit, table_scan, wildcard,
 };
@@ -282,14 +282,14 @@ fn plan_create_temporary_table() -> Result<()> {
     let plan = sql_to_rel.sql_statement_to_plan(statement)?;
 
     match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-            CreateMemoryTable { temporary, .. },
+        LogicalPlan::Ddl(DdlStatement::CreateTable(
+            CreateTable { temporary, .. },
         )) => {
             assert!(temporary);
         }
         other => {
             return Err(DataFusionError::Internal(format!(
-                "Expected CreateMemoryTable for temp table, got {other:?}"
+                "Expected CreateTable for temp table, got {other:?}"
             )));
         }
     }

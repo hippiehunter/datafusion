@@ -38,7 +38,7 @@
 //! * [`LogicalPlan::expressions`]: Return a copy of the plan's expressions
 
 use crate::{
-    Aggregate, Analyze, CreateMemoryTable, CreateView, DdlStatement, Distinct,
+    Aggregate, Analyze, CreateTable, CreateView, DdlStatement, Distinct,
     DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
     LogicalPlan, MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
     Projection, RecursiveQuery, Repartition, RowLock, Sort, Statement, Subquery, SubqueryAlias,
@@ -297,7 +297,7 @@ impl TreeNode for LogicalPlan {
             }),
             LogicalPlan::Ddl(ddl) => {
                 match ddl {
-                    DdlStatement::CreateMemoryTable(CreateMemoryTable {
+                    DdlStatement::CreateTable(CreateTable {
                         name,
                         constraints,
                         input,
@@ -308,7 +308,7 @@ impl TreeNode for LogicalPlan {
                         storage_parameters,
                         column_auto_generates,
                     }) => input.map_elements(f)?.update_data(|input| {
-                        DdlStatement::CreateMemoryTable(CreateMemoryTable {
+                        DdlStatement::CreateTable(CreateTable {
                             name,
                             constraints,
                             input,

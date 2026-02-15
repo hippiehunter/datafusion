@@ -53,7 +53,7 @@ pub enum DdlStatement {
     /// Creates an external table.
     CreateExternalTable(CreateExternalTable),
     /// Creates an in memory table.
-    CreateMemoryTable(CreateMemoryTable),
+    CreateTable(CreateTable),
     /// Creates a new view.
     CreateView(CreateView),
     /// Creates a new catalog schema.
@@ -138,7 +138,7 @@ impl DdlStatement {
             DdlStatement::CreateExternalTable(CreateExternalTable { schema, .. }) => {
                 schema
             }
-            DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. })
+            DdlStatement::CreateTable(CreateTable { input, .. })
             | DdlStatement::CreateView(CreateView { input, .. }) => input.schema(),
             DdlStatement::CreateCatalogSchema(CreateCatalogSchema { schema, .. }) => {
                 schema
@@ -187,7 +187,7 @@ impl DdlStatement {
     pub fn name(&self) -> &str {
         match self {
             DdlStatement::CreateExternalTable(_) => "CreateExternalTable",
-            DdlStatement::CreateMemoryTable(_) => "CreateMemoryTable",
+            DdlStatement::CreateTable(_) => "CreateTable",
             DdlStatement::CreateView(_) => "CreateView",
             DdlStatement::CreateCatalogSchema(_) => "CreateCatalogSchema",
             DdlStatement::CreateCatalog(_) => "CreateCatalog",
@@ -235,7 +235,7 @@ impl DdlStatement {
             DdlStatement::CreateExternalTable(_) => vec![],
             DdlStatement::CreateCatalogSchema(_) => vec![],
             DdlStatement::CreateCatalog(_) => vec![],
-            DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. }) => {
+            DdlStatement::CreateTable(CreateTable { input, .. }) => {
                 vec![input]
             }
             DdlStatement::CreateView(CreateView { input, .. }) => vec![input],
@@ -298,15 +298,15 @@ impl DdlStatement {
                             write!(f, "CreateExternalTable: {name:?} {constraints}")
                         }
                     }
-                    DdlStatement::CreateMemoryTable(CreateMemoryTable {
+                    DdlStatement::CreateTable(CreateTable {
                         name,
                         constraints,
                         ..
                     }) => {
                         if constraints.is_empty() {
-                            write!(f, "CreateMemoryTable: {name:?}")
+                            write!(f, "CreateTable: {name:?}")
                         } else {
-                            write!(f, "CreateMemoryTable: {name:?} {constraints}")
+                            write!(f, "CreateTable: {name:?} {constraints}")
                         }
                     }
                     DdlStatement::CreateView(CreateView { name, .. }) => {
@@ -779,9 +779,9 @@ pub enum AutoGenerate {
     },
 }
 
-/// Creates an in memory table.
+/// Creates a table.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct CreateMemoryTable {
+pub struct CreateTable {
     /// The table name
     pub name: TableReference,
     /// The list of constraints in the schema, such as primary key, unique, etc.

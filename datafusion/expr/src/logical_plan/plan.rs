@@ -48,7 +48,7 @@ use crate::utils::{
     grouping_set_expr_count, grouping_set_to_exprlist, split_conjunction,
 };
 use crate::{
-    BinaryExpr, CreateMemoryTable, CreateView, Execute, Expr, ExprSchemable,
+    BinaryExpr, CreateTable, CreateView, Execute, Expr, ExprSchemable,
     LogicalPlanBuilder, Operator, Prepare, TableProviderFilterPushDown, TableSource,
     WindowFunctionDefinition, build_join_schema, expr_vec_fmt, requalify_sides_if_needed,
 };
@@ -1902,7 +1902,7 @@ impl LogicalPlan {
                     input: Arc::new(input),
                 }))
             }
-            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            LogicalPlan::Ddl(DdlStatement::CreateTable(CreateTable {
                 name,
                 if_not_exists,
                 or_replace,
@@ -1914,8 +1914,8 @@ impl LogicalPlan {
             })) => {
                 self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
-                Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                    CreateMemoryTable {
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateTable(
+                    CreateTable {
                         input: Arc::new(input),
                         constraints: Constraints::default(),
                         name: name.clone(),

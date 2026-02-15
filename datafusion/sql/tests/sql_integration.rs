@@ -29,7 +29,7 @@ use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::MockContextProvider;
 use datafusion_common::{DataFusionError, Result, assert_contains};
 use datafusion_expr::{
-    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs,
+    ColumnarValue, CreateIndex, CreateTable, DdlStatement, ScalarFunctionArgs,
     ScalarUDF, ScalarUDFImpl, Signature, Volatility, col, logical_plan::LogicalPlan,
     test::function_stub::sum_udaf,
 };
@@ -613,7 +613,7 @@ fn plan_create_table_interval_day_to_second() {
     let sql = "CREATE TABLE intervals (span INTERVAL DAY TO SECOND)";
     let plan = logical_plan(sql).unwrap();
     match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+        LogicalPlan::Ddl(DdlStatement::CreateTable(CreateTable {
             input,
             ..
         })) => {
@@ -623,7 +623,7 @@ fn plan_create_table_interval_day_to_second() {
                 &DataType::Interval(IntervalUnit::MonthDayNano)
             );
         }
-        other => panic!("Expected CreateMemoryTable plan, got {other:?}"),
+        other => panic!("Expected CreateTable plan, got {other:?}"),
     }
 }
 
@@ -633,7 +633,7 @@ fn plan_create_table_with_storage_parameters() {
         "CREATE TABLE t (id INT) WITH (fillfactor = 70, autovacuum_enabled = true)";
     let plan = logical_plan(sql).unwrap();
     match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+        LogicalPlan::Ddl(DdlStatement::CreateTable(CreateTable {
             storage_parameters,
             ..
         })) => {
@@ -649,7 +649,7 @@ fn plan_create_table_with_storage_parameters() {
             );
             assert_eq!(storage_parameters.len(), 2);
         }
-        other => panic!("Expected CreateMemoryTable plan, got {other:?}"),
+        other => panic!("Expected CreateTable plan, got {other:?}"),
     }
 }
 

@@ -36,7 +36,7 @@ pub use builder::{
 pub use ddl::{
     AlterSequence, AlterTable, AutoGenerate, CreateAssertion, CreateCatalog, CreateCatalogSchema,
     CreateDomain, CreateExternalTable, CreateFunction, CreateFunctionBody, CreateIndex,
-    CreateMemoryTable, CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence,
+    CreateTable, CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence,
     CreateView, DdlStatement, DropAssertion, DropBehavior, DropCatalogSchema, DropDomain,
     DropFunction, DropIndex, DropProcedure, DropPropertyGraph, DropRole, DropSequence,
     DropTable, DropView, GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause,
