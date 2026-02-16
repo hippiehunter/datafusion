@@ -152,6 +152,14 @@ pub struct DmlStatement {
     pub input: Arc<LogicalPlan>,
     /// The schema of the output relation
     pub output_schema: DFSchemaRef,
+    /// Optional RETURNING clause expressions (e.g., RETURNING *, RETURNING id, name).
+    /// When present, the DML operation returns the affected rows projected
+    /// through these expressions instead of just a row count.
+    pub returning: Option<Vec<Expr>>,
+    /// Optional explicit target column list for INSERT statements.
+    /// When present (e.g., `INSERT INTO t (a, b)`), contains the column names
+    /// that receive values. When None, all columns in declaration order are targeted.
+    pub target_columns: Option<Vec<String>>,
 }
 impl Eq for DmlStatement {}
 impl Hash for DmlStatement {
@@ -161,6 +169,8 @@ impl Hash for DmlStatement {
         self.op.hash(state);
         self.input.hash(state);
         self.output_schema.hash(state);
+        self.returning.hash(state);
+        self.target_columns.hash(state);
     }
 }
 
@@ -171,6 +181,8 @@ impl PartialEq for DmlStatement {
             && self.op == other.op
             && self.input == other.input
             && self.output_schema == other.output_schema
+            && self.returning == other.returning
+            && self.target_columns == other.target_columns
     }
 }
 
@@ -183,6 +195,8 @@ impl Debug for DmlStatement {
             .field("op", &self.op)
             .field("input", &self.input)
             .field("output_schema", &self.output_schema)
+            .field("returning", &self.returning)
+            .field("target_columns", &self.target_columns)
             .finish()
     }
 }
@@ -203,7 +217,27 @@ impl DmlStatement {
 
             // The output schema is always a single column with the number of rows affected
             output_schema: make_count_schema(),
+            returning: None,
+            target_columns: None,
         }
+    }
+
+    /// Creates a new DML statement with a RETURNING clause.
+    ///
+    /// The `returning` parameter contains the expressions from the RETURNING clause
+    /// (e.g., `RETURNING *` or `RETURNING id, name`).
+    pub fn with_returning(mut self, returning: Option<Vec<Expr>>) -> Self {
+        self.returning = returning;
+        self
+    }
+
+    /// Creates a new DML statement with an explicit target column list.
+    ///
+    /// The `target_columns` parameter contains the column names from
+    /// `INSERT INTO t (col1, col2, ...)`.
+    pub fn with_target_columns(mut self, target_columns: Option<Vec<String>>) -> Self {
+        self.target_columns = target_columns;
+        self
     }
 
     /// Return a descriptive name of this [`DmlStatement`]
@@ -218,7 +252,15 @@ impl PartialOrd for DmlStatement {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.table_name.partial_cmp(&other.table_name) {
             Some(Ordering::Equal) => match self.op.partial_cmp(&other.op) {
-                Some(Ordering::Equal) => self.input.partial_cmp(&other.input),
+                Some(Ordering::Equal) => match self.input.partial_cmp(&other.input) {
+                    Some(Ordering::Equal) => match self.returning.partial_cmp(&other.returning) {
+                        Some(Ordering::Equal) => {
+                            self.target_columns.partial_cmp(&other.target_columns)
+                        }
+                        cmp => cmp,
+                    },
+                    cmp => cmp,
+                },
                 cmp => cmp,
             },
             cmp => cmp,

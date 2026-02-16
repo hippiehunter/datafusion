@@ -50,7 +50,7 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
     AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
     CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
-    CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateProcedure,
+    CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateTable, CreateProcedure,
     CreatePropertyGraph, CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable,
     DmlStatement, DropAssertion, DropCatalogSchema, DropFunction, DropIndex,
     DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation, Execute,
@@ -61,7 +61,8 @@ use datafusion_expr::{
     ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint,
     SetTransaction, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
     TransactionAccessMode, TransactionConclusion, TransactionEnd, TransactionIsolationLevel,
-    TransactionStart, TruncateTable, UseDatabase, Vacuum, Volatility, WriteOp, cast, col,
+    TableSource, TransactionStart, TruncateTable, UseDatabase, Vacuum, Volatility, WriteOp,
+    cast, col,
 };
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use sqlparser::ast::{
@@ -71,7 +72,7 @@ use sqlparser::ast::{
     UpdateTableFromKind, ValueWithSpan,
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
+    Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable as SqlCreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr,
     ForeignKeyColumnOrPeriod, FromTable, Ident, Insert, ObjectName, ObjectType, Query,
     SchemaName, SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
@@ -283,7 +284,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::Query(query) => self.query_to_plan(*query, planner_context),
             Statement::ShowVariable { variable, .. } => self.show_variable_to_plan(&variable),
             Statement::Set(statement) => self.set_statement_to_plan(statement.inner),
-            Statement::CreateTable(CreateTable {
+            Statement::CreateTable(SqlCreateTable {
                 temporary,
                 external,
                 global,
@@ -396,6 +397,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // Build column default values
                 let column_defaults =
                     self.build_column_defaults(&columns, planner_context)?;
+                // Extract auto-generate (IDENTITY/SERIAL) specifications before columns are consumed
+                let column_auto_generates = self.build_column_auto_generates(&columns)?;
 
                 let has_columns = !columns.is_empty();
                 let schema = self.build_schema(columns)?.to_dfschema_ref()?;
@@ -442,8 +445,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             plan.schema(),
                         )?;
 
-                        Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                            CreateMemoryTable {
+                        Ok(LogicalPlan::Ddl(DdlStatement::CreateTable(
+                            CreateTable {
                                 name: self.object_name_to_table_reference(name)?,
                                 constraints,
                                 input: Arc::new(plan),
@@ -452,6 +455,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 column_defaults,
                                 temporary,
                                 storage_parameters: storage_parameters.clone(),
+                                column_auto_generates: column_auto_generates.clone(),
                             },
                         )))
                     }
@@ -466,8 +470,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             &all_constraints,
                             plan.schema(),
                         )?;
-                        Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                            CreateMemoryTable {
+                        Ok(LogicalPlan::Ddl(DdlStatement::CreateTable(
+                            CreateTable {
                                 name: self.object_name_to_table_reference(name)?,
                                 constraints,
                                 input: Arc::new(plan),
@@ -476,6 +480,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 column_defaults,
                                 temporary,
                                 storage_parameters,
+                                column_auto_generates,
                             },
                         )))
                     }
@@ -1130,9 +1135,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                     None => None,
                 };
-                if returning.is_some() {
-                    plan_err!("Insert-returning clause not supported")?;
-                }
                 if ignore {
                     plan_err!("Insert-ignore clause not supported")?;
                 }
@@ -1164,9 +1166,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Handle INSERT DEFAULT VALUES
                 if source.is_none() {
-                    self.insert_default_values_to_plan(table_name, columns, overwrite, replace_into, on_conflict, planner_context)
+                    self.insert_default_values_to_plan(table_name, columns, returning, overwrite, replace_into, on_conflict, planner_context)
                 } else {
-                    self.insert_to_plan(table_name, columns, source.unwrap(), overwrite, replace_into, on_conflict, planner_context)
+                    self.insert_to_plan(table_name, columns, returning, source.unwrap(), overwrite, replace_into, on_conflict, planner_context)
                 }
             }
             Statement::Update(update) => {
@@ -1180,16 +1182,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("Multiple tables in UPDATE SET FROM not yet supported")?;
                 }
                 let update_from = from_clauses.and_then(|mut f| f.pop());
-                if update.returning.is_some() {
-                    plan_err!("Update-returning clause not yet supported")?;
-                }
                 if update.or.is_some() {
                     plan_err!("ON conflict not supported")?;
                 }
                 if update.limit.is_some() {
                     return not_impl_err!("Update-limit clause not supported")?;
                 }
-                self.update_to_plan(update.table, &update.assignments, update_from, update.selection, planner_context)
+                self.update_to_plan(update.table, &update.assignments, update_from, update.selection, update.returning, planner_context)
             }
 
             Statement::Delete(Delete {
@@ -1206,10 +1205,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("DELETE <TABLE> not supported")?;
                 }
 
-                if returning.is_some() {
-                    plan_err!("Delete-returning clause not yet supported")?;
-                }
-
                 if !order_by.is_empty() {
                     plan_err!("Delete-order-by clause not yet supported")?;
                 }
@@ -1219,7 +1214,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
 
                 let table = self.get_delete_target(from)?;
-                self.delete_to_plan(table, using, selection, planner_context)
+                self.delete_to_plan(table, using, selection, returning, planner_context)
             }
             Statement::Merge { into, table, source, on, clauses, output, .. } => {
                 self.merge_to_plan(into, table, source, on, clauses, output, planner_context)
@@ -2624,6 +2619,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         table: TableWithJoins,
         using: Option<Vec<TableWithJoins>>,
         predicate_expr: Option<SQLExpr>,
+        returning: Option<Vec<ast::SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Extract table name from the TableWithJoins
@@ -2667,12 +2663,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        let plan = LogicalPlan::Dml(DmlStatement::new(
-            table_ref,
-            table_source,
-            WriteOp::Delete,
-            Arc::new(source),
-        ));
+        // Plan RETURNING clause expressions
+        let returning_exprs = self.plan_returning_clause(returning, &table_source, &mut planner_context)?;
+
+        let plan = LogicalPlan::Dml(
+            DmlStatement::new(
+                table_ref,
+                table_source,
+                WriteOp::Delete,
+                Arc::new(source),
+            )
+            .with_returning(returning_exprs),
+        );
         Ok(plan)
     }
 
@@ -2842,6 +2844,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         assignments: &[Assignment],
         from: Option<TableWithJoins>,
         predicate_expr: Option<SQLExpr>,
+        returning: Option<Vec<ast::SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let (table_name, table_alias) = match &table.relation {
@@ -3047,12 +3050,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let source = project(source, exprs)?;
 
-        let plan = LogicalPlan::Dml(DmlStatement::new(
-            table_name,
-            table_source,
-            WriteOp::Update,
-            Arc::new(source),
-        ));
+        // Plan RETURNING clause expressions
+        let returning_exprs = self.plan_returning_clause(returning, &table_source, &mut planner_context)?;
+
+        let plan = LogicalPlan::Dml(
+            DmlStatement::new(
+                table_name,
+                table_source,
+                WriteOp::Update,
+                Arc::new(source),
+            )
+            .with_returning(returning_exprs),
+        );
         Ok(plan)
     }
 
@@ -3061,6 +3070,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         table_name: ObjectName,
         columns: Vec<Ident>,
+        returning: Option<Vec<ast::SelectItem>>,
         source: Box<Query>,
         overwrite: bool,
         replace_into: bool,
@@ -3071,6 +3081,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let table_name = self.object_name_to_table_reference(table_name)?;
         let table_source = self.context_provider.get_table_source(table_name.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
+
+        // Preserve the explicit column list from INSERT INTO t (col1, col2, ...)
+        // Must be done before columns is consumed by into_iter() below
+        let target_cols = if columns.is_empty() {
+            None
+        } else {
+            Some(
+                columns
+                    .iter()
+                    .map(|c| self.ident_normalizer.normalize(c.clone()))
+                    .collect::<Vec<String>>(),
+            )
+        };
 
         // Get insert fields and target table's value indices
         //
@@ -3208,12 +3231,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             )?,
         };
 
-        let plan = LogicalPlan::Dml(DmlStatement::new(
-            table_name,
-            Arc::clone(&table_source),
-            WriteOp::Insert(insert_op),
-            Arc::new(source),
-        ));
+        // Plan RETURNING clause expressions
+        let returning_exprs = self.plan_returning_clause(returning, &table_source, outer_planner_context)?;
+
+        let plan = LogicalPlan::Dml(
+            DmlStatement::new(
+                table_name,
+                Arc::clone(&table_source),
+                WriteOp::Insert(insert_op),
+                Arc::new(source),
+            )
+            .with_returning(returning_exprs)
+            .with_target_columns(target_cols),
+        );
         Ok(plan)
     }
 
@@ -3302,11 +3332,64 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(OnConflict::new(conflict.conflict_target, action))
     }
 
+    /// Plans a RETURNING clause from INSERT/UPDATE/DELETE into a list of DataFusion expressions.
+    ///
+    /// The RETURNING clause specifies which columns/expressions to return from the affected rows.
+    /// Supports `RETURNING *` (all columns) and named column expressions.
+    ///
+    /// Returns `None` if no RETURNING clause is present, or `Some(Vec<Expr>)` with the planned
+    /// expressions.
+    fn plan_returning_clause(
+        &self,
+        returning: Option<Vec<ast::SelectItem>>,
+        table_source: &Arc<dyn TableSource>,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Option<Vec<Expr>>> {
+        let Some(returning_items) = returning else {
+            return Ok(None);
+        };
+
+        let table_schema = DFSchema::try_from(table_source.schema())?;
+        let mut exprs = Vec::new();
+
+        for item in returning_items {
+            match item {
+                ast::SelectItem::Wildcard(_) => {
+                    // RETURNING * => return all columns
+                    for (_, field) in table_schema.iter() {
+                        exprs.push(Expr::Column(Column::new_unqualified(
+                            field.name(),
+                        )));
+                    }
+                }
+                ast::SelectItem::UnnamedExpr(sql_expr) => {
+                    let expr = self.sql_to_expr(sql_expr, &table_schema, planner_context)?;
+                    exprs.push(expr);
+                }
+                ast::SelectItem::ExprWithAlias { expr: sql_expr, alias } => {
+                    let expr = self.sql_to_expr(sql_expr, &table_schema, planner_context)?;
+                    exprs.push(expr.alias(self.ident_normalizer.normalize(alias)));
+                }
+                ast::SelectItem::QualifiedWildcard(_, _) => {
+                    // RETURNING table.* => return all columns (in DML context, there's only one table)
+                    for (_, field) in table_schema.iter() {
+                        exprs.push(Expr::Column(Column::new_unqualified(
+                            field.name(),
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(Some(exprs))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn insert_default_values_to_plan(
         &self,
         table_name: ObjectName,
         columns: Vec<Ident>,
+        returning: Option<Vec<ast::SelectItem>>,
         overwrite: bool,
         replace_into: bool,
         on_conflict: Option<SqlOnConflict>,
@@ -3370,6 +3453,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         self.insert_to_plan(
             object_name,
             columns,
+            returning,
             source,
             overwrite,
             replace_into,

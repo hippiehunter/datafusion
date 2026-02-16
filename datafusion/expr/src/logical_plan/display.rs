@@ -688,6 +688,11 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "Node Type": "GraphTable"
                 })
             }
+            LogicalPlan::RowLock(_) => {
+                json!({
+                    "Node Type": "RowLock"
+                })
+            }
         }
     }
 }
