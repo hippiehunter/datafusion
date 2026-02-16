@@ -54,7 +54,7 @@ version = "51.0.0"
 ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
-arrow = { version = "57.1.0", features = [
+arrow = { version = "57.3.0", features = [
     "prettyprint",
     "chrono-tz",
 ] }
