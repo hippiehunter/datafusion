@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+mod json_kernels;
 mod kernels;
 
 use crate::PhysicalExpr;
@@ -271,6 +272,20 @@ impl PhysicalExpr for BinaryExpr {
             | Operator::NotLikeMatch
             | Operator::NotILikeMatch => {
                 return apply_cmp(self.op, &lhs, &rhs);
+            }
+            Operator::Arrow
+            | Operator::LongArrow
+            | Operator::HashArrow
+            | Operator::HashLongArrow
+            | Operator::AtArrow
+            | Operator::ArrowAt
+            | Operator::Question
+            | Operator::QuestionPipe
+            | Operator::QuestionAnd
+            | Operator::HashMinus
+            | Operator::AtQuestion
+            | Operator::AtAt => {
+                return json_kernels::evaluate_json_op(&lhs, &self.op, &rhs);
             }
             _ => {}
         }
@@ -620,8 +635,10 @@ impl BinaryExpr {
             BitwiseShiftLeft => bitwise_shift_left_dyn(left, right),
             StringConcat => concat_elements(&left, &right),
             AtArrow | ArrowAt | Arrow | LongArrow | HashArrow | HashLongArrow | AtAt
-            | HashMinus | AtQuestion | Question | QuestionAnd | QuestionPipe
-            | IntegerDivide | ArrayOverlap => {
+            | HashMinus | AtQuestion | Question | QuestionAnd | QuestionPipe => {
+                unreachable!("JSON operators are handled in evaluate()")
+            }
+            IntegerDivide | ArrayOverlap => {
                 not_impl_err!(
                     "Binary operator '{:?}' is not supported in the physical expr",
                     self.op
