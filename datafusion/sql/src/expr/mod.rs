@@ -20,8 +20,8 @@ use datafusion_expr::planner::{PlannerResult, RawBinaryExpr, RawFieldAccessExpr}
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
-    ExprWithAlias as SQLExprWithAlias, StructField, Subscript, TrimWhereField,
-    TypedString, Value, ValueWithSpan,
+    ExprWithAlias as SQLExprWithAlias, JsonPathElem, StructField, Subscript,
+    TrimWhereField, TypedString, Value, ValueWithSpan,
 };
 
 use datafusion_common::{
@@ -700,6 +700,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 options: Box::new(WildcardOptions::default()),
             }),
             SQLExpr::Tuple(values) => self.parse_tuple(schema, planner_context, values),
+            SQLExpr::JsonAccess { value, path } => {
+                self.plan_json_access(*value, path.path, schema, planner_context)
+            }
             _ => not_impl_err!("Unsupported ast node in sqltorel: {sql:?}"),
         }
     }
@@ -1127,9 +1130,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 }) => Ok(Some(GetFieldAccess::NamedStructField {
                                     name: ScalarValue::from(s),
                                 })),
-                                SQLExpr::JsonAccess { .. } => {
-                                    not_impl_err!("JsonAccess")
-                                }
                                 // otherwise treat like a list index
                                 _ => Ok(Some(GetFieldAccess::ListIndex {
                                     key: Box::new(self.sql_expr_to_logical_expr(
@@ -1239,6 +1239,38 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     "GetFieldAccess not supported by ExprPlanner: {field_access_expr:?}"
                 )
             })
+    }
+
+    /// Convert a `JsonAccess` expression (bracket/dot notation on semi-structured data)
+    /// into a chain of `BinaryExpr(Arrow, ...)` expressions.
+    ///
+    /// For example, `col['key1']['key2']` becomes:
+    /// `BinaryExpr(BinaryExpr(col, ->, 'key1'), ->, 'key2')`
+    fn plan_json_access(
+        &self,
+        value: SQLExpr,
+        path: Vec<JsonPathElem>,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let mut expr = self.sql_expr_to_logical_expr(value, schema, planner_context)?;
+        for element in path {
+            let key = match element {
+                JsonPathElem::Dot { key, .. } => Expr::Literal(
+                    ScalarValue::Utf8(Some(key)),
+                    None,
+                ),
+                JsonPathElem::Bracket { key } => {
+                    self.sql_expr_to_logical_expr(key, schema, planner_context)?
+                }
+            };
+            expr = Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(expr),
+                Operator::Arrow,
+                Box::new(key),
+            ));
+        }
+        Ok(expr)
     }
 }
 

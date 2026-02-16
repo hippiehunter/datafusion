@@ -241,8 +241,7 @@ impl<'a> BinaryTypeCoercer<'a> {
                 )
             })
         }
-        AtArrow | ArrowAt | ArrayOverlap => {
-            // Array contains or search (similar to LIKE) operation
+        ArrayOverlap => {
             // ArrayOverlap checks if two arrays have any elements in common
             array_coercion(lhs, rhs)
                 .or_else(|| like_coercion(lhs, rhs)).map(Signature::comparison).ok_or_else(|| {
@@ -251,13 +250,50 @@ impl<'a> BinaryTypeCoercer<'a> {
                     )
                 })
         }
+        AtArrow | ArrowAt => {
+            // Array containment (@>, <@) or JSON/JSONB containment
+            // Try array containment first (existing behavior)
+            if let Some(t) = array_coercion(lhs, rhs) {
+                Ok(Signature::comparison(t))
+            }
+            // JSONB containment (both sides binary-like)
+            else if is_jsonb_binary_type(lhs) && is_jsonb_binary_type(rhs) {
+                let coerced = binary_coercion(lhs, rhs).unwrap_or(BinaryView);
+                Ok(Signature::comparison(coerced))
+            }
+            // JSON containment (both sides text-like)
+            else if is_json_text_type(lhs) && is_json_text_type(rhs) {
+                let coerced = string_coercion(lhs, rhs).unwrap_or(Utf8View);
+                Ok(Signature::comparison(coerced))
+            }
+            // Fallback to like_coercion for backward compat
+            else if let Some(t) = like_coercion(lhs, rhs) {
+                Ok(Signature::comparison(t))
+            }
+            else {
+                plan_err!(
+                    "Cannot infer common argument type for operation {} {} {}", self.lhs, self.op, self.rhs
+                )
+            }
+        }
         AtAt => {
-            // text search has similar signature to LIKE
-            like_coercion(lhs, rhs).map(Signature::comparison).ok_or_else(|| {
-                plan_datafusion_err!(
+            // JSONB jsonpath predicate: jsonb @@ jsonpath_text
+            if is_jsonb_binary_type(lhs) && is_json_text_type(rhs) {
+                Ok(Signature {
+                    lhs: lhs.clone(),
+                    rhs: Utf8View,
+                    ret: Boolean,
+                })
+            }
+            // text search fallback (similar to LIKE)
+            else if let Some(t) = like_coercion(lhs, rhs) {
+                Ok(Signature::comparison(t))
+            }
+            else {
+                plan_err!(
                     "Cannot infer common argument type for AtAt operation {} {} {}", self.lhs, self.op, self.rhs
                 )
-            })
+            }
         }
         Plus | Minus | Multiply | Divide | Modulo  =>  {
             if let Ok(ret) = self.get_result(lhs, rhs) {
@@ -325,9 +361,84 @@ impl<'a> BinaryTypeCoercer<'a> {
                 )
             }
         },
-        IntegerDivide | Arrow | LongArrow | HashArrow | HashLongArrow
-        | HashMinus | AtQuestion | Question | QuestionAnd | QuestionPipe => {
+        IntegerDivide => {
             not_impl_err!("Operator {} is not yet supported", self.op)
+        }
+        Arrow => {
+            // JSON/JSONB field extraction: json -> 'key' or json -> 0
+            // Returns same type as LHS (JSON text -> JSON text, JSONB binary -> JSONB binary)
+            json_access_coercion(lhs, rhs, false).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply -> to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        LongArrow => {
+            // JSON/JSONB field extraction as text: json ->> 'key' or json ->> 0
+            // Always returns text
+            json_access_coercion(lhs, rhs, true).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply ->> to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        HashArrow => {
+            // JSON/JSONB path extraction: json #> '{key1,key2}'
+            // RHS is a text path, returns same type as LHS
+            json_path_coercion(lhs, rhs, false).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply #> to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        HashLongArrow => {
+            // JSON/JSONB path extraction as text: json #>> '{key1,key2}'
+            // RHS is a text path, always returns text
+            json_path_coercion(lhs, rhs, true).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply #>> to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        Question => {
+            // JSONB key existence: jsonb ? 'key'
+            json_predicate_coercion(lhs, rhs).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply ? to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        QuestionAnd => {
+            // JSONB all-keys existence: jsonb ?& array['key1', 'key2']
+            json_predicate_coercion(lhs, rhs).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply ?& to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        QuestionPipe => {
+            // JSONB any-key existence: jsonb ?| array['key1', 'key2']
+            json_predicate_coercion(lhs, rhs).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply ?| to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        HashMinus => {
+            // JSONB key/path deletion: jsonb #- '{key}' or jsonb #- 'key' or jsonb #- 0
+            json_delete_coercion(lhs, rhs).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply #- to types {} and {}", self.lhs, self.rhs
+                )
+            })
+        }
+        AtQuestion => {
+            // JSONB jsonpath exists: jsonb @? '$.key'
+            json_path_predicate_coercion(lhs, rhs, false).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "Cannot apply @? to types {} and {}", self.lhs, self.rhs
+                )
+            })
         }
     };
         result.map_err(|err| {
@@ -1982,6 +2093,211 @@ fn null_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
         }
         _ => None,
     }
+}
+
+// ==================== JSON/JSONB operator coercion helpers ====================
+
+/// Returns true if the type is a text type that could represent JSON
+fn is_json_text_type(dt: &DataType) -> bool {
+    matches!(dt, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
+}
+
+/// Returns true if the type is a binary type that could represent JSONB
+fn is_jsonb_binary_type(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+    )
+}
+
+/// Returns true if the type is an integer type (for array index access)
+fn is_integer_type(dt: &DataType) -> bool {
+    dt.is_integer()
+}
+
+/// Coercion rules for `->` (Arrow) and `->>` (LongArrow) operators.
+///
+/// These extract a JSON field by key (text) or array element by index (integer).
+/// - `->` returns the same type as LHS (JSON text or JSONB binary)
+/// - `->>` always returns text (Utf8View)
+fn json_access_coercion(
+    lhs: &DataType,
+    rhs: &DataType,
+    return_text: bool,
+) -> Option<Signature> {
+    let (coerced_lhs, ret) = if is_json_text_type(lhs) {
+        (lhs.clone(), DataType::Utf8View)
+    } else if is_jsonb_binary_type(lhs) {
+        (
+            lhs.clone(),
+            if return_text {
+                DataType::Utf8View
+            } else {
+                DataType::BinaryView
+            },
+        )
+    } else if matches!(lhs, DataType::Null) {
+        (
+            DataType::Utf8View,
+            if return_text {
+                DataType::Utf8View
+            } else {
+                DataType::Utf8View
+            },
+        )
+    } else {
+        return None;
+    };
+
+    let coerced_rhs = if is_json_text_type(rhs) {
+        DataType::Utf8View
+    } else if is_integer_type(rhs) {
+        DataType::Int64
+    } else if matches!(rhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    Some(Signature {
+        lhs: coerced_lhs,
+        rhs: coerced_rhs,
+        ret,
+    })
+}
+
+/// Coercion rules for `#>` (HashArrow) and `#>>` (HashLongArrow) operators.
+///
+/// These extract a JSON value by path. The RHS is a text path (e.g., '{key1,key2}').
+/// - `#>` returns the same type as LHS
+/// - `#>>` always returns text (Utf8View)
+fn json_path_coercion(
+    lhs: &DataType,
+    rhs: &DataType,
+    return_text: bool,
+) -> Option<Signature> {
+    let (coerced_lhs, ret) = if is_json_text_type(lhs) {
+        (lhs.clone(), DataType::Utf8View)
+    } else if is_jsonb_binary_type(lhs) {
+        (
+            lhs.clone(),
+            if return_text {
+                DataType::Utf8View
+            } else {
+                DataType::BinaryView
+            },
+        )
+    } else if matches!(lhs, DataType::Null) {
+        (DataType::Utf8View, DataType::Utf8View)
+    } else {
+        return None;
+    };
+
+    // RHS must be text-like (the path string, e.g., '{a,b}')
+    let coerced_rhs = if is_json_text_type(rhs) || matches!(rhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    Some(Signature {
+        lhs: coerced_lhs,
+        rhs: coerced_rhs,
+        ret,
+    })
+}
+
+/// Coercion rules for `?` (Question), `?&` (QuestionAnd), `?|` (QuestionPipe) operators.
+///
+/// These check key existence in JSON/JSONB. LHS is json/jsonb, RHS is text.
+/// Returns boolean.
+fn json_predicate_coercion(lhs: &DataType, rhs: &DataType) -> Option<Signature> {
+    let coerced_lhs = if is_json_text_type(lhs) || is_jsonb_binary_type(lhs) {
+        lhs.clone()
+    } else if matches!(lhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    let coerced_rhs = if is_json_text_type(rhs) || matches!(rhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    Some(Signature {
+        lhs: coerced_lhs,
+        rhs: coerced_rhs,
+        ret: DataType::Boolean,
+    })
+}
+
+/// Coercion rules for `#-` (HashMinus) operator.
+///
+/// Deletes a key/path/element from JSON/JSONB. Returns same type as LHS.
+/// RHS can be text (key), integer (index), or text (path).
+fn json_delete_coercion(lhs: &DataType, rhs: &DataType) -> Option<Signature> {
+    let coerced_lhs = if is_json_text_type(lhs) || is_jsonb_binary_type(lhs) {
+        lhs.clone()
+    } else if matches!(lhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    let coerced_rhs = if is_json_text_type(rhs) {
+        DataType::Utf8View
+    } else if is_integer_type(rhs) {
+        DataType::Int64
+    } else if matches!(rhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    Some(Signature {
+        lhs: coerced_lhs.clone(),
+        rhs: coerced_rhs,
+        ret: coerced_lhs,
+    })
+}
+
+/// Coercion rules for `@?` (AtQuestion) and `@@` (AtAt for jsonb) operators.
+///
+/// These are jsonpath operators. LHS is json/jsonb, RHS is text (jsonpath expression).
+/// - `@?` returns same type as LHS (the matched result)
+/// - `@@` returns boolean (predicate check) — handled separately in `signature_inner`
+fn json_path_predicate_coercion(
+    lhs: &DataType,
+    rhs: &DataType,
+    return_bool: bool,
+) -> Option<Signature> {
+    let coerced_lhs = if is_json_text_type(lhs) || is_jsonb_binary_type(lhs) {
+        lhs.clone()
+    } else if matches!(lhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    let coerced_rhs = if is_json_text_type(rhs) || matches!(rhs, DataType::Null) {
+        DataType::Utf8View
+    } else {
+        return None;
+    };
+
+    let ret = if return_bool {
+        DataType::Boolean
+    } else {
+        coerced_lhs.clone()
+    };
+
+    Some(Signature {
+        lhs: coerced_lhs,
+        rhs: coerced_rhs,
+        ret,
+    })
 }
 
 #[cfg(test)]

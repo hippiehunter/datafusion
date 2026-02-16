@@ -96,49 +96,79 @@ pub enum Operator {
     /// select [1,2,3] @> [1,3]
     /// ```
     ArrowAt,
-    /// Arrow, like `->`.
+    /// JSON/JSONB field/element extraction, like `->`.
     ///
-    /// Not implemented in DataFusion yet.
+    /// Returns the JSON/JSONB value at the given key (text) or index (integer).
+    /// ```sql
+    /// select '{"a":1}'::JSON -> 'a'
+    /// ```
     Arrow,
-    /// Long arrow, like `->>`
+    /// JSON/JSONB field/element extraction as text, like `->>`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Same as `->` but returns the result as text.
+    /// ```sql
+    /// select '{"a":1}'::JSON ->> 'a'
+    /// ```
     LongArrow,
-    /// Hash arrow, like `#>`
+    /// JSON/JSONB path extraction, like `#>`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Extracts a nested value at the given path.
+    /// ```sql
+    /// select '{"a":{"b":1}}'::JSON #> '{a,b}'
+    /// ```
     HashArrow,
-    /// Hash long arrow, like `#>>`
+    /// JSON/JSONB path extraction as text, like `#>>`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Same as `#>` but returns the result as text.
+    /// ```sql
+    /// select '{"a":{"b":1}}'::JSON #>> '{a,b}'
+    /// ```
     HashLongArrow,
     /// At at, like `@@`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Used for text search matching and JSONB jsonpath predicate checks.
+    /// ```sql
+    /// select jsonb_col @@ '$.key == "value"'
+    /// ```
     AtAt,
     /// Integer division operator, like `DIV` from MySQL or `//` from DuckDB
     ///
     /// Not implemented in DataFusion yet.
     IntegerDivide,
-    /// Hash Minis, like `#-`
+    /// JSON/JSONB key/path deletion, like `#-`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Deletes a key, path, or array element from a JSON/JSONB value.
+    /// ```sql
+    /// select '{"a":1,"b":2}'::JSONB #- '{a}'
+    /// ```
     HashMinus,
-    /// At question, like `@?`
+    /// JSONB jsonpath exists, like `@?`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Tests whether a jsonpath expression returns any items for the given JSONB value.
+    /// ```sql
+    /// select '{"a":1}'::JSONB @? '$.a'
+    /// ```
     AtQuestion,
-    /// Question, like `?`
+    /// JSON/JSONB key existence, like `?`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Tests whether a key exists in a JSON/JSONB object.
+    /// ```sql
+    /// select '{"a":1}'::JSONB ? 'a'
+    /// ```
     Question,
-    /// Question and, like `?&`
+    /// JSON/JSONB all-keys existence, like `?&`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Tests whether all specified keys exist in a JSON/JSONB object.
+    /// ```sql
+    /// select '{"a":1,"b":2}'::JSONB ?& '{a,b}'
+    /// ```
     QuestionAnd,
-    /// Question pipe, like `?|`
+    /// JSON/JSONB any-key existence, like `?|`
     ///
-    /// Not implemented in DataFusion yet.
+    /// Tests whether any of the specified keys exist in a JSON/JSONB object.
+    /// ```sql
+    /// select '{"a":1,"b":2}'::JSONB ?| '{a,c}'
+    /// ```
     QuestionPipe,
     /// Array overlap, like `&&`
     ///

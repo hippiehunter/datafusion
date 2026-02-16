@@ -973,6 +973,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 Ok(DataType::Struct(Fields::from(fields)))
             }
             SQLDataType::JSON => Ok(DataType::Utf8),
+            SQLDataType::JSONB => Ok(DataType::BinaryView),
             SQLDataType::Nvarchar(_)
             | SQLDataType::Uuid
             | SQLDataType::Binary(_)
@@ -992,7 +993,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::Clob(_)
             | SQLDataType::Int64
             | SQLDataType::Float64
-            | SQLDataType::JSONB
             | SQLDataType::Unspecified
             | SQLDataType::Int16
             | SQLDataType::Int32
