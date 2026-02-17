@@ -386,12 +386,13 @@ fn optimize_projections(
             plan.inputs()
                 .into_iter()
                 .map(|input| {
-                    indices
-                        .clone()
-                        .with_projection_beneficial()
-                        .with_plan_exprs(&plan, input.schema())
+                    // Recursive queries must keep the full recursive tuple width
+                    // for both static and recursive terms. Parent requirements
+                    // are insufficient because recursive-state columns may be
+                    // consumed only inside the recursive term.
+                    RequiredIndices::new_for_all_exprs(input).with_projection_beneficial()
                 })
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Vec<_>>()
         }
         LogicalPlan::Join(join) => {
             let left_len = join.left.schema().fields().len();
