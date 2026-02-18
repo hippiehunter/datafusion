@@ -83,7 +83,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             UnaryOperator::BitwiseNot => {
                 // Bitwise NOT operator (~)
                 // Use a scalar function call to implement bitwise NOT
-                let operand = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                let operand =
+                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
 
                 // Try to get the bit_not function from the context provider
                 if let Some(func) = self.context_provider.get_function_meta("bit_not") {
@@ -93,7 +94,39 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )))
                 } else {
                     // Fall back to not_impl_err if the function is not registered
-                    not_impl_err!("Bitwise NOT operator (~) requires 'bit_not' function to be registered")
+                    not_impl_err!(
+                        "Bitwise NOT operator (~) requires 'bit_not' function to be registered"
+                    )
+                }
+            }
+            UnaryOperator::PGSquareRoot => {
+                // PostgreSQL square root prefix operator: |/ value
+                let operand =
+                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                if let Some(func) = self.context_provider.get_function_meta("sqrt") {
+                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        func,
+                        vec![operand],
+                    )))
+                } else {
+                    not_impl_err!(
+                        "Square root operator (|/) requires 'sqrt' function to be registered"
+                    )
+                }
+            }
+            UnaryOperator::PGCubeRoot => {
+                // PostgreSQL cube root prefix operator: ||/ value
+                let operand =
+                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                if let Some(func) = self.context_provider.get_function_meta("cbrt") {
+                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        func,
+                        vec![operand],
+                    )))
+                } else {
+                    not_impl_err!(
+                        "Cube root operator (||/) requires 'cbrt' function to be registered"
+                    )
                 }
             }
             _ => not_impl_err!("Unsupported SQL unary operator {op:?}"),

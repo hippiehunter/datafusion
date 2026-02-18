@@ -175,7 +175,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     } else {
                         // Check the outer query schema stack (supports multi-level correlation)
                         // Search from innermost to outermost ancestor
-                        for outer in planner_context.outer_query_schema_stack().iter().rev() {
+                        for outer in
+                            planner_context.outer_query_schema_stack().iter().rev()
+                        {
                             let search_result = search_dfschema(&ids, outer);
                             match search_result {
                                 // Found matching field with spare identifier(s) for nested field(s) in structure

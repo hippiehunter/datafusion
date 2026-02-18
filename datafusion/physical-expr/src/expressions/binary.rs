@@ -249,6 +249,10 @@ impl PhysicalExpr for BinaryExpr {
         let schema = batch.schema();
         let input_schema = schema.as_ref();
 
+        if let Some(result) = self.evaluate_pg_temporal_arithmetic(&lhs, &rhs)? {
+            return Ok(result);
+        }
+
         match self.op {
             Operator::Plus if self.fail_on_overflow => return apply(&lhs, &rhs, add),
             Operator::Plus => return apply(&lhs, &rhs, add_wrapping),
@@ -562,6 +566,133 @@ fn to_result_type_array(
     }
 }
 
+fn is_integral_numeric_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    )
+}
+
+fn unwrap_dictionary_scalar<'a>(scalar: &'a ScalarValue) -> &'a ScalarValue {
+    match scalar {
+        ScalarValue::Dictionary(_, value) => unwrap_dictionary_scalar(value.as_ref()),
+        _ => scalar,
+    }
+}
+
+fn extract_date32_scalar(scalar: &ScalarValue) -> Option<i32> {
+    match unwrap_dictionary_scalar(scalar) {
+        ScalarValue::Date32(v) => *v,
+        _ => None,
+    }
+}
+
+fn extract_i64_scalar(scalar: &ScalarValue) -> Option<i64> {
+    match unwrap_dictionary_scalar(scalar) {
+        ScalarValue::Int8(v) => v.map(i64::from),
+        ScalarValue::Int16(v) => v.map(i64::from),
+        ScalarValue::Int32(v) => v.map(i64::from),
+        ScalarValue::Int64(v) => *v,
+        ScalarValue::UInt8(v) => v.map(i64::from),
+        ScalarValue::UInt16(v) => v.map(i64::from),
+        ScalarValue::UInt32(v) => v.map(i64::from),
+        ScalarValue::UInt64(v) => v.and_then(|v| i64::try_from(v).ok()),
+        _ => None,
+    }
+}
+
+fn extract_f64_scalar(scalar: &ScalarValue) -> Option<f64> {
+    match unwrap_dictionary_scalar(scalar) {
+        ScalarValue::Int8(v) => v.map(f64::from),
+        ScalarValue::Int16(v) => v.map(f64::from),
+        ScalarValue::Int32(v) => v.map(f64::from),
+        ScalarValue::Int64(v) => v.map(|v| v as f64),
+        ScalarValue::UInt8(v) => v.map(f64::from),
+        ScalarValue::UInt16(v) => v.map(f64::from),
+        ScalarValue::UInt32(v) => v.map(f64::from),
+        ScalarValue::UInt64(v) => v.map(|v| v as f64),
+        ScalarValue::Float32(v) => v.map(f64::from),
+        ScalarValue::Float64(v) => *v,
+        ScalarValue::Decimal32(v, _, scale) => {
+            v.map(|v| f64::from(v) / 10f64.powi(i32::from(*scale)))
+        }
+        ScalarValue::Decimal64(v, _, scale) => {
+            v.map(|v| (v as f64) / 10f64.powi(i32::from(*scale)))
+        }
+        ScalarValue::Decimal128(v, _, scale) => {
+            v.map(|v| (v as f64) / 10f64.powi(i32::from(*scale)))
+        }
+        _ => None,
+    }
+}
+
+fn extract_interval_scalar(scalar: &ScalarValue) -> Option<IntervalMonthDayNano> {
+    match unwrap_dictionary_scalar(scalar) {
+        ScalarValue::IntervalMonthDayNano(v) => *v,
+        _ => None,
+    }
+}
+
+fn to_columnar_result(
+    lhs: &ColumnarValue,
+    rhs: &ColumnarValue,
+    array: ArrayRef,
+) -> Result<ColumnarValue> {
+    if matches!(
+        (lhs, rhs),
+        (ColumnarValue::Scalar(_), ColumnarValue::Scalar(_))
+    ) {
+        let scalar = ScalarValue::try_from_array(array.as_ref(), 0)?;
+        Ok(ColumnarValue::Scalar(scalar))
+    } else {
+        Ok(ColumnarValue::Array(array))
+    }
+}
+
+fn scale_interval(
+    iv: IntervalMonthDayNano,
+    factor: f64,
+) -> std::result::Result<IntervalMonthDayNano, ArrowError> {
+    if !factor.is_finite() {
+        return Err(ArrowError::ComputeError(
+            "Interval scale factor must be finite".to_string(),
+        ));
+    }
+
+    let months = (f64::from(iv.months) * factor).round();
+    let days = (f64::from(iv.days) * factor).round();
+    let nanos = (iv.nanoseconds as f64 * factor).round();
+
+    if months < i32::MIN as f64 || months > i32::MAX as f64 {
+        return Err(ArrowError::ComputeError(
+            "Scaled interval months out of range".to_string(),
+        ));
+    }
+    if days < i32::MIN as f64 || days > i32::MAX as f64 {
+        return Err(ArrowError::ComputeError(
+            "Scaled interval days out of range".to_string(),
+        ));
+    }
+    if nanos < i64::MIN as f64 || nanos > i64::MAX as f64 {
+        return Err(ArrowError::ComputeError(
+            "Scaled interval nanoseconds out of range".to_string(),
+        ));
+    }
+
+    Ok(IntervalMonthDayNano {
+        months: months as i32,
+        days: days as i32,
+        nanoseconds: nanos as i64,
+    })
+}
+
 impl BinaryExpr {
     /// Evaluate the expression of the left input is an array and
     /// right is literal - use scalar operations
@@ -586,6 +717,162 @@ impl BinaryExpr {
         };
 
         Ok(scalar_result)
+    }
+
+    fn evaluate_pg_temporal_arithmetic(
+        &self,
+        lhs: &ColumnarValue,
+        rhs: &ColumnarValue,
+    ) -> Result<Option<ColumnarValue>> {
+        let lhs_type = lhs.data_type();
+        let rhs_type = rhs.data_type();
+
+        match self.op {
+            Operator::Plus => {
+                // DATE + integer and integer + DATE
+                if matches!(lhs_type, DataType::Date32)
+                    && is_integral_numeric_type(&rhs_type)
+                {
+                    return Ok(Some(self.evaluate_date32_with_days(lhs, rhs, 1)?));
+                }
+                if matches!(rhs_type, DataType::Date32)
+                    && is_integral_numeric_type(&lhs_type)
+                {
+                    return Ok(Some(self.evaluate_date32_with_days(rhs, lhs, 1)?));
+                }
+            }
+            Operator::Minus => {
+                // DATE - integer
+                if matches!(lhs_type, DataType::Date32)
+                    && is_integral_numeric_type(&rhs_type)
+                {
+                    return Ok(Some(self.evaluate_date32_with_days(lhs, rhs, -1)?));
+                }
+                // DATE - DATE => integer day count
+                if matches!(lhs_type, DataType::Date32)
+                    && matches!(rhs_type, DataType::Date32)
+                {
+                    return Ok(Some(self.evaluate_date32_minus_date32(lhs, rhs)?));
+                }
+            }
+            Operator::Multiply => {
+                // INTERVAL * numeric and numeric * INTERVAL
+                if matches!(lhs_type, DataType::Interval(_)) && rhs_type.is_numeric() {
+                    return Ok(Some(self.evaluate_interval_mul_numeric(lhs, rhs)?));
+                }
+                if matches!(rhs_type, DataType::Interval(_)) && lhs_type.is_numeric() {
+                    return Ok(Some(self.evaluate_interval_mul_numeric(rhs, lhs)?));
+                }
+            }
+            _ => {}
+        }
+
+        Ok(None)
+    }
+
+    fn evaluate_date32_with_days(
+        &self,
+        date_value: &ColumnarValue,
+        days_value: &ColumnarValue,
+        sign: i32,
+    ) -> Result<ColumnarValue> {
+        let arrays =
+            ColumnarValue::values_to_arrays(&[date_value.clone(), days_value.clone()])?;
+        let date_array = &arrays[0];
+        let days_array = &arrays[1];
+
+        let values = (0..date_array.len())
+            .map(|i| {
+                let date_scalar = ScalarValue::try_from_array(date_array.as_ref(), i)?;
+                let days_scalar = ScalarValue::try_from_array(days_array.as_ref(), i)?;
+                let value = match (
+                    extract_date32_scalar(&date_scalar),
+                    extract_i64_scalar(&days_scalar),
+                ) {
+                    (Some(date), Some(days)) => {
+                        let days_i32 = i32::try_from(days).map_err(|_| {
+                            ArrowError::ComputeError(
+                                "Date day offset is out of Int32 range".to_string(),
+                            )
+                        })?;
+                        let signed_days = if sign >= 0 {
+                            days_i32
+                        } else {
+                            days_i32.checked_neg().ok_or_else(|| {
+                                ArrowError::ComputeError(
+                                    "Date day offset negation overflow".to_string(),
+                                )
+                            })?
+                        };
+                        date.checked_add(signed_days).ok_or_else(|| {
+                            ArrowError::ComputeError(
+                                "Date arithmetic overflow".to_string(),
+                            )
+                        })?
+                    }
+                    _ => return Ok(None),
+                };
+                Ok(Some(value))
+            })
+            .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
+
+        let result: ArrayRef = Arc::new(Date32Array::from(values));
+        to_columnar_result(date_value, days_value, result)
+    }
+
+    fn evaluate_date32_minus_date32(
+        &self,
+        lhs: &ColumnarValue,
+        rhs: &ColumnarValue,
+    ) -> Result<ColumnarValue> {
+        let arrays = ColumnarValue::values_to_arrays(&[lhs.clone(), rhs.clone()])?;
+        let left = &arrays[0];
+        let right = &arrays[1];
+
+        let values = (0..left.len())
+            .map(|i| {
+                let l = ScalarValue::try_from_array(left.as_ref(), i)?;
+                let r = ScalarValue::try_from_array(right.as_ref(), i)?;
+                let value = match (extract_date32_scalar(&l), extract_date32_scalar(&r)) {
+                    (Some(l), Some(r)) => l.checked_sub(r).ok_or_else(|| {
+                        ArrowError::ComputeError("Date subtraction overflow".to_string())
+                    })?,
+                    _ => return Ok(None),
+                };
+                Ok(Some(value))
+            })
+            .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
+
+        let result: ArrayRef = Arc::new(Int32Array::from(values));
+        to_columnar_result(lhs, rhs, result)
+    }
+
+    fn evaluate_interval_mul_numeric(
+        &self,
+        interval_value: &ColumnarValue,
+        numeric_value: &ColumnarValue,
+    ) -> Result<ColumnarValue> {
+        let arrays = ColumnarValue::values_to_arrays(&[
+            interval_value.clone(),
+            numeric_value.clone(),
+        ])?;
+        let interval_array = &arrays[0];
+        let numeric_array = &arrays[1];
+
+        let values = (0..interval_array.len())
+            .map(|i| {
+                let iv = ScalarValue::try_from_array(interval_array.as_ref(), i)?;
+                let n = ScalarValue::try_from_array(numeric_array.as_ref(), i)?;
+                let value = match (extract_interval_scalar(&iv), extract_f64_scalar(&n)) {
+                    (Some(iv), Some(factor)) => Some(scale_interval(iv, factor)?),
+                    _ => None,
+                };
+                Ok(value)
+            })
+            .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
+
+        let result: ArrayRef = Arc::new(IntervalMonthDayNanoArray::from(values));
+        to_columnar_result(interval_value, numeric_value, result)
     }
 
     fn evaluate_with_resolved_args(
@@ -886,7 +1173,9 @@ pub fn binary(
     rhs: Arc<dyn PhysicalExpr>,
     _input_schema: &Schema,
 ) -> Result<Arc<dyn PhysicalExpr>> {
-    Ok(Arc::new(BinaryExpr::new(lhs, op, rhs)))
+    Ok(Arc::new(
+        BinaryExpr::new(lhs, op, rhs).with_fail_on_overflow(true),
+    ))
 }
 
 /// Create a similar to expression

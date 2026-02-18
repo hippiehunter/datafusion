@@ -26,11 +26,13 @@ use sqlparser::ast::{
 
 use datafusion_common::{
     DFSchema, Result, ScalarValue, internal_datafusion_err, internal_err, not_impl_err,
-    plan_err,
+    plan_datafusion_err, plan_err,
 };
 
 use datafusion_expr::expr::ScalarFunction;
-use datafusion_expr::expr::{AnyExpr, AllExpr, InList, QuantifiedSource, WildcardOptions};
+use datafusion_expr::expr::{
+    AllExpr, AnyExpr, InList, QuantifiedSource, WildcardOptions,
+};
 use datafusion_expr::{
     Between, BinaryExpr, Cast, Expr, ExprSchemable, GetFieldAccess, Like, Operator,
     TryCast, lit,
@@ -85,11 +87,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 StackEntry::SQLExpr(sql_expr) => {
                     match *sql_expr {
                         SQLExpr::BinaryOp { left, op, right } => {
-                            // Note the order that we push the entries to the stack
-                            // is important. We want to visit the left node first.
-                            stack.push(StackEntry::Operator(op));
-                            stack.push(StackEntry::SQLExpr(right));
-                            stack.push(StackEntry::SQLExpr(left));
+                            if matches!(
+                                op,
+                                BinaryOperator::PGOverlap | BinaryOperator::Overlaps
+                            ) {
+                                let expr = self.plan_pg_overlaps_expr(
+                                    *left,
+                                    *right,
+                                    schema,
+                                    planner_context,
+                                )?;
+                                eval_stack.push(expr);
+                            } else {
+                                // Note the order that we push the entries to the stack
+                                // is important. We want to visit the left node first.
+                                stack.push(StackEntry::Operator(op));
+                                stack.push(StackEntry::SQLExpr(right));
+                                stack.push(StackEntry::SQLExpr(left));
+                            }
                         }
                         _ => {
                             let expr = self.sql_expr_to_logical_expr_internal(
@@ -113,6 +128,139 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         assert_eq!(1, eval_stack.len());
         let expr = eval_stack.pop().unwrap();
         Ok(expr)
+    }
+
+    fn plan_pg_overlaps_expr(
+        &self,
+        left: SQLExpr,
+        right: SQLExpr,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let (left_start_sql, left_end_sql) = self.extract_pg_overlaps_period(left)?;
+        let (right_start_sql, right_end_sql) = self.extract_pg_overlaps_period(right)?;
+
+        let left_end_is_interval = matches!(left_end_sql, SQLExpr::Interval(_));
+        let right_end_is_interval = matches!(right_end_sql, SQLExpr::Interval(_));
+
+        let left_start_expr =
+            self.sql_expr_to_logical_expr(left_start_sql, schema, planner_context)?;
+        let left_end_raw =
+            self.sql_expr_to_logical_expr(left_end_sql, schema, planner_context)?;
+        let right_start_expr =
+            self.sql_expr_to_logical_expr(right_start_sql, schema, planner_context)?;
+        let right_end_raw =
+            self.sql_expr_to_logical_expr(right_end_sql, schema, planner_context)?;
+
+        let left_end_expr = if left_end_is_interval {
+            Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(left_start_expr.clone()),
+                Operator::Plus,
+                Box::new(left_end_raw),
+            ))
+        } else {
+            left_end_raw
+        };
+        let right_end_expr = if right_end_is_interval {
+            Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(right_start_expr.clone()),
+                Operator::Plus,
+                Box::new(right_end_raw),
+            ))
+        } else {
+            right_end_raw
+        };
+
+        let least = |lhs: Expr, rhs: Expr| -> Result<Expr> {
+            let udf = self
+                .context_provider
+                .get_function_meta("least")
+                .ok_or_else(|| {
+                    plan_datafusion_err!("Function least is required to plan OVERLAPS")
+                })?;
+            Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                udf,
+                vec![lhs, rhs],
+            )))
+        };
+        let greatest = |lhs: Expr, rhs: Expr| -> Result<Expr> {
+            let udf = self
+                .context_provider
+                .get_function_meta("greatest")
+                .ok_or_else(|| {
+                    plan_datafusion_err!("Function greatest is required to plan OVERLAPS")
+                })?;
+            Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                udf,
+                vec![lhs, rhs],
+            )))
+        };
+
+        let start1 = least(left_start_expr.clone(), left_end_expr.clone())?;
+        let end1 = greatest(left_start_expr, left_end_expr)?;
+        let start2 = least(right_start_expr.clone(), right_end_expr.clone())?;
+        let end2 = greatest(right_start_expr, right_end_expr)?;
+
+        // PostgreSQL OVERLAPS uses half-open intervals [start, end), with point-in-time
+        // periods treated specially (start == end).
+        let half_open_overlap = Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(start1.clone()),
+                Operator::Lt,
+                Box::new(end2.clone()),
+            ))),
+            Operator::And,
+            Box::new(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(start2.clone()),
+                Operator::Lt,
+                Box::new(end1.clone()),
+            ))),
+        ));
+
+        let both_points_same = Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(Expr::BinaryExpr(BinaryExpr::new(
+                    Box::new(start1.clone()),
+                    Operator::Eq,
+                    Box::new(end1),
+                ))),
+                Operator::And,
+                Box::new(Expr::BinaryExpr(BinaryExpr::new(
+                    Box::new(start2.clone()),
+                    Operator::Eq,
+                    Box::new(end2),
+                ))),
+            ))),
+            Operator::And,
+            Box::new(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(start1),
+                Operator::Eq,
+                Box::new(start2),
+            ))),
+        ));
+
+        Ok(Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(half_open_overlap),
+            Operator::Or,
+            Box::new(both_points_same),
+        )))
+    }
+
+    fn extract_pg_overlaps_period(&self, expr: SQLExpr) -> Result<(SQLExpr, SQLExpr)> {
+        match expr {
+            SQLExpr::Nested(inner) => self.extract_pg_overlaps_period(*inner),
+            SQLExpr::Tuple(mut values) => {
+                if values.len() != 2 {
+                    return plan_err!(
+                        "OVERLAPS requires tuple arguments with exactly two elements"
+                    );
+                }
+                let second = values.pop().unwrap();
+                let first = values.pop().unwrap();
+                Ok((first, second))
+            }
+            _ => not_impl_err!("OVERLAPS requires tuple arguments"),
+        }
     }
 
     fn build_logical_expr(
@@ -209,9 +357,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         //       non-trivial arms. See https://github.com/apache/datafusion/pull/12384 for
         //       more context.
         match sql {
-            SQLExpr::Value(value) => {
-                self.parse_value(value.into(), planner_context.prepare_param_data_types(), planner_context)
-            }
+            SQLExpr::Value(value) => self.parse_value(
+                value.into(),
+                planner_context.prepare_param_data_types(),
+                planner_context,
+            ),
             SQLExpr::Extract { field, expr, .. } => {
                 let mut extract_args = vec![
                     Expr::Literal(ScalarValue::from(format!("{field}")), None),
@@ -369,8 +519,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
-            SQLExpr::IsJson { expr, negated, json_predicate_type, unique_keys } => {
-                let inner_expr = self.sql_expr_to_logical_expr(*expr, schema, planner_context)?;
+            SQLExpr::IsJson {
+                expr,
+                negated,
+                json_predicate_type,
+                unique_keys,
+            } => {
+                let inner_expr =
+                    self.sql_expr_to_logical_expr(*expr, schema, planner_context)?;
 
                 // Build function name based on predicate type
                 let func_name = if let Some(pred_type) = json_predicate_type {
@@ -382,7 +538,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             } else {
                                 "is_json_object"
                             }
-                        },
+                        }
                         sqlparser::ast::JsonPredicateType::Scalar => "is_json_scalar",
                         sqlparser::ast::JsonPredicateType::Value => "is_json_value",
                     }
@@ -391,11 +547,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 };
 
                 // Try to get the function from the context provider
-                let is_json_expr = if let Some(func) = self.context_provider.get_function_meta(func_name) {
+                let is_json_expr = if let Some(func) =
+                    self.context_provider.get_function_meta(func_name)
+                {
                     Expr::ScalarFunction(ScalarFunction::new_udf(func, vec![inner_expr]))
                 } else {
                     // Fall back to a stub function call if the function is not registered
-                    not_impl_err!("IS JSON predicate function '{func_name}' not registered")?
+                    not_impl_err!(
+                        "IS JSON predicate function '{func_name}' not registered"
+                    )?
                 };
 
                 // Apply negation if needed
@@ -502,10 +662,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .context_provider
                     .get_function_meta("regexp_like")
                     .ok_or_else(|| {
-                        internal_datafusion_err!("Unable to find expected 'regexp_like' function")
+                        internal_datafusion_err!(
+                            "Unable to find expected 'regexp_like' function"
+                        )
                     })?;
 
-                let regexp_expr = Expr::ScalarFunction(ScalarFunction::new_udf(func, args));
+                let regexp_expr =
+                    Expr::ScalarFunction(ScalarFunction::new_udf(func, args));
 
                 if negated {
                     Ok(Expr::Not(Box::new(regexp_expr)))
@@ -660,8 +823,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.parse_any_subquery(*left, op, *subquery, schema, planner_context)
                 } else {
                     // Right side is an array expression
-                    let left_expr = self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
-                    let right_expr = self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
+                    let left_expr =
+                        self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
+                    let right_expr =
+                        self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
                     Ok(Expr::AnyExpr(AnyExpr::new(
                         Box::new(left_expr),
                         op,
@@ -680,8 +845,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.parse_all_subquery(*left, op, *subquery, schema, planner_context)
                 } else {
                     // Right side is an array expression
-                    let left_expr = self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
-                    let right_expr = self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
+                    let left_expr =
+                        self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
+                    let right_expr =
+                        self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
                     Ok(Expr::AllExpr(AllExpr::new(
                         Box::new(left_expr),
                         op,
@@ -720,9 +887,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         // Check if ALL values are assignments or NONE are
-        let assignment_count = values.iter().filter(|v| {
-            matches!(v, SQLExpr::BinaryOp { op: BinaryOperator::Assignment, .. })
-        }).count();
+        let assignment_count = values
+            .iter()
+            .filter(|v| {
+                matches!(
+                    v,
+                    SQLExpr::BinaryOp {
+                        op: BinaryOperator::Assignment,
+                        ..
+                    }
+                )
+            })
+            .count();
 
         // Validate: either all are assignments or none are
         if assignment_count > 0 && assignment_count != values.len() {
@@ -733,39 +909,61 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             );
         }
 
-        let (mut create_struct_args, is_named_struct) = if assignment_count == values.len() {
-            // Named struct syntax: extract field names and values
-            let mut args = Vec::new();
-            let mut field_names = std::collections::HashSet::new();
+        let (mut create_struct_args, is_named_struct) =
+            if assignment_count == values.len() {
+                // Named struct syntax: extract field names and values
+                let mut args = Vec::new();
+                let mut field_names = std::collections::HashSet::new();
 
-            for value in values {
-                if let SQLExpr::BinaryOp { left, op: BinaryOperator::Assignment, right } = value {
-                    // Extract field name from left side
-                    let field_name = match *left {
-                        SQLExpr::Identifier(id) => id.value,
-                        _ => return plan_err!("Expected identifier on left side of := in STRUCT"),
-                    };
+                for value in values {
+                    if let SQLExpr::BinaryOp {
+                        left,
+                        op: BinaryOperator::Assignment,
+                        right,
+                    } = value
+                    {
+                        // Extract field name from left side
+                        let field_name = match *left {
+                            SQLExpr::Identifier(id) => id.value,
+                            _ => {
+                                return plan_err!(
+                                    "Expected identifier on left side of := in STRUCT"
+                                );
+                            }
+                        };
 
-                    // Check for duplicate field names
-                    if !field_names.insert(field_name.clone()) {
-                        return plan_err!("Duplicate field name '{}' in STRUCT", field_name);
+                        // Check for duplicate field names
+                        if !field_names.insert(field_name.clone()) {
+                            return plan_err!(
+                                "Duplicate field name '{}' in STRUCT",
+                                field_name
+                            );
+                        }
+
+                        // Add field name as string literal
+                        args.push(lit(field_name));
+
+                        // Add field value
+                        args.push(self.sql_expr_to_logical_expr(
+                            *right,
+                            schema,
+                            planner_context,
+                        )?);
+                    } else {
+                        // This should never happen due to our validation above
+                        return plan_err!(
+                            "Expected assignment operator := in named STRUCT syntax"
+                        );
                     }
-
-                    // Add field name as string literal
-                    args.push(lit(field_name));
-
-                    // Add field value
-                    args.push(self.sql_expr_to_logical_expr(*right, schema, planner_context)?);
-                } else {
-                    // This should never happen due to our validation above
-                    return plan_err!("Expected assignment operator := in named STRUCT syntax");
                 }
-            }
-            (args, true)
-        } else {
-            // Unnamed struct syntax
-            (self.create_struct_expr(values, schema, planner_context)?, false)
-        };
+                (args, true)
+            } else {
+                // Unnamed struct syntax
+                (
+                    self.create_struct_expr(values, schema, planner_context)?,
+                    false,
+                )
+            };
 
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_struct_literal(create_struct_args, is_named_struct)? {
@@ -1184,7 +1382,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             };
 
                             // Validate stride is not zero (would cause infinite loop)
-                            if let Expr::Literal(ScalarValue::Int64(Some(0)), _) = &stride {
+                            if matches!(
+                                &stride,
+                                Expr::Literal(ScalarValue::Int8(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::Int16(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::Int32(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::Int64(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::UInt8(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::UInt16(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::UInt32(Some(0)), _)
+                                    | Expr::Literal(ScalarValue::UInt64(Some(0)), _)
+                            ) {
                                 return plan_err!("Array slice stride cannot be zero");
                             }
 
@@ -1256,10 +1464,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut expr = self.sql_expr_to_logical_expr(value, schema, planner_context)?;
         for element in path {
             let key = match element {
-                JsonPathElem::Dot { key, .. } => Expr::Literal(
-                    ScalarValue::Utf8(Some(key)),
-                    None,
-                ),
+                JsonPathElem::Dot { key, .. } => {
+                    Expr::Literal(ScalarValue::Utf8(Some(key)), None)
+                }
                 JsonPathElem::Bracket { key } => {
                     self.sql_expr_to_logical_expr(key, schema, planner_context)?
                 }
@@ -1425,5 +1632,34 @@ mod tests {
             .unwrap();
 
         assert!(matches!(expr, Expr::Alias(_)));
+    }
+
+    #[test]
+    fn test_overlaps_keyword_routes_to_pg_overlaps_planner() {
+        let schema = DFSchema::empty();
+        let mut planner_context = PlannerContext::default();
+
+        let expr_str = "(DATE '2024-01-01', DATE '2024-06-30') OVERLAPS (DATE '2024-04-01', DATE '2024-12-31')";
+
+        let dialect = GenericDialect {};
+        let parser = Parser::new(&dialect).try_with_sql(expr_str).unwrap();
+        let sql_expr = parser.parse_expr().unwrap();
+
+        let context_provider = TestContextProvider::new();
+        let sql_to_rel = SqlToRel::new(&context_provider);
+
+        let err = sql_to_rel
+            .sql_expr_to_logical_expr(sql_expr, &schema, &mut planner_context)
+            .unwrap_err();
+        let err_text = err.to_string();
+
+        assert!(
+            err_text.contains("Function least is required to plan OVERLAPS"),
+            "unexpected planner error: {err_text}"
+        );
+        assert!(
+            !err_text.contains("Only identifiers and literals are supported in tuples"),
+            "keyword OVERLAPS fell back to tuple parser: {err_text}"
+        );
     }
 }

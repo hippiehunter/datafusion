@@ -769,12 +769,39 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     fn convert_simple_data_type(&self, sql_type: &SQLDataType) -> Result<DataType> {
+        let custom_type_name = |name: &ObjectName| -> Option<String> {
+            if name.0.len() != 1 {
+                return None;
+            }
+            name.0[0]
+                .as_ident()
+                .map(|ident| ident.value.to_ascii_uppercase())
+        };
+
         match sql_type {
             SQLDataType::Boolean | SQLDataType::Bool => Ok(DataType::Boolean),
             SQLDataType::TinyInt(_) => Ok(DataType::Int8),
+            SQLDataType::Custom(name, modifiers)
+                if modifiers.is_empty()
+                    && matches!(custom_type_name(name).as_deref(), Some("SMALLSERIAL")) =>
+            {
+                Ok(DataType::Int16)
+            }
             SQLDataType::SmallInt(_) | SQLDataType::Int2(_) => Ok(DataType::Int16),
+            SQLDataType::Custom(name, modifiers)
+                if modifiers.is_empty()
+                    && matches!(custom_type_name(name).as_deref(), Some("SERIAL")) =>
+            {
+                Ok(DataType::Int32)
+            }
             SQLDataType::Int(_) | SQLDataType::Integer(_) | SQLDataType::Int4(_) => {
                 Ok(DataType::Int32)
+            }
+            SQLDataType::Custom(name, modifiers)
+                if modifiers.is_empty()
+                    && matches!(custom_type_name(name).as_deref(), Some("BIGSERIAL")) =>
+            {
+                Ok(DataType::Int64)
             }
             SQLDataType::BigInt(_) | SQLDataType::Int8(_) => Ok(DataType::Int64),
             SQLDataType::TinyIntUnsigned(_) => Ok(DataType::UInt8),
@@ -851,24 +878,28 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
             SQLDataType::Date => Ok(DataType::Date32),
             SQLDataType::Time(precision, tz_info) => {
-                // TIME types map to Time64
-                // Note: TIME WITH TIME ZONE is accepted but timezone info is not preserved
-                // since Arrow doesn't have a native time-with-timezone type
-                // Precision mapping:
-                // - None or >= 6: Nanosecond (default, most precision)
-                // - 3-5: Microsecond
+                // Arrow has no native TIME WITH TIME ZONE type.
+                // Keep TIME [WITHOUT TIME ZONE] as Time64 and represent TIMETZ as Utf8.
+                // Precision mapping for Time64:
+                // - None or >= 3: Microsecond
                 // - 0-2: Millisecond
                 let time_unit = match precision {
-                    None => TimeUnit::Nanosecond,
-                    Some(p) if *p >= 6 => TimeUnit::Nanosecond,
+                    None => TimeUnit::Microsecond,
+                    Some(p) if *p >= 6 => TimeUnit::Microsecond,
                     Some(p) if *p >= 3 => TimeUnit::Microsecond,
                     Some(_) => TimeUnit::Millisecond,
                 };
                 match tz_info {
-                    TimezoneInfo::None
-                    | TimezoneInfo::WithoutTimeZone
-                    | TimezoneInfo::WithTimeZone
-                    | TimezoneInfo::Tz => Ok(DataType::Time64(time_unit)),
+                    TimezoneInfo::None | TimezoneInfo::WithoutTimeZone => {
+                        Ok(DataType::Time64(time_unit))
+                    }
+                    TimezoneInfo::WithTimeZone | TimezoneInfo::Tz => {
+                        if self.options.map_string_types_to_utf8view {
+                            Ok(DataType::Utf8View)
+                        } else {
+                            Ok(DataType::Utf8)
+                        }
+                    }
                 }
             }
             SQLDataType::Numeric(exact_number_info)
@@ -972,10 +1003,16 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(DataType::Struct(Fields::from(fields)))
             }
-            SQLDataType::JSON => Ok(DataType::Utf8),
+            SQLDataType::JSON => Ok(DataType::BinaryView),
             SQLDataType::JSONB => Ok(DataType::BinaryView),
+            SQLDataType::Uuid => {
+                if self.options.map_string_types_to_utf8view {
+                    Ok(DataType::Utf8View)
+                } else {
+                    Ok(DataType::Utf8)
+                }
+            }
             SQLDataType::Nvarchar(_)
-            | SQLDataType::Uuid
             | SQLDataType::Binary(_)
             | SQLDataType::Varbinary(_)
             | SQLDataType::Blob(_)

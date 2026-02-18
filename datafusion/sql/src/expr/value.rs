@@ -33,7 +33,8 @@ use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{Expr, Operator, lit};
 use log::debug;
 use sqlparser::ast::{
-    BinaryOperator, DateTimeField, Expr as SQLExpr, Interval, UnaryOperator, Value, ValueWithSpan,
+    BinaryOperator, DateTimeField, Expr as SQLExpr, Interval, UnaryOperator, Value,
+    ValueWithSpan,
 };
 use sqlparser::parser::ParserError::ParserError;
 use std::borrow::Cow;
@@ -81,8 +82,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Cow::Borrowed(unsigned_number)
         };
 
-        // Try to parse as i64 first, then u64 if negative is false, then decimal or f64
+        // PostgreSQL treats small integer literals as INT4 by default.
+        // Parse i32 first, then widen to i64 when needed.
+        if let Ok(n) = signed_number.parse::<i32>() {
+            return Ok(lit(n));
+        }
 
+        // Try to parse as i64 next, then u64 if negative is false, then decimal or f64
         if let Ok(n) = signed_number.parse::<i64>() {
             return Ok(lit(n));
         }
@@ -211,7 +217,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         // Handle compound intervals like INTERVAL '1-6' YEAR TO MONTH
-        if let (Some(leading), Some(last)) = (&interval.leading_field, &interval.last_field) {
+        if let (Some(leading), Some(last)) =
+            (&interval.leading_field, &interval.last_field)
+        {
             let raw_value = interval_literal(*interval.value, negative)?;
             let compound_value = parse_compound_interval(&raw_value, leading, last)?;
             let config = IntervalParseConfig::new(IntervalUnit::Second);
@@ -269,6 +277,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Some(leading_field) => format!("{value} {leading_field}"),
             None => value,
         };
+        let value = normalize_iso8601_interval_literal(&value).unwrap_or(value);
 
         let config = IntervalParseConfig::new(IntervalUnit::Second);
         let val = parse_interval_month_day_nano_config(&value, config)?;
@@ -313,6 +322,74 @@ fn interval_literal(interval_value: SQLExpr, negative: bool) -> Result<String> {
         }
     };
     if negative { Ok(format!("-{s}")) } else { Ok(s) }
+}
+
+/// Normalize ISO-8601 duration literals (e.g. `P1Y2M3DT4H5M6S`) to
+/// DataFusion interval text format.
+fn normalize_iso8601_interval_literal(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let (negative, body) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, trimmed)
+    };
+
+    let mut rest = body.strip_prefix('P').or_else(|| body.strip_prefix('p'))?;
+
+    let mut in_time = false;
+    let mut parts = Vec::new();
+
+    while !rest.is_empty() {
+        if let Some(next) = rest.strip_prefix('T').or_else(|| rest.strip_prefix('t')) {
+            in_time = true;
+            rest = next;
+            continue;
+        }
+
+        let mut end_idx = 0usize;
+        for (idx, ch) in rest.char_indices() {
+            if ch.is_ascii_digit() || ch == '.' {
+                end_idx = idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if end_idx == 0 {
+            return None;
+        }
+
+        let number = &rest[..end_idx];
+        rest = &rest[end_idx..];
+
+        let unit = rest.chars().next()?;
+        rest = &rest[unit.len_utf8()..];
+
+        let unit_name = match (unit, in_time) {
+            ('Y' | 'y', false) => "years",
+            ('M' | 'm', false) => "months",
+            ('W' | 'w', false) => "weeks",
+            ('D' | 'd', false) => "days",
+            ('H' | 'h', true) => "hours",
+            ('M' | 'm', true) => "minutes",
+            ('S' | 's', true) => "seconds",
+            _ => return None,
+        };
+
+        parts.push(format!("{number} {unit_name}"));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut normalized = parts.join(" ");
+    if negative {
+        normalized = format!("-{normalized}");
+    }
+    Some(normalized)
 }
 
 /// Parse compound interval literals like "1-6" (YEAR TO MONTH) or "1 12:30:45" (DAY TO SECOND).
@@ -449,11 +526,7 @@ fn parse_compound_interval(
             Ok(format!("{} minutes {} seconds", minutes, seconds))
         }
         _ => {
-            not_impl_err!(
-                "Unsupported compound interval: {:?} TO {:?}",
-                leading,
-                last
-            )
+            not_impl_err!("Unsupported compound interval: {:?} TO {:?}", leading, last)
         }
     }
 }
@@ -669,5 +742,18 @@ mod tests {
                 .strip_backtrace(),
             "This feature is not implemented: Decimal precision 77 exceeds the maximum supported precision: 76"
         );
+    }
+
+    #[test]
+    fn test_normalize_iso8601_interval_literal() {
+        assert_eq!(
+            normalize_iso8601_interval_literal("P1Y2M3DT4H5M6S"),
+            Some("1 years 2 months 3 days 4 hours 5 minutes 6 seconds".to_string())
+        );
+        assert_eq!(
+            normalize_iso8601_interval_literal("-P3DT12H"),
+            Some("-3 days 12 hours".to_string())
+        );
+        assert_eq!(normalize_iso8601_interval_literal("2 days"), None);
     }
 }

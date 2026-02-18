@@ -19,8 +19,8 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
-    Column, DFSchema, Dependency, Diagnostic, Result, Span, Spans, internal_datafusion_err,
-    internal_err, not_impl_err, plan_datafusion_err, plan_err,
+    Column, DFSchema, Dependency, Diagnostic, Result, Span, Spans,
+    internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::{
     Expr, ExprSchemable, LogicalPlanBuilder, SortExpr, Subquery, WindowFrame,
@@ -356,6 +356,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
         }
+
+        // PostgreSQL set-returning functions in projection context.
+        // Build them as UNNEST(<list-returning-scalar>) so they can emit rows.
+        if matches!(name.as_str(), "regexp_split_to_table" | "regexp_matches") {
+            if let Some(fm) = self.context_provider.get_function_meta(&name) {
+                let (srf_args, arg_names) = self.function_args_to_expr_with_names(
+                    args.clone(),
+                    schema,
+                    planner_context,
+                )?;
+                if arg_names.iter().any(|arg_name| arg_name.is_some()) {
+                    return plan_err!(
+                        "Function '{}' does not support named arguments",
+                        fm.name()
+                    );
+                }
+                return Ok(Expr::Unnest(Unnest::new(Expr::ScalarFunction(
+                    ScalarFunction::new_udf(fm, srf_args),
+                ))));
+            }
+        }
+
         // User-defined function (UDF) should have precedence
         if let Some(fm) = self.context_provider.get_function_meta(&name) {
             let (args, arg_names) =
@@ -646,31 +668,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .map(Box::new);
 
                 // Special handling for JSON_OBJECTAGG: convert named args (key: value) to positional args
-                let (args, arg_names) = if fm.name().eq_ignore_ascii_case("json_objectagg")
-                    && arg_names.iter().any(|name| name.is_some())
-                {
-                    // For JSON_OBJECTAGG, named arguments represent key-value pairs
-                    // Convert "key: value" to positional args [key, value]
-                    let mut positional_args = Vec::new();
-                    for (arg, name) in args.into_iter().zip(arg_names.iter()) {
-                        if let Some(key_name) = name {
-                            // Add the key as a string literal
-                            positional_args.push(Expr::Literal(
-                                datafusion_common::ScalarValue::Utf8(Some(key_name.clone())),
-                                None,
-                            ));
-                            // Add the value
-                            positional_args.push(arg);
-                        } else {
-                            // If no name, just add the arg (shouldn't happen for JSON_OBJECTAGG)
-                            positional_args.push(arg);
+                let (args, arg_names) =
+                    if fm.name().eq_ignore_ascii_case("json_objectagg")
+                        && arg_names.iter().any(|name| name.is_some())
+                    {
+                        // For JSON_OBJECTAGG, named arguments represent key-value pairs
+                        // Convert "key: value" to positional args [key, value]
+                        let mut positional_args = Vec::new();
+                        for (arg, name) in args.into_iter().zip(arg_names.iter()) {
+                            if let Some(key_name) = name {
+                                // Add the key as a string literal
+                                positional_args.push(Expr::Literal(
+                                    datafusion_common::ScalarValue::Utf8(Some(
+                                        key_name.clone(),
+                                    )),
+                                    None,
+                                ));
+                                // Add the value
+                                positional_args.push(arg);
+                            } else {
+                                // If no name, just add the arg (shouldn't happen for JSON_OBJECTAGG)
+                                positional_args.push(arg);
+                            }
                         }
-                    }
-                    let len = positional_args.len();
-                    (positional_args, vec![None; len])
-                } else {
-                    (args, arg_names)
-                };
+                        let len = positional_args.len();
+                        (positional_args, vec![None; len])
+                    } else {
+                        (args, arg_names)
+                    };
 
                 let resolved_args = if arg_names.iter().any(|name| name.is_some()) {
                     if let Some(param_names) = &fm.signature().parameter_names {
@@ -918,7 +943,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 arg: FunctionArgExpr::Expr(arg),
                 operator: _,
             } => {
-                let value_expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
+                let value_expr =
+                    self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
                 // Extract the string value from the literal to use as the key name
                 let key_name = match value {
                     sqlparser::ast::Value::SingleQuotedString(s) => Some(s),
@@ -1024,18 +1050,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // Get the column expression from the subquery
         let (qualifier, field) = sub_plan.schema().qualified_field(0);
-        let col_expr = Expr::Column(Column::new(
-            qualifier.cloned(),
-            field.name(),
-        ));
+        let col_expr = Expr::Column(Column::new(qualifier.cloned(), field.name()));
 
         // Get array_agg function
         let array_agg_fn = self
             .context_provider
             .get_aggregate_meta("array_agg")
-            .ok_or_else(|| {
-                internal_datafusion_err!("ARRAY_AGG function not found")
-            })?;
+            .ok_or_else(|| internal_datafusion_err!("ARRAY_AGG function not found"))?;
 
         // Convert ORDER BY to sort expressions if present
         let order_by_sort_exprs = if !order_by_exprs.is_empty() {
@@ -1057,7 +1078,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             false, // not distinct
             None,  // no filter
             order_by_sort_exprs,
-            None,  // no null treatment
+            None, // no null treatment
         );
 
         // Build the new subquery: SELECT ARRAY_AGG(col) FROM (original_query)

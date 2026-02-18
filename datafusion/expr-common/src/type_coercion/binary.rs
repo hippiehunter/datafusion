@@ -168,6 +168,31 @@ impl<'a> BinaryTypeCoercer<'a> {
         lhs: &DataType,
         rhs: &DataType,
     ) -> arrow::error::Result<DataType> {
+        use arrow::datatypes::DataType::*;
+
+        // PostgreSQL-compatible temporal arithmetic:
+        // - DATE + integer => DATE
+        // - integer + DATE => DATE
+        // - DATE - integer => DATE
+        // - DATE - DATE => integer day count
+        match self.op {
+            Operator::Plus => match (lhs, rhs) {
+                (Date32, rhs) if is_integral_numeric_type(rhs) => return Ok(Date32),
+                (lhs, Date32) if is_integral_numeric_type(lhs) => return Ok(Date32),
+                (Date64, rhs) if is_integral_numeric_type(rhs) => return Ok(Date64),
+                (lhs, Date64) if is_integral_numeric_type(lhs) => return Ok(Date64),
+                _ => {}
+            },
+            Operator::Minus => match (lhs, rhs) {
+                (Date32, rhs) if is_integral_numeric_type(rhs) => return Ok(Date32),
+                (Date64, rhs) if is_integral_numeric_type(rhs) => return Ok(Date64),
+                (Date32, Date32) => return Ok(Int32),
+                (Date64, Date64) => return Ok(Int64),
+                _ => {}
+            },
+            _ => {}
+        }
+
         use arrow::compute::kernels::numeric::*;
         let l = new_empty_array(lhs);
         let r = new_empty_array(rhs);
@@ -1679,7 +1704,9 @@ fn array_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> 
             let rhs_elem_type = rhs_field.data_type();
 
             // Try to coerce element types using numeric coercion
-            if let Some(coerced_elem_type) = mathematics_numerical_coercion(lhs_elem_type, rhs_elem_type) {
+            if let Some(coerced_elem_type) =
+                mathematics_numerical_coercion(lhs_elem_type, rhs_elem_type)
+            {
                 return Some(List(Arc::new(Field::new(
                     lhs_field.name(),
                     coerced_elem_type,
@@ -1704,12 +1731,13 @@ fn array_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> 
             let rhs_elem_type = rhs_field.data_type();
 
             // Try to coerce element types
-            if let Some(coerced_elem_type) = mathematics_numerical_coercion(lhs_elem_type, rhs_elem_type) {
-                return Some(FixedSizeList(Arc::new(Field::new(
-                    lhs_field.name(),
-                    coerced_elem_type,
-                    true,
-                )), *lhs_size));
+            if let Some(coerced_elem_type) =
+                mathematics_numerical_coercion(lhs_elem_type, rhs_elem_type)
+            {
+                return Some(FixedSizeList(
+                    Arc::new(Field::new(lhs_field.name(), coerced_elem_type, true)),
+                    *lhs_size,
+                ));
             }
 
             // If both elements are the same type, return as is
@@ -2021,6 +2049,14 @@ fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
     }
 }
 
+fn is_integral_numeric_type(data_type: &DataType) -> bool {
+    use arrow::datatypes::DataType::*;
+    matches!(
+        data_type,
+        Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64
+    )
+}
+
 /// Coercion rules for interval arithmetic with numeric types
 /// Supports INTERVAL * numeric and INTERVAL / numeric
 fn interval_numeric_coercion(
@@ -2040,20 +2076,13 @@ fn interval_numeric_coercion(
 
 /// Coercion rules for Time +/- Interval operations
 /// Returns the result type (Time) if the operation is valid
-fn time_interval_coercion(
-    lhs_type: &DataType,
-    rhs_type: &DataType,
-) -> Option<DataType> {
+fn time_interval_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
 
     match (lhs_type, rhs_type) {
         // Time32/Time64 +/- Interval
-        (Time32(unit), Interval(_)) | (Interval(_), Time32(unit)) => {
-            Some(Time32(*unit))
-        }
-        (Time64(unit), Interval(_)) | (Interval(_), Time64(unit)) => {
-            Some(Time64(*unit))
-        }
+        (Time32(unit), Interval(_)) | (Interval(_), Time32(unit)) => Some(Time32(*unit)),
+        (Time64(unit), Interval(_)) | (Interval(_), Time64(unit)) => Some(Time64(*unit)),
         _ => None,
     }
 }
@@ -2099,7 +2128,10 @@ fn null_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
 
 /// Returns true if the type is a text type that could represent JSON
 fn is_json_text_type(dt: &DataType) -> bool {
-    matches!(dt, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
+    matches!(
+        dt,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
 }
 
 /// Returns true if the type is a binary type that could represent JSONB

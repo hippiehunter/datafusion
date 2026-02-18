@@ -45,4 +45,5 @@ arrow = { workspace = true }
 datafusion-common = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
+jsonb = { workspace = true }
 paste = { workspace = true }

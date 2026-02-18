@@ -193,13 +193,12 @@ fn evaluate_array_scalar(
     let right_i64 = scalar_to_i64(right);
 
     // For containment operators, pre-parse RHS as jsonb once
-    let right_jsonb_bytes = if matches!(op, Operator::AtArrow | Operator::ArrowAt)
-        && !right.is_null()
-    {
-        Some(scalar_to_jsonb(right)?)
-    } else {
-        None
-    };
+    let right_jsonb_bytes =
+        if matches!(op, Operator::AtArrow | Operator::ArrowAt) && !right.is_null() {
+            Some(scalar_to_jsonb(right)?)
+        } else {
+            None
+        };
 
     // Determine result type
     match op {
@@ -216,8 +215,7 @@ fn evaluate_array_scalar(
                     let raw = RawJsonb::new(left_bytes.as_ref());
                     match op {
                         Operator::Arrow => {
-                            let result =
-                                json_get(&raw, right_str.as_deref(), right_i64)?;
+                            let result = json_get(&raw, right_str.as_deref(), right_i64)?;
                             append_owned_jsonb_as_text(&mut builder, result);
                         }
                         Operator::HashArrow => {
@@ -245,8 +243,7 @@ fn evaluate_array_scalar(
                     let raw = RawJsonb::new(&left_bytes);
                     match op {
                         Operator::Arrow => {
-                            let result =
-                                json_get(&raw, right_str.as_deref(), right_i64)?;
+                            let result = json_get(&raw, right_str.as_deref(), right_i64)?;
                             append_owned_jsonb_as_binary(&mut builder, result);
                         }
                         Operator::HashArrow => {
@@ -399,8 +396,7 @@ fn evaluate_array_array(
                     let right_i64 = int_array_value(right_arr, i);
                     match op {
                         Operator::Arrow => {
-                            let result =
-                                json_get(&raw, right_str.as_deref(), right_i64)?;
+                            let result = json_get(&raw, right_str.as_deref(), right_i64)?;
                             append_owned_jsonb_as_text(&mut builder, result);
                         }
                         Operator::HashArrow => {
@@ -430,8 +426,7 @@ fn evaluate_array_array(
                     let right_i64 = int_array_value(right_arr, i);
                     match op {
                         Operator::Arrow => {
-                            let result =
-                                json_get(&raw, right_str.as_deref(), right_i64)?;
+                            let result = json_get(&raw, right_str.as_deref(), right_i64)?;
                             append_owned_jsonb_as_binary(&mut builder, result);
                         }
                         Operator::HashArrow => {
@@ -504,14 +499,12 @@ fn evaluate_array_array(
                 let raw = RawJsonb::new(left_bytes.as_ref());
                 let result = match op {
                     Operator::AtArrow => {
-                        let right_bytes =
-                            get_jsonb_bytes(right_arr, i, is_text_rhs)?;
+                        let right_bytes = get_jsonb_bytes(right_arr, i, is_text_rhs)?;
                         let right_raw = RawJsonb::new(right_bytes.as_ref());
                         raw.contains(&right_raw).map_err(jsonb_err)?
                     }
                     Operator::ArrowAt => {
-                        let right_bytes =
-                            get_jsonb_bytes(right_arr, i, is_text_rhs)?;
+                        let right_bytes = get_jsonb_bytes(right_arr, i, is_text_rhs)?;
                         let right_raw = RawJsonb::new(right_bytes.as_ref());
                         right_raw.contains(&raw).map_err(jsonb_err)?
                     }
@@ -627,8 +620,8 @@ fn json_delete(
 
 /// Check jsonpath existence (@? operator).
 fn json_path_exists(raw: &RawJsonb, path_str: &str) -> Result<bool> {
-    let json_path = jsonb::jsonpath::parse_json_path(path_str.as_bytes())
-        .map_err(|e| {
+    let json_path =
+        jsonb::jsonpath::parse_json_path(path_str.as_bytes()).map_err(|e| {
             datafusion_common::DataFusionError::Execution(format!(
                 "Invalid JSON path: {e}"
             ))
@@ -638,8 +631,8 @@ fn json_path_exists(raw: &RawJsonb, path_str: &str) -> Result<bool> {
 
 /// Check jsonpath predicate match (@@ operator).
 fn json_path_match(raw: &RawJsonb, path_str: &str) -> Result<Option<bool>> {
-    let json_path = jsonb::jsonpath::parse_json_path(path_str.as_bytes())
-        .map_err(|e| {
+    let json_path =
+        jsonb::jsonpath::parse_json_path(path_str.as_bytes()).map_err(|e| {
             datafusion_common::DataFusionError::Execution(format!(
                 "Invalid JSON path: {e}"
             ))
@@ -784,10 +777,7 @@ fn binary_array_value(arr: &ArrayRef, i: usize) -> Vec<u8> {
 }
 
 /// Convert an OwnedJsonb result to a ScalarValue matching the LHS type.
-fn owned_jsonb_to_scalar(
-    result: Option<OwnedJsonb>,
-    lhs_type: &DataType,
-) -> ScalarValue {
+fn owned_jsonb_to_scalar(result: Option<OwnedJsonb>, lhs_type: &DataType) -> ScalarValue {
     match result {
         Some(owned) => {
             if is_text_type(lhs_type) {
@@ -831,10 +821,7 @@ fn append_owned_jsonb_as_text(builder: &mut StringBuilder, result: Option<OwnedJ
 }
 
 /// Append an OwnedJsonb to a BinaryBuilder (JSONB binary representation).
-fn append_owned_jsonb_as_binary(
-    builder: &mut BinaryBuilder,
-    result: Option<OwnedJsonb>,
-) {
+fn append_owned_jsonb_as_binary(builder: &mut BinaryBuilder, result: Option<OwnedJsonb>) {
     match result {
         Some(owned) => builder.append_value(owned.as_ref()),
         None => builder.append_null(),
