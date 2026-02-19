@@ -66,7 +66,6 @@ impl Display for NullTreatment {
     }
 }
 
-
 impl From<sqlparser::ast::NullTreatment> for NullTreatment {
     fn from(value: sqlparser::ast::NullTreatment) -> Self {
         match value {
@@ -2821,7 +2820,13 @@ impl Display for SchemaDisplay<'_> {
                     write!(f, "{} {} ANY(<subquery>)", SchemaDisplay(expr), op)
                 }
                 QuantifiedSource::Array(arr) => {
-                    write!(f, "{} {} ANY({})", SchemaDisplay(expr), op, SchemaDisplay(arr))
+                    write!(
+                        f,
+                        "{} {} ANY({})",
+                        SchemaDisplay(expr),
+                        op,
+                        SchemaDisplay(arr)
+                    )
                 }
             },
             Expr::AllExpr(AllExpr { expr, op, source }) => match source {
@@ -2829,7 +2834,13 @@ impl Display for SchemaDisplay<'_> {
                     write!(f, "{} {} ALL(<subquery>)", SchemaDisplay(expr), op)
                 }
                 QuantifiedSource::Array(arr) => {
-                    write!(f, "{} {} ALL({})", SchemaDisplay(expr), op, SchemaDisplay(arr))
+                    write!(
+                        f,
+                        "{} {} ALL({})",
+                        SchemaDisplay(expr),
+                        op,
+                        SchemaDisplay(arr)
+                    )
                 }
             },
             Expr::IsTrue(expr) => write!(f, "{} IS TRUE", SchemaDisplay(expr)),
@@ -3371,13 +3382,7 @@ impl Display for Expr {
                         if !order_by.is_empty() {
                             write!(f, " ORDER BY [{}]", expr_vec_fmt!(order_by))?;
                         }
-                        write!(
-                            f,
-                            " {} BETWEEN {} AND {}",
-                            window_frame.units,
-                            window_frame.start_bound,
-                            window_frame.end_bound
-                        )
+                        write!(f, " {window_frame}")
                     }
                 }
             }

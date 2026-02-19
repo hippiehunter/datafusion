@@ -44,8 +44,8 @@ use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::{
-    AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like,
-    Operator, TryCast,
+    AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like, Operator,
+    TryCast,
     expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
@@ -231,6 +231,7 @@ impl Unparser<'_> {
 
                 let start_bound = self.convert_bound(&window_frame.start_bound)?;
                 let end_bound = self.convert_bound(&window_frame.end_bound)?;
+                let exclude = self.convert_exclusion(&window_frame.exclude)?;
 
                 let window_frame = if self.dialect.window_func_support_window_frame(
                     func_name,
@@ -241,7 +242,7 @@ impl Unparser<'_> {
                         units,
                         start_bound,
                         end_bound: Some(end_bound),
-                        exclude: None,
+                        exclude,
                     })
                 } else {
                     None
@@ -888,6 +889,24 @@ impl Unparser<'_> {
                 Ok(ast::WindowFrameBound::CurrentRow)
             }
         }
+    }
+
+    fn convert_exclusion(
+        &self,
+        exclusion: &datafusion_expr::window_frame::WindowFrameExclusion,
+    ) -> Result<Option<ast::WindowFrameExclude>> {
+        Ok(match exclusion {
+            datafusion_expr::window_frame::WindowFrameExclusion::CurrentRow => {
+                Some(ast::WindowFrameExclude::CurrentRow)
+            }
+            datafusion_expr::window_frame::WindowFrameExclusion::Group => {
+                Some(ast::WindowFrameExclude::Group)
+            }
+            datafusion_expr::window_frame::WindowFrameExclusion::Ties => {
+                Some(ast::WindowFrameExclude::Ties)
+            }
+            datafusion_expr::window_frame::WindowFrameExclusion::NoOthers => None,
+        })
     }
 
     pub(crate) fn function_args_to_sql(
@@ -1903,8 +1922,7 @@ mod tests {
     // datafusion_functions_window) were removed from this workspace.
 
     use crate::unparser::dialect::{
-        CustomDialect, CustomDialectBuilder, Dialect, DuckDBDialect,
-        ScalarFnToSqlHandler,
+        CustomDialect, CustomDialectBuilder, Dialect, DuckDBDialect, ScalarFnToSqlHandler,
     };
 
     use super::*;

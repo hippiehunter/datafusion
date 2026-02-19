@@ -1082,10 +1082,7 @@ pub fn udaf_default_window_function_display_name<F: AggregateUDFImpl + ?Sized>(
             .write_fmt(format_args!(" ORDER BY [{}]", expr_vec_fmt!(order_by)))?;
     };
 
-    display_name.write_fmt(format_args!(
-        " {} BETWEEN {} AND {}",
-        window_frame.units, window_frame.start_bound, window_frame.end_bound
-    ))?;
+    display_name.write_fmt(format_args!(" {window_frame}"))?;
 
     Ok(display_name)
 }

@@ -43,6 +43,9 @@ pub struct WindowFrame {
     pub start_bound: WindowFrameBound,
     /// Ending frame boundary
     pub end_bound: WindowFrameBound,
+    /// Optional EXCLUDE clause. `NoOthers` is equivalent to the default
+    /// (no explicit exclusion).
+    pub exclude: WindowFrameExclusion,
     /// Flag indicating whether the frame is causal (i.e. computing the result
     /// for the current row doesn't depend on any subsequent rows).
     ///
@@ -99,6 +102,9 @@ impl fmt::Display for WindowFrame {
             "{} BETWEEN {} AND {}",
             self.units, self.start_bound, self.end_bound
         )?;
+        if self.exclude != WindowFrameExclusion::NoOthers {
+            write!(f, " {}", self.exclude)?;
+        }
         Ok(())
     }
 }
@@ -107,13 +113,12 @@ impl fmt::Debug for WindowFrame {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "WindowFrame {{ units: {:?}, start_bound: {:?}, end_bound: {:?}, is_causal: {:?} }}",
-            self.units, self.start_bound, self.end_bound, self.causal
+            "WindowFrame {{ units: {:?}, start_bound: {:?}, end_bound: {:?}, exclude: {:?}, is_causal: {:?} }}",
+            self.units, self.start_bound, self.end_bound, self.exclude, self.causal
         )?;
         Ok(())
     }
 }
-
 
 impl TryFrom<ast::WindowFrame> for WindowFrame {
     type Error = datafusion_common::error::DataFusionError;
@@ -124,6 +129,10 @@ impl TryFrom<ast::WindowFrame> for WindowFrame {
             Some(bound) => WindowFrameBound::try_parse(bound, &value.units)?,
             None => WindowFrameBound::CurrentRow,
         };
+        let exclude = value
+            .exclude
+            .map(WindowFrameExclusion::from)
+            .unwrap_or(WindowFrameExclusion::NoOthers);
 
         if let WindowFrameBound::Following(val) = &start_bound {
             if val.is_null() {
@@ -138,7 +147,12 @@ impl TryFrom<ast::WindowFrame> for WindowFrame {
         };
 
         let units = value.units.into();
-        Ok(Self::new_bounds(units, start_bound, end_bound))
+        Ok(Self::new_bounds_with_exclusion(
+            units,
+            start_bound,
+            end_bound,
+            exclude,
+        ))
     }
 }
 
@@ -160,6 +174,7 @@ impl WindowFrame {
                 },
                 start_bound: WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
                 end_bound: WindowFrameBound::CurrentRow,
+                exclude: WindowFrameExclusion::NoOthers,
                 causal: strict,
             }
         } else {
@@ -170,6 +185,7 @@ impl WindowFrame {
                 units: WindowFrameUnits::Rows,
                 start_bound: WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
                 end_bound: WindowFrameBound::Following(ScalarValue::UInt64(None)),
+                exclude: WindowFrameExclusion::NoOthers,
                 causal: false,
             }
         }
@@ -197,7 +213,7 @@ impl WindowFrame {
             }
             WindowFrameBound::CurrentRow => WindowFrameBound::CurrentRow,
         };
-        Self::new_bounds(self.units, start_bound, end_bound)
+        Self::new_bounds_with_exclusion(self.units, start_bound, end_bound, self.exclude)
     }
 
     /// Get whether window frame is causal
@@ -210,6 +226,22 @@ impl WindowFrame {
         units: WindowFrameUnits,
         start_bound: WindowFrameBound,
         end_bound: WindowFrameBound,
+    ) -> Self {
+        Self::new_bounds_with_exclusion(
+            units,
+            start_bound,
+            end_bound,
+            WindowFrameExclusion::NoOthers,
+        )
+    }
+
+    /// Initializes window frame from units (type), start bound, end bound and
+    /// EXCLUDE mode.
+    pub fn new_bounds_with_exclusion(
+        units: WindowFrameUnits,
+        start_bound: WindowFrameBound,
+        end_bound: WindowFrameBound,
+        exclude: WindowFrameExclusion,
     ) -> Self {
         let causal = match units {
             WindowFrameUnits::Rows => match &end_bound {
@@ -241,6 +273,7 @@ impl WindowFrame {
             units,
             start_bound,
             end_bound,
+            exclude,
             causal,
         }
     }
@@ -340,7 +373,6 @@ impl WindowFrameBound {
 }
 
 impl WindowFrameBound {
-    
     fn try_parse(
         value: ast::WindowFrameBound,
         units: &ast::WindowFrameUnits,
@@ -362,7 +394,6 @@ impl WindowFrameBound {
         })
     }
 }
-
 
 fn convert_frame_bound_to_scalar_value(
     v: ast::Expr,
@@ -474,6 +505,37 @@ pub enum WindowFrameUnits {
     Groups,
 }
 
+/// EXCLUDE clause for a window frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
+pub enum WindowFrameExclusion {
+    CurrentRow,
+    Group,
+    Ties,
+    NoOthers,
+}
+
+impl fmt::Display for WindowFrameExclusion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CurrentRow => "EXCLUDE CURRENT ROW",
+            Self::Group => "EXCLUDE GROUP",
+            Self::Ties => "EXCLUDE TIES",
+            Self::NoOthers => "EXCLUDE NO OTHERS",
+        })
+    }
+}
+
+impl From<ast::WindowFrameExclude> for WindowFrameExclusion {
+    fn from(value: ast::WindowFrameExclude) -> Self {
+        match value {
+            ast::WindowFrameExclude::CurrentRow => Self::CurrentRow,
+            ast::WindowFrameExclude::Group => Self::Group,
+            ast::WindowFrameExclude::Ties => Self::Ties,
+            ast::WindowFrameExclude::NoOthers => Self::NoOthers,
+        }
+    }
+}
+
 impl fmt::Display for WindowFrameUnits {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.write_str(match self {
@@ -483,7 +545,6 @@ impl fmt::Display for WindowFrameUnits {
         })
     }
 }
-
 
 impl From<ast::WindowFrameUnits> for WindowFrameUnits {
     fn from(value: ast::WindowFrameUnits) -> Self {

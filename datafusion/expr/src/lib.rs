@@ -97,9 +97,8 @@ pub use datafusion_expr_common::signature::{
 };
 pub use datafusion_expr_common::type_coercion::binary;
 pub use expr::{
-    AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GetFieldAccess,
-    GroupingSet, Like, QuantifiedSource, Sort as SortExpr, TryCast,
-    WindowFunctionDefinition,
+    AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GetFieldAccess, GroupingSet,
+    Like, QuantifiedSource, Sort as SortExpr, TryCast, WindowFunctionDefinition,
 };
 pub use expr_fn::*;
 pub use expr_schema::ExprSchemable;
@@ -123,7 +122,9 @@ pub use udaf::{
 };
 pub use udf::{ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl};
 pub use udwf::{LimitEffect, ReversedUDWF, WindowUDF, WindowUDFImpl};
-pub use window_frame::{WindowFrame, WindowFrameBound, WindowFrameUnits};
+pub use window_frame::{
+    WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnits,
+};
 
 #[cfg(test)]
 #[ctor::ctor]
