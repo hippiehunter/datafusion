@@ -372,6 +372,9 @@ impl<'a> BinaryTypeCoercer<'a> {
                 } else if let Some(numeric) = mathematics_numerical_coercion(lhs, rhs) {
                     // Numeric arithmetic, e.g. Int32 + Int32
                     Ok(Signature::uniform(numeric))
+                } else if let Some(numeric) = string_numeric_coercion_as_numeric(lhs, rhs) {
+                    // Implicit string-to-numeric coercion, e.g. Int32 + Utf8 → Int32
+                    Ok(Signature::uniform(numeric))
                 } else {
                     plan_err!(
                         "Cannot coerce arithmetic expression {} {} {} to valid types", self.lhs, self.op, self.rhs
@@ -379,6 +382,9 @@ impl<'a> BinaryTypeCoercer<'a> {
                 }
             } else if let Some(numeric) = mathematics_numerical_coercion(lhs, rhs) {
                 // Numeric arithmetic, e.g. Int32 + Int32
+                Ok(Signature::uniform(numeric))
+            } else if let Some(numeric) = string_numeric_coercion_as_numeric(lhs, rhs) {
+                // Implicit string-to-numeric coercion, e.g. Int32 + Utf8 → Int32
                 Ok(Signature::uniform(numeric))
             } else {
                 plan_err!(

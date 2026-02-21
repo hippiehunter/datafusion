@@ -19,16 +19,16 @@ use super::*;
 use datafusion_common::assert_contains;
 
 #[test]
-fn test_coercion_error() -> Result<()> {
+fn test_string_numeric_arithmetic_coercion() -> Result<()> {
     let coercer =
         BinaryTypeCoercer::new(&DataType::Float32, &Operator::Plus, &DataType::Utf8);
-    let result_type = coercer.get_input_types();
+    let result_type = coercer.get_input_types()?;
+    assert_eq!(result_type, vec![DataType::Float32, DataType::Float32]);
 
-    let e = result_type.unwrap_err();
-    assert_eq!(
-        e.strip_backtrace(),
-        "Error during planning: Cannot coerce arithmetic expression Float32 + Utf8 to valid types"
-    );
+    let coercer =
+        BinaryTypeCoercer::new(&DataType::Utf8, &Operator::Multiply, &DataType::Int32);
+    let result_type = coercer.get_input_types()?;
+    assert_eq!(result_type, vec![DataType::Int32, DataType::Int32]);
     Ok(())
 }
 
