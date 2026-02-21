@@ -448,12 +448,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 data_type,
                 value,
                 uses_odbc_syntax: _,
-            }) => Ok(Expr::Cast(Cast::new(
-                Box::new(lit(value.into_string().unwrap())),
-                self.convert_data_type_to_field(&data_type)?
-                    .data_type()
-                    .clone(),
-            ))),
+            }) => {
+                if Self::is_regclass_sql_type(&data_type) {
+                    return self.sql_regclass_cast_from_arg_expr(
+                        lit(value.into_string().unwrap()),
+                    );
+                }
+
+                Ok(Expr::Cast(Cast::new(
+                    Box::new(lit(value.into_string().unwrap())),
+                    self.convert_data_type_to_field(&data_type)?
+                        .data_type()
+                        .clone(),
+                )))
+            }
 
             SQLExpr::IsNull { expr, .. } => Ok(Expr::IsNull(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
@@ -1216,6 +1224,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return not_impl_err!("CAST with format is not supported: {format}");
         }
 
+        if Self::is_regclass_sql_type(data_type) {
+            return self.sql_regclass_cast_to_expr(expr, schema, planner_context);
+        }
+
         let dt = self.convert_data_type_to_field(data_type)?;
         let expr = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
 
@@ -1239,6 +1251,38 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Box::new(expr),
             dt.data_type().clone(),
         )))
+    }
+
+    fn sql_regclass_cast_to_expr(
+        &self,
+        expr: SQLExpr,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let arg = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        self.sql_regclass_cast_from_arg_expr(arg)
+    }
+
+    fn sql_regclass_cast_from_arg_expr(&self, arg: Expr) -> Result<Expr> {
+        let fun = self
+            .context_provider
+            .get_function_meta("__dbl_regclass_cast")
+            .ok_or_else(|| {
+                internal_datafusion_err!(
+                    "Unable to find expected '__dbl_regclass_cast' function"
+                )
+            })?;
+
+        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(fun, vec![arg])))
+    }
+
+    fn is_regclass_sql_type(data_type: &SQLDataType) -> bool {
+        matches!(data_type, SQLDataType::Regclass)
+            || matches!(
+                data_type,
+                SQLDataType::Custom(name, _)
+                    if name.to_string().eq_ignore_ascii_case("regclass")
+            )
     }
 
     /// Extracts the root expression and access chain from a compound expression.

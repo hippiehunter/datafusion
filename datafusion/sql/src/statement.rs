@@ -345,9 +345,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if comment.is_some() {
                     return not_impl_err!("Comment not supported")?;
                 }
-                if on_commit.is_some() {
-                    return not_impl_err!("On commit not supported")?;
-                }
                 if on_cluster.is_some() {
                     return not_impl_err!("On cluster not supported")?;
                 }
@@ -378,7 +375,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if version.is_some() {
                     return not_impl_err!("Version not supported")?;
                 }
-                let storage_parameters = match table_options {
+                let mut storage_parameters = match table_options {
                     CreateTableOptions::None => BTreeMap::new(),
                     CreateTableOptions::With(options) => {
                         self.parse_storage_parameters(options)?
@@ -389,6 +386,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         )?;
                     }
                 };
+                if let Some(on_commit) = on_commit {
+                    if !temporary {
+                        return plan_err!(
+                            "ON COMMIT can only be used on temporary tables"
+                        );
+                    }
+                    let on_commit_value = match on_commit {
+                        ast::OnCommit::PreserveRows => "preserve_rows",
+                        ast::OnCommit::DeleteRows => "delete_rows",
+                        ast::OnCommit::Drop => "drop",
+                    };
+                    // Internal marker consumed by downstream planners.
+                    storage_parameters.insert(
+                        "__dbl_on_commit".to_string(),
+                        on_commit_value.to_string(),
+                    );
+                }
                 // Merge inline constraints and existing constraints
                 let mut all_constraints = constraints;
                 let inline_constraints = calc_inline_constraints_from_columns(&columns);
