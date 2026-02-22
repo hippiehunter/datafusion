@@ -832,10 +832,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         self.sql_expr_to_logical_expr(*left, schema, planner_context)?;
                     let right_expr =
                         self.sql_expr_to_logical_expr(*right, schema, planner_context)?;
+
+                    // Try ExprPlanners first (e.g., for column-typed arrays)
+                    let mut any_expr = RawBinaryExpr {
+                        op: compare_op,
+                        left: left_expr,
+                        right: right_expr,
+                    };
+                    for planner in self.context_provider.get_expr_planners() {
+                        match planner.plan_any(any_expr)? {
+                            PlannerResult::Planned(expr) => return Ok(expr),
+                            PlannerResult::Original(expr) => {
+                                any_expr = expr;
+                            }
+                        }
+                    }
+
                     Ok(Expr::AnyExpr(AnyExpr::new(
-                        Box::new(left_expr),
+                        Box::new(any_expr.left),
                         op,
-                        QuantifiedSource::Array(Box::new(right_expr)),
+                        QuantifiedSource::Array(Box::new(any_expr.right)),
                     )))
                 }
             }
