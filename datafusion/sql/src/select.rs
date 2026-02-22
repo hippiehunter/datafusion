@@ -29,7 +29,7 @@ use crate::utils::{
 
 use datafusion_common::error::DataFusionErrorBuilder;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{Column, RecursionUnnestOption, UnnestOptions};
+use datafusion_common::{Column, DFSchema, RecursionUnnestOption, UnnestOptions};
 use datafusion_common::{Result, not_impl_err, plan_err};
 use datafusion_expr::expr::{Alias, PlannedReplaceSelectItem, WildcardOptions};
 use datafusion_expr::expr_rewriter::{
@@ -46,9 +46,9 @@ use datafusion_expr::{
 
 use indexmap::IndexMap;
 use sqlparser::ast::{
-    Distinct, Expr as SQLExpr, GroupByExpr, NamedWindowExpr, OrderBy,
-    SelectItemQualifiedWildcardKind, WildcardAdditionalOptions, WindowType,
-    visit_expressions_mut,
+    Distinct, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, NamedWindowExpr, OrderBy, SelectItemQualifiedWildcardKind,
+    WildcardAdditionalOptions, WindowType, visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
 
@@ -91,8 +91,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         // Process `from` clause
-        let plan = self.plan_from_tables(select.from, planner_context)?;
+        let from = std::mem::take(&mut select.from);
+        let plan = self.plan_from_tables(from, planner_context)?;
         let empty_from = matches!(plan, LogicalPlan::EmptyRelation(_));
+
+        // Detect set-returning functions in SELECT with no FROM clause.
+        // PostgreSQL allows `SELECT srf(args)` as shorthand for `SELECT * FROM srf(args)`.
+        let (plan, empty_from) = if empty_from {
+            match self.try_rewrite_srf_select(&mut select, planner_context) {
+                Ok(Some(srf_plan)) => (srf_plan, false),
+                _ => (plan, true),
+            }
+        } else {
+            (plan, empty_from)
+        };
 
         // Process `where` clause
         let base_plan = self.plan_selection(select.selection, plan, planner_context)?;
@@ -651,6 +663,57 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         Ok((intermediate_plan, intermediate_select_exprs))
+    }
+
+    /// Checks if a SELECT with no FROM clause contains a single set-returning function
+    /// call, and if so rewrites the plan as `SELECT * FROM func(args)`.
+    fn try_rewrite_srf_select(
+        &self,
+        select: &mut Select,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Option<LogicalPlan>> {
+        if select.projection.len() != 1 {
+            return Ok(None);
+        }
+
+        let func = match &select.projection[0] {
+            SelectItem::UnnamedExpr(SQLExpr::Function(f)) => f.clone(),
+            _ => return Ok(None),
+        };
+
+        let func_name = func.name.to_string().to_ascii_lowercase();
+
+        let schema = DFSchema::empty();
+        let func_args = match func.args {
+            FunctionArguments::List(list) => list
+                .args
+                .into_iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(expr),
+                        ..
+                    } => self.sql_expr_to_logical_expr(expr, &schema, planner_context),
+                    _ => plan_err!("Unsupported function argument: {arg:?}"),
+                })
+                .collect::<Result<Vec<Expr>>>()?,
+            FunctionArguments::None => vec![],
+            _ => return Ok(None),
+        };
+
+        match self
+            .context_provider
+            .get_table_function_source(&func_name, func_args)
+        {
+            Ok(provider) => {
+                let plan =
+                    LogicalPlanBuilder::scan(&func_name, provider, None)?.build()?;
+                select.projection =
+                    vec![SelectItem::Wildcard(WildcardAdditionalOptions::default())];
+                Ok(Some(plan))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     pub(crate) fn plan_selection(

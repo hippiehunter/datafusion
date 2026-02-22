@@ -87,10 +87,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 StackEntry::SQLExpr(sql_expr) => {
                     match *sql_expr {
                         SQLExpr::BinaryOp { left, op, right } => {
-                            if matches!(
-                                op,
-                                BinaryOperator::PGOverlap | BinaryOperator::Overlaps
-                            ) {
+                            if matches!(op, BinaryOperator::Overlaps) {
                                 let expr = self.plan_pg_overlaps_expr(
                                     *left,
                                     *right,

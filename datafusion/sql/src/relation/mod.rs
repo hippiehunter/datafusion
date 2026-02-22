@@ -35,7 +35,10 @@ use datafusion_expr::{
     LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier, RowLimiting,
     Subquery, SubqueryAlias,
 };
-use sqlparser::ast::{FunctionArg, FunctionArgExpr, Ident, Spanned, TableFactor};
+use sqlparser::ast::{
+    Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Spanned,
+    TableFactor,
+};
 
 mod join;
 
@@ -698,7 +701,60 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )?;
                 (plan, alias)
             }
-            // @todo Support TableFactory::TableFunction?
+            TableFactor::TableFunction { expr, alias } => {
+                if let SQLExpr::Function(func) = expr {
+                    let tbl_func_ref = self.object_name_to_table_reference(func.name)?;
+                    let schema = planner_context
+                        .outer_query_schema()
+                        .cloned()
+                        .unwrap_or_else(DFSchema::empty);
+                    let func_args = match func.args {
+                        FunctionArguments::List(list) => list
+                            .args
+                            .into_iter()
+                            .map(|arg| match arg {
+                                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                                | FunctionArg::Named {
+                                    arg: FunctionArgExpr::Expr(expr),
+                                    ..
+                                } => {
+                                    self.sql_expr_to_logical_expr(
+                                        expr,
+                                        &schema,
+                                        planner_context,
+                                    )
+                                }
+                                _ => plan_err!(
+                                    "Unsupported function argument: {arg:?}"
+                                ),
+                            })
+                            .collect::<Result<Vec<Expr>>>()?,
+                        FunctionArguments::None => vec![],
+                        other => {
+                            return not_impl_err!(
+                                "Unsupported table function arguments: {other:?}"
+                            );
+                        }
+                    };
+                    let provider = self
+                        .context_provider
+                        .get_table_function_source(
+                            tbl_func_ref.table(),
+                            func_args,
+                        )?;
+                    let plan = LogicalPlanBuilder::scan(
+                        tbl_func_ref.table(),
+                        provider,
+                        None,
+                    )?
+                    .build()?;
+                    (plan, alias)
+                } else {
+                    return not_impl_err!(
+                        "TableFunction with non-function expression: {expr:?}"
+                    );
+                }
+            }
             _ => {
                 return not_impl_err!(
                     "Unsupported ast node {relation:?} in create_relation"
