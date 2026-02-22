@@ -3028,6 +3028,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .map(|(qualifier, field)| {
                 let expr = match assign_map.remove(field.name()) {
                     Some(new_value) => {
+                        let new_value = crate::values::maybe_rewrite_pg_array_literal(
+                            new_value,
+                            Some(field.data_type()),
+                        );
                         let mut expr = self.sql_to_expr(
                             new_value,
                             source.schema(),
