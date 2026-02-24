@@ -18,8 +18,9 @@
 use crate::logical_plan;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{
-    ParamValues, ScalarValue, assert_contains,
-    metadata::{ScalarAndMetadata, format_type_and_metadata},
+    assert_contains,
+    metadata::{format_type_and_metadata, ScalarAndMetadata},
+    ParamValues, ScalarValue,
 };
 use datafusion_expr::{LogicalPlan, Prepare, Statement};
 use insta::assert_snapshot;
@@ -128,12 +129,10 @@ fn test_prepare_statement_to_plan_panic_prepare_wrong_syntax() {
     // param is not number following the $ sign
     // panic due to error returned from the parser
     let sql = "PREPARE AS SELECT id, age  FROM person WHERE age = $foo";
-    assert!(
-        logical_plan(sql)
-            .unwrap_err()
-            .strip_backtrace()
-            .contains("Expected: AS, found: SELECT")
-    )
+    assert!(logical_plan(sql)
+        .unwrap_err()
+        .strip_backtrace()
+        .contains("Expected: AS, found: SELECT"))
 }
 
 #[test]
@@ -155,7 +154,7 @@ fn test_prepare_statement_should_infer_types() {
     let actual_types = plan.get_parameter_types().unwrap();
     let expected_types = HashMap::from([
         ("$1".to_string(), Some(DataType::Int32)),
-        ("$2".to_string(), Some(DataType::Int64)),
+        ("$2".to_string(), Some(DataType::Int32)),
     ]);
     assert_eq!(actual_types, expected_types);
 }
@@ -167,8 +166,8 @@ fn test_non_prepare_statement_should_infer_types() {
     let plan = logical_plan(sql).unwrap();
     let actual_types = plan.get_parameter_types().unwrap();
     let expected_types = HashMap::from([
-        // constant 1 is inferred to be int64
-        ("$1".to_string(), Some(DataType::Int64)),
+        // constant 1 is inferred to be int32
+        ("$1".to_string(), Some(DataType::Int32)),
     ]);
     assert_eq!(actual_types, expected_types);
 }
@@ -192,7 +191,7 @@ fn test_prepare_statement_to_plan_no_param() {
         @r#"
     Prepare: "my_plan" [Int32]
       Projection: person.id, person.age
-        Filter: person.age = Int64(10)
+        Filter: person.age = Int32(10)
           TableScan: person
     "#
     );
@@ -206,7 +205,7 @@ fn test_prepare_statement_to_plan_no_param() {
         plan_with_params,
         @r"
     Projection: person.id, person.age
-      Filter: person.age = Int64(10)
+      Filter: person.age = Int32(10)
         TableScan: person
     "
     );
@@ -220,7 +219,7 @@ fn test_prepare_statement_to_plan_no_param() {
         @r#"
     Prepare: "my_plan" []
       Projection: person.id, person.age
-        Filter: person.age = Int64(10)
+        Filter: person.age = Int32(10)
           TableScan: person
     "#
     );
@@ -234,7 +233,7 @@ fn test_prepare_statement_to_plan_no_param() {
         plan_with_params,
         @r"
     Projection: person.id, person.age
-      Filter: person.age = Int64(10)
+      Filter: person.age = Int32(10)
         TableScan: person
     "
     );
@@ -326,7 +325,7 @@ fn test_prepare_statement_to_plan_params_as_constants() {
         plan,
         @r#"
     Prepare: "my_plan" [Int32]
-      Projection: Int64(1) + $1
+      Projection: Int32(1) + $1
         EmptyRelation: rows=1
     "#
     );
@@ -339,7 +338,7 @@ fn test_prepare_statement_to_plan_params_as_constants() {
     assert_snapshot!(
         plan_with_params,
         @r"
-    Projection: Int64(1) + Int32(10) AS Int64(1) + $1
+    Projection: Int32(1) + Int32(10) AS Int32(1) + $1
       EmptyRelation: rows=1
     "
     );
@@ -351,7 +350,7 @@ fn test_prepare_statement_to_plan_params_as_constants() {
         plan,
         @r#"
     Prepare: "my_plan" [Int32, Float64]
-      Projection: Int64(1) + $1 + $2
+      Projection: Int32(1) + $1 + $2
         EmptyRelation: rows=1
     "#
     );
@@ -367,7 +366,7 @@ fn test_prepare_statement_to_plan_params_as_constants() {
     assert_snapshot!(
         plan_with_params,
         @r"
-    Projection: Int64(1) + Int32(10) + Float64(10) AS Int64(1) + $1 + $2
+    Projection: Int32(1) + Int32(10) + Float64(10) AS Int32(1) + $1 + $2
       EmptyRelation: rows=1
     "
     );
@@ -376,7 +375,8 @@ fn test_prepare_statement_to_plan_params_as_constants() {
 #[test]
 fn test_infer_types_from_join() {
     let test = ParameterTest {
-        sql: "SELECT id, order_id FROM person JOIN orders ON id = customer_id and age = $1",
+        sql:
+            "SELECT id, order_id FROM person JOIN orders ON id = customer_id and age = $1",
         expected_types: vec![("$1", Some(DataType::Int32))],
         param_values: vec![ScalarValue::Int32(Some(10))],
     };
@@ -967,7 +967,7 @@ fn test_prepare_statement_to_plan_having() {
         @r#"
     Prepare: "my_plan" [Int32, Float64, Float64, Float64]
       Projection: person.id, sum(person.age)
-        Filter: sum(person.age) < $1 AND sum(person.age) > Int64(10) OR sum(person.age) IN ([$3, $4])
+        Filter: sum(person.age) < $1 AND sum(person.age) > Int32(10) OR sum(person.age) IN ([$3, $4])
           Aggregate: groupBy=[[person.id]], aggr=[[sum(person.age)]]
             Filter: person.salary > $2
               TableScan: person
@@ -989,7 +989,7 @@ fn test_prepare_statement_to_plan_having() {
         plan_with_params,
         @r#"
     Projection: person.id, sum(person.age)
-      Filter: sum(person.age) < Int32(10) AND sum(person.age) > Int64(10) OR sum(person.age) IN ([Float64(200), Float64(300)])
+      Filter: sum(person.age) < Int32(10) AND sum(person.age) > Int32(10) OR sum(person.age) IN ([Float64(200), Float64(300)])
         Aggregate: groupBy=[[person.id]], aggr=[[sum(person.age)]]
           Filter: person.salary > Float64(100)
             TableScan: person

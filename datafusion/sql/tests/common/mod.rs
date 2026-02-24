@@ -24,7 +24,7 @@ use std::{sync::Arc, vec};
 use arrow::datatypes::*;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{GetExt, Result, TableReference, plan_err};
+use datafusion_common::{plan_err, GetExt, Result, TableReference};
 use datafusion_expr::planner::{ExprPlanner, TypePlanner};
 use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::ContextProvider;

@@ -22,22 +22,23 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use arrow::datatypes::Field;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, Diagnostic, Result, Span, Spans, TableReference, UnnestOptions, not_impl_err, plan_err,
+    Column, DFSchema, Diagnostic, Result, Span, Spans, TableReference, UnnestOptions,
+    not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::planner::{
     PlannedRelation, RelationPlannerContext, RelationPlanning,
 };
-use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, expr::Unnest};
 use datafusion_expr::{
     EdgeDirection, EdgePattern, GraphColumn, GraphPattern, GraphPatternElement,
     GraphPatternExpr, GraphTable, JsonTable, JsonTableColumnDef, JsonTableErrorHandling,
-    LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier, RowLimiting,
-    Subquery, SubqueryAlias,
+    LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier,
+    RowLimiting, Subquery, SubqueryAlias,
 };
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, expr::Unnest};
 use sqlparser::ast::{
     Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Spanned,
-    TableFactor,
+    TableAliasColumnDef, TableFactor,
 };
 
 mod join;
@@ -114,7 +115,9 @@ fn extract_pattern_symbols_recursive(
     use sqlparser::ast::MatchRecognizePattern;
 
     match pattern {
-        MatchRecognizePattern::Symbol(sqlparser::ast::MatchRecognizeSymbol::Named(ident)) => {
+        MatchRecognizePattern::Symbol(sqlparser::ast::MatchRecognizeSymbol::Named(
+            ident,
+        )) => {
             let name = normalizer(ident.clone());
             if !symbols.contains(&name) {
                 symbols.push(name);
@@ -123,7 +126,9 @@ fn extract_pattern_symbols_recursive(
         MatchRecognizePattern::Symbol(_) => {
             // Skip Start and End anchors
         }
-        MatchRecognizePattern::Exclude(sqlparser::ast::MatchRecognizeSymbol::Named(ident)) => {
+        MatchRecognizePattern::Exclude(sqlparser::ast::MatchRecognizeSymbol::Named(
+            ident,
+        )) => {
             let name = normalizer(ident.clone());
             if !symbols.contains(&name) {
                 symbols.push(name);
@@ -202,19 +207,30 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// Converts references like `A.value` to unqualified `value`, making the expression
     /// compatible with the input schema validation while preserving the semantic meaning
     /// for later pattern matching execution.
-    fn strip_pattern_var_qualifiers(&self, expr: Expr, pattern_var_names: &[String]) -> Expr {
+    fn strip_pattern_var_qualifiers(
+        &self,
+        expr: Expr,
+        pattern_var_names: &[String],
+    ) -> Expr {
         expr.transform(|e| {
             if let Expr::Column(col) = &e {
                 if let Some(qualifier) = &col.relation {
                     // Check if this qualifier is a pattern variable
-                    if pattern_var_names.iter().any(|pv| qualifier.table() == pv.as_str()) {
+                    if pattern_var_names
+                        .iter()
+                        .any(|pv| qualifier.table() == pv.as_str())
+                    {
                         // Strip the pattern variable qualifier, making it unqualified
-                        return Ok(Transformed::yes(Expr::Column(Column::new_unqualified(&col.name))));
+                        return Ok(Transformed::yes(Expr::Column(
+                            Column::new_unqualified(&col.name),
+                        )));
                     }
                 }
             }
             Ok(Transformed::no(e))
-        }).data().expect("transform should not fail")
+        })
+        .data()
+        .expect("transform should not fail")
     }
 
     /// Create a `LogicalPlan` that scans the named relation.
@@ -356,7 +372,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 alias,
             ),
             TableFactor::UNNEST {
-                alias,
+                mut alias,
                 array_exprs,
                 with_offset: false,
                 with_offset_alias: None,
@@ -385,14 +401,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Create options with ordinality if requested
                 let options = if with_ordinality {
-                    Some(UnnestOptions::new()
-                        .with_preserve_nulls(false)
-                        .with_ordinality(true))
+                    Some(
+                        UnnestOptions::new()
+                            .with_preserve_nulls(false)
+                            .with_ordinality(true),
+                    )
                 } else {
                     None
                 };
 
-                let logical_plan = self.try_process_unnest_with_options(input, unnest_exprs, options)?;
+                let single_unnest_output = !with_ordinality && unnest_exprs.len() == 1;
+                let logical_plan =
+                    self.try_process_unnest_with_options(input, unnest_exprs, options)?;
+
+                // PostgreSQL compatibility: for a single-argument UNNEST with an alias but no
+                // explicit column alias list, treat the relation alias as the output column name.
+                // Example: `UNNEST(arr) AS x` exposes column `x`.
+                if single_unnest_output {
+                    if let Some(table_alias) = alias.as_mut()
+                        && table_alias.columns.is_empty()
+                    {
+                        table_alias.columns.push(TableAliasColumnDef {
+                            name: table_alias.name.clone(),
+                            data_type: None,
+                        });
+                    }
+                }
+
                 (logical_plan, alias)
             }
             TableFactor::UNNEST { .. } => {
@@ -447,9 +482,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     SubsetDef, SymbolDef,
                 };
                 use sqlparser::ast::{
-                    AfterMatchSkip, EmptyMatchesMode as SqlEmptyMatchesMode, MatchRecognizePattern,
-                    MatchRecognizeSymbol, Measure, RepetitionQuantifier as SqlRepetitionQuantifier,
-                    RowsPerMatch, SubsetDefinition, SymbolDefinition,
+                    AfterMatchSkip, EmptyMatchesMode as SqlEmptyMatchesMode,
+                    MatchRecognizePattern, MatchRecognizeSymbol, Measure,
+                    RepetitionQuantifier as SqlRepetitionQuantifier, RowsPerMatch,
+                    SubsetDefinition, SymbolDefinition,
                 };
 
                 // Plan the input table
@@ -489,19 +525,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Create an augmented schema that includes pattern variables as qualifiers
                 // This allows expressions like A.value to resolve correctly in MEASURES and DEFINE
-                let augmented_schema = self.create_match_recognize_schema(
-                    input_schema,
-                    &pattern_var_names,
-                )?;
+                let augmented_schema =
+                    self.create_match_recognize_schema(input_schema, &pattern_var_names)?;
 
                 // Convert measures using the augmented schema, then strip pattern variable qualifiers
                 let measure_exprs: Vec<MeasureExpr> = measures
                     .into_iter()
                     .map(|Measure { expr, alias }| {
-                        let mut converted_expr = self.sql_to_expr(expr, &augmented_schema, planner_context)?;
+                        let mut converted_expr =
+                            self.sql_to_expr(expr, &augmented_schema, planner_context)?;
                         // Strip pattern variable qualifiers from the expression
                         // to make it compatible with input schema validation
-                        converted_expr = self.strip_pattern_var_qualifiers(converted_expr, &pattern_var_names);
+                        converted_expr = self.strip_pattern_var_qualifiers(
+                            converted_expr,
+                            &pattern_var_names,
+                        );
                         Ok(MeasureExpr {
                             expr: converted_expr,
                             alias: self.ident_normalizer.normalize(alias),
@@ -528,12 +566,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let after_match_skip_opt = after_match_skip.map(|ams| match ams {
                     AfterMatchSkip::PastLastRow => AfterMatchSkipOption::PastLastRow,
                     AfterMatchSkip::ToNextRow => AfterMatchSkipOption::ToNextRow,
-                    AfterMatchSkip::ToFirst(ident) => {
-                        AfterMatchSkipOption::ToFirst(self.ident_normalizer.normalize(ident))
-                    }
-                    AfterMatchSkip::ToLast(ident) => {
-                        AfterMatchSkipOption::ToLast(self.ident_normalizer.normalize(ident))
-                    }
+                    AfterMatchSkip::ToFirst(ident) => AfterMatchSkipOption::ToFirst(
+                        self.ident_normalizer.normalize(ident),
+                    ),
+                    AfterMatchSkip::ToLast(ident) => AfterMatchSkipOption::ToLast(
+                        self.ident_normalizer.normalize(ident),
+                    ),
                 });
 
                 // Helper function to convert pattern symbols
@@ -546,43 +584,65 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 };
 
                 // Helper function to convert repetition quantifiers
-                let convert_quantifier = |q: SqlRepetitionQuantifier| -> Result<RepetitionQuantifier> {
-                    match q {
-                        SqlRepetitionQuantifier::ZeroOrMore => Ok(RepetitionQuantifier::ZeroOrMore),
-                        SqlRepetitionQuantifier::OneOrMore => Ok(RepetitionQuantifier::OneOrMore),
-                        SqlRepetitionQuantifier::AtMostOne => Ok(RepetitionQuantifier::AtMostOne),
-                        SqlRepetitionQuantifier::Exactly(n) => {
-                            if n == 0 {
-                                plan_err!("Invalid pattern quantifier: {{0}} can never match")
-                            } else {
-                                Ok(RepetitionQuantifier::Exactly(n))
+                let convert_quantifier =
+                    |q: SqlRepetitionQuantifier| -> Result<RepetitionQuantifier> {
+                        match q {
+                            SqlRepetitionQuantifier::ZeroOrMore => {
+                                Ok(RepetitionQuantifier::ZeroOrMore)
+                            }
+                            SqlRepetitionQuantifier::OneOrMore => {
+                                Ok(RepetitionQuantifier::OneOrMore)
+                            }
+                            SqlRepetitionQuantifier::AtMostOne => {
+                                Ok(RepetitionQuantifier::AtMostOne)
+                            }
+                            SqlRepetitionQuantifier::Exactly(n) => {
+                                if n == 0 {
+                                    plan_err!(
+                                        "Invalid pattern quantifier: {{0}} can never match"
+                                    )
+                                } else {
+                                    Ok(RepetitionQuantifier::Exactly(n))
+                                }
+                            }
+                            SqlRepetitionQuantifier::AtLeast(n) => {
+                                Ok(RepetitionQuantifier::AtLeast(n))
+                            }
+                            SqlRepetitionQuantifier::AtMost(n) => {
+                                if n == 0 {
+                                    plan_err!(
+                                        "Invalid pattern quantifier: {{,0}} can never match"
+                                    )
+                                } else {
+                                    Ok(RepetitionQuantifier::AtMost(n))
+                                }
+                            }
+                            SqlRepetitionQuantifier::Range(min, max) => {
+                                if min > max {
+                                    plan_err!(
+                                        "Invalid pattern quantifier: minimum {} exceeds maximum {}",
+                                        min,
+                                        max
+                                    )
+                                } else if min == 0 && max == 0 {
+                                    plan_err!(
+                                        "Invalid pattern quantifier: {{0,0}} can never match"
+                                    )
+                                } else {
+                                    Ok(RepetitionQuantifier::Range(min, max))
+                                }
                             }
                         }
-                        SqlRepetitionQuantifier::AtLeast(n) => Ok(RepetitionQuantifier::AtLeast(n)),
-                        SqlRepetitionQuantifier::AtMost(n) => {
-                            if n == 0 {
-                                plan_err!("Invalid pattern quantifier: {{,0}} can never match")
-                            } else {
-                                Ok(RepetitionQuantifier::AtMost(n))
-                            }
-                        }
-                        SqlRepetitionQuantifier::Range(min, max) => {
-                            if min > max {
-                                plan_err!("Invalid pattern quantifier: minimum {} exceeds maximum {}", min, max)
-                            } else if min == 0 && max == 0 {
-                                plan_err!("Invalid pattern quantifier: {{0,0}} can never match")
-                            } else {
-                                Ok(RepetitionQuantifier::Range(min, max))
-                            }
-                        }
-                    }
-                };
+                    };
 
                 // Recursive function to convert pattern
                 fn convert_pattern(
                     pat: MatchRecognizePattern,
                     convert_symbol: &impl Fn(MatchRecognizeSymbol) -> PatternSymbol,
-                    convert_quantifier: &impl Fn(SqlRepetitionQuantifier) -> Result<RepetitionQuantifier>,
+                    convert_quantifier: &impl Fn(
+                        SqlRepetitionQuantifier,
+                    )
+                        -> Result<RepetitionQuantifier>,
                 ) -> Result<Pattern> {
                     match pat {
                         MatchRecognizePattern::Symbol(sym) => {
@@ -591,22 +651,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         MatchRecognizePattern::Exclude(sym) => {
                             Ok(Pattern::Exclude(convert_symbol(sym)))
                         }
-                        MatchRecognizePattern::Permute(syms) => {
-                            Ok(Pattern::Permute(syms.into_iter().map(convert_symbol).collect()))
-                        }
+                        MatchRecognizePattern::Permute(syms) => Ok(Pattern::Permute(
+                            syms.into_iter().map(convert_symbol).collect(),
+                        )),
                         MatchRecognizePattern::Concat(pats) => {
-                            let converted_pats = pats.into_iter()
-                                .map(|p| convert_pattern(p, convert_symbol, convert_quantifier))
+                            let converted_pats = pats
+                                .into_iter()
+                                .map(|p| {
+                                    convert_pattern(p, convert_symbol, convert_quantifier)
+                                })
                                 .collect::<Result<Vec<_>>>()?;
                             Ok(Pattern::Concat(converted_pats))
                         }
                         MatchRecognizePattern::Group(pat) => {
-                            let converted_pat = convert_pattern(*pat, convert_symbol, convert_quantifier)?;
+                            let converted_pat = convert_pattern(
+                                *pat,
+                                convert_symbol,
+                                convert_quantifier,
+                            )?;
                             Ok(Pattern::Group(Box::new(converted_pat)))
                         }
                         MatchRecognizePattern::Alternation(pats) => {
-                            let converted_pats = pats.into_iter()
-                                .map(|p| convert_pattern(p, convert_symbol, convert_quantifier))
+                            let converted_pats = pats
+                                .into_iter()
+                                .map(|p| {
+                                    convert_pattern(p, convert_symbol, convert_quantifier)
+                                })
                                 .collect::<Result<Vec<_>>>()?;
                             Ok(Pattern::Alternation(converted_pats))
                         }
@@ -650,7 +720,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             planner_context,
                         )?;
                         // Strip pattern variable qualifiers from the expression
-                        converted_expr = self.strip_pattern_var_qualifiers(converted_expr, &pattern_var_names);
+                        converted_expr = self.strip_pattern_var_qualifiers(
+                            converted_expr,
+                            &pattern_var_names,
+                        );
                         Ok(SymbolDef {
                             symbol: self.ident_normalizer.normalize(symbol),
                             definition: converted_expr,
@@ -694,11 +767,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 alias,
             } => {
                 // Plan GRAPH_TABLE function
-                let plan = self.plan_graph_table(
-                    graph_name,
-                    match_clause,
-                    planner_context,
-                )?;
+                let plan =
+                    self.plan_graph_table(graph_name, match_clause, planner_context)?;
                 (plan, alias)
             }
             TableFactor::TableFunction { expr, alias } => {
@@ -717,16 +787,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 | FunctionArg::Named {
                                     arg: FunctionArgExpr::Expr(expr),
                                     ..
-                                } => {
-                                    self.sql_expr_to_logical_expr(
-                                        expr,
-                                        &schema,
-                                        planner_context,
-                                    )
-                                }
-                                _ => plan_err!(
-                                    "Unsupported function argument: {arg:?}"
+                                } => self.sql_expr_to_logical_expr(
+                                    expr,
+                                    &schema,
+                                    planner_context,
                                 ),
+                                _ => plan_err!("Unsupported function argument: {arg:?}"),
                             })
                             .collect::<Result<Vec<Expr>>>()?,
                         FunctionArguments::None => vec![],
@@ -738,16 +804,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     };
                     let provider = self
                         .context_provider
-                        .get_table_function_source(
-                            tbl_func_ref.table(),
-                            func_args,
-                        )?;
-                    let plan = LogicalPlanBuilder::scan(
-                        tbl_func_ref.table(),
-                        provider,
-                        None,
-                    )?
-                    .build()?;
+                        .get_table_function_source(tbl_func_ref.table(), func_args)?;
+                    let plan =
+                        LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
+                            .build()?;
                     (plan, alias)
                 } else {
                     return not_impl_err!(
@@ -862,7 +922,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Convert the JSON expression to a DataFusion Expr
         // Use an empty schema since we're creating a table from JSON
         let empty_schema = DFSchema::empty();
-        let df_json_expr = self.sql_expr_to_logical_expr(json_expr, &empty_schema, planner_context)?;
+        let df_json_expr =
+            self.sql_expr_to_logical_expr(json_expr, &empty_schema, planner_context)?;
 
         // Convert sqlparser column definitions to DataFusion column definitions
         let df_columns = self.convert_json_table_columns(columns)?;
@@ -923,9 +984,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 })
             }
             sqlparser::ast::JsonTableColumn::ForOrdinality(ident) => {
-                Ok(JsonTableColumnDef::Ordinality {
-                    name: ident.value,
-                })
+                Ok(JsonTableColumnDef::Ordinality { name: ident.value })
             }
             sqlparser::ast::JsonTableColumn::Nested(nested) => {
                 // Extract nested path - it should be a string literal
@@ -933,7 +992,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     sqlparser::ast::Value::SingleQuotedString(s)
                     | sqlparser::ast::Value::DoubleQuotedString(s) => s,
                     _ => {
-                        return plan_err!("JSON_TABLE nested path must be a string literal");
+                        return plan_err!(
+                            "JSON_TABLE nested path must be a string literal"
+                        );
                     }
                 };
 
@@ -1152,7 +1213,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .map(|p| self.convert_graph_pattern_expr(p))
                     .collect::<Result<Vec<_>>>()?,
             ),
-            SqlGPE::Group { pattern, quantifier } => GraphPatternExpr::Group {
+            SqlGPE::Group {
+                pattern,
+                quantifier,
+            } => GraphPatternExpr::Group {
                 pattern: Box::new(self.convert_graph_pattern_expr(*pattern)?),
                 quantifier: quantifier.map(|q| self.convert_quantifier(q)),
             },
@@ -1172,9 +1236,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             SqlGPE::Edge(edge) => {
                 GraphPatternElement::Edge(self.convert_edge_pattern(edge)?)
             }
-            SqlGPE::Subpattern(expr) => {
-                GraphPatternElement::Subpattern(Box::new(self.convert_graph_pattern_expr(expr)?))
-            }
+            SqlGPE::Subpattern(expr) => GraphPatternElement::Subpattern(Box::new(
+                self.convert_graph_pattern_expr(expr)?,
+            )),
         })
     }
 
@@ -1187,9 +1251,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut planner_context = PlannerContext::new();
 
         Ok(NodePattern {
-            variable: node
-                .variable
-                .map(|v| self.ident_normalizer.normalize(v)),
+            variable: node.variable.map(|v| self.ident_normalizer.normalize(v)),
             labels: node
                 .labels
                 .into_iter()
@@ -1226,9 +1288,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut planner_context = PlannerContext::new();
 
         Ok(EdgePattern {
-            variable: edge
-                .variable
-                .map(|v| self.ident_normalizer.normalize(v)),
+            variable: edge.variable.map(|v| self.ident_normalizer.normalize(v)),
             labels: edge
                 .labels
                 .into_iter()
@@ -1259,7 +1319,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     /// Convert sqlparser EdgeDirection to DataFusion EdgeDirection
-    fn convert_edge_direction(&self, dir: sqlparser::ast::EdgeDirection) -> EdgeDirection {
+    fn convert_edge_direction(
+        &self,
+        dir: sqlparser::ast::EdgeDirection,
+    ) -> EdgeDirection {
         use sqlparser::ast::EdgeDirection as SqlED;
         match dir {
             SqlED::Right => EdgeDirection::Right,
@@ -1318,8 +1381,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         columns: &[GraphColumn],
         _input_schema: &DFSchema,
     ) -> Result<DFSchema> {
-        use std::collections::HashMap;
         use arrow::datatypes::DataType;
+        use std::collections::HashMap;
 
         // For now, create a schema with Utf8 columns (in practice, this would
         // need type inference from the property graph schema)
@@ -1327,10 +1390,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .iter()
             .enumerate()
             .map(|(idx, col)| {
-                let name = col
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("col{}", idx));
+                let name = col.alias.clone().unwrap_or_else(|| format!("col{}", idx));
                 Arc::new(Field::new(name, DataType::Utf8, true))
             })
             .collect();

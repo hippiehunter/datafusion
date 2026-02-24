@@ -156,6 +156,8 @@ pub struct DmlStatement {
     pub target_columns: Option<Vec<String>>,
     /// Columns requested by a RETURNING clause
     pub returning_columns: Option<Vec<String>>,
+    /// Expressions requested by a RETURNING clause
+    pub returning_exprs: Option<Vec<Expr>>,
     /// OVERRIDING SYSTEM VALUE was specified (PostgreSQL identity columns)
     pub overriding_system_value: bool,
 }
@@ -169,6 +171,7 @@ impl Hash for DmlStatement {
         self.output_schema.hash(state);
         self.target_columns.hash(state);
         self.returning_columns.hash(state);
+        self.returning_exprs.hash(state);
         self.overriding_system_value.hash(state);
     }
 }
@@ -182,6 +185,7 @@ impl PartialEq for DmlStatement {
             && self.output_schema == other.output_schema
             && self.target_columns == other.target_columns
             && self.returning_columns == other.returning_columns
+            && self.returning_exprs == other.returning_exprs
             && self.overriding_system_value == other.overriding_system_value
     }
 }
@@ -197,6 +201,7 @@ impl Debug for DmlStatement {
             .field("output_schema", &self.output_schema)
             .field("target_columns", &self.target_columns)
             .field("returning_columns", &self.returning_columns)
+            .field("returning_exprs", &self.returning_exprs)
             .finish()
     }
 }
@@ -217,6 +222,7 @@ impl DmlStatement {
             output_schema: make_count_schema(),
             target_columns: None,
             returning_columns: None,
+            returning_exprs: None,
             overriding_system_value: false,
         }
     }
@@ -234,6 +240,20 @@ impl DmlStatement {
         if !columns.is_empty() {
             self.returning_columns = Some(columns);
         }
+        self
+    }
+
+    /// Set RETURNING clause expressions.
+    pub fn with_returning_exprs(mut self, exprs: Vec<Expr>) -> Self {
+        if !exprs.is_empty() {
+            self.returning_exprs = Some(exprs);
+        }
+        self
+    }
+
+    /// Override the output schema.
+    pub fn with_output_schema(mut self, output_schema: DFSchemaRef) -> Self {
+        self.output_schema = output_schema;
         self
     }
 

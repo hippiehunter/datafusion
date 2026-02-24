@@ -1494,8 +1494,10 @@ impl LogicalPlan {
                     dml.op.clone(),
                     Arc::new(input),
                 );
+                new_dml.output_schema = dml.output_schema.clone();
                 new_dml.target_columns = dml.target_columns.clone();
                 new_dml.returning_columns = dml.returning_columns.clone();
+                new_dml.returning_exprs = dml.returning_exprs.clone();
                 new_dml.overriding_system_value = dml.overriding_system_value;
                 Ok(LogicalPlan::Dml(new_dml))
             }
@@ -5364,7 +5366,7 @@ mod tests {
     use datafusion_common::tree_node::{
         TransformedResult, TreeNodeRewriter, TreeNodeVisitor,
     };
-    use datafusion_common::{Constraint, ScalarValue, not_impl_err};
+    use datafusion_common::{Constraint, NullsDistinct, ScalarValue, not_impl_err};
     use insta::{assert_debug_snapshot, assert_snapshot};
     use std::hash::DefaultHasher;
 
@@ -5487,49 +5489,49 @@ mod tests {
         [
           {
             "Plan": {
+              "Node Type": "Projection",
               "Expressions": [
                 "employee_csv.id"
               ],
-              "Node Type": "Projection",
-              "Output": [
-                "id"
-              ],
               "Plans": [
                 {
-                  "Condition": "employee_csv.state IN (<subquery>)",
                   "Node Type": "Filter",
-                  "Output": [
-                    "id",
-                    "state"
-                  ],
+                  "Condition": "employee_csv.state IN (<subquery>)",
                   "Plans": [
                     {
                       "Node Type": "Subquery",
-                      "Output": [
-                        "state"
-                      ],
                       "Plans": [
                         {
                           "Node Type": "TableScan",
+                          "Relation Name": "employee_csv",
+                          "Plans": [],
                           "Output": [
                             "state"
-                          ],
-                          "Plans": [],
-                          "Relation Name": "employee_csv"
+                          ]
                         }
+                      ],
+                      "Output": [
+                        "state"
                       ]
                     },
                     {
                       "Node Type": "TableScan",
+                      "Relation Name": "employee_csv",
+                      "Plans": [],
                       "Output": [
                         "id",
                         "state"
-                      ],
-                      "Plans": [],
-                      "Relation Name": "employee_csv"
+                      ]
                     }
+                  ],
+                  "Output": [
+                    "id",
+                    "state"
                   ]
                 }
+              ],
+              "Output": [
+                "id"
               ]
             }
           }

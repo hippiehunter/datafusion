@@ -33,6 +33,7 @@ use crate::utils::normalize_ident;
 use arrow::datatypes::{Field, FieldRef, Fields};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{
     Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, MatchType,
     NullsDistinct, ReferentialAction, Result, ScalarValue, SchemaError, SchemaReference,
@@ -46,7 +47,7 @@ use datafusion_expr::dml::{
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::logical_plan::builder::project;
-use datafusion_expr::utils::expr_to_columns;
+use datafusion_expr::utils::{expr_to_columns, exprlist_to_fields};
 use datafusion_expr::{
     AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
     CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
@@ -105,10 +106,9 @@ fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
             SelectItem::UnnamedExpr(expr) => match expr {
                 SQLExpr::Identifier(ident) => ident_to_string(ident),
                 SQLExpr::CompoundIdentifier(idents) => idents
-                    .iter()
+                    .last()
                     .map(ident_to_string)
-                    .collect::<Vec<_>>()
-                    .join("."),
+                    .unwrap_or_else(|| "*".to_string()),
                 _ => "*".to_string(),
             },
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
@@ -119,6 +119,85 @@ fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn relation_matches_target(
+    relation: &TableReference,
+    target_table: &TableReference,
+    target_alias: Option<&str>,
+) -> bool {
+    let relation_table = relation.table().to_ascii_lowercase();
+    if relation_table == target_table.table().to_ascii_lowercase() {
+        return true;
+    }
+    if let Some(alias) = target_alias {
+        return relation_table == alias.to_ascii_lowercase();
+    }
+    false
+}
+
+fn rewrite_update_returning_exprs(
+    exprs: Vec<Expr>,
+    source_schema: &DFSchema,
+    target_column_names: &HashSet<String>,
+    target_table: &TableReference,
+    target_alias: Option<&str>,
+) -> Result<(Vec<Expr>, Vec<Expr>)> {
+    let mut passthrough_aliases: HashMap<Column, String> = HashMap::new();
+    let mut passthrough_exprs: Vec<Expr> = Vec::new();
+    let mut next_passthrough_idx = 0usize;
+    let mut rewritten_exprs = Vec::with_capacity(exprs.len());
+
+    for expr in exprs {
+        let rewritten = expr
+            .transform_up(|node| {
+                let Expr::Column(column) = node else {
+                    return Ok(Transformed::no(node));
+                };
+
+                let column_name_lc = column.name.to_ascii_lowercase();
+                let relation_is_target = column
+                    .relation
+                    .as_ref()
+                    .map(|rel| relation_matches_target(rel, target_table, target_alias))
+                    .unwrap_or(false);
+
+                // After UPDATE, RETURNING should observe target-table columns as their
+                // post-update values. These live in the projected DML input as unqualified
+                // columns named after the target table fields.
+                if target_column_names.contains(&column_name_lc)
+                    && (column.relation.is_none() || relation_is_target)
+                {
+                    return Ok(Transformed::yes(Expr::Column(Column::from_name(
+                        column.name,
+                    ))));
+                }
+
+                let resolved_column = match source_schema.qualified_field_from_column(&column) {
+                    Ok((qualifier, field)) => Column::from((qualifier, field)),
+                    Err(_) => column.clone(),
+                };
+
+                let passthrough_alias = if let Some(alias) = passthrough_aliases.get(&resolved_column) {
+                    alias.clone()
+                } else {
+                    let alias = format!("__returning_src_{}", next_passthrough_idx);
+                    next_passthrough_idx += 1;
+                    passthrough_aliases.insert(resolved_column.clone(), alias.clone());
+                    passthrough_exprs
+                        .push(Expr::Column(resolved_column).alias(alias.clone()));
+                    alias
+                };
+
+                Ok(Transformed::yes(Expr::Column(Column::from_name(
+                    passthrough_alias,
+                ))))
+            })?
+            .data;
+        rewritten_exprs.push(rewritten);
+    }
+
+    Ok((rewritten_exprs, passthrough_exprs))
 }
 
 fn get_schema_name(schema_name: &SchemaName) -> String {
@@ -3035,7 +3114,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let scan = self.plan_from_tables(input_tables, &mut planner_context)?;
 
         // Filter
-        let source = match predicate_expr {
+        let mut source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
                 let filter_expr = self.sql_to_expr(
@@ -3055,7 +3134,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         };
 
         // Build updated values for each column, using the previous value if not modified
-        let exprs = table_schema
+        let mut projected_exprs = table_schema
             .iter()
             .map(|(qualifier, field)| {
                 let expr = match assign_map.remove(field.name()) {
@@ -3095,17 +3174,76 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let source = project(source, exprs)?;
+        let mut returning_exprs = None;
+        let mut returning_col_names = None;
+        let mut output_schema = None;
+        if let Some(returning_items) = returning {
+            let prepared = self.prepare_select_exprs(
+                &source,
+                returning_items,
+                false,
+                &mut planner_context,
+            )?;
+            let logical_exprs = prepared
+                .into_iter()
+                .map(|select_expr| match select_expr {
+                    datafusion_expr::select_expr::SelectExpr::Expression(expr) => Ok(expr),
+                    datafusion_expr::select_expr::SelectExpr::Wildcard(_) => {
+                        not_impl_err!("UPDATE RETURNING * is not implemented")
+                    }
+                    datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(_, _) => {
+                        not_impl_err!("UPDATE RETURNING qualified wildcard is not implemented")
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
 
-        let returning_col_names = returning.map(|items| select_items_to_column_names(&items));
-        let mut dml = DmlStatement::new(
-            table_name,
-            table_source,
-            WriteOp::Update,
-            Arc::new(source),
-        );
+            let target_column_names = table_schema
+                .fields()
+                .iter()
+                .map(|f| f.name().to_ascii_lowercase())
+                .collect::<HashSet<_>>();
+            let target_alias = table_alias
+                .as_ref()
+                .map(|alias| self.ident_normalizer.normalize(alias.name.clone()));
+            let (rewritten_returning_exprs, passthrough_exprs) = rewrite_update_returning_exprs(
+                logical_exprs,
+                source.schema(),
+                &target_column_names,
+                &table_name,
+                target_alias.as_deref(),
+            )?;
+
+            projected_exprs.extend(passthrough_exprs);
+            source = project(source, projected_exprs)?;
+
+            let fields = exprlist_to_fields(rewritten_returning_exprs.iter(), &source)?;
+            let returning_output_schema = Arc::new(DFSchema::new_with_metadata(
+                fields,
+                source.schema().metadata().clone(),
+            )?);
+            returning_col_names = Some(
+                returning_output_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect(),
+            );
+            output_schema = Some(returning_output_schema);
+            returning_exprs = Some(rewritten_returning_exprs);
+        } else {
+            source = project(source, projected_exprs)?;
+        }
+
+        let mut dml =
+            DmlStatement::new(table_name, table_source, WriteOp::Update, Arc::new(source));
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
+        }
+        if let Some(ret_exprs) = returning_exprs {
+            dml = dml.with_returning_exprs(ret_exprs);
+        }
+        if let Some(schema) = output_schema {
+            dml = dml.with_output_schema(schema);
         }
         let plan = LogicalPlan::Dml(dml);
         Ok(plan)

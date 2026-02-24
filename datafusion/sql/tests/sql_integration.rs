@@ -27,11 +27,11 @@ use std::vec;
 
 use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::MockContextProvider;
-use datafusion_common::{DataFusionError, Result, assert_contains};
+use datafusion_common::{assert_contains, DataFusionError, Result};
 use datafusion_expr::{
-    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs,
-    ScalarUDF, ScalarUDFImpl, Signature, Volatility, col, logical_plan::LogicalPlan,
-    test::function_stub::sum_udaf,
+    col, logical_plan::LogicalPlan, test::function_stub::sum_udaf, ColumnarValue,
+    CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_sql::{
     parser::DFParser,
@@ -64,7 +64,7 @@ fn parse_decimals_1() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: Int64(1)
+    Projection: Int32(1)
       EmptyRelation: rows=1
     "
     );
@@ -78,7 +78,7 @@ fn parse_decimals_2() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: Int64(1)
+    Projection: Int32(1)
       EmptyRelation: rows=1
     "
     );
@@ -278,7 +278,7 @@ fn select_no_relation() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: Int64(1)
+    Projection: Int32(1)
       EmptyRelation: rows=1
     "
     );
@@ -302,7 +302,7 @@ fn test_int_decimal_default() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: CAST(Int64(10) AS Decimal128(38, 10))
+    Projection: CAST(Int32(10) AS Decimal128(38, 10))
       EmptyRelation: rows=1
     "
     );
@@ -314,7 +314,7 @@ fn test_int_decimal_no_scale() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: CAST(Int64(10) AS Decimal128(5, 0))
+    Projection: CAST(Int32(10) AS Decimal128(5, 0))
       EmptyRelation: rows=1
     "
     );
@@ -326,7 +326,7 @@ fn test_tinyint() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: CAST(Int64(6) AS Int8)
+    Projection: CAST(Int32(6) AS Int8)
       EmptyRelation: rows=1
     "
     );
@@ -339,7 +339,7 @@ fn cast_from_subquery() {
         plan,
         @r"
     Projection: CAST(a AS Float32)
-      Projection: Int64(1) AS a
+      Projection: Int32(1) AS a
         EmptyRelation: rows=1
     "
     );
@@ -378,7 +378,7 @@ fn cast_to_invalid_decimal_type_precision_gt_38() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: CAST(Int64(10) AS Decimal256(39, 0))
+    Projection: CAST(Int32(10) AS Decimal256(39, 0))
       EmptyRelation: rows=1
     "
     );
@@ -575,7 +575,7 @@ fn plan_insert() {
         @r#"
     Dml: op=[Insert Into] table=[person]
       Projection: column1 AS id, column2 AS first_name, column3 AS last_name, CAST(NULL AS Int32) AS age, CAST(NULL AS Utf8) AS state, CAST(NULL AS Float64) AS salary, CAST(NULL AS Timestamp(ns)) AS birth_date, CAST(NULL AS Int32) AS 😀
-        Values: (CAST(Int64(1) AS UInt32), Utf8("Alan"), Utf8("Turing"))
+        Values: (CAST(Int32(1) AS UInt32), Utf8("Alan"), Utf8("Turing"))
     "#
     );
 }
@@ -603,7 +603,7 @@ fn plan_insert_no_target_columns() {
         @r#"
         Dml: op=[Insert Into] table=[test_decimal]
           Projection: column1 AS id, column2 AS price
-            Values: (CAST(Int64(1) AS Int32), CAST(Int64(2) AS Decimal128(10, 2))), (CAST(Int64(3) AS Int32), CAST(Int64(4) AS Decimal128(10, 2)))
+            Values: (Int32(1), CAST(Int32(2) AS Decimal128(10, 2))), (Int32(3), CAST(Int32(4) AS Decimal128(10, 2)))
         "#
     );
 }
@@ -629,8 +629,7 @@ fn plan_create_table_interval_day_to_second() {
 
 #[test]
 fn plan_create_table_with_storage_parameters() {
-    let sql =
-        "CREATE TABLE t (id INT) WITH (fillfactor = 70, autovacuum_enabled = true)";
+    let sql = "CREATE TABLE t (id INT) WITH (fillfactor = 70, autovacuum_enabled = true)";
     let plan = logical_plan(sql).unwrap();
     match plan {
         LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
@@ -657,10 +656,7 @@ fn plan_create_table_with_storage_parameters() {
 fn plan_create_table_with_storage_parameter_expression_error() {
     let sql = "CREATE TABLE t (id INT) WITH (fillfactor = 10 * 2)";
     let err = logical_plan(sql).unwrap_err();
-    assert_contains!(
-        err.strip_backtrace(),
-        "Unsupported storage parameter value"
-    );
+    assert_contains!(err.strip_backtrace(), "Unsupported storage parameter value");
 }
 
 #[rstest]
@@ -704,7 +700,7 @@ fn plan_update() {
         @r#"
         Dml: op=[Update] table=[person]
           Projection: person.id AS id, person.first_name AS first_name, Utf8("Kay") AS last_name, person.age AS age, person.state AS state, person.salary AS salary, person.birth_date AS birth_date, person.😀 AS 😀
-            Filter: person.id = Int64(1)
+            Filter: person.id = Int32(1)
               TableScan: person
         "#
     );
@@ -730,7 +726,7 @@ fn plan_delete() {
         plan,
         @r#"
         Dml: op=[Delete] table=[person]
-          Filter: person.id = Int64(1)
+          Filter: person.id = Int32(1)
             TableScan: person
         "#
     );
@@ -745,7 +741,7 @@ fn plan_delete_quoted_identifier_case_sensitive() {
         plan,
         @r#"
         Dml: op=[Delete] table=[SomeCatalog.SomeSchema.UPPERCASE_test]
-          Filter: SomeCatalog.SomeSchema.UPPERCASE_test.Id = Int64(1)
+          Filter: SomeCatalog.SomeSchema.UPPERCASE_test.Id = Int32(1)
             TableScan: SomeCatalog.SomeSchema.UPPERCASE_test
         "#
     );
@@ -777,7 +773,7 @@ fn select_scalar_func_with_literal_no_relation() {
     assert_snapshot!(
         plan,
         @r"
-    Projection: sqrt(Int64(9))
+    Projection: sqrt(Int32(9))
       EmptyRelation: rows=1
     "
     );
@@ -836,7 +832,7 @@ fn select_compound_filter() {
         plan,
         @r#"
         Projection: person.id, person.first_name, person.last_name
-          Filter: person.state = Utf8("CO") AND person.age >= Int64(21) AND person.age <= Int64(65)
+          Filter: person.state = Utf8("CO") AND person.age >= Int32(21) AND person.age <= Int32(65)
             TableScan: person
         "#
     );
@@ -885,7 +881,7 @@ fn select_all_boolean_operators() {
         plan,
         @r#"
         Projection: person.age, person.first_name, person.last_name
-          Filter: person.age = Int64(21) AND person.age != Int64(21) AND person.age > Int64(21) AND person.age >= Int64(21) AND person.age < Int64(65) AND person.age <= Int64(65)
+          Filter: person.age = Int32(21) AND person.age != Int32(21) AND person.age > Int32(21) AND person.age >= Int32(21) AND person.age < Int32(65) AND person.age <= Int32(65)
             TableScan: person
         "#
     );
@@ -899,7 +895,7 @@ fn select_between() {
         plan,
         @r#"
         Projection: person.state
-          Filter: person.age BETWEEN Int64(21) AND Int64(65)
+          Filter: person.age BETWEEN Int32(21) AND Int32(65)
             TableScan: person
         "#
     );
@@ -913,7 +909,7 @@ fn select_between_negated() {
         plan,
         @r#"
         Projection: person.state
-          Filter: person.age NOT BETWEEN Int64(21) AND Int64(65)
+          Filter: person.age NOT BETWEEN Int32(21) AND Int32(65)
             TableScan: person
         "#
     );
@@ -957,10 +953,10 @@ fn select_nested_with_filters() {
         plan,
         @r#"
         Projection: a.fn1, a.age
-          Filter: a.fn1 = Utf8("X") AND a.age < Int64(30)
+          Filter: a.fn1 = Utf8("X") AND a.age < Int32(30)
             SubqueryAlias: a
               Projection: person.first_name AS fn1, person.age
-                Filter: person.age > Int64(20)
+                Filter: person.age > Int32(20)
                   TableScan: person
         "#
     );
@@ -976,7 +972,7 @@ fn table_with_column_alias() {
         @r#"
         Projection: l.a, l.b, l.c
           SubqueryAlias: l
-            Projection: lineitem.l_item_id AS a, lineitem.l_description AS b, lineitem.price AS c
+            Projection: l_item_id AS a, l_description AS b, price AS c
               TableScan: lineitem
         "#
     );
@@ -1017,8 +1013,12 @@ fn table_with_column_alias_duplicate_names() {
     // Duplicate aliases - should fail during projection validation
     let sql = "SELECT * FROM lineitem l (dup, dup, c)";
     let err = logical_plan(sql).expect_err("Duplicate aliases should fail");
-    assert!(err.to_string().contains("unique expression names") || err.to_string().contains("dup"),
-            "Error should mention duplicate names: {}", err);
+    assert!(
+        err.to_string().contains("unique expression names")
+            || err.to_string().contains("dup"),
+        "Error should mention duplicate names: {}",
+        err
+    );
 }
 
 #[test]
@@ -1032,27 +1032,40 @@ fn table_with_column_alias_collision_with_original() {
 
     // The original "price" column should be renamed to avoid ambiguity
     // Look for price_1 or similar conflict resolution
-    assert!(plan_str.contains("price"), "Should contain the new 'price' alias");
+    assert!(
+        plan_str.contains("price"),
+        "Should contain the new 'price' alias"
+    );
 }
 
 #[test]
 fn table_with_column_alias_special_chars() {
     // Special characters in aliases (quoted identifiers)
-    let sql = r#"SELECT "col-1", "col 2", "col@3" FROM lineitem l ("col-1", "col 2", "col@3")"#;
+    let sql =
+        r#"SELECT "col-1", "col 2", "col@3" FROM lineitem l ("col-1", "col 2", "col@3")"#;
     let plan = logical_plan(sql).expect("Special characters should work when quoted");
     let plan_str = format!("{:?}", plan);
-    assert!(plan_str.contains("col-1") || plan_str.contains("col 2") || plan_str.contains("col@3"),
-            "Special character aliases should be preserved");
+    assert!(
+        plan_str.contains("col-1")
+            || plan_str.contains("col 2")
+            || plan_str.contains("col@3"),
+        "Special character aliases should be preserved"
+    );
 }
 
 #[test]
 fn table_with_column_alias_reserved_keywords() {
     // Reserved keywords as aliases (must be quoted)
-    let sql = r#"SELECT "select", "from", "where" FROM lineitem l ("select", "from", "where")"#;
+    let sql =
+        r#"SELECT "select", "from", "where" FROM lineitem l ("select", "from", "where")"#;
     let plan = logical_plan(sql).expect("Reserved keywords should work when quoted");
     let plan_str = format!("{:?}", plan);
-    assert!(plan_str.contains("select") && plan_str.contains("from") && plan_str.contains("where"),
-            "Reserved keyword aliases should work when quoted");
+    assert!(
+        plan_str.contains("select")
+            && plan_str.contains("from")
+            && plan_str.contains("where"),
+        "Reserved keyword aliases should work when quoted"
+    );
 }
 
 #[test]
@@ -1062,8 +1075,10 @@ fn table_with_column_alias_case_sensitivity() {
     let plan = logical_plan(sql).expect("Case sensitivity should be handled");
     let plan_str = format!("{:?}", plan);
     // Unquoted identifiers are normalized to lowercase
-    assert!(plan_str.contains("abc") && plan_str.contains("def"),
-            "Unquoted aliases should be normalized to lowercase");
+    assert!(
+        plan_str.contains("abc") && plan_str.contains("def"),
+        "Unquoted aliases should be normalized to lowercase"
+    );
 }
 
 #[test]
@@ -1089,8 +1104,10 @@ fn table_with_column_alias_empty_vs_no_alias() {
     let plan = logical_plan(sql).expect("Table alias should work");
     let plan_str = format!("{:?}", plan);
     // Should have either SubqueryAlias or just table reference
-    assert!(plan_str.contains("lineitem") || plan_str.contains("SubqueryAlias"),
-            "Should reference table");
+    assert!(
+        plan_str.contains("lineitem") || plan_str.contains("SubqueryAlias"),
+        "Should reference table"
+    );
 }
 
 #[test]
@@ -1103,8 +1120,14 @@ fn table_with_column_alias_collision_renamed() {
     let plan_str = format!("{:?}", plan);
 
     // Verify that both "price" (new alias) and "price_1" (renamed original) exist
-    assert!(plan_str.contains("price"), "Should contain new 'price' alias");
-    assert!(plan_str.contains("price_1"), "Original 'price' should be renamed to 'price_1'");
+    assert!(
+        plan_str.contains("price"),
+        "Should contain new 'price' alias"
+    );
+    assert!(
+        plan_str.contains("price_1"),
+        "Original 'price' should be renamed to 'price_1'"
+    );
 }
 
 #[test]
@@ -1117,8 +1140,10 @@ fn table_with_column_alias_collision_detection() {
     let plan_str = format!("{:?}", plan);
 
     // The plan should be created successfully with collision resolution
-    assert!(plan_str.contains("l_description") && plan_str.contains("price"),
-            "Should contain renamed columns");
+    assert!(
+        plan_str.contains("l_description") && plan_str.contains("price"),
+        "Should contain renamed columns"
+    );
 }
 
 #[test]
@@ -1193,7 +1218,7 @@ fn select_with_having() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r"Error during planning: HAVING clause references: person.age > Int64(100) AND person.age < Int64(200) must appear in the GROUP BY clause or be used in an aggregate function"
+        @r"Error during planning: HAVING clause references: person.age > Int32(100) AND person.age < Int32(200) must appear in the GROUP BY clause or be used in an aggregate function"
     );
 }
 
@@ -1238,7 +1263,7 @@ fn select_with_having_referencing_column_nested_in_select_expression() {
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: HAVING clause references: person.age > Int64(100) must appear in the GROUP BY clause or be used in an aggregate function
+        Error during planning: HAVING clause references: person.age > Int32(100) must appear in the GROUP BY clause or be used in an aggregate function
         "#
     );
 }
@@ -1266,7 +1291,7 @@ fn select_aggregate_with_having_that_reuses_aggregate() {
         plan,
         @r#"
         Projection: max(person.age)
-          Filter: max(person.age) < Int64(30)
+          Filter: max(person.age) < Int32(30)
             Aggregate: groupBy=[[]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1316,7 +1341,7 @@ fn select_aggregate_aliased_with_having_referencing_aggregate_by_its_alias() {
         plan,
         @r#"
         Projection: max(person.age) AS max_age
-          Filter: max(person.age) < Int64(30)
+          Filter: max(person.age) < Int32(30)
             Aggregate: groupBy=[[]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1333,7 +1358,7 @@ fn select_aggregate_aliased_with_having_that_reuses_aggregate_but_not_by_its_ali
         plan,
         @r#"
         Projection: max(person.age) AS max_age
-          Filter: max(person.age) < Int64(30)
+          Filter: max(person.age) < Int32(30)
             Aggregate: groupBy=[[]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1370,9 +1395,9 @@ fn select_aggregate_with_group_by_with_having_and_where() {
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) < Int64(100)
+          Filter: max(person.age) < Int32(100)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              Filter: person.id > Int64(5)
+              Filter: person.id > Int32(5)
                 TableScan: person
         "#
     );
@@ -1390,9 +1415,9 @@ fn select_aggregate_with_group_by_with_having_and_where_filtering_on_aggregate_c
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) < Int64(100)
+          Filter: max(person.age) < Int32(100)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              Filter: person.id > Int64(5) AND person.age > Int64(18)
+              Filter: person.id > Int32(5) AND person.age > Int32(18)
                 TableScan: person
         "#
     );
@@ -1409,7 +1434,7 @@ fn select_aggregate_with_group_by_with_having_using_column_by_alias() {
         plan,
         @r#"
         Projection: person.first_name AS fn, max(person.age)
-          Filter: max(person.age) > Int64(2) AND person.first_name = Utf8("M")
+          Filter: max(person.age) > Int32(2) AND person.first_name = Utf8("M")
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1417,8 +1442,8 @@ fn select_aggregate_with_group_by_with_having_using_column_by_alias() {
 }
 
 #[test]
-fn select_aggregate_with_group_by_with_having_using_columns_with_and_without_their_aliases()
- {
+fn select_aggregate_with_group_by_with_having_using_columns_with_and_without_their_aliases(
+) {
     let sql = "SELECT first_name AS fn, MAX(age) AS max_age
                    FROM person
                    GROUP BY first_name
@@ -1428,7 +1453,7 @@ fn select_aggregate_with_group_by_with_having_using_columns_with_and_without_the
         plan,
         @r#"
         Projection: person.first_name AS fn, max(person.age) AS max_age
-          Filter: max(person.age) > Int64(2) AND max(person.age) < Int64(5) AND person.first_name = Utf8("M") AND person.first_name = Utf8("N")
+          Filter: max(person.age) > Int32(2) AND max(person.age) < Int32(5) AND person.first_name = Utf8("M") AND person.first_name = Utf8("N")
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1446,7 +1471,7 @@ fn select_aggregate_with_group_by_with_having_that_reuses_aggregate() {
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int64(100)
+          Filter: max(person.age) > Int32(100)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1480,7 +1505,7 @@ fn select_aggregate_with_group_by_with_having_that_reuses_aggregate_multiple_tim
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int64(100) AND max(person.age) < Int64(200)
+          Filter: max(person.age) > Int32(100) AND max(person.age) < Int32(200)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1498,7 +1523,7 @@ fn select_aggregate_with_group_by_with_having_using_aggregate_not_in_select() {
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int64(100) AND min(person.id) < Int64(50)
+          Filter: max(person.age) > Int32(100) AND min(person.id) < Int32(50)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id)]]
               TableScan: person
         "#
@@ -1517,7 +1542,7 @@ fn select_aggregate_aliased_with_group_by_with_having_referencing_aggregate_by_i
         plan,
         @r#"
         Projection: person.first_name, max(person.age) AS max_age
-          Filter: max(person.age) > Int64(100)
+          Filter: max(person.age) > Int32(100)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1525,8 +1550,8 @@ fn select_aggregate_aliased_with_group_by_with_having_referencing_aggregate_by_i
 }
 
 #[test]
-fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compound_aggregate_by_its_alias()
- {
+fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compound_aggregate_by_its_alias(
+) {
     let sql = "SELECT first_name, MAX(age) + 1 AS max_age_plus_one
                    FROM person
                    GROUP BY first_name
@@ -1535,8 +1560,8 @@ fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compo
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.first_name, max(person.age) + Int64(1) AS max_age_plus_one
-          Filter: max(person.age) + Int64(1) > Int64(100)
+        Projection: person.first_name, max(person.age) + Int32(1) AS max_age_plus_one
+          Filter: max(person.age) + Int32(1) > Int32(100)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
               TableScan: person
         "#
@@ -1544,8 +1569,8 @@ fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compo
 }
 
 #[test]
-fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not_in_select()
- {
+fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not_in_select(
+) {
     let sql = "SELECT first_name, MAX(age)
                    FROM person
                    GROUP BY first_name
@@ -1555,8 +1580,8 @@ fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int64(100) AND min(person.id - Int64(2)) < Int64(50)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id - Int64(2))]]
+          Filter: max(person.age) > Int32(100) AND min(person.id - Int32(2)) < Int32(50)
+            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id - Int32(2))]]
               TableScan: person
         "#
     );
@@ -1573,7 +1598,7 @@ fn select_aggregate_with_group_by_with_having_using_count_star_not_in_select() {
         plan,
         @r#"
         Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int64(100) AND count(*) < Int64(50)
+          Filter: max(person.age) > Int32(100) AND count(*) < Int32(50)
             Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), count(*)]]
               TableScan: person
         "#
@@ -1600,7 +1625,7 @@ fn select_binary_expr_nested() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: (person.age + person.salary) / Int64(2)
+        Projection: (person.age + person.salary) / Int32(2)
           TableScan: person
         "#
     );
@@ -1818,8 +1843,8 @@ fn select_simple_aggregate_with_groupby_can_use_positions() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.state, person.age AS b, count(Int64(1))
-          Aggregate: groupBy=[[person.state, person.age]], aggr=[[count(Int64(1))]]
+        Projection: person.state, person.age AS b, count(Int32(1))
+          Aggregate: groupBy=[[person.state, person.age]], aggr=[[count(Int32(1))]]
             TableScan: person
         "#
     );
@@ -1828,8 +1853,8 @@ fn select_simple_aggregate_with_groupby_can_use_positions() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.state, person.age AS b, count(Int64(1))
-          Aggregate: groupBy=[[person.age, person.state]], aggr=[[count(Int64(1))]]
+        Projection: person.state, person.age AS b, count(Int32(1))
+          Aggregate: groupBy=[[person.age, person.state]], aggr=[[count(Int32(1))]]
             TableScan: person
         "#
     );
@@ -1908,7 +1933,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_unselected() {
         plan,
         @r#"
         Projection: min(person.first_name)
-          Aggregate: groupBy=[[person.age + Int64(1)]], aggr=[[min(person.first_name)]]
+          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
             TableScan: person
         "#
     );
@@ -1922,8 +1947,8 @@ fn select_simple_aggregate_with_groupby_non_column_expression_selected_and_resol
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.age + Int64(1), min(person.first_name)
-          Aggregate: groupBy=[[person.age + Int64(1)]], aggr=[[min(person.first_name)]]
+        Projection: person.age + Int32(1), min(person.first_name)
+          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
             TableScan: person
         "#
     );
@@ -1933,8 +1958,8 @@ fn select_simple_aggregate_with_groupby_non_column_expression_selected_and_resol
     assert_snapshot!(
         plan,
         @r#"
-        Projection: min(person.first_name), person.age + Int64(1)
-          Aggregate: groupBy=[[person.age + Int64(1)]], aggr=[[min(person.first_name)]]
+        Projection: min(person.first_name), person.age + Int32(1)
+          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
             TableScan: person
         "#
     );
@@ -1948,8 +1973,8 @@ fn select_simple_aggregate_with_groupby_non_column_expression_nested_and_resolva
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.age + Int64(1) / Int64(2) * person.age + Int64(1), min(person.first_name)
-          Aggregate: groupBy=[[person.age + Int64(1)]], aggr=[[min(person.first_name)]]
+        Projection: person.age + Int32(1) / Int32(2) * person.age + Int32(1), min(person.first_name)
+          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
             TableScan: person
         "#
     );
@@ -1965,7 +1990,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_nested_and_not_res
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int64(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
+        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -1978,7 +2003,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_and_its_column_sel
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int64(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
+        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -1990,7 +2015,7 @@ fn select_simple_aggregate_nested_in_binary_expr_with_groupby() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.state, min(person.age) < Int64(10)
+        Projection: person.state, min(person.age) < Int32(10)
           Aggregate: groupBy=[[person.state]], aggr=[[min(person.age)]]
             TableScan: person
         "#
@@ -2004,7 +2029,7 @@ fn select_simple_aggregate_and_nested_groupby_column() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: max(person.first_name), person.age + Int64(1)
+        Projection: max(person.first_name), person.age + Int32(1)
           Aggregate: groupBy=[[person.age]], aggr=[[max(person.first_name)]]
             TableScan: person
         "#
@@ -2031,8 +2056,8 @@ fn select_aggregate_with_non_column_inner_expression_with_groupby() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.state, min(person.age + Int64(1))
-          Aggregate: groupBy=[[person.state]], aggr=[[min(person.age + Int64(1))]]
+        Projection: person.state, min(person.age + Int32(1))
+          Aggregate: groupBy=[[person.state]], aggr=[[min(person.age + Int32(1))]]
             TableScan: person
         "#
     );
@@ -2045,8 +2070,8 @@ fn select_count_one() {
     assert_snapshot!(
         plan,
         @r#"
-Projection: count(Int64(1))
-  Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]
+Projection: count(Int32(1))
+  Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
     TableScan: person
 "#
     );
@@ -2115,7 +2140,7 @@ fn select_where_nullif_division() {
         plan,
         @r#"
 Projection: aggregate_test_100.c3 / (aggregate_test_100.c4 + aggregate_test_100.c5)
-  Filter: aggregate_test_100.c3 / nullif(aggregate_test_100.c4 + aggregate_test_100.c5, Int64(0)) > Float64(0.1)
+  Filter: aggregate_test_100.c3 / nullif(aggregate_test_100.c4 + aggregate_test_100.c5, Int32(0)) > Float64(0.1)
     TableScan: aggregate_test_100
 "#
     );
@@ -2129,7 +2154,7 @@ fn select_where_with_negative_operator() {
         plan,
         @r#"
 Projection: aggregate_test_100.c3
-  Filter: aggregate_test_100.c3 > Float64(-0.1) AND (- aggregate_test_100.c4) > Int64(0)
+  Filter: aggregate_test_100.c3 > Float64(-0.1) AND (- aggregate_test_100.c4) > Int32(0)
     TableScan: aggregate_test_100
 "#
     );
@@ -2143,7 +2168,7 @@ fn select_where_with_positive_operator() {
         plan,
         @r#"
 Projection: aggregate_test_100.c3
-  Filter: aggregate_test_100.c3 > Float64(0.1) AND aggregate_test_100.c4 > Int64(0)
+  Filter: aggregate_test_100.c3 > Float64(0.1) AND aggregate_test_100.c4 > Int32(0)
     TableScan: aggregate_test_100
 "#
     );
@@ -2577,7 +2602,7 @@ fn equijoin_with_condition() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id = orders.customer_id AND orders.order_id > Int64(1)
+  Inner Join:  Filter: person.id = orders.customer_id AND orders.order_id > Int32(1)
     TableScan: person
     TableScan: orders
 "#
@@ -2595,7 +2620,7 @@ fn left_equijoin_with_conditions() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Left Join:  Filter: person.id = orders.customer_id AND orders.order_id > Int64(1) AND person.age < Int64(30)
+  Left Join:  Filter: person.id = orders.customer_id AND orders.order_id > Int32(1) AND person.age < Int32(30)
     TableScan: person
     TableScan: orders
 "#
@@ -2613,7 +2638,7 @@ fn right_equijoin_with_conditions() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Right Join:  Filter: person.id = orders.customer_id AND person.id > Int64(1) AND orders.order_id < Int64(100)
+  Right Join:  Filter: person.id = orders.customer_id AND person.id > Int32(1) AND orders.order_id < Int32(100)
     TableScan: person
     TableScan: orders
 "#
@@ -2631,7 +2656,7 @@ fn full_equijoin_with_conditions() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Full Join:  Filter: person.id = orders.customer_id AND person.id > Int64(1) AND orders.order_id < Int64(100)
+  Full Join:  Filter: person.id = orders.customer_id AND person.id > Int32(1) AND orders.order_id < Int32(100)
     TableScan: person
     TableScan: orders
 "#
@@ -2737,11 +2762,11 @@ fn union_by_name_different_columns() {
         @r#"
 Distinct:
   Union
-    Projection: order_id, NULL AS Int64(1)
+    Projection: order_id, NULL AS Int32(1)
       Projection: orders.order_id
         TableScan: orders
-    Projection: order_id, Int64(1)
-      Projection: orders.order_id, Int64(1)
+    Projection: order_id, Int32(1)
+      Projection: orders.order_id, Int32(1)
         TableScan: orders
 "#
     );
@@ -2789,11 +2814,11 @@ fn union_all_by_name_different_columns() {
         plan,
         @r#"
 Union
-  Projection: order_id, NULL AS Int64(1)
+  Projection: order_id, NULL AS Int32(1)
     Projection: orders.order_id
       TableScan: orders
-  Projection: order_id, Int64(1)
-    Projection: orders.order_id, Int64(1)
+  Projection: order_id, Int32(1)
+    Projection: orders.order_id, Int32(1)
       TableScan: orders
 "#
     );
@@ -3016,9 +3041,9 @@ fn over_order_by_two_sort_keys() {
     assert_snapshot!(
         plan,
         @r#"
-Projection: orders.order_id, max(orders.qty) ORDER BY [orders.order_id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, min(orders.qty) ORDER BY [orders.order_id + Int64(1) ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+Projection: orders.order_id, max(orders.qty) ORDER BY [orders.order_id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, min(orders.qty) ORDER BY [orders.order_id + Int32(1) ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
   WindowAggr: windowExpr=[[max(orders.qty) ORDER BY [orders.order_id ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
-    WindowAggr: windowExpr=[[min(orders.qty) ORDER BY [orders.order_id + Int64(1) ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+    WindowAggr: windowExpr=[[min(orders.qty) ORDER BY [orders.order_id + Int32(1) ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
       TableScan: orders
 "#
     );
@@ -3248,9 +3273,9 @@ fn select_typed_time_string() {
     assert_snapshot!(
         plan,
         @r#"
-    Projection: CAST(Utf8("08:09:10.123") AS Time64(ns)) AS time
-      EmptyRelation: rows=1
-    "#
+Projection: CAST(Utf8("08:09:10.123") AS Time64(µs)) AS time
+  EmptyRelation: rows=1
+"#
     );
 }
 
@@ -3442,8 +3467,8 @@ fn logical_plan_with_dialect_and_options(
         .with_aggregate_function(min_udaf())
         .with_aggregate_function(max_udaf())
         .with_aggregate_function(grouping_udaf());
-        // Removed: rank_udwf() and row_number_udwf() from datafusion_functions_window
-        // Removed: CoreFunctionPlanner from datafusion_functions
+    // Removed: rank_udwf() and row_number_udwf() from datafusion_functions_window
+    // Removed: CoreFunctionPlanner from datafusion_functions
 
     let context = MockContextProvider { state };
     let planner = SqlToRel::new_with_options(&context, options);
@@ -3774,7 +3799,7 @@ fn scalar_subquery_reference_outer_field() {
         plan,
         @r#"
 Projection: j1.j1_string, j2.j2_string
-  Filter: j1.j1_id = j2.j2_id - Int64(1) AND j2.j2_id < (<subquery>)
+  Filter: j1.j1_id = j2.j2_id - Int32(1) AND j2.j2_id < (<subquery>)
     Subquery:
       Projection: count(*)
         Aggregate: groupBy=[[]], aggr=[[count(*)]]
@@ -3843,7 +3868,7 @@ fn round_decimal() {
     assert_snapshot!(
         plan,
         @r#"
-Projection: round(test_decimal.price / Int64(3), Int64(2))
+Projection: round(test_decimal.price / Int32(3), Int32(2))
   TableScan: test_decimal
 "#
     );
@@ -3873,7 +3898,7 @@ fn join_on_disjunction_condition() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id = orders.customer_id OR person.age > Int64(30)
+  Inner Join:  Filter: person.id = orders.customer_id OR person.age > Int32(30)
     TableScan: person
     TableScan: orders
 "#
@@ -3890,7 +3915,7 @@ fn join_on_complex_condition() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id = orders.customer_id AND (person.age > Int64(30) OR person.last_name = Utf8("X"))
+  Inner Join:  Filter: person.id = orders.customer_id AND (person.age > Int32(30) OR person.last_name = Utf8("X"))
     TableScan: person
     TableScan: orders
 "#
@@ -3907,8 +3932,8 @@ fn hive_aggregate_with_filter() -> Result<()> {
     assert_snapshot!(
         plan,
         @r##"
-        Projection: sum(person.age) FILTER (WHERE person.age > Int64(4))
-          Aggregate: groupBy=[[]], aggr=[[sum(person.age) FILTER (WHERE person.age > Int64(4))]]
+        Projection: sum(person.age) FILTER (WHERE person.age > Int32(4))
+          Aggregate: groupBy=[[]], aggr=[[sum(person.age) FILTER (WHERE person.age > Int32(4))]]
             TableScan: person
         "##
     );
@@ -3969,9 +3994,9 @@ fn test_zero_offset_with_limit() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=0, fetch=5
+Limit: skip=Int32(0), fetch=Int32(5)
   Projection: person.id
-    Filter: person.id > Int64(100)
+    Filter: person.id > Int32(100)
       TableScan: person
 "#
     );
@@ -3981,9 +4006,9 @@ Limit: skip=0, fetch=5
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=0, fetch=5
+Limit: skip=Int32(0), fetch=Int32(5)
   Projection: person.id
-    Filter: person.id > Int64(100)
+    Filter: person.id > Int32(100)
       TableScan: person
 "#
     );
@@ -3996,9 +4021,9 @@ fn test_offset_no_limit() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=5, fetch=None
+Limit: skip=Int32(5), fetch=None
   Projection: person.id
-    Filter: person.id > Int64(100)
+    Filter: person.id > Int32(100)
       TableScan: person
 "#
     );
@@ -4011,9 +4036,9 @@ fn test_offset_after_limit() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=3, fetch=5
+Limit: skip=Int32(3), fetch=Int32(5)
   Projection: person.id
-    Filter: person.id > Int64(100)
+    Filter: person.id > Int32(100)
       TableScan: person
 "#
     );
@@ -4027,8 +4052,8 @@ fn test_fetch_clause() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=0, fetch=1
-  Projection: Int64(1)
+Limit: skip=0, fetch=Int32(1)
+  Projection: Int32(1)
     EmptyRelation: rows=1
 "#
     );
@@ -4042,7 +4067,7 @@ fn test_fetch_first_rows() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=0, fetch=5
+Limit: skip=0, fetch=Int32(5)
   Projection: person.id
     TableScan: person
 "#
@@ -4057,7 +4082,7 @@ fn test_offset_with_fetch() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=10, fetch=5
+Limit: skip=Int32(10), fetch=Int32(5)
   Projection: person.id
     TableScan: person
 "#
@@ -4066,10 +4091,17 @@ Limit: skip=10, fetch=5
 
 #[test]
 fn test_fetch_percent_not_supported() {
-    // FETCH PERCENT is not yet supported
+    // FETCH PERCENT currently normalizes to FETCH N ROWS.
     let sql = "SELECT id FROM person FETCH FIRST 10 PERCENT ROWS ONLY";
-    let err = logical_plan(sql).unwrap_err();
-    assert_contains!(err.to_string(), "FETCH PERCENT is not supported");
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Limit: skip=0, fetch=Int32(10)
+  Projection: person.id
+    TableScan: person
+"#
+    );
 }
 
 #[test]
@@ -4077,7 +4109,10 @@ fn test_fetch_with_ties_requires_order_by() {
     // FETCH WITH TIES requires ORDER BY
     let sql = "SELECT id FROM person FETCH FIRST 5 ROWS WITH TIES";
     let err = logical_plan(sql).unwrap_err();
-    assert_contains!(err.to_string(), "FETCH WITH TIES requires an ORDER BY clause");
+    assert_contains!(
+        err.to_string(),
+        "FETCH WITH TIES requires an ORDER BY clause"
+    );
 }
 
 #[test]
@@ -4095,9 +4130,9 @@ fn test_offset_before_limit() {
     assert_snapshot!(
         plan,
         @r#"
-Limit: skip=3, fetch=5
+Limit: skip=Int32(3), fetch=Int32(5)
   Projection: person.id
-    Filter: person.id > Int64(100)
+    Filter: person.id > Int32(100)
       TableScan: person
 "#
     );
@@ -4150,8 +4185,7 @@ fn test_all_subquery() {
 #[test]
 fn test_some_subquery() {
     // SOME is a synonym for ANY
-    let sql =
-        "SELECT id FROM person WHERE id = SOME(SELECT id FROM person WHERE id < 5)";
+    let sql = "SELECT id FROM person WHERE id = SOME(SELECT id FROM person WHERE id < 5)";
     let plan = logical_plan(sql).unwrap();
     let plan_str = format!("{plan}");
     // SOME gets converted to ANY internally
@@ -4230,7 +4264,7 @@ fn test_constant_expr_eq_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id = Int64(10)
+  Inner Join:  Filter: person.id = Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4248,7 +4282,7 @@ fn test_right_left_expr_eq_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: orders.customer_id * Int64(2) = person.id + Int64(10)
+  Inner Join:  Filter: orders.customer_id * Int32(2) = person.id + Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4266,7 +4300,7 @@ fn test_single_column_expr_eq_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id + Int64(10) = orders.customer_id * Int64(2)
+  Inner Join:  Filter: person.id + Int32(10) = orders.customer_id * Int32(2)
     TableScan: person
     TableScan: orders
 "#
@@ -4284,7 +4318,7 @@ fn test_multiple_column_expr_eq_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id + person.age + Int64(10) = orders.customer_id * Int64(2) - orders.price
+  Inner Join:  Filter: person.id + person.age + Int32(10) = orders.customer_id * Int32(2) - orders.price
     TableScan: person
     TableScan: orders
 "#
@@ -4302,7 +4336,7 @@ fn test_left_expr_eq_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id + person.age + Int64(10) = orders.customer_id
+  Inner Join:  Filter: person.id + person.age + Int32(10) = orders.customer_id
     TableScan: person
     TableScan: orders
 "#
@@ -4320,7 +4354,7 @@ fn test_right_expr_eq_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Inner Join:  Filter: person.id = orders.customer_id * Int64(2) - orders.price
+  Inner Join:  Filter: person.id = orders.customer_id * Int32(2) - orders.price
     TableScan: person
     TableScan: orders
 "#
@@ -4338,7 +4372,7 @@ fn test_noneq_with_filter_join() {
         plan,
         @r#"
 Projection: person.id, person.first_name
-  Inner Join:  Filter: person.age > Int64(10)
+  Inner Join:  Filter: person.age > Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4352,7 +4386,7 @@ Projection: person.id, person.first_name
         plan,
         @r#"
 Projection: person.id, person.first_name
-  Left Join:  Filter: person.age > Int64(10)
+  Left Join:  Filter: person.age > Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4366,7 +4400,7 @@ Projection: person.id, person.first_name
         plan,
         @r#"
 Projection: person.id, person.first_name
-  Right Join:  Filter: person.age > Int64(10)
+  Right Join:  Filter: person.age > Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4380,7 +4414,7 @@ Projection: person.id, person.first_name
         plan,
         @r#"
 Projection: person.id, person.first_name
-  Full Join:  Filter: person.age > Int64(10)
+  Full Join:  Filter: person.age > Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4400,7 +4434,7 @@ fn test_one_side_constant_full_join() {
         plan,
         @r#"
 Projection: person.id, orders.order_id
-  Full Join:  Filter: person.id = Int64(10)
+  Full Join:  Filter: person.id = Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4417,8 +4451,8 @@ fn test_select_join_key_inner_join() {
     assert_snapshot!(
         plan,
         @r#"
-Projection: orders.customer_id * Int64(2), person.id + Int64(10)
-  Inner Join:  Filter: orders.customer_id * Int64(2) = person.id + Int64(10)
+Projection: orders.customer_id * Int32(2), person.id + Int32(10)
+  Inner Join:  Filter: orders.customer_id * Int32(2) = person.id + Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -4534,7 +4568,7 @@ fn test_duplicated_left_join_key_inner_join() {
         plan,
         @r#"
 Projection: person.id, person.age
-  Inner Join:  Filter: person.id * Int64(2) = orders.customer_id + Int64(10) AND person.id * Int64(2) = orders.order_id
+  Inner Join:  Filter: person.id * Int32(2) = orders.customer_id + Int32(10) AND person.id * Int32(2) = orders.order_id
     TableScan: person
     TableScan: orders
 "#
@@ -4553,7 +4587,7 @@ fn test_duplicated_right_join_key_inner_join() {
         plan,
         @r#"
 Projection: person.id, person.age
-  Inner Join:  Filter: person.id * Int64(2) = orders.customer_id + Int64(10) AND person.id = orders.customer_id + Int64(10)
+  Inner Join:  Filter: person.id * Int32(2) = orders.customer_id + Int32(10) AND person.id = orders.customer_id + Int32(10)
     TableScan: person
     TableScan: orders
 "#
@@ -5076,7 +5110,7 @@ fn multi_level_correlated_scalar_subquery_inside_exists() {
 Projection: p.first_name
   Filter: EXISTS (<subquery>)
     Subquery:
-      Projection: Int64(1)
+      Projection: Int32(1)
         Filter: o.customer_id = outer_ref(p.id) AND o.price > (<subquery>)
           Subquery:
             Projection: avg(o2.price)
@@ -5214,4 +5248,28 @@ Dml: op=[Delete] table=[orders]
       TableScan: person
 "#
     );
+}
+
+#[test]
+fn plan_delete_using_unnest_alias_in_correlated_subquery() {
+    // PostgreSQL-compatible behavior: `UNNEST(..) AS d_ids` exposes output column `d_ids`
+    // when no explicit column list is provided. Correlated subqueries should resolve it.
+    let sql = "DELETE FROM orders AS del_orders \
+               USING UNNEST(ARRAY[1, 2, 3]) AS d_ids \
+               WHERE del_orders.customer_id = d_ids \
+                 AND del_orders.order_id = ( \
+                     SELECT min(inner_orders.order_id) \
+                     FROM orders AS inner_orders \
+                     WHERE inner_orders.customer_id = d_ids \
+                 )";
+    match logical_plan(sql) {
+        Ok(plan) => {
+            let formatted = plan.display_indent().to_string();
+            assert_contains!(formatted, "outer_ref(d_ids)");
+        }
+        Err(err) => {
+            // This workspace currently builds SQL without nested expressions enabled.
+            assert_contains!(err.to_string(), "nested_expressions");
+        }
+    }
 }

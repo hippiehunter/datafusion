@@ -18,16 +18,16 @@
 use arrow::datatypes::{DataType, Field, Schema};
 
 use datafusion_common::{
-    Column, DFSchema, DFSchemaRef, DataFusionError, Result, TableReference,
-    assert_contains,
+    assert_contains, Column, DFSchema, DFSchemaRef, DataFusionError, Result,
+    TableReference,
 };
 use datafusion_expr::test::function_stub::{
     count_udaf, max_udaf, min_udaf, sum, sum_udaf,
 };
 use datafusion_expr::{
-    CreateMemoryTable, DdlStatement, EmptyRelation, Expr, Extension, LogicalPlan,
-    LogicalPlanBuilder, Union, UserDefinedLogicalNode, UserDefinedLogicalNodeCore, cast,
-    col, lit, table_scan, wildcard,
+    cast, col, lit, table_scan, wildcard, CreateMemoryTable, DdlStatement, EmptyRelation,
+    Expr, Extension, LogicalPlan, LogicalPlanBuilder, Union, UserDefinedLogicalNode,
+    UserDefinedLogicalNodeCore,
 };
 use datafusion_functions_aggregate::grouping::grouping_udaf;
 use datafusion_sql::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -36,7 +36,7 @@ use datafusion_sql::unparser::dialect::{
     DefaultDialect, Dialect as UnparserDialect, MySqlDialect as UnparserMySqlDialect,
     PostgreSqlDialect as UnparserPostgreSqlDialect, SqliteDialect,
 };
-use datafusion_sql::unparser::{Unparser, expr_to_sql, plan_to_sql};
+use datafusion_sql::unparser::{expr_to_sql, plan_to_sql, Unparser};
 use insta::assert_snapshot;
 use sqlparser::ast::Statement;
 use std::hash::Hash;
@@ -273,18 +273,17 @@ fn roundtrip_statement() -> Result<()> {
 fn plan_create_temporary_table() -> Result<()> {
     let sql = "CREATE TEMPORARY TABLE temp_table (id INT, name VARCHAR)";
     let dialect = GenericDialect {};
-    let statement = Parser::new(&dialect)
-        .try_with_sql(sql)?
-        .parse_statement()?;
+    let statement = Parser::new(&dialect).try_with_sql(sql)?.parse_statement()?;
     let state = MockSessionState::default();
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new(&context);
     let plan = sql_to_rel.sql_statement_to_plan(statement)?;
 
     match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-            CreateMemoryTable { temporary, .. },
-        )) => {
+        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            temporary,
+            ..
+        })) => {
             assert!(temporary);
         }
         other => {
@@ -585,7 +584,7 @@ fn roundtrip_statement_with_dialect_13() -> Result<(), DataFusionError> {
             ",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT agg.string_count FROM (SELECT j1.j1_id, min(j2.j2_string) FROM j1 LEFT OUTER JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id) AS agg (id, string_count)"#,
+        expected: @r#"SELECT agg.string_count FROM (SELECT j1_id AS id, "min(j2.j2_string)" AS string_count FROM (SELECT j1.j1_id, min(j2.j2_string) FROM j1 LEFT OUTER JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id)) AS agg"#,
     );
     Ok(())
 }
@@ -660,7 +659,7 @@ fn roundtrip_statement_with_dialect_16() -> Result<(), DataFusionError> {
         sql: "SELECT id FROM (SELECT j1_id from j1) AS c (id)",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT c.id FROM (SELECT j1.j1_id FROM j1) AS c (id)"#,
+        expected: @r#"SELECT c.id FROM (SELECT j1_id AS id FROM (SELECT j1.j1_id FROM j1)) AS c"#,
     );
     Ok(())
 }
@@ -739,7 +738,7 @@ fn roundtrip_statement_with_dialect_23() -> Result<(), DataFusionError> {
         sql: "SELECT temp_j.id2 FROM (SELECT j1_id, j1_string FROM j1) AS temp_j(id2, string2)",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT temp_j.id2 FROM (SELECT j1.j1_id, j1.j1_string FROM j1) AS temp_j (id2, string2)"#,
+        expected: @r#"SELECT temp_j.id2 FROM (SELECT j1_id AS id2, j1_string AS string2 FROM (SELECT j1.j1_id, j1.j1_string FROM j1)) AS temp_j"#,
     );
     Ok(())
 }
@@ -750,7 +749,7 @@ fn roundtrip_statement_with_dialect_24() -> Result<(), DataFusionError> {
         sql: "SELECT temp_j.id2 FROM (SELECT j1_id, j1_string FROM j1) AS temp_j(id2, string2)",
         parser_dialect: GenericDialect {},
         unparser_dialect: SqliteDialect {},
-        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1`.`j1_id` AS `id2`, `j1`.`j1_string` AS `string2` FROM `j1`) AS `temp_j`"#,
+        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1_id` AS `id2`, `j1_string` AS `string2` FROM (SELECT `j1`.`j1_id`, `j1`.`j1_string` FROM `j1`)) AS `temp_j`"#,
     );
     Ok(())
 }
@@ -772,7 +771,7 @@ fn roundtrip_statement_with_dialect_26() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM (SELECT j1_id FROM j1 LIMIT 1) AS temp_j(id2)",
         parser_dialect: GenericDialect {},
         unparser_dialect: SqliteDialect {},
-        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1`.`j1_id` AS `id2` FROM `j1` LIMIT 1) AS `temp_j`"#,
+        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1_id` AS `id2` FROM (SELECT `j1`.`j1_id` FROM `j1` LIMIT 1)) AS `temp_j`"#,
     );
     Ok(())
 }
@@ -784,7 +783,7 @@ fn roundtrip_statement_with_dialect_27() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3])",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))" FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))") AS derived_projection ("UNNEST(make_array(Int64(1),Int64(2),Int64(3)))")"#,
+        expected: @r#"SELECT "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))" FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS derived_projection ("UNNEST(make_array(Int32(1),Int32(2),Int32(3)))")"#,
     );
     Ok(())
 }
@@ -796,7 +795,7 @@ fn roundtrip_statement_with_dialect_28() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3]) AS t1 (c1)",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT t1.c1 FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))") AS t1 (c1)"#,
+        expected: @r#"SELECT t1.c1 FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS t1 (c1)"#,
     );
     Ok(())
 }
@@ -808,7 +807,7 @@ fn roundtrip_statement_with_dialect_29() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3]), j1",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))", j1.j1_id, j1.j1_string FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))") AS derived_projection ("UNNEST(make_array(Int64(1),Int64(2),Int64(3)))") CROSS JOIN j1"#,
+        expected: @r#"SELECT "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))", j1.j1_id, j1.j1_string FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS derived_projection ("UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") CROSS JOIN j1"#,
     );
     Ok(())
 }
@@ -820,7 +819,7 @@ fn roundtrip_statement_with_dialect_30() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) JOIN j1 ON u.c1 = j1.j1_id",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT u.c1, j1.j1_id, j1.j1_string FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))") AS u (c1) INNER JOIN j1 ON (u.c1 = j1.j1_id)"#,
+        expected: @r#"SELECT u.c1, j1.j1_id, j1.j1_string FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS u (c1) INNER JOIN j1 ON (u.c1 = j1.j1_id)"#,
     );
     Ok(())
 }
@@ -832,7 +831,7 @@ fn roundtrip_statement_with_dialect_31() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) UNION ALL SELECT * FROM UNNEST([4,5,6]) u(c1)",
         parser_dialect: GenericDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT u.c1 FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int64(1),Int64(2),Int64(3)))") AS u (c1) UNION ALL SELECT u.c1 FROM (SELECT UNNEST([4, 5, 6]) AS "UNNEST(make_array(Int64(4),Int64(5),Int64(6)))") AS u (c1)"#,
+        expected: @r#"SELECT u.c1 FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS u (c1) UNION ALL SELECT u.c1 FROM (SELECT UNNEST([4, 5, 6]) AS "UNNEST(make_array(Int32(4),Int32(5),Int32(6)))") AS u (c1)"#,
     );
     Ok(())
 }
@@ -847,7 +846,7 @@ fn roundtrip_statement_with_dialect_32() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3])",
         parser_dialect: GenericDialect {},
         unparser_dialect: unparser,
-        expected: @r#"SELECT UNNEST(make_array(Int64(1),Int64(2),Int64(3))) FROM UNNEST([1, 2, 3])"#,
+        expected: @r#"SELECT UNNEST(make_array(Int32(1),Int32(2),Int32(3))) FROM UNNEST([1, 2, 3])"#,
     );
     Ok(())
 }
@@ -888,7 +887,7 @@ fn roundtrip_statement_with_dialect_35() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM UNNEST([1,2,3]), j1",
         parser_dialect: GenericDialect {},
         unparser_dialect: unparser,
-        expected: @r#"SELECT UNNEST(make_array(Int64(1),Int64(2),Int64(3))), j1.j1_id, j1.j1_string FROM UNNEST([1, 2, 3]) CROSS JOIN j1"#,
+        expected: @r#"SELECT UNNEST(make_array(Int32(1),Int32(2),Int32(3))), j1.j1_id, j1.j1_string FROM UNNEST([1, 2, 3]) CROSS JOIN j1"#,
     );
     Ok(())
 }
@@ -963,7 +962,7 @@ fn roundtrip_statement_with_dialect_40() -> Result<(), DataFusionError> {
         sql: "SELECT UNNEST([1,2,3]), 1",
         parser_dialect: GenericDialect {},
         unparser_dialect: unparser,
-        expected: @r#"SELECT UNNEST([1, 2, 3]) AS UNNEST(make_array(Int64(1),Int64(2),Int64(3))), Int64(1)"#,
+        expected: @r#"SELECT UNNEST([1, 2, 3]) AS UNNEST(make_array(Int32(1),Int32(2),Int32(3))), Int32(1)"#,
     );
     Ok(())
 }
@@ -1006,7 +1005,7 @@ fn roundtrip_statement_with_dialect_43() -> Result<(), DataFusionError> {
         sql: "SELECT unnest([1, 2, 3, 4]) from unnest([1, 2, 3]);",
         parser_dialect: GenericDialect {},
         unparser_dialect: unparser,
-        expected: @r#"SELECT UNNEST([1, 2, 3, 4]) AS UNNEST(make_array(Int64(1),Int64(2),Int64(3),Int64(4))) FROM UNNEST([1, 2, 3])"#,
+        expected: @r#"SELECT UNNEST([1, 2, 3, 4]) AS UNNEST(make_array(Int32(1),Int32(2),Int32(3),Int32(4))) FROM UNNEST([1, 2, 3])"#,
     );
     Ok(())
 }
@@ -2234,9 +2233,11 @@ fn test_unparse_optimized_multi_union() -> Result<()> {
     );
 
     let plan = LogicalPlan::Union(Union {
-        inputs: vec![
-            project(empty.clone(), vec![lit(1).alias("x"), lit("a").alias("y")])?.into(),
-        ],
+        inputs: vec![project(
+            empty.clone(),
+            vec![lit(1).alias("x"), lit("a").alias("y")],
+        )?
+        .into()],
         schema: dfschema.clone(),
     });
 
@@ -2424,7 +2425,7 @@ fn test_unparse_right_semi_join() -> Result<()> {
         Field::new("c", DataType::Int32, false),
         Field::new("d", DataType::Int32, false),
     ]);
-    // Filter: t2.c <= Int64(1)
+    // Filter: t2.c <= Int32(1)
     //   RightSemi Join: t1.c = t2.c
     //     TableScan: t1 projection=[c, d]
     //     Projection: t2.c, t2.d
@@ -2462,7 +2463,7 @@ fn test_unparse_right_anti_join() -> Result<()> {
         Field::new("c", DataType::Int32, false),
         Field::new("d", DataType::Int32, false),
     ]);
-    // Filter: t2.c <= Int64(1)
+    // Filter: t2.c <= Int32(1)
     //   RightAnti Join: t1.c = t2.c
     //     TableScan: t1 projection=[c, d]
     //     Projection: t2.c, t2.d
@@ -2584,7 +2585,7 @@ fn test_unparse_left_semi_join_with_table_scan_projection() -> Result<()> {
 fn test_unparse_window() -> Result<()> {
     // SubqueryAlias: t
     // Projection: t.k, t.v, rank() PARTITION BY [t.k] ORDER BY [t.v ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS r
-    //     Filter: rank() PARTITION BY [t.k] ORDER BY [t.v ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW = UInt64(1)
+    //     Filter: rank() PARTITION BY [t.k] ORDER BY [t.v ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW = UInt32(1)
     //     WindowAggr: windowExpr=[[rank() PARTITION BY [t.k] ORDER BY [t.v ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
     //         TableScan: t projection=[k, v]
 

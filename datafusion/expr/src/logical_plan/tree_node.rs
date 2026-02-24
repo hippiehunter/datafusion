@@ -233,6 +233,7 @@ impl TreeNode for LogicalPlan {
                 output_schema,
                 target_columns,
                 returning_columns,
+                returning_exprs,
                 overriding_system_value,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
@@ -243,6 +244,7 @@ impl TreeNode for LogicalPlan {
                     output_schema,
                     target_columns,
                     returning_columns,
+                    returning_exprs,
                     overriding_system_value,
                 })
             }),
