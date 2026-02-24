@@ -152,6 +152,12 @@ pub struct DmlStatement {
     pub input: Arc<LogicalPlan>,
     /// The schema of the output relation
     pub output_schema: DFSchemaRef,
+    /// Explicit target columns for INSERT (e.g. `INSERT INTO t (a, b) ...`)
+    pub target_columns: Option<Vec<String>>,
+    /// Columns requested by a RETURNING clause
+    pub returning_columns: Option<Vec<String>>,
+    /// OVERRIDING SYSTEM VALUE was specified (PostgreSQL identity columns)
+    pub overriding_system_value: bool,
 }
 impl Eq for DmlStatement {}
 impl Hash for DmlStatement {
@@ -161,6 +167,9 @@ impl Hash for DmlStatement {
         self.op.hash(state);
         self.input.hash(state);
         self.output_schema.hash(state);
+        self.target_columns.hash(state);
+        self.returning_columns.hash(state);
+        self.overriding_system_value.hash(state);
     }
 }
 
@@ -171,6 +180,9 @@ impl PartialEq for DmlStatement {
             && self.op == other.op
             && self.input == other.input
             && self.output_schema == other.output_schema
+            && self.target_columns == other.target_columns
+            && self.returning_columns == other.returning_columns
+            && self.overriding_system_value == other.overriding_system_value
     }
 }
 
@@ -183,6 +195,8 @@ impl Debug for DmlStatement {
             .field("op", &self.op)
             .field("input", &self.input)
             .field("output_schema", &self.output_schema)
+            .field("target_columns", &self.target_columns)
+            .field("returning_columns", &self.returning_columns)
             .finish()
     }
 }
@@ -200,10 +214,33 @@ impl DmlStatement {
             target,
             op,
             input,
-
-            // The output schema is always a single column with the number of rows affected
             output_schema: make_count_schema(),
+            target_columns: None,
+            returning_columns: None,
+            overriding_system_value: false,
         }
+    }
+
+    /// Set explicit INSERT target columns.
+    pub fn with_target_columns(mut self, columns: Vec<String>) -> Self {
+        if !columns.is_empty() {
+            self.target_columns = Some(columns);
+        }
+        self
+    }
+
+    /// Set RETURNING clause columns.
+    pub fn with_returning_columns(mut self, columns: Vec<String>) -> Self {
+        if !columns.is_empty() {
+            self.returning_columns = Some(columns);
+        }
+        self
+    }
+
+    /// Mark this INSERT as using OVERRIDING SYSTEM VALUE.
+    pub fn with_overriding_system_value(mut self) -> Self {
+        self.overriding_system_value = true;
+        self
     }
 
     /// Return a descriptive name of this [`DmlStatement`]

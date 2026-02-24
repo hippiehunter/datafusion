@@ -66,15 +66,15 @@ use datafusion_expr::{
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use sqlparser::ast::{
     self, BeginTransactionKind, IndexColumn, IndexType, OnConflict as SqlOnConflict,
-    OnConflictAction as SqlOnConflictAction, OnInsert, OrderByExpr, OrderByOptions, Set,
-    ShowStatementIn, ShowStatementOptions, SqliteOnConflict, TableObject,
-    UpdateTableFromKind, ValueWithSpan,
+    OnConflictAction as SqlOnConflictAction, OnInsert, OrderByExpr, OrderByOptions,
+    OverridingKind, Set, ShowStatementIn, ShowStatementOptions, SqliteOnConflict,
+    TableObject, UpdateTableFromKind, ValueWithSpan,
 };
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr,
     ForeignKeyColumnOrPeriod, FromTable, Ident, Insert, ObjectName, ObjectType, Query,
-    SchemaName, SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
+    SchemaName, SelectItem, SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
     TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
@@ -96,6 +96,29 @@ fn object_name_to_string(object_name: &ObjectName) -> String {
         })
         .collect::<Vec<String>>()
         .join(".")
+}
+
+fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expr) => match expr {
+                SQLExpr::Identifier(ident) => ident_to_string(ident),
+                SQLExpr::CompoundIdentifier(idents) => idents
+                    .iter()
+                    .map(ident_to_string)
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => "*".to_string(),
+            },
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
+                "*".to_string()
+            }
+            SelectItem::ExprWithAlias { alias, .. } => {
+                ident_to_string(alias)
+            }
+        })
+        .collect()
 }
 
 fn get_schema_name(schema_name: &SchemaName) -> String {
@@ -1111,6 +1134,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 has_table_keyword,
                 settings,
                 format_clause,
+                overriding,
                 ..
             }) => {
                 let table_name = match table {
@@ -1144,9 +1168,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                     None => None,
                 };
-                if returning.is_some() {
-                    plan_err!("Insert-returning clause not supported")?;
-                }
                 if ignore {
                     plan_err!("Insert-ignore clause not supported")?;
                 }
@@ -1176,12 +1197,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let _ = into;
                 let _ = has_table_keyword;
 
+                let is_overriding_system =
+                    matches!(overriding, Some(OverridingKind::SystemValue));
+
                 // Handle INSERT DEFAULT VALUES
-                if source.is_none() {
-                    self.insert_default_values_to_plan(table_name, columns, overwrite, replace_into, on_conflict, planner_context)
+                let mut plan = if source.is_none() {
+                    self.insert_default_values_to_plan(table_name, columns, overwrite, replace_into, on_conflict, planner_context)?
                 } else {
-                    self.insert_to_plan(table_name, columns, source.unwrap(), overwrite, replace_into, on_conflict, planner_context)
+                    self.insert_to_plan(table_name, columns, source.unwrap(), overwrite, replace_into, on_conflict, returning, planner_context)?
+                };
+
+                if is_overriding_system {
+                    if let LogicalPlan::Dml(ref mut dml) = plan {
+                        dml.overriding_system_value = true;
+                    }
                 }
+
+                Ok(plan)
             }
             Statement::Update(update) => {
                 let from_clauses =
@@ -1194,16 +1226,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("Multiple tables in UPDATE SET FROM not yet supported")?;
                 }
                 let update_from = from_clauses.and_then(|mut f| f.pop());
-                if update.returning.is_some() {
-                    plan_err!("Update-returning clause not yet supported")?;
-                }
                 if update.or.is_some() {
                     plan_err!("ON conflict not supported")?;
                 }
                 if update.limit.is_some() {
                     return not_impl_err!("Update-limit clause not supported")?;
                 }
-                self.update_to_plan(update.table, &update.assignments, update_from, update.selection, planner_context)
+                self.update_to_plan(update.table, &update.assignments, update_from, update.selection, update.returning, planner_context)
             }
 
             Statement::Delete(Delete {
@@ -1220,10 +1249,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("DELETE <TABLE> not supported")?;
                 }
 
-                if returning.is_some() {
-                    plan_err!("Delete-returning clause not yet supported")?;
-                }
-
                 if !order_by.is_empty() {
                     plan_err!("Delete-order-by clause not yet supported")?;
                 }
@@ -1233,7 +1258,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
 
                 let table = self.get_delete_target(from)?;
-                self.delete_to_plan(table, using, selection, planner_context)
+                self.delete_to_plan(table, using, selection, returning, planner_context)
             }
             Statement::Merge { into, table, source, on, clauses, output, .. } => {
                 self.merge_to_plan(into, table, source, on, clauses, output, planner_context)
@@ -2638,6 +2663,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         table: TableWithJoins,
         using: Option<Vec<TableWithJoins>>,
         predicate_expr: Option<SQLExpr>,
+        returning: Option<Vec<SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Extract table name from the TableWithJoins
@@ -2681,12 +2707,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        let plan = LogicalPlan::Dml(DmlStatement::new(
+        let returning_col_names = returning.map(|items| select_items_to_column_names(&items));
+        let mut dml = DmlStatement::new(
             table_ref,
             table_source,
             WriteOp::Delete,
             Arc::new(source),
-        ));
+        );
+        if let Some(ret_cols) = returning_col_names {
+            dml = dml.with_returning_columns(ret_cols);
+        }
+        let plan = LogicalPlan::Dml(dml);
         Ok(plan)
     }
 
@@ -2856,6 +2887,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         assignments: &[Assignment],
         from: Option<TableWithJoins>,
         predicate_expr: Option<SQLExpr>,
+        returning: Option<Vec<SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let (table_name, table_alias) = match &table.relation {
@@ -3065,12 +3097,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let source = project(source, exprs)?;
 
-        let plan = LogicalPlan::Dml(DmlStatement::new(
+        let returning_col_names = returning.map(|items| select_items_to_column_names(&items));
+        let mut dml = DmlStatement::new(
             table_name,
             table_source,
             WriteOp::Update,
             Arc::new(source),
-        ));
+        );
+        if let Some(ret_cols) = returning_col_names {
+            dml = dml.with_returning_columns(ret_cols);
+        }
+        let plan = LogicalPlan::Dml(dml);
         Ok(plan)
     }
 
@@ -3083,6 +3120,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         overwrite: bool,
         replace_into: bool,
         on_conflict: Option<SqlOnConflict>,
+        returning: Option<Vec<SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Do a table lookup to verify the table exists
@@ -3097,6 +3135,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         //
         // If value_indices[i] = None, it means that the value of the i-th target table's column is
         // not provided, and should be filled with a default value later.
+        let target_col_names: Vec<String> = columns
+            .iter()
+            .map(|c| self.ident_normalizer.normalize(c.clone()))
+            .collect();
+
         let (fields, value_indices) = if columns.is_empty() {
             // Empty means we're inserting into all columns of the table
             (
@@ -3226,12 +3269,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             )?,
         };
 
-        let plan = LogicalPlan::Dml(DmlStatement::new(
+        let returning_col_names = returning.map(|items| select_items_to_column_names(&items));
+
+        let mut dml = DmlStatement::new(
             table_name,
             Arc::clone(&table_source),
             WriteOp::Insert(insert_op),
             Arc::new(source),
-        ));
+        )
+        .with_target_columns(target_col_names);
+        if let Some(ret_cols) = returning_col_names {
+            dml = dml.with_returning_columns(ret_cols);
+        }
+        let plan = LogicalPlan::Dml(dml);
         Ok(plan)
     }
 
@@ -3392,6 +3442,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             overwrite,
             replace_into,
             on_conflict,
+            None,
             planner_context,
         )
     }

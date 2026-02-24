@@ -38,7 +38,7 @@ pub use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::utils::find_column_exprs;
 use datafusion_expr::{Expr, col};
 use sqlparser::ast::{ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
-use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption};
+use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption, ColumnOptionDef};
 use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
 
 /// SQL parser options
@@ -529,13 +529,20 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 .options
                 .iter()
                 .any(|x| x.option == ColumnOption::NotNull);
-            fields.push(
-                data_type
-                    .as_ref()
-                    .clone()
-                    .with_name(self.ident_normalizer.normalize(column.name))
-                    .with_nullable(!not_nullable),
-            );
+            let mut field = data_type
+                .as_ref()
+                .clone()
+                .with_name(self.ident_normalizer.normalize(column.name))
+                .with_nullable(!not_nullable);
+
+            let identity_meta = extract_identity_metadata(&column.options, &column.data_type);
+            if !identity_meta.is_empty() {
+                let mut metadata = field.metadata().clone();
+                metadata.extend(identity_meta);
+                field = field.with_metadata(metadata);
+            }
+
+            fields.push(field);
         }
 
         Ok(Schema::new(fields))
@@ -734,7 +741,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         if let Some(type_planner) = self.context_provider.get_type_planner()
             && let Some(data_type) = type_planner.plan_type(sql_type)?
         {
-            return Ok(data_type.into_nullable_field_ref());
+            let field: Field = data_type.into_nullable_field();
+            let field = if let Some(metadata) = type_planner.plan_field_metadata(sql_type)? {
+                field.with_metadata(metadata)
+            } else {
+                field
+            };
+            return Ok(Arc::new(field));
         }
 
         // If no type_planner can handle this type, use the default conversion
@@ -1233,4 +1246,133 @@ pub fn object_name_to_qualifier(
         })
         .collect::<Result<Vec<_>>>()
         .map(|parts| parts.join(" AND "))
+}
+
+fn extract_identity_metadata(
+    options: &[ColumnOptionDef],
+    data_type: &SQLDataType,
+) -> HashMap<String, String> {
+    use sqlparser::ast::{
+        GeneratedAs, IdentityPropertyFormatKind, IdentityPropertyKind,
+    };
+
+    let mut meta = HashMap::new();
+
+    // SERIAL / SMALLSERIAL / BIGSERIAL detection
+    if let SQLDataType::Custom(name, modifiers) = data_type {
+        if modifiers.is_empty() && name.0.len() == 1 {
+            if let Some(ident) = name.0[0].as_ident() {
+                let normalized = ident.value.to_ascii_uppercase();
+                if matches!(normalized.as_str(), "SERIAL" | "SMALLSERIAL" | "BIGSERIAL") {
+                    meta.insert("identity_start".to_string(), "1".to_string());
+                    meta.insert("identity_increment".to_string(), "1".to_string());
+                    return meta;
+                }
+            }
+        }
+    }
+
+    for opt in options {
+        match &opt.option {
+            ColumnOption::Generated {
+                generated_as,
+                sequence_options,
+                generation_expr,
+                ..
+            } if generation_expr.is_none()
+                && matches!(
+                    generated_as,
+                    GeneratedAs::Always | GeneratedAs::ByDefault
+                ) =>
+            {
+                let (start, increment) = parse_sequence_options(sequence_options.as_deref());
+                meta.insert("identity_start".to_string(), start.to_string());
+                meta.insert("identity_increment".to_string(), increment.to_string());
+                let gen_kind = match generated_as {
+                    GeneratedAs::Always => "ALWAYS",
+                    GeneratedAs::ByDefault => "BY_DEFAULT",
+                    _ => "BY_DEFAULT",
+                };
+                meta.insert("identity_generation".to_string(), gen_kind.to_string());
+                return meta;
+            }
+            ColumnOption::Identity(identity_kind) => {
+                let property = match identity_kind {
+                    IdentityPropertyKind::Identity(p) | IdentityPropertyKind::Autoincrement(p) => {
+                        p
+                    }
+                };
+                let (start, increment) = match &property.parameters {
+                    Some(
+                        IdentityPropertyFormatKind::FunctionCall(params)
+                        | IdentityPropertyFormatKind::StartAndIncrement(params),
+                    ) => (
+                        expr_to_i64_string(&params.seed),
+                        expr_to_i64_string(&params.increment),
+                    ),
+                    None => ("1".to_string(), "1".to_string()),
+                };
+                meta.insert("identity_start".to_string(), start);
+                meta.insert("identity_increment".to_string(), increment);
+                return meta;
+            }
+            ColumnOption::Generated {
+                generation_expr: Some(expr),
+                generated_as: GeneratedAs::ExpStored,
+                ..
+            } => {
+                meta.insert(
+                    "generated_stored_expr".to_string(),
+                    expr.to_string(),
+                );
+                return meta;
+            }
+            _ => {}
+        }
+    }
+
+    meta
+}
+
+fn parse_sequence_options(options: Option<&[sqlparser::ast::SequenceOptions]>) -> (i64, i64) {
+    let mut start = 1i64;
+    let mut increment = 1i64;
+    if let Some(options) = options {
+        for option in options {
+            match option {
+                sqlparser::ast::SequenceOptions::StartWith(expr, _) => {
+                    if let Ok(val) = expr_to_i64(expr) {
+                        start = val;
+                    }
+                }
+                sqlparser::ast::SequenceOptions::IncrementBy(expr, _) => {
+                    if let Ok(val) = expr_to_i64(expr) {
+                        increment = val;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (start, increment)
+}
+
+fn expr_to_i64(expr: &sqlparser::ast::Expr) -> Result<i64> {
+    match expr {
+        sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan { value, .. }) => match value {
+            sqlparser::ast::Value::Number(n, _) => n
+                .parse::<i64>()
+                .map_err(|e| plan_datafusion_err!("Invalid identity value: {e}")),
+            _ => plan_err!("Expected numeric identity value"),
+        },
+        sqlparser::ast::Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Minus,
+            expr,
+        } => Ok(-expr_to_i64(expr)?),
+        _ => plan_err!("Expected numeric identity value"),
+    }
+}
+
+fn expr_to_i64_string(expr: &sqlparser::ast::Expr) -> String {
+    expr_to_i64(expr).map_or_else(|_| "1".to_string(), |v| v.to_string())
 }

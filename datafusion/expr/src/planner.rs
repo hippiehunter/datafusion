@@ -17,6 +17,7 @@
 
 //! [`ContextProvider`] and [`ExprPlanner`] APIs to customize SQL query planning
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -432,6 +433,15 @@ pub trait TypePlanner: Debug + Send + Sync {
         &self,
         _sql_type: &sqlparser::ast::DataType,
     ) -> Result<Option<DataType>> {
+        Ok(None)
+    }
+
+    /// Return additional metadata to attach to the Arrow [`Field`] for
+    /// the given SQL type. Returns `None` when no extra metadata is needed.
+    fn plan_field_metadata(
+        &self,
+        _sql_type: &sqlparser::ast::DataType,
+    ) -> Result<Option<HashMap<String, String>>> {
         Ok(None)
     }
 }

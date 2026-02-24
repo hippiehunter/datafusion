@@ -1485,20 +1485,19 @@ impl LogicalPlan {
                 let input = self.only_input(inputs)?;
                 Projection::try_new(expr, Arc::new(input)).map(LogicalPlan::Projection)
             }
-            LogicalPlan::Dml(DmlStatement {
-                table_name,
-                target,
-                op,
-                ..
-            }) => {
+            LogicalPlan::Dml(dml) => {
                 self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
-                Ok(LogicalPlan::Dml(DmlStatement::new(
-                    table_name.clone(),
-                    Arc::clone(target),
-                    op.clone(),
+                let mut new_dml = DmlStatement::new(
+                    dml.table_name.clone(),
+                    Arc::clone(&dml.target),
+                    dml.op.clone(),
                     Arc::new(input),
-                )))
+                );
+                new_dml.target_columns = dml.target_columns.clone();
+                new_dml.returning_columns = dml.returning_columns.clone();
+                new_dml.overriding_system_value = dml.overriding_system_value;
+                Ok(LogicalPlan::Dml(new_dml))
             }
             LogicalPlan::Merge(merge) => {
                 let (target, source) = self.only_two_inputs(inputs)?;

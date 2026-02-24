@@ -231,6 +231,9 @@ impl TreeNode for LogicalPlan {
                 op,
                 input,
                 output_schema,
+                target_columns,
+                returning_columns,
+                overriding_system_value,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
                     table_name,
@@ -238,6 +241,9 @@ impl TreeNode for LogicalPlan {
                     op,
                     input,
                     output_schema,
+                    target_columns,
+                    returning_columns,
+                    overriding_system_value,
                 })
             }),
             LogicalPlan::Merge(Merge {
