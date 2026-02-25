@@ -396,8 +396,14 @@ fn optimize_projections(
         }
         LogicalPlan::Join(join) => {
             let left_len = join.left.schema().fields().len();
+            let right_len = join.right.schema().fields().len();
             let (left_req_indices, right_req_indices) =
-                split_join_requirements(left_len, indices, &join.join_type);
+                split_join_requirements(
+                    left_len,
+                    right_len,
+                    indices,
+                    &join.join_type,
+                );
             let left_indices =
                 left_req_indices.with_plan_exprs(&plan, join.left.schema())?;
             let right_indices =
@@ -751,6 +757,7 @@ fn outer_columns_helper_multi<'a, 'b>(
 /// # Parameters
 ///
 /// * `left_len` - The length of the left child.
+/// * `right_len` - The length of the right child.
 /// * `indices` - A slice of requirement indices.
 /// * `join_type` - The type of join (e.g. `INNER`, `LEFT`, `RIGHT`).
 ///
@@ -762,20 +769,44 @@ fn outer_columns_helper_multi<'a, 'b>(
 /// adjusted based on the join type.
 fn split_join_requirements(
     left_len: usize,
+    right_len: usize,
     indices: RequiredIndices,
     join_type: &JoinType,
 ) -> (RequiredIndices, RequiredIndices) {
     match join_type {
         // In these cases requirements are split between left/right children:
-        JoinType::Inner
-        | JoinType::Left
-        | JoinType::Right
-        | JoinType::Full
-        | JoinType::LeftMark
-        | JoinType::RightMark => {
+        JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
             // Decrease right side indices by `left_len` so that they point to valid
             // positions within the right child:
             indices.split_off(left_len)
+        }
+        JoinType::LeftMark => {
+            // LEFT MARK output is: left columns + one synthetic marker column.
+            // Marker output does not map to either child schema by index.
+            let left = indices
+                .indices()
+                .iter()
+                .copied()
+                .filter(|idx| *idx < left_len)
+                .collect::<Vec<_>>();
+            (
+                RequiredIndices::new_from_indices(left),
+                RequiredIndices::new(),
+            )
+        }
+        JoinType::RightMark => {
+            // RIGHT MARK output is: right columns + one synthetic marker column.
+            // Marker output does not map to either child schema by index.
+            let right = indices
+                .indices()
+                .iter()
+                .copied()
+                .filter(|idx| *idx < right_len)
+                .collect::<Vec<_>>();
+            (
+                RequiredIndices::new(),
+                RequiredIndices::new_from_indices(right),
+            )
         }
         // All requirements can be re-routed to left child directly.
         JoinType::LeftAnti | JoinType::LeftSemi => (indices, RequiredIndices::new()),
@@ -942,6 +973,7 @@ fn subquery_alias_targets_recursive_cte(plan: &LogicalPlan, cte_name: &str) -> b
 
 #[cfg(test)]
 mod tests {
+    use super::{RequiredIndices, split_join_requirements};
     use std::cmp::Ordering;
     use std::collections::HashMap;
     use std::fmt::Formatter;
@@ -993,6 +1025,35 @@ mod tests {
                 @ $expected,
             )
         }};
+    }
+
+    #[test]
+    fn split_join_requirements_left_mark_ignores_marker_column() {
+        let required = RequiredIndices::new_from_indices(vec![0, 2, 3]);
+        let (left, right) =
+            split_join_requirements(3, 2, required, &JoinType::LeftMark);
+
+        assert_eq!(left.into_inner(), vec![0, 2]);
+        assert_eq!(right.into_inner(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn split_join_requirements_right_mark_ignores_marker_column() {
+        let required = RequiredIndices::new_from_indices(vec![0, 1, 2]);
+        let (left, right) =
+            split_join_requirements(4, 2, required, &JoinType::RightMark);
+
+        assert_eq!(left.into_inner(), Vec::<usize>::new());
+        assert_eq!(right.into_inner(), vec![0, 1]);
+    }
+
+    #[test]
+    fn split_join_requirements_inner_still_splits_both_children() {
+        let required = RequiredIndices::new_from_indices(vec![0, 2, 3, 4]);
+        let (left, right) = split_join_requirements(3, 2, required, &JoinType::Inner);
+
+        assert_eq!(left.into_inner(), vec![0, 2]);
+        assert_eq!(right.into_inner(), vec![0, 1]);
     }
 
     #[derive(Debug, Hash, PartialEq, Eq)]
