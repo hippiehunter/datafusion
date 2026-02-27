@@ -2817,7 +2817,22 @@ impl ScalarValue {
         let values = if values.is_empty() {
             new_empty_array(data_type)
         } else {
-            Self::iter_to_array(values.iter().cloned()).unwrap()
+            match Self::iter_to_array(values.iter().cloned()) {
+                Ok(array) => array,
+                Err(_) => {
+                    let typed_values = values.iter().map(|value| {
+                        if matches!(value, ScalarValue::Null) {
+                            ScalarValue::try_new_null(data_type)
+                                .unwrap_or(ScalarValue::Null)
+                        } else {
+                            value.clone()
+                        }
+                    });
+                    Self::iter_to_array(typed_values).unwrap_or_else(|_| {
+                        new_null_array(data_type, values.len())
+                    })
+                }
+            }
         };
         Arc::new(
             SingleRowListArrayBuilder::new(values)

@@ -1101,10 +1101,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             DataType::List(_)
             | DataType::LargeList(_)
             | DataType::FixedSizeList(_, _)
-            | DataType::Struct(_) => Ok(()),
-            DataType::Null => {
-                not_impl_err!("unnest() does not support null yet")
-            }
+            | DataType::Struct(_)
+            | DataType::Null => Ok(()),
             _ => {
                 plan_err!("unnest() can only be applied to array, struct and null")
             }

@@ -37,7 +37,7 @@ use datafusion_expr::{
 use crate::optimize_projections::required_indices::RequiredIndices;
 use crate::utils::NamePreserver;
 use datafusion_common::tree_node::{
-    Transformed, TreeNode, TreeNodeContainer, TreeNodeRecursion,
+    Transformed, TransformedResult, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
 
 /// Optimizer rule to prune unnecessary columns from intermediate schemas
@@ -398,12 +398,7 @@ fn optimize_projections(
             let left_len = join.left.schema().fields().len();
             let right_len = join.right.schema().fields().len();
             let (left_req_indices, right_req_indices) =
-                split_join_requirements(
-                    left_len,
-                    right_len,
-                    indices,
-                    &join.join_type,
-                );
+                split_join_requirements(left_len, right_len, indices, &join.join_type);
             let left_indices =
                 left_req_indices.with_plan_exprs(&plan, join.left.schema())?;
             let right_indices =
@@ -872,6 +867,10 @@ fn rewrite_projection_given_requirements(
     let Projection { expr, input, .. } = proj;
 
     let exprs_used = indices.get_at_indices(&expr);
+    let exprs_used = exprs_used
+        .into_iter()
+        .map(|expr| rebind_projection_expr_to_input(expr, &input))
+        .collect::<Result<Vec<_>>>()?;
 
     let required_indices =
         RequiredIndices::new().with_exprs(input.schema(), exprs_used.iter());
@@ -879,7 +878,13 @@ fn rewrite_projection_given_requirements(
     // rewrite the children projection, and if they are changed rewrite the
     // projection down
     optimize_projections(Arc::unwrap_or_clone(input), config, required_indices)?
-        .transform_data(|input| {
+        .transform_data(move |input| {
+            let exprs_used = exprs_used
+                .iter()
+                .cloned()
+                .map(|expr| rebind_projection_expr_to_input(expr, &input))
+                .collect::<Result<Vec<_>>>()?;
+
             if is_projection_unnecessary(&input, &exprs_used)? {
                 Ok(Transformed::yes(input))
             } else {
@@ -888,6 +893,43 @@ fn rewrite_projection_given_requirements(
                     .map(Transformed::yes)
             }
         })
+}
+
+/// Rebind projection expressions to an updated input schema.
+///
+/// Optimizer rewrites can change qualifiers without changing column meaning
+/// (for example when child projections are introduced/merged). We first attempt
+/// normal normalization, then retry after removing qualifiers to preserve
+/// semantic bindings when only qualification drifted.
+fn rebind_projection_expr_to_input(expr: Expr, input: &LogicalPlan) -> Result<Expr> {
+    let schema = input.schema();
+    let fallback_schemas = input.fallback_normalize_schemas();
+    let using_columns = input.using_columns()?;
+
+    expr.transform_up(|expr| {
+        if let Expr::Column(col) = expr {
+            let normalized = if col.relation.is_some() {
+                if schema.has_column(&col) {
+                    col
+                } else {
+                    let unqualified = Column::new_unqualified(col.name.clone());
+                    unqualified.normalize_with_schemas_and_ambiguity_check(
+                        &[&[schema], &fallback_schemas],
+                        &using_columns,
+                    )?
+                }
+            } else {
+                col.normalize_with_schemas_and_ambiguity_check(
+                    &[&[schema], &fallback_schemas],
+                    &using_columns,
+                )?
+            };
+            Ok(Transformed::yes(Expr::Column(normalized)))
+        } else {
+            Ok(Transformed::no(expr))
+        }
+    })
+    .data()
 }
 
 /// Projection is unnecessary, when
@@ -1030,8 +1072,7 @@ mod tests {
     #[test]
     fn split_join_requirements_left_mark_ignores_marker_column() {
         let required = RequiredIndices::new_from_indices(vec![0, 2, 3]);
-        let (left, right) =
-            split_join_requirements(3, 2, required, &JoinType::LeftMark);
+        let (left, right) = split_join_requirements(3, 2, required, &JoinType::LeftMark);
 
         assert_eq!(left.into_inner(), vec![0, 2]);
         assert_eq!(right.into_inner(), Vec::<usize>::new());
@@ -1040,8 +1081,7 @@ mod tests {
     #[test]
     fn split_join_requirements_right_mark_ignores_marker_column() {
         let required = RequiredIndices::new_from_indices(vec![0, 1, 2]);
-        let (left, right) =
-            split_join_requirements(4, 2, required, &JoinType::RightMark);
+        let (left, right) = split_join_requirements(4, 2, required, &JoinType::RightMark);
 
         assert_eq!(left.into_inner(), Vec::<usize>::new());
         assert_eq!(right.into_inner(), vec![0, 1]);
@@ -1054,6 +1094,45 @@ mod tests {
 
         assert_eq!(left.into_inner(), vec![0, 2]);
         assert_eq!(right.into_inner(), vec![0, 1]);
+    }
+
+    #[test]
+    fn left_mark_projection_rebinds_marker_column_after_child_pruning() -> Result<()> {
+        let left = test_table_scan_with_name("t1")?;
+        let right = test_table_scan_with_name("t2")?;
+
+        let join = LogicalPlanBuilder::from(left)
+            .join(
+                right,
+                JoinType::LeftMark,
+                (Vec::<Column>::new(), Vec::<Column>::new()),
+                Some(lit(true)),
+            )?
+            .build()?;
+
+        let mark_expr =
+            Expr::Column(Column::new(Some("t2"), "mark")).alias("exists_mark_0");
+        let plan = LogicalPlanBuilder::from(join)
+            .project(vec![col("t1.a"), mark_expr])?
+            .build()?;
+
+        let optimized = optimize(plan)?;
+
+        let LogicalPlan::Projection(Projection { expr, .. }) = optimized else {
+            panic!("expected projection at root after optimization");
+        };
+        let Expr::Alias(alias) = &expr[1] else {
+            panic!("expected second projection expression to be an alias");
+        };
+        let Expr::Column(mark_col) = alias.expr.as_ref() else {
+            panic!("expected aliased expression to be a column");
+        };
+
+        assert_eq!(alias.name, "exists_mark_0");
+        assert_eq!(mark_col.name, "mark");
+        assert!(mark_col.relation.is_none());
+
+        Ok(())
     }
 
     #[derive(Debug, Hash, PartialEq, Eq)]

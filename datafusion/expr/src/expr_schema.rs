@@ -32,7 +32,7 @@ use datafusion_common::datatype::FieldExt;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     Column, DataFusionError, ExprSchema, Result, ScalarValue, Spans, TableReference,
-    not_impl_err, plan_datafusion_err, plan_err,
+    plan_datafusion_err, plan_err,
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
@@ -144,9 +144,7 @@ impl ExprSchemable for Expr {
                     | DataType::LargeList(field)
                     | DataType::FixedSizeList(field, _) => Ok(field.data_type().clone()),
                     DataType::Struct(_) => Ok(arg_data_type),
-                    DataType::Null => {
-                        not_impl_err!("unnest() does not support null yet")
-                    }
+                    DataType::Null => Ok(DataType::Null),
                     _ => {
                         plan_err!(
                             "unnest() can only be applied to array, struct and null"
