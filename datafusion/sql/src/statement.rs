@@ -3327,17 +3327,42 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             )?;
             let logical_exprs = prepared
                 .into_iter()
-                .map(|select_expr| match select_expr {
+                .flat_map(|select_expr| match select_expr {
                     datafusion_expr::select_expr::SelectExpr::Expression(expr) => {
-                        Ok(expr)
+                        vec![Ok(expr)]
                     }
                     datafusion_expr::select_expr::SelectExpr::Wildcard(_) => {
-                        not_impl_err!("UPDATE RETURNING * is not implemented")
+                        table_schema
+                            .fields()
+                            .iter()
+                            .map(|field| {
+                                Ok(Expr::Column(Column::from_name(field.name())))
+                            })
+                            .collect()
                     }
-                    datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(_, _) => {
-                        not_impl_err!(
-                            "UPDATE RETURNING qualified wildcard is not implemented"
-                        )
+                    datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(
+                        qualifier,
+                        _,
+                    ) => {
+                        table_schema
+                            .fields()
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, _)| {
+                                let (q, field) = table_schema.qualified_field(idx);
+                                if q.map(|q| q.to_string().to_ascii_lowercase())
+                                    == Some(
+                                        qualifier.to_string().to_ascii_lowercase(),
+                                    )
+                                {
+                                    Some(Ok(Expr::Column(Column::from_name(
+                                        field.name(),
+                                    ))))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
