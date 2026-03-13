@@ -19,7 +19,6 @@
 name = "datafusion-functions-window-common"
 description = "Common functions for implementing user-defined window functions for the DataFusion query engine"
 keywords = ["datafusion", "logical", "plan", "expressions"]
-readme = "README.md"
 authors = { workspace = true }
 edition = "2024"
 homepage = { workspace = true }

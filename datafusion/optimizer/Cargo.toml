@@ -19,7 +19,6 @@
 name = "datafusion-optimizer"
 description = "DataFusion Query Optimizer"
 keywords = ["datafusion", "query", "optimizer"]
-readme = "README.md"
 version = { workspace = true }
 edition = "2024"
 homepage = { workspace = true }
@@ -59,14 +58,9 @@ regex-syntax = "0.8.6"
 
 [dev-dependencies]
 async-trait = { workspace = true }
-criterion = { workspace = true }
 ctor = { workspace = true }
 datafusion-functions-aggregate = { workspace = true }
 datafusion-functions-window-common = { workspace = true }
 datafusion-sql = { workspace = true }
 env_logger = { workspace = true }
 insta = { workspace = true }
-
-[[bench]]
-name = "projection_unnecessary"
-harness = false

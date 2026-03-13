@@ -19,7 +19,6 @@
 name = "datafusion-common"
 description = "Common functionality for DataFusion query engine"
 keywords = ["arrow", "query", "sql"]
-readme = "README.md"
 version = { workspace = true }
 edition = "2024"
 homepage = { workspace = true }

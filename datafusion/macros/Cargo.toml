@@ -19,7 +19,6 @@
 name = "datafusion-macros"
 description = "Procedural macros for DataFusion query engine"
 keywords = ["datafusion", "query", "sql"]
-readme = "README.md"
 version = { workspace = true }
 edition = "2024"
 homepage = { workspace = true }
