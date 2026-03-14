@@ -63,7 +63,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::function::PartitionEvaluatorArgs;
 use datafusion_sql::parser::DFParser;
 use datafusion_sql::planner::{ContextProvider, ParserOptions, SqlToRel};
-use sqlparser::dialect::{Dialect, GenericDialect, MsSqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{Dialect, PostgreSqlDialect, MsSqlDialect};
 
 // Import aggregate function stubs from datafusion_expr::test::function_stub
 use datafusion_expr::test::function_stub::{
@@ -2636,7 +2636,7 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
 
 /// Parse SQL text into AST statements.
 ///
-/// Uses the default GenericDialect.
+/// Uses the default PostgreSqlDialect.
 pub fn parse_sql(sql: &str) -> Result<()> {
     let _ = DFParser::parse_sql(sql)?;
     Ok(())
@@ -2689,7 +2689,7 @@ pub fn logical_plan_postgres(
 
 /// Convert SQL text to a logical plan.
 ///
-/// Uses the default GenericDialect and DataFusionFunctionProvider.
+/// Uses the default PostgreSqlDialect and DataFusionFunctionProvider.
 /// Downstream users can use `logical_plan_with_provider` to use their own
 /// function implementations.
 pub fn logical_plan(
@@ -2703,7 +2703,7 @@ pub fn logical_plan_with_options(
     sql: &str,
     options: ParserOptions,
 ) -> Result<datafusion_expr::logical_plan::LogicalPlan> {
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     logical_plan_with_dialect_and_options(sql, &dialect, options)
 }
 

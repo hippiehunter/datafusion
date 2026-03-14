@@ -60,7 +60,7 @@ use datafusion_sql::unparser::extension_unparser::{
     UnparseToStatementResult, UnparseWithinStatementResult,
     UserDefinedLogicalNodeUnparser,
 };
-use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect};
+use sqlparser::dialect::{Dialect, PostgreSqlDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 
 #[test]
@@ -89,7 +89,7 @@ fn test_roundtrip_expr_4() {
 }
 
 fn roundtrip_expr(table: TableReference, sql: &str) -> Result<String> {
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let sql_expr = Parser::new(&dialect).try_with_sql(sql)?.parse_expr()?;
     let state = MockSessionState::default().with_aggregate_function(sum_udaf());
     let context = MockContextProvider { state };
@@ -245,7 +245,7 @@ fn roundtrip_statement() -> Result<()> {
     // query information of the original sql string and disreguards other differences in syntax or
     // quoting.
     for query in tests {
-        let dialect = GenericDialect {};
+        let dialect = PostgreSqlDialect {};
         let statement = Parser::new(&dialect)
             .try_with_sql(query)?
             .parse_statement()?;
@@ -272,7 +272,7 @@ fn roundtrip_statement() -> Result<()> {
 #[test]
 fn plan_create_temporary_table() -> Result<()> {
     let sql = "CREATE TEMPORARY TABLE temp_table (id INT, name VARCHAR)";
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect).try_with_sql(sql)?.parse_statement()?;
     let state = MockSessionState::default();
     let context = MockContextProvider { state };
@@ -323,7 +323,7 @@ fn roundtrip_grant_revoke_role() -> Result<()> {
     // query information of the original sql string and disregards other differences in syntax or
     // quoting.
     for query in tests {
-        let dialect = GenericDialect {};
+        let dialect = PostgreSqlDialect {};
         let statement = Parser::new(&dialect)
             .try_with_sql(query)?
             .parse_statement()?;
@@ -348,7 +348,7 @@ fn roundtrip_grant_revoke_role() -> Result<()> {
 fn roundtrip_crossjoin() -> Result<()> {
     let query = "select j1.j1_id, j2.j2_string from j1, j2";
 
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
         .try_with_sql(query)?
         .parse_statement()?;
@@ -426,7 +426,7 @@ fn roundtrip_statement_with_dialect_1() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_2() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "select min(ta.j1_id) as j1_min from j1 ta order by min(ta.j1_id) limit 10;",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @"SELECT min(ta.j1_id) AS j1_min FROM j1 AS ta ORDER BY j1_min ASC NULLS LAST LIMIT 10",
     );
@@ -481,7 +481,7 @@ fn roundtrip_statement_with_dialect_6() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_7() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "select ta.j1_id from j1 ta order by j1_id limit 10;",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT ta.j1_id FROM j1 AS ta ORDER BY ta.j1_id ASC NULLS LAST LIMIT 10"#,
     );
@@ -496,7 +496,7 @@ fn roundtrip_statement_with_dialect_8() -> Result<(), DataFusionError> {
                   SELECT tb.j2_id as j1_id FROM j2 tb
                   ORDER BY j1_id
                   LIMIT 10;",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT j1.j1_id FROM j1 UNION ALL SELECT tb.j2_id AS j1_id FROM j2 AS tb ORDER BY j1_id ASC NULLS LAST LIMIT 10"#,
     );
@@ -508,7 +508,7 @@ fn roundtrip_statement_with_dialect_8() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_9() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT j1_string from j1 order by j1_id",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT j1.j1_string FROM j1 ORDER BY j1.j1_id ASC NULLS LAST"#,
     );
@@ -519,7 +519,7 @@ fn roundtrip_statement_with_dialect_9() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_10() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT j1_string AS a from j1 order by j1_id",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT j1.j1_string AS a FROM j1 ORDER BY j1.j1_id ASC NULLS LAST"#,
     );
@@ -530,7 +530,7 @@ fn roundtrip_statement_with_dialect_10() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_11() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT j1_string from j1 join j2 on j1.j1_id = j2.j2_id order by j1_id",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT j1.j1_string FROM j1 INNER JOIN j2 ON (j1.j1_id = j2.j2_id) ORDER BY j1.j1_id ASC NULLS LAST"#,
     );
@@ -560,7 +560,7 @@ fn roundtrip_statement_with_dialect_12() -> Result<(), DataFusionError> {
                   ) abc
                 ORDER BY
                   abc.j2_string",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT abc.j1_string, abc.j2_string FROM (SELECT DISTINCT j1.j1_id, j1.j1_string, j2.j2_string FROM j1 INNER JOIN j2 ON (j1.j1_id = j2.j2_id) ORDER BY j1.j1_id DESC NULLS FIRST LIMIT 10) AS abc ORDER BY abc.j2_string ASC NULLS LAST"#,
     );
@@ -582,7 +582,7 @@ fn roundtrip_statement_with_dialect_13() -> Result<(), DataFusionError> {
                         j1_id
                 ) AS agg (id, string_count)
             ",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT agg.string_count FROM (SELECT j1_id AS id, "min(j2.j2_string)" AS string_count FROM (SELECT j1.j1_id, min(j2.j2_string) FROM j1 LEFT OUTER JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id)) AS agg"#,
     );
@@ -616,7 +616,7 @@ fn roundtrip_statement_with_dialect_14() -> Result<(), DataFusionError> {
                   ) abc
                 ORDER BY
                   abc.j2_string",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT abc.j1_string, abc.j2_string FROM (SELECT j1.j1_id, j1.j1_string, j2.j2_string FROM j1 INNER JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id, j1.j1_string, j2.j2_string ORDER BY j1.j1_id DESC NULLS FIRST LIMIT 10) AS abc ORDER BY abc.j2_string ASC NULLS LAST"#,
     );
@@ -646,7 +646,7 @@ fn roundtrip_statement_with_dialect_15() -> Result<(), DataFusionError> {
                   ) abc
                 ORDER BY
                   j2_string",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT abc.j1_string FROM (SELECT j1.j1_string, j2.j2_string FROM j1 INNER JOIN j2 ON (j1.j1_id = j2.j2_id) ORDER BY j1.j1_id DESC NULLS FIRST, j2.j2_id DESC NULLS FIRST LIMIT 10) AS abc ORDER BY abc.j2_string ASC NULLS LAST"#,
     );
@@ -657,7 +657,7 @@ fn roundtrip_statement_with_dialect_15() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_16() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT j1_id from j1) AS c (id)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT j1_id AS id FROM (SELECT j1.j1_id FROM j1)) AS c"#,
     );
@@ -668,7 +668,7 @@ fn roundtrip_statement_with_dialect_16() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_17() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT j1_id as id from j1) AS c",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT j1.j1_id AS id FROM j1) AS c"#,
     );
@@ -680,7 +680,7 @@ fn roundtrip_statement_with_dialect_17() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_18() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT j1_id + 1 * 3 from j1) AS c (id)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT (j1.j1_id + (1 * 3)) FROM j1) AS c (id)"#,
     );
@@ -692,7 +692,7 @@ fn roundtrip_statement_with_dialect_18() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_19() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT distinct (j1_id + 1 * 3) FROM j1 LIMIT 1) AS c (id)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT DISTINCT (j1.j1_id + (1 * 3)) FROM j1 LIMIT 1) AS c (id)"#,
     );
@@ -703,7 +703,7 @@ fn roundtrip_statement_with_dialect_19() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_20() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT j1_id + 1 FROM j1 ORDER BY j1_id DESC LIMIT 1) AS c (id)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT (j1.j1_id + 1) FROM j1 ORDER BY j1.j1_id DESC NULLS FIRST LIMIT 1) AS c (id)"#,
     );
@@ -714,7 +714,7 @@ fn roundtrip_statement_with_dialect_20() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_21() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT CAST((CAST(j1_id as BIGINT) + 1) as int) * 10 FROM j1 LIMIT 1) AS c (id)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT (CAST((CAST(j1.j1_id AS BIGINT) + 1) AS INTEGER) * 10) FROM j1 LIMIT 1) AS c (id)"#,
     );
@@ -725,7 +725,7 @@ fn roundtrip_statement_with_dialect_21() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_22() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT id FROM (SELECT CAST(j1_id as BIGINT) + 1 FROM j1 ORDER BY j1_id LIMIT 1) AS c (id)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT c.id FROM (SELECT (CAST(j1.j1_id AS BIGINT) + 1) FROM j1 ORDER BY j1.j1_id ASC NULLS LAST LIMIT 1) AS c (id)"#,
     );
@@ -736,7 +736,7 @@ fn roundtrip_statement_with_dialect_22() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_23() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT temp_j.id2 FROM (SELECT j1_id, j1_string FROM j1) AS temp_j(id2, string2)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT temp_j.id2 FROM (SELECT j1_id AS id2, j1_string AS string2 FROM (SELECT j1.j1_id, j1.j1_string FROM j1)) AS temp_j"#,
     );
@@ -747,7 +747,7 @@ fn roundtrip_statement_with_dialect_23() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_24() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT temp_j.id2 FROM (SELECT j1_id, j1_string FROM j1) AS temp_j(id2, string2)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: SqliteDialect {},
         expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1_id` AS `id2`, `j1_string` AS `string2` FROM (SELECT `j1`.`j1_id`, `j1`.`j1_string` FROM `j1`)) AS `temp_j`"#,
     );
@@ -758,7 +758,7 @@ fn roundtrip_statement_with_dialect_24() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_25() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM (SELECT j1_id + 1 FROM j1) AS temp_j(id2)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: SqliteDialect {},
         expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT (`j1`.`j1_id` + 1) AS `id2` FROM `j1`) AS `temp_j`"#,
     );
@@ -769,7 +769,7 @@ fn roundtrip_statement_with_dialect_25() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_26() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM (SELECT j1_id FROM j1 LIMIT 1) AS temp_j(id2)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: SqliteDialect {},
         expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1_id` AS `id2` FROM (SELECT `j1`.`j1_id` FROM `j1` LIMIT 1)) AS `temp_j`"#,
     );
@@ -781,7 +781,7 @@ fn roundtrip_statement_with_dialect_26() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_27() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3])",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))" FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS derived_projection ("UNNEST(make_array(Int32(1),Int32(2),Int32(3)))")"#,
     );
@@ -793,7 +793,7 @@ fn roundtrip_statement_with_dialect_27() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_28() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) AS t1 (c1)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT t1.c1 FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS t1 (c1)"#,
     );
@@ -805,7 +805,7 @@ fn roundtrip_statement_with_dialect_28() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_29() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]), j1",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))", j1.j1_id, j1.j1_string FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS derived_projection ("UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") CROSS JOIN j1"#,
     );
@@ -817,7 +817,7 @@ fn roundtrip_statement_with_dialect_29() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_30() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) JOIN j1 ON u.c1 = j1.j1_id",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT u.c1, j1.j1_id, j1.j1_string FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS u (c1) INNER JOIN j1 ON (u.c1 = j1.j1_id)"#,
     );
@@ -829,7 +829,7 @@ fn roundtrip_statement_with_dialect_30() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_31() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) UNION ALL SELECT * FROM UNNEST([4,5,6]) u(c1)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT u.c1 FROM (SELECT UNNEST([1, 2, 3]) AS "UNNEST(make_array(Int32(1),Int32(2),Int32(3)))") AS u (c1) UNION ALL SELECT u.c1 FROM (SELECT UNNEST([4, 5, 6]) AS "UNNEST(make_array(Int32(4),Int32(5),Int32(6)))") AS u (c1)"#,
     );
@@ -844,7 +844,7 @@ fn roundtrip_statement_with_dialect_32() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3])",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT UNNEST(make_array(Int32(1),Int32(2),Int32(3))) FROM UNNEST([1, 2, 3])"#,
     );
@@ -855,7 +855,7 @@ fn roundtrip_statement_with_dialect_32() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_33() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM unnest_table u, UNNEST(u.array_col)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT u.array_col, u.struct_col, "UNNEST(outer_ref(u.array_col))" FROM unnest_table AS u CROSS JOIN LATERAL (SELECT UNNEST(u.array_col) AS "UNNEST(outer_ref(u.array_col))")"#,
     );
@@ -870,7 +870,7 @@ fn roundtrip_statement_with_dialect_34() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) AS t1 (c1)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT t1.c1 FROM UNNEST([1, 2, 3]) AS t1 (c1)"#,
     );
@@ -885,7 +885,7 @@ fn roundtrip_statement_with_dialect_35() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]), j1",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT UNNEST(make_array(Int32(1),Int32(2),Int32(3))), j1.j1_id, j1.j1_string FROM UNNEST([1, 2, 3]) CROSS JOIN j1"#,
     );
@@ -900,7 +900,7 @@ fn roundtrip_statement_with_dialect_36() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) JOIN j1 ON u.c1 = j1.j1_id",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT u.c1, j1.j1_id, j1.j1_string FROM UNNEST([1, 2, 3]) AS u (c1) INNER JOIN j1 ON (u.c1 = j1.j1_id)"#,
     );
@@ -915,7 +915,7 @@ fn roundtrip_statement_with_dialect_37() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM UNNEST([1,2,3]) u(c1) UNION ALL SELECT * FROM UNNEST([4,5,6]) u(c1)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT u.c1 FROM UNNEST([1, 2, 3]) AS u (c1) UNION ALL SELECT u.c1 FROM UNNEST([4, 5, 6]) AS u (c1)"#,
     );
@@ -930,7 +930,7 @@ fn roundtrip_statement_with_dialect_38() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT UNNEST([1,2,3])",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT * FROM UNNEST([1, 2, 3])"#,
     );
@@ -945,7 +945,7 @@ fn roundtrip_statement_with_dialect_39() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT UNNEST([1,2,3]) as c1",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT UNNEST([1, 2, 3]) AS c1"#,
     );
@@ -960,7 +960,7 @@ fn roundtrip_statement_with_dialect_40() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT UNNEST([1,2,3]), 1",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT UNNEST([1, 2, 3]) AS UNNEST(make_array(Int32(1),Int32(2),Int32(3))), Int32(1)"#,
     );
@@ -974,7 +974,7 @@ fn roundtrip_statement_with_dialect_41() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM unnest_table u, UNNEST(u.array_col)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT u.array_col, u.struct_col, UNNEST(outer_ref(u.array_col)) FROM unnest_table AS u CROSS JOIN UNNEST(u.array_col)"#,
     );
@@ -988,7 +988,7 @@ fn roundtrip_statement_with_dialect_42() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM unnest_table u, UNNEST(u.array_col) AS t1 (c1)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT u.array_col, u.struct_col, t1.c1 FROM unnest_table AS u CROSS JOIN UNNEST(u.array_col) AS t1 (c1)"#,
     );
@@ -1003,7 +1003,7 @@ fn roundtrip_statement_with_dialect_43() -> Result<(), DataFusionError> {
         .build();
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT unnest([1, 2, 3, 4]) from unnest([1, 2, 3]);",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: unparser,
         expected: @r#"SELECT UNNEST([1, 2, 3, 4]) AS UNNEST(make_array(Int32(1),Int32(2),Int32(3),Int32(4))) FROM UNNEST([1, 2, 3])"#,
     );
@@ -1014,7 +1014,7 @@ fn roundtrip_statement_with_dialect_43() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_45() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "SELECT * FROM unnest_table u, UNNEST(u.array_col) AS t1 (c1)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT u.array_col, u.struct_col, t1.c1 FROM unnest_table AS u CROSS JOIN LATERAL (SELECT UNNEST(u.array_col) AS "UNNEST(outer_ref(u.array_col))") AS t1 (c1)"#,
     );
@@ -1025,31 +1025,31 @@ fn roundtrip_statement_with_dialect_45() -> Result<(), DataFusionError> {
 fn roundtrip_statement_with_dialect_special_char_alias() -> Result<(), DataFusionError> {
     roundtrip_statement_with_dialect_helper!(
         sql: "select min(a) as \"min(a)\" from (select 1 as a)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: BigQueryDialect {},
         expected: @r#"SELECT min(`a`) AS `min_40a_41` FROM (SELECT 1 AS `a`)"#,
     );
     roundtrip_statement_with_dialect_helper!(
         sql: "select a as \"a*\", b as \"b@\" from (select 1 as a , 2 as b)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: BigQueryDialect {},
         expected: @r#"SELECT `a` AS `a_42`, `b` AS `b_64` FROM (SELECT 1 AS `a`, 2 AS `b`)"#,
     );
     roundtrip_statement_with_dialect_helper!(
         sql: "select a as \"a*\", b , c as \"c@\" from (select 1 as a , 2 as b, 3 as c)",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: BigQueryDialect {},
         expected: @r#"SELECT `a` AS `a_42`, `b`, `c` AS `c_64` FROM (SELECT 1 AS `a`, 2 AS `b`, 3 AS `c`)"#,
     );
     roundtrip_statement_with_dialect_helper!(
         sql: "select * from (select a as \"a*\", b as \"b@\" from (select 1 as a , 2 as b)) where \"a*\" = 1",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: BigQueryDialect {},
         expected: @r#"SELECT `a_42`, `b_64` FROM (SELECT `a` AS `a_42`, `b` AS `b_64` FROM (SELECT 1 AS `a`, 2 AS `b`)) WHERE (`a_42` = 1)"#,
     );
     roundtrip_statement_with_dialect_helper!(
         sql: "select * from (select a as \"a*\", b as \"b@\" from (select 1 as a , 2 as b)) where \"a*\" = 1",
-        parser_dialect: GenericDialect {},
+        parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
         expected: @r#"SELECT "a*", "b@" FROM (SELECT a AS "a*", b AS "b@" FROM (SELECT 1 AS a, 2 AS b)) WHERE ("a*" = 1)"#,
     );
@@ -1060,7 +1060,7 @@ fn roundtrip_statement_with_dialect_special_char_alias() -> Result<(), DataFusio
 fn test_unnest_logical_plan() -> Result<()> {
     let query = "select unnest(struct_col), unnest(array_col), struct_col, array_col from unnest_table";
 
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
         .try_with_sql(query)?
         .parse_statement()?;
@@ -1393,7 +1393,7 @@ fn test_pretty_roundtrip() -> Result<()> {
     ];
 
     for (sql, pretty) in sql_to_pretty_unparse.iter() {
-        let sql_expr = Parser::new(&GenericDialect {})
+        let sql_expr = Parser::new(&PostgreSqlDialect {})
             .try_with_sql(sql)?
             .parse_expr()?;
         let expr =
@@ -1402,7 +1402,7 @@ fn test_pretty_roundtrip() -> Result<()> {
         assert_eq!((*pretty).to_string(), round_trip_sql);
 
         // verify that the pretty string parses to the same underlying Expr
-        let pretty_sql_expr = Parser::new(&GenericDialect {})
+        let pretty_sql_expr = Parser::new(&PostgreSqlDialect {})
             .try_with_sql(pretty)?
             .parse_expr()?;
 
@@ -1871,7 +1871,7 @@ fn test_join_with_table_scan_filters() -> Result<()> {
 #[test]
 fn test_interval_lhs_eq() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         "select interval '2 seconds' = interval '2 seconds'",
     );
     assert_snapshot!(
@@ -1883,7 +1883,7 @@ fn test_interval_lhs_eq() {
 #[test]
 fn test_interval_lhs_lt() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         "select interval '2 seconds' < interval '2 seconds'",
     );
     assert_snapshot!(
@@ -1923,7 +1923,7 @@ fn test_with_offset95() {
 fn test_order_by_to_sql_1() {
     // order by aggregation function
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT id, first_name, SUM(id) FROM person GROUP BY id, first_name ORDER BY SUM(id) ASC, first_name DESC, id, first_name LIMIT 10"#,
     );
     assert_snapshot!(
@@ -1936,7 +1936,7 @@ fn test_order_by_to_sql_1() {
 fn test_order_by_to_sql_2() {
     // order by aggregation function alias
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT id, first_name, SUM(id) as total_sum FROM person GROUP BY id, first_name ORDER BY total_sum ASC, first_name DESC, id, first_name LIMIT 10"#,
     );
     assert_snapshot!(
@@ -1956,7 +1956,7 @@ fn test_complex_order_by_with_grouping() -> Result<()> {
     let sql_to_rel = SqlToRel::new(&context);
 
     // This SQL is based on a simplified version of the TPC-DS query 36.
-    let statement = Parser::new(&GenericDialect {})
+    let statement = Parser::new(&PostgreSqlDialect {})
         .try_with_sql(
             r#"SELECT
             j1_id,
@@ -1999,7 +1999,7 @@ fn test_complex_order_by_with_grouping() -> Result<()> {
 #[test]
 fn test_unnest_to_sql_1() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT unnest(array_col) as u1, struct_col, array_col FROM unnest_table WHERE array_col != NULL ORDER BY struct_col, array_col"#,
     );
     assert_snapshot!(
@@ -2014,7 +2014,7 @@ fn test_unnest_to_sql_1() {
 #[test]
 fn test_join_with_no_conditions() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         "SELECT j1.j1_id, j1.j1_string FROM j1 CROSS JOIN j2",
     );
     assert_snapshot!(
@@ -2102,7 +2102,7 @@ impl UserDefinedLogicalNodeUnparser for UnusedUnparser {
 
 #[test]
 fn test_unparse_extension_to_statement() -> Result<()> {
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
         .try_with_sql("SELECT * FROM j1")?
         .parse_statement()?;
@@ -2164,7 +2164,7 @@ impl UserDefinedLogicalNodeUnparser for MockSqlUnparser {
 
 #[test]
 fn test_unparse_extension_to_sql() -> Result<()> {
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
         .try_with_sql("SELECT * FROM j1")?
         .parse_statement()?;
@@ -2669,7 +2669,7 @@ fn test_unparse_window() -> Result<()> {
 #[test]
 fn test_like_filter() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name LIKE '%John%'"#,
     );
     assert_snapshot!(
@@ -2681,7 +2681,7 @@ fn test_like_filter() {
 #[test]
 fn test_ilike_filter() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name ILIKE '%john%'"#,
     );
     assert_snapshot!(
@@ -2693,7 +2693,7 @@ fn test_ilike_filter() {
 #[test]
 fn test_not_like_filter() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name NOT LIKE 'A%'"#,
     );
     assert_snapshot!(
@@ -2705,7 +2705,7 @@ fn test_not_like_filter() {
 #[test]
 fn test_not_ilike_filter() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name NOT ILIKE 'a%'"#,
     );
     assert_snapshot!(
@@ -2717,7 +2717,7 @@ fn test_not_ilike_filter() {
 #[test]
 fn test_like_filter_with_escape() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name LIKE 'A!_%' ESCAPE '!'"#,
     );
     assert_snapshot!(
@@ -2729,7 +2729,7 @@ fn test_like_filter_with_escape() {
 #[test]
 fn test_not_like_filter_with_escape() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name NOT LIKE 'A!_%' ESCAPE '!'"#,
     );
     assert_snapshot!(
@@ -2741,7 +2741,7 @@ fn test_not_like_filter_with_escape() {
 #[test]
 fn test_not_ilike_filter_with_escape() {
     let statement = generate_round_trip_statement(
-        GenericDialect {},
+        PostgreSqlDialect {},
         r#"SELECT first_name FROM person WHERE first_name NOT ILIKE 'A!_%' ESCAPE '!'"#,
     );
     assert_snapshot!(

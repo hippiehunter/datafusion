@@ -43,7 +43,7 @@
 //!
 //! - **MsSqlDialect**: `AS BEGIN ... END` blocks, but requires `@` prefix for variables
 //! - **PostgreSqlDialect**: Standard variable names, but uses `$$ ... $$` string bodies
-//! - **GenericDialect**: Standard syntax but no BEGIN/END block support
+//! - **PostgreSqlDialect**: Standard syntax but no BEGIN/END block support
 //!
 //! Most tests use MsSqlDialect for BEGIN/END support, with `@` prefixed variables.
 //! PostgreSQL-style tests with standard variable names are included where applicable.

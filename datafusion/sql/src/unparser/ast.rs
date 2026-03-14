@@ -109,8 +109,6 @@ impl QueryBuilder {
             fetch: self.fetch.clone(),
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
-            settings: None,
-            format_clause: None,
         })
     }
     fn create_empty() -> Self {
@@ -141,15 +139,10 @@ pub struct SelectBuilder {
     projection: Vec<ast::SelectItem>,
     into: Option<ast::SelectInto>,
     from: Vec<TableWithJoinsBuilder>,
-    lateral_views: Vec<ast::LateralView>,
     selection: Option<ast::Expr>,
     group_by: Option<ast::GroupByExpr>,
-    cluster_by: Vec<ast::Expr>,
-    distribute_by: Vec<ast::Expr>,
-    sort_by: Vec<ast::OrderByExpr>,
     having: Option<ast::Expr>,
     named_window: Vec<ast::NamedWindowDefinition>,
-    qualify: Option<ast::Expr>,
     flavor: Option<SelectFlavor>,
 }
 
@@ -189,11 +182,6 @@ impl SelectBuilder {
     pub fn pop_from(&mut self) -> Option<TableWithJoinsBuilder> {
         self.from.pop()
     }
-    pub fn lateral_views(&mut self, value: Vec<ast::LateralView>) -> &mut Self {
-        self.lateral_views = value;
-        self
-    }
-
     /// Replaces the selection with a new value.
     ///
     /// This function is used to replace a specific expression within the selection.
@@ -253,28 +241,12 @@ impl SelectBuilder {
         self.group_by = Some(value);
         self
     }
-    pub fn cluster_by(&mut self, value: Vec<ast::Expr>) -> &mut Self {
-        self.cluster_by = value;
-        self
-    }
-    pub fn distribute_by(&mut self, value: Vec<ast::Expr>) -> &mut Self {
-        self.distribute_by = value;
-        self
-    }
-    pub fn sort_by(&mut self, value: Vec<ast::OrderByExpr>) -> &mut Self {
-        self.sort_by = value;
-        self
-    }
     pub fn having(&mut self, value: Option<ast::Expr>) -> &mut Self {
         self.having = value;
         self
     }
     pub fn named_window(&mut self, value: Vec<ast::NamedWindowDefinition>) -> &mut Self {
         self.named_window = value;
-        self
-    }
-    pub fn qualify(&mut self, value: Option<ast::Expr>) -> &mut Self {
-        self.qualify = value;
         self
     }
     pub fn build(&self) -> Result<ast::Select, BuilderError> {
@@ -289,7 +261,6 @@ impl SelectBuilder {
                 .iter()
                 .filter_map(|b| b.build().transpose())
                 .collect::<Result<Vec<_>, BuilderError>>()?,
-            lateral_views: self.lateral_views.clone(),
             selection: self.selection.clone(),
             group_by: match self.group_by {
                 Some(ref value) => value.clone(),
@@ -297,21 +268,14 @@ impl SelectBuilder {
                     return Err(Into::into(UninitializedFieldError::from("group_by")));
                 }
             },
-            cluster_by: self.cluster_by.clone(),
-            distribute_by: self.distribute_by.clone(),
-            sort_by: self.sort_by.clone(),
             having: self.having.clone(),
             named_window: self.named_window.clone(),
-            qualify: self.qualify.clone(),
             connect_by: None,
-            window_before_qualify: false,
-            prewhere: None,
             select_token: AttachedToken::empty(),
             flavor: match self.flavor {
                 Some(ref value) => value.clone(),
                 None => return Err(Into::into(UninitializedFieldError::from("flavor"))),
             },
-            exclude: None,
         })
     }
     fn create_empty() -> Self {
@@ -321,15 +285,10 @@ impl SelectBuilder {
             projection: Default::default(),
             into: Default::default(),
             from: Default::default(),
-            lateral_views: Default::default(),
             selection: Default::default(),
             group_by: Some(ast::GroupByExpr::Expressions(Vec::new(), Vec::new())),
-            cluster_by: Default::default(),
-            distribute_by: Default::default(),
-            sort_by: Default::default(),
             having: Default::default(),
             named_window: Default::default(),
-            qualify: Default::default(),
             flavor: Some(SelectFlavor::Standard),
         }
     }
@@ -509,7 +468,6 @@ impl TableRelationBuilder {
             alias: self.alias.clone(),
             args: self.args.clone().map(|args| ast::TableFunctionArgs {
                 args,
-                settings: None,
             }),
             with_hints: self.with_hints.clone(),
             version: self.version.clone(),

@@ -17,12 +17,12 @@
 
 use datafusion_common::{assert_contains, DataFusionError};
 use datafusion_sql::planner::SqlToRel;
-use sqlparser::{dialect::GenericDialect, parser::Parser};
+use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 use crate::{MockContextProvider, MockSessionState};
 
 fn do_query(sql: &'static str) -> DataFusionError {
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
         .try_with_sql(sql)
         .expect("unable to create parser")

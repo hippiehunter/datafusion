@@ -52,12 +52,11 @@ use datafusion_expr::{
     AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
     CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
     CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable,
-    CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence, CreateView,
+    CreateProcedure, CreateRole, CreateSequence, CreateView,
     Deallocate, DescribeTable, DmlStatement, DropAssertion, DropCatalogSchema,
-    DropFunction, DropIndex, DropPropertyGraph, DropRole, DropSequence, DropTable,
+    DropFunction, DropIndex, DropRole, DropSequence, DropTable,
     DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable,
-    Filter, Grant, GrantRole, GraphEdgeEndpoint, GraphEdgeTableDefinition,
-    GraphKeyClause, GraphPropertiesClause, GraphVertexTableDefinition, JoinType,
+    Filter, Grant, GrantRole, JoinType,
     LogicalPlan, LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause,
     MergeInsertExpr, MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType,
     Prepare, ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint,
@@ -69,7 +68,7 @@ use datafusion_expr::{
 use sqlparser::ast::{
     self, BeginTransactionKind, IndexColumn, IndexType, OnConflict as SqlOnConflict,
     OnConflictAction as SqlOnConflictAction, OnInsert, OrderByExpr, OrderByOptions,
-    OverridingKind, Set, ShowStatementIn, ShowStatementOptions, SqliteOnConflict,
+    OverridingKind, Set, ShowStatementIn, ShowStatementOptions,
     TableObject, UpdateTableFromKind, ValueWithSpan,
 };
 use sqlparser::ast::{
@@ -338,12 +337,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                 | ast::ColumnOption::Comment(_)
                 | ast::ColumnOption::Options(_)
                 | ast::ColumnOption::OnUpdate(_)
-                | ast::ColumnOption::Materialized(_)
-                | ast::ColumnOption::Ephemeral(_)
                 | ast::ColumnOption::Identity(_)
-                | ast::ColumnOption::OnConflict(_)
-                | ast::ColumnOption::Policy(_)
-                | ast::ColumnOption::Alias(_)
                 | ast::ColumnOption::Srid(_)
                 | ast::ColumnOption::Collation(_)
                 | ast::ColumnOption::Invisible => {}
@@ -430,9 +424,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 temporary,
                 external,
                 global,
-                transient,
                 volatile,
-                file_format,
                 location,
                 query,
                 name,
@@ -445,13 +437,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 clone,
                 comment,
                 on_commit,
-                on_cluster,
-                primary_key,
-                order_by,
-                partition_by,
-                cluster_by,
-                strict,
-                iceberg,
                 inherits,
                 table_options,
                 dynamic,
@@ -464,14 +449,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if global.is_some() {
                     return not_impl_err!("Global tables not supported")?;
                 }
-                if transient {
-                    return not_impl_err!("Transient tables not supported")?;
-                }
                 if volatile {
                     return not_impl_err!("Volatile tables not supported")?;
-                }
-                if file_format.is_some() {
-                    return not_impl_err!("File format not supported")?;
                 }
                 if location.is_some() {
                     return not_impl_err!("Location not supported")?;
@@ -487,27 +466,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if comment.is_some() {
                     return not_impl_err!("Comment not supported")?;
-                }
-                if on_cluster.is_some() {
-                    return not_impl_err!("On cluster not supported")?;
-                }
-                if primary_key.is_some() {
-                    return not_impl_err!("Primary key not supported")?;
-                }
-                if order_by.is_some() {
-                    return not_impl_err!("Order by not supported")?;
-                }
-                if partition_by.is_some() {
-                    return not_impl_err!("Partition by not supported")?;
-                }
-                if cluster_by.is_some() {
-                    return not_impl_err!("Cluster by not supported")?;
-                }
-                if strict {
-                    return not_impl_err!("Strict not supported")?;
-                }
-                if iceberg {
-                    return not_impl_err!("Iceberg not supported")?;
                 }
                 if inherits.is_some() {
                     return not_impl_err!("Table inheritance not supported")?;
@@ -642,23 +600,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if view.materialized {
                     return not_impl_err!("Materialized views not supported")?;
                 }
-                if !view.cluster_by.is_empty() {
-                    return not_impl_err!("Cluster by not supported")?;
-                }
-                if view.comment.is_some() {
-                    return not_impl_err!("Comment not supported")?;
-                }
-                if view.with_no_schema_binding {
-                    return not_impl_err!("With no schema binding not supported")?;
-                }
-                if view.to.is_some() {
-                    return not_impl_err!("To not supported")?;
-                }
-                if view.or_replace && view.if_not_exists {
-                    return plan_err!(
-                        "CREATE VIEW cannot have both OR REPLACE and IF NOT EXISTS clauses"
-                    );
-                }
+                // Note: if_not_exists and temporary fields were removed from sqlparser CreateView
 
                 // put the statement back together temporarily to get the SQL
                 // string representation
@@ -686,19 +628,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     name: self.object_name_to_table_reference(view.name)?,
                     input: Arc::new(plan),
                     or_replace: view.or_replace,
-                    if_not_exists: view.if_not_exists,
+                    if_not_exists: false,
                     definition: Some(sql),
-                    temporary: view.temporary,
+                    temporary: false,
                 })))
             }
             Statement::AlterTable(mut alter_table) => {
-                if alter_table.on_cluster.is_some() {
-                    return not_impl_err!("ALTER TABLE ... ON CLUSTER not supported");
-                }
-                if alter_table.table_type.is_some() {
-                    return not_impl_err!("ALTER TABLE type modifiers not supported");
-                }
-
                 let mut operations = Vec::with_capacity(alter_table.operations.len());
                 for operation in alter_table.operations {
                     use ast::AlterColumnOperation;
@@ -1251,7 +1186,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             Statement::Insert(Insert {
-                or,
                 into,
                 columns,
                 overwrite,
@@ -1263,13 +1197,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 returning,
                 ignore,
                 table_alias,
-                mut replace_into,
+                replace_into,
                 priority,
                 insert_alias,
                 assignments,
                 has_table_keyword,
-                settings,
-                format_clause,
                 overriding,
                 ..
             }) => {
@@ -1281,12 +1213,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         );
                     }
                 };
-                if let Some(or) = or {
-                    match or {
-                        SqliteOnConflict::Replace => replace_into = true,
-                        _ => plan_err!("Inserts with {or} clause is not supported")?,
-                    }
-                }
                 if partitioned.is_some() {
                     plan_err!("Partitioned inserts not yet supported")?;
                 }
@@ -1322,12 +1248,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if !assignments.is_empty() {
                     plan_err!("Inserts with assignments not supported")?;
-                }
-                if settings.is_some() {
-                    plan_err!("Inserts with settings not supported")?;
-                }
-                if format_clause.is_some() {
-                    plan_err!("Inserts with format clause not supported")?;
                 }
                 // optional keywords don't change behavior
                 let _ = into;
@@ -1371,7 +1291,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let from_clauses =
                     update.from.map(
                         |update_table_from_kind| match update_table_from_kind {
-                            UpdateTableFromKind::BeforeSet(from_clauses) => from_clauses,
                             UpdateTableFromKind::AfterSet(from_clauses) => from_clauses,
                         },
                     );
@@ -1380,9 +1299,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     plan_err!("Multiple tables in UPDATE SET FROM not yet supported")?;
                 }
                 let update_from = from_clauses.and_then(|mut f| f.pop());
-                if update.or.is_some() {
-                    plan_err!("ON conflict not supported")?;
-                }
                 if update.limit.is_some() {
                     return not_impl_err!("Update-limit clause not supported")?;
                 }
@@ -2008,101 +1924,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     args,
                 })))
             }
-            Statement::CreatePropertyGraph(create_property_graph) => {
-                let name = self
-                    .object_name_to_table_reference(create_property_graph.name.clone())?;
-
-                let vertex_tables = create_property_graph
-                    .vertex_tables
-                    .into_iter()
-                    .map(|vt| {
-                        Ok(GraphVertexTableDefinition {
-                            table: self.object_name_to_table_reference(vt.table)?,
-                            key: vt.key.map(|k| GraphKeyClause {
-                                columns: k
-                                    .columns
-                                    .into_iter()
-                                    .map(|c| normalize_ident(c))
-                                    .collect(),
-                            }),
-                            label: vt.label.map(|l| normalize_ident(l)),
-                            properties: vt.properties.map(|p| GraphPropertiesClause {
-                                columns: p
-                                    .columns
-                                    .into_iter()
-                                    .map(|c| normalize_ident(c))
-                                    .collect(),
-                            }),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                let edge_tables = create_property_graph
-                    .edge_tables
-                    .into_iter()
-                    .map(|et| {
-                        Ok(GraphEdgeTableDefinition {
-                            table: self.object_name_to_table_reference(et.table)?,
-                            source: GraphEdgeEndpoint {
-                                key: et.source.key.map(|k| GraphKeyClause {
-                                    columns: k
-                                        .columns
-                                        .into_iter()
-                                        .map(|c| normalize_ident(c))
-                                        .collect(),
-                                }),
-                                references: self.object_name_to_table_reference(
-                                    et.source.references,
-                                )?,
-                            },
-                            destination: GraphEdgeEndpoint {
-                                key: et.destination.key.map(|k| GraphKeyClause {
-                                    columns: k
-                                        .columns
-                                        .into_iter()
-                                        .map(|c| normalize_ident(c))
-                                        .collect(),
-                                }),
-                                references: self.object_name_to_table_reference(
-                                    et.destination.references,
-                                )?,
-                            },
-                            // Edge table key is optional and not part of sqlparser's GraphEdgeTableDefinition
-                            key: None,
-                            label: et.label.map(|l| normalize_ident(l)),
-                            properties: et.properties.map(|p| GraphPropertiesClause {
-                                columns: p
-                                    .columns
-                                    .into_iter()
-                                    .map(|c| normalize_ident(c))
-                                    .collect(),
-                            }),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                Ok(LogicalPlan::Ddl(DdlStatement::CreatePropertyGraph(
-                    CreatePropertyGraph {
-                        name,
-                        or_replace: create_property_graph.or_replace,
-                        if_not_exists: create_property_graph.if_not_exists,
-                        vertex_tables,
-                        edge_tables,
-                    },
-                )))
-            }
-            Statement::DropPropertyGraph(drop_property_graph) => {
-                let name = self
-                    .object_name_to_table_reference(drop_property_graph.name.clone())?;
-
-                Ok(LogicalPlan::Ddl(DdlStatement::DropPropertyGraph(
-                    DropPropertyGraph {
-                        name,
-                        if_exists: drop_property_graph.if_exists,
-                        drop_behavior: drop_property_graph.drop_behavior,
-                    },
-                )))
-            }
+            // Statement::CreatePropertyGraph and DropPropertyGraph removed from sqlparser fork
             stmt => {
                 not_impl_err!("Unsupported SQL statement: {stmt}")
             }
@@ -3745,8 +3567,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             fetch: None,
             locks: vec![],
             for_clause: None,
-            settings: None,
-            format_clause: None,
         });
 
         // Convert TableReference back to ObjectName

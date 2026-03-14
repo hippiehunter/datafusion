@@ -17,12 +17,12 @@
 
 //! Edge case tests for MATCH_RECOGNIZE implementation
 
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
 /// Parse SQL and check if it parses successfully
 fn parse_sql(sql: &str) -> Result<(), String> {
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     Parser::parse_sql(&dialect, sql)
         .map(|_| ())
         .map_err(|e| format!("Parse error: {}", e))

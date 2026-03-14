@@ -1000,22 +1000,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     Ok(DataType::Struct(Fields::from(fields)))
                 }
             }
-            // Handle Tuple type from ClickHouse as STRUCT
-            SQLDataType::Tuple(fields) => {
-                let fields = fields
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, sql_struct_field)| {
-                        let field = self.convert_data_type_to_field(&sql_struct_field.field_type)?;
-                        let field_name = match &sql_struct_field.field_name {
-                            Some(ident) => ident.clone(),
-                            None => Ident::new(format!("c{idx}")),
-                        };
-                        Ok(field.as_ref().clone().with_name(self.ident_normalizer.normalize(field_name)))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(DataType::Struct(Fields::from(fields)))
-            }
             SQLDataType::JSON => Ok(DataType::BinaryView),
             SQLDataType::JSONB => Ok(DataType::BinaryView),
             SQLDataType::Uuid => {
@@ -1041,27 +1025,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::CharLargeObject(_)
             | SQLDataType::Timestamp(_, _)
             | SQLDataType::Clob(_)
-            | SQLDataType::Int64
-            | SQLDataType::Float64
-            | SQLDataType::Unspecified
-            | SQLDataType::Int16
-            | SQLDataType::Int32
-            | SQLDataType::Int128
-            | SQLDataType::Int256
-            | SQLDataType::UInt8
-            | SQLDataType::UInt16
-            | SQLDataType::UInt32
-            | SQLDataType::UInt64
-            | SQLDataType::UInt128
-            | SQLDataType::UInt256
-            | SQLDataType::Float32
-            | SQLDataType::Date32
-            | SQLDataType::Datetime64(_, _)
-            | SQLDataType::FixedString(_)
-            | SQLDataType::Map(_, _)
-            | SQLDataType::Nested(_)
-            | SQLDataType::Nullable(_)
-            | SQLDataType::LowCardinality(_)
             | SQLDataType::Trigger
             | SQLDataType::TinyBlob
             | SQLDataType::MediumBlob
@@ -1077,11 +1040,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::UnsignedInteger
             | SQLDataType::Table(_)
             | SQLDataType::VarBit(_)
-            | SQLDataType::UTinyInt
-            | SQLDataType::USmallInt
-            | SQLDataType::HugeInt
-            | SQLDataType::UHugeInt
-            | SQLDataType::UBigInt
             | SQLDataType::TimestampNtz(_)
             | SQLDataType::NamedTable { .. }
             | SQLDataType::TsVector
@@ -1094,6 +1052,14 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::DoubleUnsigned(_) // deprecated mysql type
             | SQLDataType::DoublePrecisionUnsigned // deprecated mysql type
             | SQLDataType::MdArray(_) // multi-dimensional array type
+            | SQLDataType::Serial
+            | SQLDataType::SmallSerial
+            | SQLDataType::BigSerial
+            | SQLDataType::Money
+            | SQLDataType::Inet
+            | SQLDataType::Cidr
+            | SQLDataType::MacAddr
+            | SQLDataType::MacAddr8
             => {
                 not_impl_err!("Unsupported SQL type {sql_type}")
             }

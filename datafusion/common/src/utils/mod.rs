@@ -32,7 +32,7 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::{SortColumn, SortOptions, partition};
 use arrow::datatypes::{DataType, Field, SchemaRef};
-use sqlparser::{ast::Ident, dialect::GenericDialect, parser::Parser};
+use sqlparser::{ast::Ident, dialect::PostgreSqlDialect, parser::Parser};
 use std::borrow::{Borrow, Cow};
 use std::cmp::{Ordering, min};
 use std::collections::HashSet;
@@ -275,7 +275,7 @@ fn needs_quotes(s: &str) -> bool {
 }
 
 pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<Ident>> {
-    let dialect = GenericDialect;
+    let dialect = PostgreSqlDialect {};
     let parser = Parser::new(&dialect).try_with_sql(s)?;
     let idents = parser.parse_multipart_identifier()?;
 

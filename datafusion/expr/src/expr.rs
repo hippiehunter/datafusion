@@ -41,7 +41,7 @@ use datafusion_common::{
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 
 pub use sqlparser::ast::{
-    ExceptSelectItem, ExcludeSelectItem, Ident, IlikeSelectItem, RenameSelectItem,
+    ExceptSelectItem, Ident, IlikeSelectItem, RenameSelectItem,
     ReplaceSelectElement,
 };
 
@@ -1289,9 +1289,6 @@ pub struct WildcardOptions {
     /// `[ILIKE...]`.
     ///  Snowflake syntax: <https://docs.snowflake.com/en/sql-reference/sql/select#parameters>
     pub ilike: Option<IlikeSelectItem>,
-    /// `[EXCLUDE...]`.
-    ///  Snowflake syntax: <https://docs.snowflake.com/en/sql-reference/sql/select#parameters>
-    pub exclude: Option<ExcludeSelectItem>,
     /// `[EXCEPT...]`.
     ///  BigQuery syntax: <https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_except>
     ///  Clickhouse syntax: <https://clickhouse.com/docs/en/sql-reference/statements/select#except>
@@ -1310,7 +1307,6 @@ impl WildcardOptions {
     pub fn with_replace(self, replace: PlannedReplaceSelectItem) -> Self {
         WildcardOptions {
             ilike: self.ilike,
-            exclude: self.exclude,
             except: self.except,
             replace: Some(replace),
             rename: self.rename,
@@ -1322,9 +1318,6 @@ impl Display for WildcardOptions {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if let Some(ilike) = &self.ilike {
             write!(f, " {ilike}")?;
-        }
-        if let Some(exclude) = &self.exclude {
-            write!(f, " {exclude}")?;
         }
         if let Some(except) = &self.except {
             write!(f, " {except}")?;
@@ -3825,7 +3818,6 @@ mod test {
                     }),
                     None,
                     None,
-                    None,
                     None
                 ))
             ),
@@ -3835,23 +3827,6 @@ mod test {
             format!(
                 "{}",
                 wildcard_with_options(wildcard_options(
-                    None,
-                    Some(ExcludeSelectItem::Multiple(vec![
-                        Ident::from("c1"),
-                        Ident::from("c2")
-                    ])),
-                    None,
-                    None,
-                    None
-                ))
-            ),
-            "* EXCLUDE (c1, c2)"
-        );
-        assert_eq!(
-            format!(
-                "{}",
-                wildcard_with_options(wildcard_options(
-                    None,
                     None,
                     Some(ExceptSelectItem {
                         first_element: Ident::from("c1"),
@@ -3867,7 +3842,6 @@ mod test {
             format!(
                 "{}",
                 wildcard_with_options(wildcard_options(
-                    None,
                     None,
                     None,
                     Some(PlannedReplaceSelectItem {
@@ -3887,7 +3861,6 @@ mod test {
             format!(
                 "{}",
                 wildcard_with_options(wildcard_options(
-                    None,
                     None,
                     None,
                     None,
@@ -3927,14 +3900,12 @@ mod test {
 
     fn wildcard_options(
         opt_ilike: Option<IlikeSelectItem>,
-        opt_exclude: Option<ExcludeSelectItem>,
         opt_except: Option<ExceptSelectItem>,
         opt_replace: Option<PlannedReplaceSelectItem>,
         opt_rename: Option<RenameSelectItem>,
     ) -> WildcardOptions {
         WildcardOptions {
             ilike: opt_ilike,
-            exclude: opt_exclude,
             except: opt_except,
             replace: opt_replace,
             rename: opt_rename,

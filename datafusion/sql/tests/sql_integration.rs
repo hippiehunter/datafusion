@@ -51,7 +51,7 @@ use datafusion_functions_aggregate::{
 // or datafusion_functions_window are disabled as those crates were removed.
 use insta::{allow_duplicates, assert_snapshot};
 use rstest::rstest;
-use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect};
+use sqlparser::dialect::{Dialect, PostgreSqlDialect, MySqlDialect};
 
 mod cases;
 mod common;
@@ -231,29 +231,34 @@ fn within_group_rejected_for_non_ordered_set_udaf() {
 
 #[test]
 fn parse_ident_normalization_5() {
+    // With PG dialect, unquoted identifiers are always lowercased by the parser,
+    // so PERSON becomes person regardless of enable_ident_normalization setting.
     let sql = "SELECT AGE FROM PERSON";
     let parser_option = ident_normalization_parser_options_no_ident_normalization();
-    let plan = logical_plan_with_options(sql, parser_option)
-        .unwrap_err()
-        .strip_backtrace();
+    let plan = logical_plan_with_options(sql, parser_option).unwrap();
     assert_snapshot!(
         plan,
         @r#"
-        Error during planning: No table named: PERSON found
+        Projection: person.age
+          TableScan: person
         "#
     );
 }
 
 #[test]
 fn parse_ident_normalization_6() {
+    // With PG dialect, unquoted identifiers are always lowercased by the parser,
+    // so UPPERCASE_test becomes uppercase_test and Id becomes id.
+    // The registered table is "UPPERCASE_test" (mixed case), so it won't be found.
     let sql = "SELECT Id FROM UPPERCASE_test";
     let parser_option = ident_normalization_parser_options_no_ident_normalization();
-    let plan = logical_plan_with_options(sql, parser_option).unwrap();
+    let err = logical_plan_with_options(sql, parser_option)
+        .unwrap_err()
+        .strip_backtrace();
     assert_snapshot!(
-        plan,
+        err,
         @r#"
-        Projection: UPPERCASE_test.Id
-          TableScan: UPPERCASE_test
+        Error during planning: No table named: uppercase_test found
         "#
     );
 }
@@ -3415,7 +3420,7 @@ fn logical_plan(sql: &str) -> Result<LogicalPlan> {
 }
 
 fn logical_plan_with_options(sql: &str, options: ParserOptions) -> Result<LogicalPlan> {
-    let dialect = &GenericDialect {};
+    let dialect = &PostgreSqlDialect {};
     logical_plan_with_dialect_and_options(sql, dialect, options)
 }
 
@@ -3925,7 +3930,7 @@ Projection: person.id, orders.order_id
 #[test]
 #[ignore = "HiveDialect not available in sqlparser fork"]
 fn hive_aggregate_with_filter() -> Result<()> {
-    let dialect = &GenericDialect {};
+    let dialect = &PostgreSqlDialect {};
     let sql = "SELECT sum(age) FILTER (WHERE age > 4) FROM person";
     let plan = logical_plan_with_dialect(sql, dialect)?;
 
@@ -4139,6 +4144,7 @@ Limit: skip=Int32(3), fetch=Int32(5)
 }
 
 #[test]
+#[ignore = "DISTRIBUTE BY is Hive syntax, removed from sqlparser fork"]
 fn test_distribute_by() {
     let sql = "select id from person distribute by state";
     let plan = logical_plan(sql).unwrap();
@@ -4498,6 +4504,7 @@ fn test_select_distinct_order_by() {
 // (require row_number()/rank() from pruned datafusion_functions_window)
 
 #[test]
+#[ignore = "QUALIFY is Snowflake syntax, removed from sqlparser fork"]
 fn test_select_qualify_without_window_function() {
     let sql = "SELECT person.id FROM person QUALIFY person.id > 1";
     let err = logical_plan(sql).unwrap_err();
@@ -4507,22 +4514,13 @@ fn test_select_qualify_without_window_function() {
     );
 }
 
+// Removed cases: select_cluster_by_unsupported, select_lateral_view_unsupported,
+// select_sort_by_unsupported (CLUSTER BY, LATERAL VIEW, SORT BY syntax removed
+// from sqlparser fork - these now fail at the parser level, not the planner)
 #[rstest]
-#[case::select_cluster_by_unsupported(
-    "SELECT customer_name, sum(order_total) as total_order_amount FROM orders CLUSTER BY customer_name",
-    "This feature is not implemented: CLUSTER BY"
-)]
-#[case::select_lateral_view_unsupported(
-    "SELECT id, number FROM person LATERAL VIEW explode(numbers) exploded_table AS number",
-    "This feature is not implemented: LATERAL VIEWS"
-)]
 #[case::select_top_unsupported(
     "SELECT TOP (5) * FROM person",
     "This feature is not implemented: TOP"
-)]
-#[case::select_sort_by_unsupported(
-    "SELECT * FROM person SORT BY id",
-    "This feature is not implemented: SORT BY"
 )]
 #[test]
 fn test_select_unsupported_syntax_errors(#[case] sql: &str, #[case] error: &str) {
@@ -4791,7 +4789,7 @@ fn test_no_functions_registered() {
     let sql = "SELECT foo()";
 
     let options = ParserOptions::default();
-    let dialect = &GenericDialect {};
+    let dialect = &PostgreSqlDialect {};
     let state = MockSessionState::default();
     let context = MockContextProvider { state };
     let planner = SqlToRel::new_with_options(&context, options);

@@ -39,7 +39,7 @@ use datafusion_common::{
 };
 
 
-use crate::expr::{ExceptSelectItem, ExcludeSelectItem};
+use crate::expr::ExceptSelectItem;
 use indexmap::IndexSet;
 
 pub use datafusion_functions_aggregate_common::order::AggregateOrderSensitivity;
@@ -325,7 +325,6 @@ pub fn expr_to_columns(expr: &Expr, accum: &mut HashSet<Column>) -> Result<()> {
 /// Find excluded columns in the schema, if any
 /// SELECT * EXCLUDE(col1, col2), would return `vec![col1, col2]`
 fn get_excluded_columns(
-    opt_exclude: Option<&ExcludeSelectItem>,
     opt_except: Option<&ExceptSelectItem>,
     schema: &DFSchema,
     qualifier: Option<&TableReference>,
@@ -334,12 +333,6 @@ fn get_excluded_columns(
     if let Some(excepts) = opt_except {
         idents.push(&excepts.first_element);
         idents.extend(&excepts.additional_elements);
-    }
-    if let Some(exclude) = opt_exclude {
-        match exclude {
-            ExcludeSelectItem::Single(ident) => idents.push(ident),
-            ExcludeSelectItem::Multiple(idents_inner) => idents.extend(idents_inner),
-        }
     }
     // Excluded columns should be unique
     let n_elem = idents.len();
@@ -416,12 +409,11 @@ pub fn expand_wildcard(
 ) -> Result<Vec<Expr>> {
     let mut columns_to_skip = exclude_using_columns(plan)?;
     let excluded_columns = if let Some(WildcardOptions {
-        exclude: opt_exclude,
         except: opt_except,
         ..
     }) = wildcard_options
     {
-        get_excluded_columns(opt_exclude.as_ref(), opt_except.as_ref(), schema, None)?
+        get_excluded_columns(opt_except.as_ref(), schema, None)?
     } else {
         vec![]
     };
@@ -453,13 +445,11 @@ pub fn expand_qualified_wildcard(
         DFSchema::try_from_qualified_schema(qualifier.clone(), &qualified_schema)?
             .with_functional_dependencies(projected_func_dependencies)?;
     let excluded_columns = if let Some(WildcardOptions {
-        exclude: opt_exclude,
         except: opt_except,
         ..
     }) = wildcard_options
     {
         get_excluded_columns(
-            opt_exclude.as_ref(),
             opt_except.as_ref(),
             schema,
             Some(qualifier),

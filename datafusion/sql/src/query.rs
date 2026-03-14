@@ -62,8 +62,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             fetch,
             locks: _,
             for_clause: _,
-            settings: _,
-            format_clause: _,
             ..
         } = query;
 

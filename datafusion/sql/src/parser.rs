@@ -30,7 +30,7 @@ use sqlparser::{
         ColumnDef, ColumnOptionDef, ObjectName, OrderByExpr, Query,
         Statement as SQLStatement, TableConstraint, Value,
     },
-    dialect::{Dialect, GenericDialect, keywords::Keyword},
+    dialect::{Dialect, PostgreSqlDialect, keywords::Keyword},
     parser::{Parser, ParserError},
     tokenizer::{Token, Tokenizer, Word},
 };
@@ -397,7 +397,7 @@ pub struct DFParser<'a> {
 
 /// Same as `sqlparser`
 const DEFAULT_RECURSION_LIMIT: usize = 50;
-const DEFAULT_DIALECT: GenericDialect = GenericDialect {};
+const DEFAULT_DIALECT: PostgreSqlDialect = PostgreSqlDialect {};
 
 /// Builder for [`DFParser`]
 ///
@@ -434,7 +434,7 @@ const DEFAULT_DIALECT: GenericDialect = GenericDialect {};
 pub struct DFParserBuilder<'a> {
     /// The SQL string to parse
     sql: &'a str,
-    /// The Dialect to use (defaults to [`GenericDialect`]
+    /// The Dialect to use (defaults to [`PostgreSqlDialect`]
     dialect: &'a dyn Dialect,
     /// The recursion limit while parsing
     recursion_limit: usize,
@@ -442,7 +442,7 @@ pub struct DFParserBuilder<'a> {
 
 impl<'a> DFParserBuilder<'a> {
     /// Create a new parser builder for the specified tokens using the
-    /// [`GenericDialect`].
+    /// [`PostgreSqlDialect`].
     pub fn new(sql: &'a str) -> Self {
         Self {
             sql,
@@ -451,7 +451,7 @@ impl<'a> DFParserBuilder<'a> {
         }
     }
 
-    /// Adjust the parser builder's dialect. Defaults to [`GenericDialect`]
+    /// Adjust the parser builder's dialect. Defaults to [`PostgreSqlDialect`]
     pub fn with_dialect(mut self, dialect: &'a dyn Dialect) -> Self {
         self.dialect = dialect;
         self
@@ -512,7 +512,7 @@ impl<'a> DFParser<'a> {
     }
 
     /// Parse a sql string into one or [`Statement`]s using the
-    /// [`GenericDialect`].
+    /// [`PostgreSqlDialect`].
     pub fn parse_sql(sql: &'a str) -> Result<VecDeque<Statement>, DataFusionError> {
         let mut parser = DFParserBuilder::new(sql).build()?;
 
@@ -1395,7 +1395,7 @@ mod tests {
     use sqlparser::ast::{
         BinaryOperator, DataType, ExactNumberInfo, Expr, Ident, ValueWithSpan,
     };
-    use sqlparser::dialect::GenericDialect;
+    use sqlparser::dialect::PostgreSqlDialect;
     use sqlparser::tokenizer::Span;
 
     fn expect_parse_ok(sql: &str, expected: Statement) -> Result<(), DataFusionError> {
@@ -2036,7 +2036,7 @@ mod tests {
     #[ignore = "SnowflakeDialect not available in sqlparser fork"]
     fn skip_copy_into_snowflake() -> Result<(), DataFusionError> {
         let sql = "COPY INTO foo FROM @~/staged FILE_FORMAT = (FORMAT_NAME = 'mycsv');";
-        let dialect = Box::new(GenericDialect {});
+        let dialect = Box::new(PostgreSqlDialect {});
         let statements = DFParser::parse_sql_with_dialect(sql, dialect.as_ref())?;
 
         assert_eq!(

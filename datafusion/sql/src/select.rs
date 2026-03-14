@@ -41,7 +41,7 @@ use datafusion_expr::utils::{
 };
 use datafusion_expr::{
     Aggregate, Expr, Filter, GroupingSet, LogicalPlan, LogicalPlanBuilder,
-    LogicalPlanBuilderOptions, Partitioning, SortExpr,
+    LogicalPlanBuilderOptions, SortExpr,
 };
 
 use indexmap::IndexMap;
@@ -76,18 +76,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Check for unsupported syntax first
-        if !select.cluster_by.is_empty() {
-            return not_impl_err!("CLUSTER BY");
-        }
-        if !select.lateral_views.is_empty() {
-            return not_impl_err!("LATERAL VIEWS");
-        }
-
         if select.top.is_some() {
             return not_impl_err!("TOP");
-        }
-        if !select.sort_by.is_empty() {
-            return not_impl_err!("SORT BY");
         }
 
         // Process `from` clause
@@ -220,8 +210,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         };
 
         // Optionally the QUALIFY expression.
-        let qualify_expr_opt = select
-            .qualify
+        // Note: qualify was removed from sqlparser Select struct (non-PG syntax)
+        let qualify_expr_opt = None::<SQLExpr>
             .map::<Result<Expr>, _>(|qualify_expr| {
                 let qualify_expr = self.sql_expr_to_logical_expr(
                     qualify_expr,
@@ -400,25 +390,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }?;
 
-        // DISTRIBUTE BY
-        let plan = if !select.distribute_by.is_empty() {
-            let x = select
-                .distribute_by
-                .iter()
-                .map(|e| {
-                    self.sql_expr_to_logical_expr(
-                        e.clone(),
-                        &combined_schema,
-                        planner_context,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            LogicalPlanBuilder::from(plan)
-                .repartition(Partitioning::DistributeBy(x))?
-                .build()?
-        } else {
-            plan
-        };
+        // DISTRIBUTE BY - removed from sqlparser Select struct (non-PG syntax)
 
         let plan = self.order_by(plan, order_by_rex)?;
         Ok(plan)
@@ -893,8 +865,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn check_wildcard_options(options: &WildcardAdditionalOptions) -> Result<()> {
         let WildcardAdditionalOptions {
-            // opt_exclude is handled
-            opt_exclude: _opt_exclude,
             opt_except: _opt_except,
             opt_rename,
             opt_replace: _opt_replace,
@@ -921,7 +891,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<WildcardOptions> {
         let planned_option = WildcardOptions {
             ilike: options.opt_ilike,
-            exclude: options.opt_exclude,
             except: options.opt_except,
             replace: None,
             rename: options.opt_rename,

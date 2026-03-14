@@ -1564,7 +1564,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::datatypes::{Field, Schema};
-    use sqlparser::dialect::GenericDialect;
+    use sqlparser::dialect::PostgreSqlDialect;
     use sqlparser::parser::Parser;
 
     use datafusion_common::TableReference;
@@ -1661,7 +1661,7 @@ mod tests {
                         .collect::<Vec<String>>()
                         .join(" OR ");
 
-                    let dialect = GenericDialect{};
+                    let dialect = PostgreSqlDialect{};
                     let parser = Parser::new(&dialect)
                         .try_with_sql(expr_str.as_str())
                         .unwrap();
@@ -1696,7 +1696,7 @@ mod tests {
 
         let expr_str = "SUM(int_col) as sum_int_col";
 
-        let dialect = GenericDialect {};
+        let dialect = PostgreSqlDialect {};
         let parser = Parser::new(&dialect).try_with_sql(expr_str).unwrap();
         // from sqlparser
         let sql_expr = parser.parse_expr_with_alias().unwrap();
@@ -1718,7 +1718,7 @@ mod tests {
 
         let expr_str = "(DATE '2024-01-01', DATE '2024-06-30') OVERLAPS (DATE '2024-04-01', DATE '2024-12-31')";
 
-        let dialect = GenericDialect {};
+        let dialect = PostgreSqlDialect {};
         let parser = Parser::new(&dialect).try_with_sql(expr_str).unwrap();
         let sql_expr = parser.parse_expr().unwrap();
 

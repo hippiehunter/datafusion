@@ -30,7 +30,7 @@ use datafusion_functions_aggregate::count::count_udaf;
 use datafusion_functions_aggregate::sum::sum_udaf;
 use datafusion_sql::{
     planner::{ContextProvider, SqlToRel},
-    sqlparser::{dialect::GenericDialect, parser::Parser},
+    sqlparser::{dialect::PostgreSqlDialect, parser::Parser},
 };
 
 fn main() {
@@ -48,7 +48,7 @@ fn main() {
         ORDER BY state_tax DESC";
 
     // parse the SQL
-    let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
+    let dialect = PostgreSqlDialect {}; // or AnsiDialect, or your own dialect ...
     let ast = Parser::parse_sql(&dialect, sql).unwrap();
     let statement = &ast[0];
 
