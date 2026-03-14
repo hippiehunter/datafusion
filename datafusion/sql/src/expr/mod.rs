@@ -16,7 +16,7 @@
 // under the License.
 
 use arrow::datatypes::{DataType, TimeUnit};
-use datafusion_expr::planner::{PlannerResult, RawBinaryExpr, RawFieldAccessExpr};
+use datafusion_expr::planner::{PlannerResult, RawBinaryExpr, RawCastExpr, RawFieldAccessExpr};
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
@@ -411,35 +411,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             ),
 
             SQLExpr::Cast {
-                kind: CastKind::Cast | CastKind::DoubleColon,
+                kind,
                 expr,
                 data_type,
                 format,
-            } => {
-                self.sql_cast_to_expr(*expr, &data_type, format, schema, planner_context)
-            }
-
-            SQLExpr::Cast {
-                kind: CastKind::TryCast,
-                expr,
-                data_type,
-                format,
-            } => {
-                if let Some(format) = format {
-                    return not_impl_err!("CAST with format is not supported: {format}");
-                }
-
-                Ok(Expr::TryCast(TryCast::new(
-                    Box::new(self.sql_expr_to_logical_expr(
-                        *expr,
-                        schema,
-                        planner_context,
-                    )?),
-                    self.convert_data_type_to_field(&data_type)?
-                        .data_type()
-                        .clone(),
-                )))
-            }
+            } => self.sql_cast_to_expr(kind, *expr, &data_type, format, schema, planner_context),
 
             SQLExpr::TypedString(TypedString {
                 data_type,
@@ -452,12 +428,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     );
                 }
 
-                Ok(Expr::Cast(Cast::new(
-                    Box::new(lit(value.into_string().unwrap())),
-                    self.convert_data_type_to_field(&data_type)?
-                        .data_type()
-                        .clone(),
-                )))
+                self.finish_cast_expr(
+                    lit(value.into_string().unwrap()),
+                    &data_type,
+                    CastKind::Cast,
+                    None,
+                    schema,
+                )
             }
 
             SQLExpr::IsNull { expr, .. } => Ok(Expr::IsNull(Box::new(
@@ -1227,6 +1204,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn sql_cast_to_expr(
         &self,
+        cast_kind: CastKind,
         expr: SQLExpr,
         data_type: &SQLDataType,
         format: Option<CastFormat>,
@@ -1241,12 +1219,52 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return self.sql_regclass_cast_to_expr(expr, schema, planner_context);
         }
 
-        let dt = self.convert_data_type_to_field(data_type)?;
         let expr = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        self.finish_cast_expr(expr, data_type, cast_kind, format, schema)
+    }
 
+    fn finish_cast_expr(
+        &self,
+        expr: Expr,
+        sql_data_type: &SQLDataType,
+        cast_kind: CastKind,
+        format: Option<CastFormat>,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
         // numeric constants are treated as seconds (rather as nanoseconds)
         // to align with postgres / duckdb semantics
-        let expr = match dt.data_type() {
+        let target_data_type = self
+            .convert_data_type_to_field(sql_data_type)?
+            .data_type()
+            .clone();
+        let mut cast_expr = RawCastExpr {
+            cast_kind,
+            expr,
+            data_type: target_data_type.clone(),
+            sql_data_type: sql_data_type.clone(),
+            format,
+        };
+
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_cast(cast_expr, schema)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(expr) => {
+                    cast_expr = expr;
+                }
+            }
+        }
+
+        if let Some(format) = cast_expr.format {
+            return not_impl_err!("CAST with format is not supported: {format}");
+        }
+
+        let RawCastExpr {
+            cast_kind,
+            expr,
+            data_type,
+            ..
+        } = cast_expr;
+        let expr = match &data_type {
             DataType::Timestamp(TimeUnit::Nanosecond, tz)
                 if expr.get_type(schema)? == DataType::Int64 =>
             {
@@ -1260,10 +1278,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // Currently drops metadata attached to the type
         // https://github.com/apache/datafusion/issues/18060
-        Ok(Expr::Cast(Cast::new(
-            Box::new(expr),
-            dt.data_type().clone(),
-        )))
+        match cast_kind {
+            CastKind::TryCast => Ok(Expr::TryCast(TryCast::new(Box::new(expr), data_type))),
+            CastKind::Cast | CastKind::DoubleColon => {
+                Ok(Expr::Cast(Cast::new(Box::new(expr), data_type)))
+            }
+        }
     }
 
     fn sql_regclass_cast_to_expr(

@@ -2795,6 +2795,30 @@ impl FeatureInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion_expr::planner::{PlannerResult, RawCastExpr};
+    use sqlparser::ast::{CastKind, DataType as SQLDataType};
+
+    #[derive(Debug)]
+    struct TestCastExprPlanner;
+
+    impl ExprPlanner for TestCastExprPlanner {
+        fn plan_cast(
+            &self,
+            expr: RawCastExpr,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<RawCastExpr>> {
+            if matches!(expr.cast_kind, CastKind::Cast | CastKind::DoubleColon)
+                && matches!(expr.sql_data_type, SQLDataType::Int(_) | SQLDataType::Integer(_))
+            {
+                return Ok(PlannerResult::Planned(Expr::Literal(
+                    ScalarValue::Utf8(Some("planned_cast".to_string())),
+                    None,
+                )));
+            }
+
+            Ok(PlannerResult::Original(expr))
+        }
+    }
 
     #[test]
     fn test_parse_sql_basic() {
@@ -2856,6 +2880,50 @@ mod tests {
         assert!(logical_plan("SELECT SUM(a) FROM t").is_ok());
         assert!(logical_plan("SELECT AVG(a), MIN(b), MAX(b) FROM t").is_ok());
         assert!(logical_plan("SELECT a, COUNT(*) FROM t GROUP BY a").is_ok());
+    }
+
+    #[test]
+    fn test_expr_planner_plan_cast_handles_cast_expression() -> Result<()> {
+        let provider = DataFusionFunctionProvider;
+        let mut config_options = ConfigOptions::default();
+        config_options.catalog.information_schema = true;
+        let context = ConformanceContextProvider {
+            function_provider: &provider,
+            config_options,
+            expr_planners: vec![Arc::new(TestCastExprPlanner)],
+        };
+        let planner = SqlToRel::new_with_options(&context, ParserOptions::default());
+        let mut ast = DFParser::parse_sql("SELECT CAST(1 AS INT)")?;
+        let plan = planner.statement_to_plan(ast.pop_front().unwrap())?;
+
+        let plan_text = format!("{}", plan.display_indent());
+        assert!(
+            plan_text.contains("planned_cast"),
+            "expected cast hook result in logical plan, got:\n{plan_text}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_expr_planner_plan_cast_handles_typed_string() -> Result<()> {
+        let provider = DataFusionFunctionProvider;
+        let mut config_options = ConfigOptions::default();
+        config_options.catalog.information_schema = true;
+        let context = ConformanceContextProvider {
+            function_provider: &provider,
+            config_options,
+            expr_planners: vec![Arc::new(TestCastExprPlanner)],
+        };
+        let planner = SqlToRel::new_with_options(&context, ParserOptions::default());
+        let mut ast = DFParser::parse_sql("SELECT INTEGER '7'")?;
+        let plan = planner.statement_to_plan(ast.pop_front().unwrap())?;
+
+        let plan_text = format!("{}", plan.display_indent());
+        assert!(
+            plan_text.contains("planned_cast"),
+            "expected typed-string cast hook result in logical plan, got:\n{plan_text}"
+        );
+        Ok(())
     }
 
     #[test]

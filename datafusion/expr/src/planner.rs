@@ -233,6 +233,17 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(args))
     }
 
+    /// Plan a cast expression, such as `CAST(expr AS type)` or `expr::type`
+    ///
+    /// Returns original cast payload if not possible
+    fn plan_cast(
+        &self,
+        expr: RawCastExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawCastExpr>> {
+        Ok(PlannerResult::Original(expr))
+    }
+
     /// Plans compound identifier such as `db.schema.table` for non-empty nested names
     ///
     /// # Note:
@@ -297,6 +308,19 @@ pub struct RawBinaryExpr {
 pub struct RawFieldAccessExpr {
     pub field_access: GetFieldAccess,
     pub expr: Expr,
+}
+
+/// A cast expression to plan
+///
+/// This structure is used by [`ExprPlanner`] to plan casts with
+/// custom expressions.
+#[derive(Debug, Clone)]
+pub struct RawCastExpr {
+    pub cast_kind: sqlparser::ast::CastKind,
+    pub expr: Expr,
+    pub data_type: DataType,
+    pub sql_data_type: sqlparser::ast::DataType,
+    pub format: Option<sqlparser::ast::CastFormat>,
 }
 
 /// A Dictionary literal expression `{ key: value, ...}`
