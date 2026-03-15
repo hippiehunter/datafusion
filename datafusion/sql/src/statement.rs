@@ -52,11 +52,12 @@ use datafusion_expr::{
     AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
     CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
     CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable,
-    CreateProcedure, CreateRole, CreateSequence, CreateView,
+    CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence, CreateView,
     Deallocate, DescribeTable, DmlStatement, DropAssertion, DropCatalogSchema,
-    DropFunction, DropIndex, DropRole, DropSequence, DropTable,
+    DropFunction, DropIndex, DropPropertyGraph, DropRole, DropSequence, DropTable,
     DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable,
-    Filter, Grant, GrantRole, JoinType,
+    Filter, Grant, GrantRole, GraphEdgeEndpoint, GraphEdgeTableDefinition,
+    GraphKeyClause, GraphPropertiesClause, GraphVertexTableDefinition, JoinType,
     LogicalPlan, LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause,
     MergeInsertExpr, MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType,
     Prepare, ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint,
@@ -1924,7 +1925,101 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     args,
                 })))
             }
-            // Statement::CreatePropertyGraph and DropPropertyGraph removed from sqlparser fork
+            Statement::CreatePropertyGraph(create_property_graph) => {
+                let name = self
+                    .object_name_to_table_reference(create_property_graph.name.clone())?;
+
+                let vertex_tables = create_property_graph
+                    .vertex_tables
+                    .into_iter()
+                    .map(|vt| {
+                        Ok(GraphVertexTableDefinition {
+                            table: self.object_name_to_table_reference(vt.table)?,
+                            key: vt.key.map(|k| GraphKeyClause {
+                                columns: k
+                                    .columns
+                                    .into_iter()
+                                    .map(|c| normalize_ident(c))
+                                    .collect(),
+                            }),
+                            label: vt.label.map(|l| normalize_ident(l)),
+                            properties: vt.properties.map(|p| GraphPropertiesClause {
+                                columns: p
+                                    .columns
+                                    .into_iter()
+                                    .map(|c| normalize_ident(c))
+                                    .collect(),
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let edge_tables = create_property_graph
+                    .edge_tables
+                    .into_iter()
+                    .map(|et| {
+                        Ok(GraphEdgeTableDefinition {
+                            table: self.object_name_to_table_reference(et.table)?,
+                            source: GraphEdgeEndpoint {
+                                key: et.source.key.map(|k| GraphKeyClause {
+                                    columns: k
+                                        .columns
+                                        .into_iter()
+                                        .map(|c| normalize_ident(c))
+                                        .collect(),
+                                }),
+                                references: self.object_name_to_table_reference(
+                                    et.source.references,
+                                )?,
+                            },
+                            destination: GraphEdgeEndpoint {
+                                key: et.destination.key.map(|k| GraphKeyClause {
+                                    columns: k
+                                        .columns
+                                        .into_iter()
+                                        .map(|c| normalize_ident(c))
+                                        .collect(),
+                                }),
+                                references: self.object_name_to_table_reference(
+                                    et.destination.references,
+                                )?,
+                            },
+                            // Edge table key is optional and not part of sqlparser's GraphEdgeTableDefinition
+                            key: None,
+                            label: et.label.map(|l| normalize_ident(l)),
+                            properties: et.properties.map(|p| GraphPropertiesClause {
+                                columns: p
+                                    .columns
+                                    .into_iter()
+                                    .map(|c| normalize_ident(c))
+                                    .collect(),
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                Ok(LogicalPlan::Ddl(DdlStatement::CreatePropertyGraph(
+                    CreatePropertyGraph {
+                        name,
+                        or_replace: create_property_graph.or_replace,
+                        if_not_exists: create_property_graph.if_not_exists,
+                        vertex_tables,
+                        edge_tables,
+                    },
+                )))
+            }
+            Statement::DropPropertyGraph(drop_property_graph) => {
+                let name = self
+                    .object_name_to_table_reference(drop_property_graph.name.clone())?;
+
+                Ok(LogicalPlan::Ddl(DdlStatement::DropPropertyGraph(
+                    DropPropertyGraph {
+                        name,
+                        if_exists: drop_property_graph.if_exists,
+                        drop_behavior: drop_property_graph.drop_behavior,
+                    },
+                )))
+            }
             stmt => {
                 not_impl_err!("Unsupported SQL statement: {stmt}")
             }
