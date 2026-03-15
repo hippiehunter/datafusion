@@ -40,7 +40,7 @@ use datafusion_common::{
     schema_err, unqualified_field_not_found,
 };
 use datafusion_expr::dml::{
-    ConflictAssignment, CopyFrom, CopyTo, DoUpdateAction, InsertOp, OnConflict,
+    ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, InsertOp, OnConflict,
     OnConflictAction,
 };
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -3609,7 +3609,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        Ok(OnConflict::new(conflict.conflict_target, action))
+        let conflict_target = conflict.conflict_target.map(|ct| match ct {
+            ast::ConflictTarget::Columns(idents) => {
+                ConflictTarget::Columns(
+                    idents
+                        .into_iter()
+                        .map(|ident| ident.value)
+                        .collect(),
+                )
+            }
+            ast::ConflictTarget::OnConstraint(name) => {
+                ConflictTarget::OnConstraint(name.to_string())
+            }
+        });
+
+        Ok(OnConflict::new(conflict_target, action))
     }
 
     #[allow(clippy::too_many_arguments)]

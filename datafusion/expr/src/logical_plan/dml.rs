@@ -26,8 +26,16 @@ use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::{DFSchemaRef, TableReference};
 use sqlparser::ast::AssignmentTarget;
 
-// Re-export ConflictTarget from sqlparser for ON CONFLICT clause
-pub use sqlparser::ast::ConflictTarget;
+/// Target specification for ON CONFLICT clauses.
+///
+/// Identifies which unique constraint should trigger the conflict handling.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum ConflictTarget {
+    /// Column list: `ON CONFLICT (col_a, col_b)`
+    Columns(Vec<String>),
+    /// Named constraint: `ON CONFLICT ON CONSTRAINT constraint_name`
+    OnConstraint(String),
+}
 
 use crate::{Expr, LogicalPlan, TableSource};
 
