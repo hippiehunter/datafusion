@@ -800,23 +800,26 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             {
                 Ok(DataType::Int16)
             }
-            SQLDataType::SmallInt(_) | SQLDataType::Int2(_) => Ok(DataType::Int16),
+            SQLDataType::SmallInt(_) | SQLDataType::Int2(_) | SQLDataType::SmallSerial => {
+                Ok(DataType::Int16)
+            }
             SQLDataType::Custom(name, modifiers)
                 if modifiers.is_empty()
                     && matches!(custom_type_name(name).as_deref(), Some("SERIAL")) =>
             {
                 Ok(DataType::Int32)
             }
-            SQLDataType::Int(_) | SQLDataType::Integer(_) | SQLDataType::Int4(_) => {
-                Ok(DataType::Int32)
-            }
+            SQLDataType::Int(_) | SQLDataType::Integer(_) | SQLDataType::Int4(_)
+            | SQLDataType::Serial => Ok(DataType::Int32),
             SQLDataType::Custom(name, modifiers)
                 if modifiers.is_empty()
                     && matches!(custom_type_name(name).as_deref(), Some("BIGSERIAL")) =>
             {
                 Ok(DataType::Int64)
             }
-            SQLDataType::BigInt(_) | SQLDataType::Int8(_) => Ok(DataType::Int64),
+            SQLDataType::BigInt(_) | SQLDataType::Int8(_) | SQLDataType::BigSerial => {
+                Ok(DataType::Int64)
+            }
             SQLDataType::TinyIntUnsigned(_) => Ok(DataType::UInt8),
             SQLDataType::SmallIntUnsigned(_) | SQLDataType::Int2Unsigned(_) => {
                 Ok(DataType::UInt16)
@@ -1052,9 +1055,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::DoubleUnsigned(_) // deprecated mysql type
             | SQLDataType::DoublePrecisionUnsigned // deprecated mysql type
             | SQLDataType::MdArray(_) // multi-dimensional array type
-            | SQLDataType::Serial
-            | SQLDataType::SmallSerial
-            | SQLDataType::BigSerial
             | SQLDataType::Money
             | SQLDataType::Inet
             | SQLDataType::Cidr
