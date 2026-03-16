@@ -300,7 +300,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             } => {
                 if let Some(func_args) = args {
                     let tbl_func_name =
-                        name.0.first().unwrap().as_ident().unwrap().to_string();
+                        name.0.last().unwrap().as_ident().unwrap().to_string();
                     let args = func_args
                         .args
                         .into_iter()

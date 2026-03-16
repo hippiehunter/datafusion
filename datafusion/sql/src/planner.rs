@@ -1062,7 +1062,15 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             => {
                 not_impl_err!("Unsupported SQL type {sql_type}")
             }
-            SQLDataType::Custom(_, _) => Ok(DataType::Utf8),
+            SQLDataType::Custom(name, _) => {
+                let type_name = name.0.last()
+                    .map(|id| id.as_ident().map(|i| i.value.to_lowercase()).unwrap_or_default())
+                    .unwrap_or_default();
+                match type_name.as_str() {
+                    "oid" | "xid" | "cid" => Ok(DataType::Int32),
+                    _ => Ok(DataType::Utf8),
+                }
+            }
         }
     }
 
