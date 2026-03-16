@@ -868,6 +868,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             SQLExpr::JsonAccess { value, path } => {
                 self.plan_json_access(*value, path.path, schema, planner_context)
             }
+            SQLExpr::Collate { expr, .. } => {
+                self.sql_expr_to_logical_expr(*expr, schema, planner_context)
+            }
             _ => not_impl_err!("Unsupported ast node in sqltorel: {sql:?}"),
         }
     }

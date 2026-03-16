@@ -67,6 +67,41 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             BinaryOperator::QuestionAnd => Ok(Operator::QuestionAnd),
             BinaryOperator::QuestionPipe => Ok(Operator::QuestionPipe),
             BinaryOperator::PGOverlap => Ok(Operator::ArrayOverlap),
+            BinaryOperator::PGCustomBinaryOperator(ref names) => {
+                let op_name = names.last().map(String::as_str).unwrap_or("");
+                match op_name {
+                    "~" => Ok(Operator::RegexMatch),
+                    "~*" => Ok(Operator::RegexIMatch),
+                    "!~" => Ok(Operator::RegexNotMatch),
+                    "!~*" => Ok(Operator::RegexNotIMatch),
+                    "~~" => Ok(Operator::LikeMatch),
+                    "~~*" => Ok(Operator::ILikeMatch),
+                    "!~~" => Ok(Operator::NotLikeMatch),
+                    "!~~*" => Ok(Operator::NotILikeMatch),
+                    "||" => Ok(Operator::StringConcat),
+                    "<<" => Ok(Operator::BitwiseShiftLeft),
+                    ">>" => Ok(Operator::BitwiseShiftRight),
+                    "#" => Ok(Operator::BitwiseXor),
+                    "&" => Ok(Operator::BitwiseAnd),
+                    "|" => Ok(Operator::BitwiseOr),
+                    "&&" => Ok(Operator::ArrayOverlap),
+                    "@>" => Ok(Operator::AtArrow),
+                    "<@" => Ok(Operator::ArrowAt),
+                    "->" => Ok(Operator::Arrow),
+                    "->>" => Ok(Operator::LongArrow),
+                    "#>" => Ok(Operator::HashArrow),
+                    "#>>" => Ok(Operator::HashLongArrow),
+                    "#-" => Ok(Operator::HashMinus),
+                    "@@" => Ok(Operator::AtAt),
+                    "?" => Ok(Operator::Question),
+                    "?&" => Ok(Operator::QuestionAnd),
+                    "?|" => Ok(Operator::QuestionPipe),
+                    _ => not_impl_err!(
+                        "Unsupported qualified operator: OPERATOR({})",
+                        names.join(".")
+                    ),
+                }
+            }
             _ => not_impl_err!("Unsupported binary operator: {:?}", op),
         }
     }

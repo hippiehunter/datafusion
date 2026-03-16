@@ -1018,7 +1018,6 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::Blob(_)
             | SQLDataType::Datetime(_)
             | SQLDataType::Regclass
-            | SQLDataType::Custom(_, _)
             | SQLDataType::Array(_)
             | SQLDataType::Enum(_, _)
             | SQLDataType::Set(_)
@@ -1063,6 +1062,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             => {
                 not_impl_err!("Unsupported SQL type {sql_type}")
             }
+            SQLDataType::Custom(_, _) => Ok(DataType::Utf8),
         }
     }
 
