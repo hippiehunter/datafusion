@@ -320,7 +320,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     let provider = self
                         .context_provider
                         .get_table_function_source(&tbl_func_name, args)?;
-                    let plan = LogicalPlanBuilder::scan(
+                    let mut plan = LogicalPlanBuilder::scan(
                         TableReference::Bare {
                             table: format!("{tbl_func_name}()").into(),
                         },
@@ -328,6 +328,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         None,
                     )?
                     .build()?;
+                    // For single-column table functions with a table alias but no column
+                    // aliases, add a projection that renames the column to match the table
+                    // alias. PostgreSQL allows using the table alias as a column name for
+                    // single-column set-returning functions.
+                    if plan.schema().fields().len() == 1 {
+                        if let Some(ref tbl_alias) = alias {
+                            if tbl_alias.columns.is_empty() {
+                                let alias_name = tbl_alias.name.value.clone();
+                                let field = plan.schema().field(0);
+                                let orig_col = Expr::Column(Column::new(None::<String>, field.name()));
+                                plan = LogicalPlanBuilder::from(plan)
+                                    .project(vec![orig_col.alias(&alias_name)])?
+                                    .build()?;
+                            }
+                        }
+                    }
                     (plan, alias)
                 } else {
                     // Normalize name and alias
