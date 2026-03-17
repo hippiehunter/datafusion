@@ -1012,13 +1012,25 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     Ok(DataType::Utf8)
                 }
             }
+            SQLDataType::Array(elem_type) => {
+                match elem_type {
+                    ArrayElemTypeDef::SquareBracket(inner_type, _)
+                    | ArrayElemTypeDef::Parenthesis(inner_type)
+                    | ArrayElemTypeDef::AngleBracket(inner_type) => {
+                        let inner = self.convert_simple_data_type(&inner_type)?;
+                        Ok(DataType::List(Arc::new(Field::new("item", inner, true))))
+                    }
+                    ArrayElemTypeDef::None => {
+                        Ok(DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))))
+                    }
+                }
+            }
             SQLDataType::Nvarchar(_)
             | SQLDataType::Binary(_)
             | SQLDataType::Varbinary(_)
             | SQLDataType::Blob(_)
             | SQLDataType::Datetime(_)
             | SQLDataType::Regclass
-            | SQLDataType::Array(_)
             | SQLDataType::Enum(_, _)
             | SQLDataType::Set(_)
             | SQLDataType::MediumInt(_)
