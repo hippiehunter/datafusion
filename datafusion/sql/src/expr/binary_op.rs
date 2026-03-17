@@ -70,6 +70,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             BinaryOperator::PGCustomBinaryOperator(ref names) => {
                 let op_name = names.last().map(String::as_str).unwrap_or("");
                 match op_name {
+                    "=" => Ok(Operator::Eq),
+                    "<>" | "!=" => Ok(Operator::NotEq),
+                    "<" => Ok(Operator::Lt),
+                    ">" => Ok(Operator::Gt),
+                    "<=" => Ok(Operator::LtEq),
+                    ">=" => Ok(Operator::GtEq),
                     "~" => Ok(Operator::RegexMatch),
                     "~*" => Ok(Operator::RegexIMatch),
                     "!~" => Ok(Operator::RegexNotMatch),
