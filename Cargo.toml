@@ -97,7 +97,8 @@ rstest = "0.26.1"
 serde_json = "1"
 sqlparser = { git = "https://github.com/hippiehunter/datafusion-sqlparser-rs.git", default-features = false, features = ["std", "visitor"] }
 tempfile = "3"
-tokio = { version = "1.48", features = ["macros", "rt", "sync"] }
+event-listener = "5.4"
+smol = "2"
 url = "2.5.7"
 
 [workspace.lints.clippy]
@@ -113,7 +114,6 @@ needless_pass_by_value = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(datafusion_coop, values("tokio", "tokio_fallback", "per_stream"))',
     "cfg(tarpaulin)",
     "cfg(tarpaulin_include)",
 ] }

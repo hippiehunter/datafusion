@@ -56,7 +56,6 @@ log = { workspace = true }
 paste = { workspace = true }
 recursive = { workspace = true, optional = true }
 sqlparser = { workspace = true }
-tokio = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1.1.0"

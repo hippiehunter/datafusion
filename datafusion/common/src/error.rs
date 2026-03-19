@@ -51,7 +51,6 @@ use crate::{Column, DFSchema, Diagnostic, TableReference};
 use arrow::error::ArrowError;
 
 use sqlparser::parser::ParserError;
-use tokio::task::JoinError;
 
 /// Result type for operations that could result in an [DataFusionError]
 pub type Result<T, E = DataFusionError> = result::Result<T, E>;
@@ -122,10 +121,6 @@ pub enum DataFusionError {
     /// SQL method, opened a CSV file that is broken, or tried to divide an
     /// integer by zero.
     Execution(String),
-    /// [`JoinError`] during execution of the query.
-    ///
-    /// This error can't occur for unjoined tasks, such as execution shutdown.
-    ExecutionJoin(Box<JoinError>),
     /// Error when resources (such as memory of scratch disk space) are exhausted.
     ///
     /// This error is thrown when a consumer cannot acquire additional memory
@@ -354,7 +349,6 @@ impl Error for DataFusionError {
             DataFusionError::Plan(_) => None,
             DataFusionError::SchemaError(e, _) => Some(e.as_ref()),
             DataFusionError::Execution(_) => None,
-            DataFusionError::ExecutionJoin(e) => Some(e.as_ref()),
             DataFusionError::ResourcesExhausted(_) => None,
             DataFusionError::External(e) => Some(e.as_ref()),
             DataFusionError::Context(_, e) => Some(e.as_ref()),
@@ -483,7 +477,6 @@ impl DataFusionError {
             }
             DataFusionError::SchemaError(_, _) => "Schema error: ",
             DataFusionError::Execution(_) => "Execution error: ",
-            DataFusionError::ExecutionJoin(_) => "ExecutionJoin error: ",
             DataFusionError::ResourcesExhausted(_) => {
                 "Resources exhausted: "
             }
@@ -526,7 +519,6 @@ impl DataFusionError {
                 Cow::Owned(format!("{desc}{backtrace}"))
             }
             DataFusionError::Execution(ref desc) => Cow::Owned(desc.to_string()),
-            DataFusionError::ExecutionJoin(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::ResourcesExhausted(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::External(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::Context(ref desc, ref err) => {
