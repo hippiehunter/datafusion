@@ -359,7 +359,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // PostgreSQL set-returning functions in projection context.
         // Build them as UNNEST(<list-returning-scalar>) so they can emit rows.
-        if matches!(name.as_str(), "regexp_split_to_table" | "regexp_matches") {
+        if matches!(
+            name.as_str(),
+            "regexp_split_to_table"
+                | "regexp_matches"
+                | "_pg_expandarray"
+                | "information_schema._pg_expandarray"
+        ) {
             if let Some(fm) = self.context_provider.get_function_meta(&name) {
                 let (srf_args, arg_names) = self.function_args_to_expr_with_names(
                     args.clone(),
