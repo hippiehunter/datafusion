@@ -1867,6 +1867,25 @@ pub fn validate_unique_names<'a>(
     })
 }
 
+/// Auto-alias projection expressions that share the same schema name.
+///
+/// PostgreSQL allows `SELECT NULL, NULL, NULL` and returns columns all named
+/// `NULL`.  DataFusion's `DFSchema` requires unique field names, so this
+/// function appends `:N` suffixes to duplicates so the schema is valid while
+/// the query still executes.
+fn deduplicate_expr_names(exprs: &mut Vec<Expr>) {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for i in 0..exprs.len() {
+        let name = exprs[i].schema_name().to_string();
+        let count = seen.entry(name.clone()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            let alias = format!("{name}:{}", *count - 1);
+            exprs[i] = exprs[i].clone().alias(alias);
+        }
+    }
+}
+
 /// Union two [`LogicalPlan`]s.
 ///
 /// Constructs the UNION plan, but does not perform type-coercion. Therefore the
@@ -1974,7 +1993,7 @@ fn project_with_validation(
             }
         }
     }
-    validate_unique_names("Projections", projected_expr.iter())?;
+    deduplicate_expr_names(&mut projected_expr);
 
     Projection::try_new(projected_expr, Arc::new(plan)).map(LogicalPlan::Projection)
 }
