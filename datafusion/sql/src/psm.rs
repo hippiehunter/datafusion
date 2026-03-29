@@ -450,7 +450,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let has_subquery = Self::expr_contains_subquery(&planned);
                 (Some(planned), has_subquery)
             }
-            Some(ReturnStatementValue::Next(_)) => {
+            Some(ReturnStatementValue::Next(_)) | Some(ReturnStatementValue::NextNoExpr) => {
                 // RETURN NEXT is PostgreSQL-specific, not supported yet
                 return not_impl_err!("RETURN NEXT is not supported");
             }
