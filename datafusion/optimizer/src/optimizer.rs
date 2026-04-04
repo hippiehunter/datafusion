@@ -109,7 +109,6 @@ pub trait OptimizerConfig {
 
 /// A standalone [`OptimizerConfig`] that can be used independently
 /// of DataFusion's config management
-#[derive(Debug)]
 pub struct OptimizerContext {
     /// Query execution start time that can be used to rewrite
     /// expressions such as `now()` to use a literal value instead
@@ -119,6 +118,19 @@ pub struct OptimizerContext {
     alias_generator: Arc<AliasGenerator>,
 
     options: Arc<ConfigOptions>,
+
+    /// Optional function registry for optimizer rules that need UDF/UDAF lookups
+    function_registry: Option<Arc<dyn FunctionRegistry + Send + Sync>>,
+}
+
+impl Debug for OptimizerContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OptimizerContext")
+            .field("query_execution_start_time", &self.query_execution_start_time)
+            .field("options", &self.options)
+            .field("has_function_registry", &self.function_registry.is_some())
+            .finish()
+    }
 }
 
 impl OptimizerContext {
@@ -136,7 +148,18 @@ impl OptimizerContext {
             query_execution_start_time: Utc::now(),
             alias_generator: Arc::new(AliasGenerator::new()),
             options,
+            function_registry: None,
         }
+    }
+
+    /// Set the function registry for optimizer rules that need UDF/UDAF lookups
+    /// (e.g. DISTINCT ON → first_value aggregate).
+    pub fn with_function_registry(
+        mut self,
+        registry: Arc<dyn FunctionRegistry + Send + Sync>,
+    ) -> Self {
+        self.function_registry = Some(registry);
+        self
     }
 
     /// Specify whether to enable the filter_null_keys rule
@@ -189,6 +212,10 @@ impl OptimizerConfig for OptimizerContext {
 
     fn options(&self) -> Arc<ConfigOptions> {
         Arc::clone(&self.options)
+    }
+
+    fn function_registry(&self) -> Option<&dyn FunctionRegistry> {
+        self.function_registry.as_ref().map(|r| r.as_ref() as &dyn FunctionRegistry)
     }
 }
 

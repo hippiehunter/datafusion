@@ -132,8 +132,13 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
                 let expr_cnt = on_expr.len();
 
                 // Construct the aggregation expression to be used to fetch the selected expressions.
+                let registry = config.function_registry().ok_or_else(|| {
+                    datafusion_common::DataFusionError::Internal(
+                        "DISTINCT ON requires a function registry (for first_value UDAF)".to_string(),
+                    )
+                })?;
                 let first_value_udaf: Arc<datafusion_expr::AggregateUDF> =
-                    config.function_registry().unwrap().udaf("first_value")?;
+                    registry.udaf("first_value")?;
                 let aggr_expr = select_expr.into_iter().map(|e| {
                     if let Some(order_by) = &sort_expr {
                         first_value_udaf
