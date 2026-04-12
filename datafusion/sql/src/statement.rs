@@ -49,20 +49,21 @@ use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
 use datafusion_expr::utils::{expr_to_columns, exprlist_to_fields};
 use datafusion_expr::{
-    AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion, CreateCatalog,
-    CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction,
-    CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable,
-    CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence, CreateView,
-    Deallocate, DescribeTable, DmlStatement, DropAssertion, DropCatalogSchema,
-    DropFunction, DropIndex, DropPropertyGraph, DropRole, DropSequence, DropTable,
-    DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable,
-    Filter, Grant, GrantRole, GraphEdgeEndpoint, GraphEdgeTableDefinition,
-    GraphKeyClause, GraphPropertiesClause, GraphVertexTableDefinition, JoinType,
-    LogicalPlan, LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause,
-    MergeInsertExpr, MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType,
-    Prepare, ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint,
-    Savepoint, SetTransaction, SetVariable, SortExpr, Statement as PlanStatement,
-    ToStringifiedPlan, TransactionAccessMode, TransactionConclusion, TransactionEnd,
+    AlterMaterializedView, AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion,
+    CreateCatalog, CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable,
+    CreateFunction, CreateFunctionBody, CreateIndex as PlanCreateIndex,
+    CreateMaterializedView, CreateMemoryTable, CreateProcedure, CreatePropertyGraph,
+    CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable, DmlStatement,
+    DropAssertion, DropCatalogSchema, DropFunction, DropIndex, DropMaterializedView,
+    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation, Execute,
+    Explain, ExplainFormat, Expr, ExprSchemable, Filter, Grant, GrantRole,
+    GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause,
+    GraphVertexTableDefinition, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
+    MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
+    MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare, RefreshMaterializedView,
+    ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint,
+    SetTransaction, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
+    TransactionAccessMode, TransactionConclusion, TransactionEnd,
     TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
     Volatility, WriteOp, cast, col,
 };
@@ -83,6 +84,36 @@ use sqlparser::parser::ParserError::ParserError;
 
 fn ident_to_string(ident: &Ident) -> String {
     normalize_ident(ident.to_owned())
+}
+
+/// Convert the `WITH (...)` options of a `CREATE MATERIALIZED VIEW` into
+/// a flat string-keyed map. Each option's value is rendered using its
+/// sqlparser `Display` impl so the engine layer sees the user's literal
+/// without losing escaping; the engine layer is responsible for
+/// interpreting the string ("manual", "incremental", "60s", …).
+fn mv_with_options_to_map(
+    options: Vec<SqlOption>,
+) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for option in options {
+        let name = match option {
+            SqlOption::KeyValue { key, value } => {
+                let key_str = ident_to_string(&key);
+                if out.contains_key(&key_str) {
+                    return plan_err!(
+                        "duplicate option in CREATE MATERIALIZED VIEW WITH clause: {key_str}"
+                    );
+                }
+                out.insert(key_str, value.to_string());
+                continue;
+            }
+            other => other,
+        };
+        return not_impl_err!(
+            "CREATE MATERIALIZED VIEW WITH option not supported: {name:?}"
+        );
+    }
+    Ok(out)
 }
 
 fn object_name_to_string(object_name: &ObjectName) -> String {
@@ -598,11 +629,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
             Statement::CreateView(view) => {
-                if view.materialized {
-                    return not_impl_err!("Materialized views not supported")?;
-                }
-                // Note: if_not_exists and temporary fields were removed from sqlparser CreateView
-
                 // put the statement back together temporarily to get the SQL
                 // string representation
                 let sql = Statement::CreateView(view.clone()).to_string();
@@ -625,6 +651,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.query_to_plan(*view.query, &mut PlannerContext::new())?;
                 plan = self.apply_expr_alias(plan, columns)?;
 
+                if view.materialized {
+                    let with_options = match view.options {
+                        CreateTableOptions::With(opts) => mv_with_options_to_map(opts)?,
+                        CreateTableOptions::None => Default::default(),
+                        other => {
+                            return not_impl_err!(
+                                "CREATE MATERIALIZED VIEW with options form not supported: {other:?}"
+                            );
+                        }
+                    };
+                    return Ok(LogicalPlan::Ddl(DdlStatement::CreateMaterializedView(
+                        CreateMaterializedView {
+                            name: self.object_name_to_table_reference(view.name)?,
+                            input: Arc::new(plan),
+                            or_replace: view.or_replace,
+                            if_not_exists: false,
+                            definition: Some(sql),
+                            with_options,
+                        },
+                    )));
+                }
+
                 Ok(LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {
                     name: self.object_name_to_table_reference(view.name)?,
                     input: Arc::new(plan),
@@ -634,6 +682,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     temporary: false,
                 })))
             }
+            Statement::RefreshMaterializedView {
+                name,
+                concurrently,
+                method,
+            } => Ok(LogicalPlan::Ddl(DdlStatement::RefreshMaterializedView(
+                RefreshMaterializedView {
+                    name: self.object_name_to_table_reference(name)?,
+                    concurrently,
+                    method,
+                    schema: DFSchemaRef::new(DFSchema::empty()),
+                },
+            ))),
+            Statement::AlterMaterializedView { name, operation } => Ok(LogicalPlan::Ddl(
+                DdlStatement::AlterMaterializedView(AlterMaterializedView {
+                    name: self.object_name_to_table_reference(name)?,
+                    operation,
+                    schema: DFSchemaRef::new(DFSchema::empty()),
+                }),
+            )),
             Statement::AlterTable(mut alter_table) => {
                 let mut operations = Vec::with_capacity(alter_table.operations.len());
                 for operation in alter_table.operations {
@@ -846,6 +913,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             schema: DFSchemaRef::new(DFSchema::empty()),
                         })))
                     }
+                    ObjectType::MaterializedView => Ok(LogicalPlan::Ddl(
+                        DdlStatement::DropMaterializedView(DropMaterializedView {
+                            name,
+                            if_exists,
+                            cascade,
+                            schema: DFSchemaRef::new(DFSchema::empty()),
+                        }),
+                    )),
                     ObjectType::Schema => {
                         let name = match name {
                             TableReference::Bare { table } => {

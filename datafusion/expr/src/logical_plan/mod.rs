@@ -34,13 +34,15 @@ pub use builder::{
     wrap_projection_for_join_if_necessary,
 };
 pub use ddl::{
-    AlterSequence, AlterTable, CreateAssertion, CreateCatalog, CreateCatalogSchema,
-    CreateDomain, CreateExternalTable, CreateFunction, CreateFunctionBody, CreateIndex,
-    CreateMemoryTable, CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence,
-    CreateView, DdlStatement, DropAssertion, DropBehavior, DropCatalogSchema, DropDomain,
-    DropFunction, DropIndex, DropProcedure, DropPropertyGraph, DropRole, DropSequence,
-    DropTable, DropView, GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause,
-    GraphPropertiesClause, GraphVertexTableDefinition, OperateFunctionArg, SequenceOptions,
+    AlterMaterializedView, AlterMaterializedViewOperation, AlterSequence, AlterTable,
+    CreateAssertion, CreateCatalog, CreateCatalogSchema, CreateDomain, CreateExternalTable,
+    CreateFunction, CreateFunctionBody, CreateIndex, CreateMaterializedView, CreateMemoryTable,
+    CreateProcedure, CreatePropertyGraph, CreateRole, CreateSequence, CreateView, DdlStatement,
+    DropAssertion, DropBehavior, DropCatalogSchema, DropDomain, DropFunction, DropIndex,
+    DropMaterializedView, DropProcedure, DropPropertyGraph, DropRole, DropSequence, DropTable,
+    DropView, GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause,
+    GraphPropertiesClause, GraphVertexTableDefinition, MaterializedViewRefreshMethod,
+    OperateFunctionArg, RefreshMaterializedView, SequenceOptions,
     // SQL/MED (Management of External Data) types
     AlterForeignDataWrapperOperation, AlterForeignDataWrapperStatement,
     AlterForeignTableOperation, AlterForeignTableStatement, AlterServerOperation,

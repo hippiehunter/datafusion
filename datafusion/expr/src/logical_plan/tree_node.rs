@@ -38,8 +38,8 @@
 //! * [`LogicalPlan::expressions`]: Return a copy of the plan's expressions
 
 use crate::{
-    Aggregate, Analyze, CreateMemoryTable, CreateView, DdlStatement, Distinct,
-    DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
+    Aggregate, Analyze, CreateMaterializedView, CreateMemoryTable, CreateView, DdlStatement,
+    Distinct, DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
     LogicalPlan, MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
     Projection, RecursiveQuery, Repartition, Sort, Statement, Subquery, SubqueryAlias,
     TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::{CopyFrom, CopyTo},
@@ -339,8 +339,28 @@ impl TreeNode for LogicalPlan {
                             temporary,
                         })
                     }),
+                    DdlStatement::CreateMaterializedView(CreateMaterializedView {
+                        name,
+                        input,
+                        or_replace,
+                        if_not_exists,
+                        definition,
+                        with_options,
+                    }) => input.map_elements(f)?.update_data(|input| {
+                        DdlStatement::CreateMaterializedView(CreateMaterializedView {
+                            name,
+                            input,
+                            or_replace,
+                            if_not_exists,
+                            definition,
+                            with_options,
+                        })
+                    }),
                     // no inputs in these statements
                     DdlStatement::CreateExternalTable(_)
+                    | DdlStatement::DropMaterializedView(_)
+                    | DdlStatement::RefreshMaterializedView(_)
+                    | DdlStatement::AlterMaterializedView(_)
                     | DdlStatement::CreateCatalogSchema(_)
                     | DdlStatement::CreateCatalog(_)
                     | DdlStatement::CreateIndex(_)

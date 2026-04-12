@@ -31,7 +31,10 @@ use datafusion_common::tree_node::{Transformed, TreeNodeContainer, TreeNodeRecur
 use datafusion_common::{
     Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
 };
-pub use sqlparser::ast::{AlterTable, CreateDomain, DropDomain, DropBehavior, SequenceOptions};
+pub use sqlparser::ast::{
+    AlterMaterializedViewOperation, AlterTable, CreateDomain, DropBehavior, DropDomain,
+    MaterializedViewRefreshMethod, SequenceOptions,
+};
 // SQL/MED (Management of External Data) statement types - ISO/IEC 9075-9
 pub use sqlparser::ast::{
     AlterForeignDataWrapperOperation, AlterForeignDataWrapperStatement,
@@ -56,6 +59,14 @@ pub enum DdlStatement {
     CreateMemoryTable(CreateMemoryTable),
     /// Creates a new view.
     CreateView(CreateView),
+    /// Creates a new materialized view.
+    CreateMaterializedView(CreateMaterializedView),
+    /// Drops a materialized view.
+    DropMaterializedView(DropMaterializedView),
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [FAST | COMPLETE]`.
+    RefreshMaterializedView(RefreshMaterializedView),
+    /// `ALTER MATERIALIZED VIEW name {ENABLE REWRITE | DISABLE REWRITE | OWNER TO ...}`.
+    AlterMaterializedView(AlterMaterializedView),
     /// Creates a new catalog schema.
     CreateCatalogSchema(CreateCatalogSchema),
     /// Creates a new catalog (aka "Database").
@@ -140,6 +151,9 @@ impl DdlStatement {
             }
             DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. })
             | DdlStatement::CreateView(CreateView { input, .. }) => input.schema(),
+            DdlStatement::CreateMaterializedView(CreateMaterializedView {
+                input, ..
+            }) => input.schema(),
             DdlStatement::CreateCatalogSchema(CreateCatalogSchema { schema, .. }) => {
                 schema
             }
@@ -151,6 +165,13 @@ impl DdlStatement {
             DdlStatement::DropCatalogSchema(DropCatalogSchema { schema, .. }) => schema,
             DdlStatement::CreateFunction(CreateFunction { schema, .. }) => schema,
             DdlStatement::DropFunction(DropFunction { schema, .. }) => schema,
+            DdlStatement::DropMaterializedView(DropMaterializedView { schema, .. }) => schema,
+            DdlStatement::RefreshMaterializedView(RefreshMaterializedView {
+                schema, ..
+            }) => schema,
+            DdlStatement::AlterMaterializedView(AlterMaterializedView { schema, .. }) => {
+                schema
+            }
             DdlStatement::AlterTable(_)
             | DdlStatement::CreateDomain(_)
             | DdlStatement::DropDomain(_)
@@ -189,6 +210,10 @@ impl DdlStatement {
             DdlStatement::CreateExternalTable(_) => "CreateExternalTable",
             DdlStatement::CreateMemoryTable(_) => "CreateMemoryTable",
             DdlStatement::CreateView(_) => "CreateView",
+            DdlStatement::CreateMaterializedView(_) => "CreateMaterializedView",
+            DdlStatement::DropMaterializedView(_) => "DropMaterializedView",
+            DdlStatement::RefreshMaterializedView(_) => "RefreshMaterializedView",
+            DdlStatement::AlterMaterializedView(_) => "AlterMaterializedView",
             DdlStatement::CreateCatalogSchema(_) => "CreateCatalogSchema",
             DdlStatement::CreateCatalog(_) => "CreateCatalog",
             DdlStatement::CreateIndex(_) => "CreateIndex",
@@ -239,6 +264,12 @@ impl DdlStatement {
                 vec![input]
             }
             DdlStatement::CreateView(CreateView { input, .. }) => vec![input],
+            DdlStatement::CreateMaterializedView(CreateMaterializedView {
+                input, ..
+            }) => vec![input],
+            DdlStatement::DropMaterializedView(_) => vec![],
+            DdlStatement::RefreshMaterializedView(_) => vec![],
+            DdlStatement::AlterMaterializedView(_) => vec![],
             DdlStatement::CreateIndex(_) => vec![],
             DdlStatement::DropIndex(_) => vec![],
             DdlStatement::DropTable(_) => vec![],
@@ -311,6 +342,46 @@ impl DdlStatement {
                     }
                     DdlStatement::CreateView(CreateView { name, .. }) => {
                         write!(f, "CreateView: {name:?}")
+                    }
+                    DdlStatement::CreateMaterializedView(CreateMaterializedView {
+                        name,
+                        or_replace,
+                        if_not_exists,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "CreateMaterializedView: {name:?} or_replace:={or_replace} if_not_exists:={if_not_exists}"
+                        )
+                    }
+                    DdlStatement::DropMaterializedView(DropMaterializedView {
+                        name,
+                        if_exists,
+                        cascade,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "DropMaterializedView: {name:?} if_exists:={if_exists} cascade:={cascade}"
+                        )
+                    }
+                    DdlStatement::RefreshMaterializedView(RefreshMaterializedView {
+                        name,
+                        concurrently,
+                        method,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "RefreshMaterializedView: {name:?} concurrently:={concurrently} method:={method:?}"
+                        )
+                    }
+                    DdlStatement::AlterMaterializedView(AlterMaterializedView {
+                        name,
+                        operation,
+                        ..
+                    }) => {
+                        write!(f, "AlterMaterializedView: {name:?} {operation}")
                     }
                     DdlStatement::CreateCatalogSchema(CreateCatalogSchema {
                         schema_name,
@@ -795,6 +866,106 @@ pub struct CreateView {
     pub definition: Option<String>,
     /// Whether the view is ephemeral
     pub temporary: bool,
+}
+
+/// Creates a materialized view.
+///
+/// The inner `SELECT` is planned by the SQL planner so type checking,
+/// schema resolution, and downstream rewrites all happen against the
+/// real query before the dialect-specific MV admin layer takes over.
+/// `definition` carries the original `CREATE MATERIALIZED VIEW` SQL
+/// text so the engine layer can persist it for later refresh planning.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+pub struct CreateMaterializedView {
+    /// The materialized view name.
+    pub name: TableReference,
+    /// The logical plan of the inner `SELECT`.
+    pub input: Arc<LogicalPlan>,
+    /// `OR REPLACE` clause.
+    pub or_replace: bool,
+    /// `IF NOT EXISTS` clause.
+    pub if_not_exists: bool,
+    /// Original `CREATE MATERIALIZED VIEW` SQL text, for catalog persistence.
+    pub definition: Option<String>,
+    /// `WITH (...)` options as ordered key/value strings. The engine
+    /// layer interprets these (`maintenance`, `refresh_policy`, …).
+    pub with_options: BTreeMap<String, String>,
+}
+
+/// Drops a materialized view.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DropMaterializedView {
+    /// The materialized view name.
+    pub name: TableReference,
+    /// `IF EXISTS` clause.
+    pub if_exists: bool,
+    /// `CASCADE` clause.
+    pub cascade: bool,
+    /// Dummy schema (DDL has no result columns).
+    pub schema: DFSchemaRef,
+}
+
+// Manual implementation needed because of `schema` field. Comparison excludes this field.
+impl PartialOrd for DropMaterializedView {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.name.partial_cmp(&other.name) {
+            Some(Ordering::Equal) => match self.if_exists.partial_cmp(&other.if_exists) {
+                Some(Ordering::Equal) => self.cascade.partial_cmp(&other.cascade),
+                cmp => cmp,
+            },
+            cmp => cmp,
+        }
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+/// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [FAST | COMPLETE]`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RefreshMaterializedView {
+    /// The materialized view name.
+    pub name: TableReference,
+    /// `CONCURRENTLY` flag.
+    pub concurrently: bool,
+    /// Optional refresh method.
+    pub method: Option<MaterializedViewRefreshMethod>,
+    /// Dummy schema (DDL has no result columns).
+    pub schema: DFSchemaRef,
+}
+
+// Manual implementation needed because of `schema` field. Comparison excludes this field.
+impl PartialOrd for RefreshMaterializedView {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.name.partial_cmp(&other.name) {
+            Some(Ordering::Equal) => match self.concurrently.partial_cmp(&other.concurrently) {
+                Some(Ordering::Equal) => self.method.partial_cmp(&other.method),
+                cmp => cmp,
+            },
+            cmp => cmp,
+        }
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+/// `ALTER MATERIALIZED VIEW name {ENABLE REWRITE | DISABLE REWRITE | OWNER TO ...}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AlterMaterializedView {
+    /// The materialized view name.
+    pub name: TableReference,
+    /// The alter operation.
+    pub operation: AlterMaterializedViewOperation,
+    /// Dummy schema (DDL has no result columns).
+    pub schema: DFSchemaRef,
+}
+
+// Manual implementation needed because of `schema` field. Comparison excludes this field.
+impl PartialOrd for AlterMaterializedView {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.name.partial_cmp(&other.name) {
+            Some(Ordering::Equal) => self.operation.partial_cmp(&other.operation),
+            cmp => cmp,
+        }
+        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
 }
 
 /// Creates a catalog (aka "Database").
