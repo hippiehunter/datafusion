@@ -27,11 +27,13 @@ use std::vec;
 
 use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::MockContextProvider;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{assert_contains, DataFusionError, Result};
 use datafusion_expr::{
     col, logical_plan::LogicalPlan, test::function_stub::sum_udaf, ColumnarValue,
     CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, Volatility,
+    ScalarUDFImpl, Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy,
+    Volatility,
 };
 use datafusion_sql::{
     parser::DFParser,
@@ -3412,6 +3414,99 @@ Projection: person.id
       Aggregate: groupBy=[[person.id]], aggr=[[min(person.age)]]
         TableScan: person
 "#
+    );
+}
+
+#[test]
+fn for_update_of_alias_annotates_only_target_table_scan() -> Result<()> {
+    let plan = logical_plan(
+        "SELECT o.order_id, l.l_item_id \
+         FROM orders o JOIN lineitem l ON o.o_item_id = l.l_item_id \
+         FOR UPDATE OF o NOWAIT",
+    )?;
+
+    let mut scan_locks = vec![];
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            scan_locks.push((
+                scan.table_name.to_string(),
+                scan.row_lock.map(|lock| (lock.mode, lock.wait_policy)),
+            ));
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    scan_locks.sort_by(|left, right| left.0.cmp(&right.0));
+
+    assert_eq!(
+        scan_locks,
+        vec![
+            ("lineitem".to_string(), None),
+            (
+                "orders".to_string(),
+                Some((
+                    TableScanRowLockMode::ForUpdate,
+                    TableScanRowLockWaitPolicy::Nowait
+                ))
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn for_share_without_of_annotates_all_table_scans() -> Result<()> {
+    let plan = logical_plan(
+        "SELECT o.order_id, l.l_item_id \
+         FROM orders o JOIN lineitem l ON o.o_item_id = l.l_item_id \
+         FOR SHARE SKIP LOCKED",
+    )?;
+
+    let mut scan_locks = vec![];
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            scan_locks.push((
+                scan.table_name.to_string(),
+                scan.row_lock.map(|lock| (lock.mode, lock.wait_policy)),
+            ));
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    scan_locks.sort_by(|left, right| left.0.cmp(&right.0));
+
+    assert_eq!(
+        scan_locks,
+        vec![
+            (
+                "lineitem".to_string(),
+                Some((
+                    TableScanRowLockMode::ForShare,
+                    TableScanRowLockWaitPolicy::SkipLocked
+                ))
+            ),
+            (
+                "orders".to_string(),
+                Some((
+                    TableScanRowLockMode::ForShare,
+                    TableScanRowLockWaitPolicy::SkipLocked
+                ))
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn for_update_of_unknown_relation_errors() {
+    let err = logical_plan(
+        "SELECT o.order_id, l.l_item_id \
+         FROM orders o JOIN lineitem l ON o.o_item_id = l.l_item_id \
+         FOR UPDATE OF missing",
+    )
+    .expect_err("unknown lock target should fail planning");
+
+    assert_contains!(
+        err.to_string(),
+        "FOR UPDATE OF missing did not match any table scan in the query"
     );
 }
 

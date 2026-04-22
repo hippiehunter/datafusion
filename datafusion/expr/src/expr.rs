@@ -1424,6 +1424,9 @@ impl Expr {
                 spans: _,
             }) => (relation.clone(), name.clone()),
             Expr::Alias(Alias { relation, name, .. }) => (relation.clone(), name.clone()),
+            Expr::Cast(Cast { expr, .. }) | Expr::TryCast(TryCast { expr, .. }) => {
+                expr.qualified_name()
+            }
             _ => (None, self.schema_name().to_string()),
         }
     }
@@ -3684,6 +3687,30 @@ mod test {
         // Note that CAST intentionally has a name that is different from its `Display`
         // representation. CAST does not change the name of expressions.
         assert_eq!("Float32(1.23)", expr.schema_name().to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_of_qualified_column_preserves_unqualified_field_name() -> Result<()> {
+        let expr = Expr::Cast(Cast {
+            expr: Box::new(col(Column::new(Some("attr"), "attgenerated"))),
+            data_type: DataType::Utf8,
+        });
+
+        assert_eq!("attr.attgenerated", expr.schema_name().to_string());
+        assert_eq!(
+            (Some(TableReference::bare("attr")), "attgenerated".to_string()),
+            expr.qualified_name()
+        );
+
+        let schema = DFSchema::try_from_qualified_schema(
+            "attr",
+            &Schema::new(vec![Field::new("attgenerated", DataType::Utf8, false)]),
+        )?;
+        let (relation, field) = expr.to_field(&schema)?;
+
+        assert_eq!(Some(TableReference::bare("attr")), relation);
+        assert_eq!("attgenerated", field.name());
         Ok(())
     }
 

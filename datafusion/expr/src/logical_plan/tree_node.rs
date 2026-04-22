@@ -799,6 +799,7 @@ impl LogicalPlan {
                 projected_schema,
                 filters,
                 fetch,
+                row_lock,
             }) => filters.map_elements(f)?.update_data(|filters| {
                 LogicalPlan::TableScan(TableScan {
                     table_name,
@@ -807,6 +808,7 @@ impl LogicalPlan {
                     projected_schema,
                     filters,
                     fetch,
+                    row_lock,
                 })
             }),
             LogicalPlan::Distinct(Distinct::On(DistinctOn {

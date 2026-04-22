@@ -74,6 +74,74 @@ use crate::display::PgJsonVisitor;
 pub use datafusion_common::display::{PlanType, StringifiedPlan, ToStringifiedPlan};
 pub use datafusion_common::{JoinConstraint, JoinType};
 
+/// Row-level lock mode requested for rows produced by a table scan.
+///
+/// This is populated from PostgreSQL-style `SELECT ... FOR UPDATE/SHARE`
+/// clauses by the SQL planner. Storage engines can inspect it during physical
+/// planning to acquire locks only for the scans selected by `OF relation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TableScanRowLockMode {
+    /// FOR KEY SHARE
+    ForKeyShare,
+    /// FOR SHARE
+    ForShare,
+    /// FOR NO KEY UPDATE
+    ForNoKeyUpdate,
+    /// FOR UPDATE
+    ForUpdate,
+}
+
+impl Display for TableScanRowLockMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForKeyShare => f.write_str("KEY SHARE"),
+            Self::ForShare => f.write_str("SHARE"),
+            Self::ForNoKeyUpdate => f.write_str("NO KEY UPDATE"),
+            Self::ForUpdate => f.write_str("UPDATE"),
+        }
+    }
+}
+
+/// Wait policy for row-level table-scan locks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TableScanRowLockWaitPolicy {
+    /// Wait for conflicting locks.
+    Block,
+    /// Fail immediately on a conflicting lock.
+    Nowait,
+    /// Skip rows with conflicting locks.
+    SkipLocked,
+}
+
+impl Display for TableScanRowLockWaitPolicy {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Block => Ok(()),
+            Self::Nowait => f.write_str("NOWAIT"),
+            Self::SkipLocked => f.write_str("SKIP LOCKED"),
+        }
+    }
+}
+
+/// Row-level lock specification attached to a table scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TableScanRowLock {
+    /// Requested row lock mode.
+    pub mode: TableScanRowLockMode,
+    /// Conflict handling policy.
+    pub wait_policy: TableScanRowLockWaitPolicy,
+}
+
+impl Display for TableScanRowLock {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "FOR {}", self.mode)?;
+        if self.wait_policy != TableScanRowLockWaitPolicy::Block {
+            write!(f, " {}", self.wait_policy)?;
+        }
+        Ok(())
+    }
+}
+
 /// A `LogicalPlan` is a node in a tree of relational operators (such as
 /// Projection or Filter).
 ///
@@ -2806,6 +2874,7 @@ impl LogicalPlan {
                         projection,
                         filters,
                         fetch,
+                        row_lock,
                         ..
                     }) => {
                         let projected_fields = match projection {
@@ -2871,6 +2940,10 @@ impl LogicalPlan {
 
                         if let Some(n) = fetch {
                             write!(f, ", fetch={n}")?;
+                        }
+
+                        if let Some(lock) = row_lock {
+                            write!(f, ", row_lock=[{lock}]")?;
                         }
 
                         Ok(())
@@ -3723,6 +3796,8 @@ pub struct TableScan {
     pub filters: Vec<Expr>,
     /// Optional number of rows to read
     pub fetch: Option<usize>,
+    /// Optional row-level lock requested for rows produced by this scan.
+    pub row_lock: Option<TableScanRowLock>,
 }
 
 impl Debug for TableScan {
@@ -3734,6 +3809,7 @@ impl Debug for TableScan {
             .field("projected_schema", &self.projected_schema)
             .field("filters", &self.filters)
             .field("fetch", &self.fetch)
+            .field("row_lock", &self.row_lock)
             .finish_non_exhaustive()
     }
 }
@@ -3745,6 +3821,7 @@ impl PartialEq for TableScan {
             && self.projected_schema == other.projected_schema
             && self.filters == other.filters
             && self.fetch == other.fetch
+            && self.row_lock == other.row_lock
     }
 }
 
@@ -3764,18 +3841,22 @@ impl PartialOrd for TableScan {
             pub filters: &'a Vec<Expr>,
             /// Optional number of rows to read
             pub fetch: &'a Option<usize>,
+            /// Optional row-level lock requested for rows produced by this scan.
+            pub row_lock: &'a Option<TableScanRowLock>,
         }
         let comparable_self = ComparableTableScan {
             table_name: &self.table_name,
             projection: &self.projection,
             filters: &self.filters,
             fetch: &self.fetch,
+            row_lock: &self.row_lock,
         };
         let comparable_other = ComparableTableScan {
             table_name: &other.table_name,
             projection: &other.projection,
             filters: &other.filters,
             fetch: &other.fetch,
+            row_lock: &other.row_lock,
         };
         comparable_self
             .partial_cmp(&comparable_other)
@@ -3791,6 +3872,7 @@ impl Hash for TableScan {
         self.projected_schema.hash(state);
         self.filters.hash(state);
         self.fetch.hash(state);
+        self.row_lock.hash(state);
     }
 }
 
@@ -3844,6 +3926,7 @@ impl TableScan {
             projected_schema,
             filters,
             fetch,
+            row_lock: None,
         })
     }
 }
@@ -6021,6 +6104,7 @@ mod tests {
             projected_schema: Arc::clone(&schema),
             filters: vec![],
             fetch: None,
+            row_lock: None,
         }));
         let col = schema.field_names()[0].clone();
 
@@ -6052,6 +6136,7 @@ mod tests {
             projected_schema: Arc::clone(&unique_schema),
             filters: vec![],
             fetch: None,
+            row_lock: None,
         }));
         let col = schema.field_names()[0].clone();
 

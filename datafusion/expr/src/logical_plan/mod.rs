@@ -69,8 +69,9 @@ pub use plan::{
     LogicalPlan, MatchRecognize, MeasureExpr, NodePattern, Partitioning, PathFinding,
     PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
     RepetitionQuantifier, RowLimiting, RowsPerMatchOption, SkipType, Sort, StringifiedPlan,
-    Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan, ToStringifiedPlan, Union,
-    Unnest, Values, Window, projection_schema,
+    Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan, TableScanRowLock,
+    TableScanRowLockMode, TableScanRowLockWaitPolicy, ToStringifiedPlan, Union, Unnest,
+    Values, Window, projection_schema,
 };
 pub use statement::{
     AnalyzeTable, Call, Deallocate, Execute, Grant, GrantRole, Prepare, ReleaseSavepoint,
