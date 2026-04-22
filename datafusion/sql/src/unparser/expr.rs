@@ -25,28 +25,28 @@ use sqlparser::ast::{
 use std::sync::Arc;
 use std::vec;
 
-use super::Unparser;
 use super::dialect::IntervalStyle;
+use super::Unparser;
 use arrow::array::{
-    ArrayRef, Date32Array, Date64Array, PrimitiveArray,
     types::{
         ArrowTemporalType, Time32MillisecondType, Time32SecondType,
         Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
         TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
     },
+    ArrayRef, Date32Array, Date64Array, PrimitiveArray,
 };
 use arrow::datatypes::{
-    DataType, Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type, DecimalType,
+    DataType, Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type, DecimalType,
 };
 use arrow::util::display::array_value_to_string;
 use datafusion_common::{
-    Column, Result, ScalarValue, assert_eq_or_internal_err, assert_or_internal_err,
-    internal_datafusion_err, internal_err, not_impl_err, plan_err,
+    assert_eq_or_internal_err, assert_or_internal_err, internal_datafusion_err,
+    internal_err, not_impl_err, plan_err, Column, Result, ScalarValue,
 };
 use datafusion_expr::{
+    expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
     AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like, Operator,
     TryCast,
-    expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::tokenizer::Span;
@@ -97,6 +97,57 @@ impl Unparser<'_> {
         Ok(root_expr)
     }
 
+    fn binary_expr_to_sql_iterative(&self, expr: &Expr) -> Result<ast::Expr> {
+        enum Frame<'a> {
+            Visit(&'a Expr),
+            Build(&'a Operator),
+        }
+
+        let mut frames = vec![Frame::Visit(expr)];
+        let mut exprs = Vec::new();
+
+        while let Some(frame) = frames.pop() {
+            match frame {
+                Frame::Visit(expr) => match expr {
+                    Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                        frames.push(Frame::Build(op));
+                        frames.push(Frame::Visit(right.as_ref()));
+                        frames.push(Frame::Visit(left.as_ref()));
+                    }
+                    expr => exprs.push(self.expr_to_sql_inner(expr)?),
+                },
+                Frame::Build(op) => {
+                    let right = exprs.pop().ok_or_else(|| {
+                        internal_datafusion_err!(
+                            "binary expression unparse stack missing right operand"
+                        )
+                    })?;
+                    let left = exprs.pop().ok_or_else(|| {
+                        internal_datafusion_err!(
+                            "binary expression unparse stack missing left operand"
+                        )
+                    })?;
+                    let op = self.op_to_sql(op)?;
+                    exprs.push(ast::Expr::Nested(Box::new(
+                        self.binary_op_to_sql(left, right, op),
+                    )));
+                }
+            }
+        }
+
+        if exprs.len() != 1 {
+            return internal_err!(
+                "binary expression unparse produced {} root expressions",
+                exprs.len()
+            );
+        }
+        exprs.pop().ok_or_else(|| {
+            internal_datafusion_err!(
+                "binary expression unparse produced no root expression"
+            )
+        })
+    }
+
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
     fn expr_to_sql_inner(&self, expr: &Expr) -> Result<ast::Expr> {
         match expr {
@@ -144,13 +195,7 @@ impl Unparser<'_> {
                 ))))
             }
             Expr::Column(col) => self.col_to_sql(col),
-            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
-                let l = self.expr_to_sql_inner(left.as_ref())?;
-                let r = self.expr_to_sql_inner(right.as_ref())?;
-                let op = self.op_to_sql(op)?;
-
-                Ok(ast::Expr::Nested(Box::new(self.binary_op_to_sql(l, r, op))))
-            }
+            Expr::BinaryExpr(_) => self.binary_expr_to_sql_iterative(expr),
             Expr::Case(Case {
                 expr,
                 when_then_expr,
@@ -1906,12 +1951,12 @@ mod tests {
     use datafusion_common::{Spans, TableReference};
     use datafusion_expr::expr::WildcardOptions;
     use datafusion_expr::{
-        ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
-        Volatility, WindowFrame, WindowFunctionDefinition, case, cast, col, cube, exists,
-        grouping_set, interval_datetime_lit, interval_year_month_lit, lit, not,
-        not_exists, out_ref_col, placeholder, rollup, table_scan, try_cast, when,
+        case, cast, col, cube, exists, grouping_set, interval_datetime_lit,
+        interval_year_month_lit, lit, not, not_exists, out_ref_col, placeholder, rollup,
+        table_scan, try_cast, when, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
+        ScalarUDFImpl, Signature, Volatility, WindowFrame, WindowFunctionDefinition,
     };
-    use datafusion_expr::{ExprFunctionExt, interval_month_day_nano_lit};
+    use datafusion_expr::{interval_month_day_nano_lit, ExprFunctionExt};
     use datafusion_functions_aggregate::count::count_udaf;
     use datafusion_functions_aggregate::expr_fn::sum;
     use sqlparser::ast::ExactNumberInfo;
@@ -2414,6 +2459,26 @@ mod tests {
             assert_eq!(actual, expected);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn expr_to_sql_deep_binary_chain_does_not_overflow() -> Result<()> {
+        let mut expr = col("c0").eq(lit(0_i64));
+        for i in 1..20_000 {
+            let next = col(format!("c{i}")).eq(lit(i as i64));
+            expr = Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(expr),
+                op: Operator::And,
+                right: Box::new(next),
+            });
+        }
+
+        let ast = expr_to_sql(&expr)?;
+        assert!(matches!(ast, ast::Expr::Nested(_)));
+
+        std::mem::forget(ast);
+        std::mem::forget(expr);
         Ok(())
     }
 
