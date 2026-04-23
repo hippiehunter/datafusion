@@ -19,6 +19,7 @@
 
 use crate::async_udf::AsyncScalarUDF;
 use crate::expr::schema_name_from_exprs_comma_separated_without_space;
+use crate::session::SessionProvider;
 use crate::simplify::{ExprSimplifyResult, SimplifyInfo};
 use crate::sort_properties::{ExprProperties, SortProperties};
 use crate::udf_eq::UdfEq;
@@ -373,8 +374,17 @@ pub struct ScalarFunctionArgs {
     /// or `return_field_from_args`) when creating the physical expression
     /// from the logical expression
     pub return_field: FieldRef,
-    /// The config options at execution time
+    /// The config options at execution time (static config — DataFusion
+    /// execution settings, extension knobs). Do not use this to carry
+    /// per-session state; use `session` instead.
     pub config_options: Arc<ConfigOptions>,
+    /// Ambient per-session context for session-bound scalar UDFs (advisory
+    /// locks, `current_user`, `now()`, `current_setting`, ...). `None` when
+    /// the function is being evaluated outside a user session (tests,
+    /// catalog bootstrap, const-folding on a planner that did not set
+    /// [`crate::execution_props::ExecutionProps::session`]). Session-bound
+    /// UDFs are expected to fail loudly when `session` is `None`.
+    pub session: Option<Arc<dyn SessionProvider>>,
 }
 
 impl ScalarFunctionArgs {

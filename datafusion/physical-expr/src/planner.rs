@@ -322,12 +322,14 @@ pub fn create_physical_expr(
                 None => Arc::new(ConfigOptions::default()),
             };
 
-            Ok(Arc::new(ScalarFunctionExpr::try_new(
+            let scalar_expr = ScalarFunctionExpr::try_new(
                 Arc::clone(func),
                 physical_args,
                 input_schema,
                 config_options,
-            )?))
+            )?
+            .with_session(execution_props.session.clone());
+            Ok(Arc::new(scalar_expr))
         }
         Expr::Between(Between {
             expr,

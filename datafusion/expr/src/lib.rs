@@ -64,6 +64,7 @@ pub mod interval_arithmetic {
 pub mod logical_plan;
 pub mod planner;
 pub mod registry;
+pub mod session;
 pub mod simplify;
 pub mod sort_properties {
     pub use datafusion_expr_common::sort_properties::*;
@@ -120,6 +121,7 @@ pub use udaf::{
     udaf_default_schema_name, udaf_default_window_function_display_name,
     udaf_default_window_function_schema_name,
 };
+pub use session::{NoSession, SessionProvider, no_session};
 pub use udf::{ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl};
 pub use udwf::{LimitEffect, ReversedUDWF, WindowUDF, WindowUDFImpl};
 pub use window_frame::{

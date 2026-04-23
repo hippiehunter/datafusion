@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::session::SessionProvider;
 use crate::var_provider::{VarProvider, VarType};
 use chrono::{DateTime, TimeZone, Utc};
 use datafusion_common::HashMap;
@@ -40,6 +41,11 @@ pub struct ExecutionProps {
     pub config_options: Option<Arc<ConfigOptions>>,
     /// Providers for scalar variables
     pub var_providers: Option<HashMap<VarType, Arc<dyn VarProvider + Send + Sync>>>,
+    /// Ambient per-session context, threaded into every scalar UDF
+    /// invocation via [`crate::udf::ScalarFunctionArgs::session`]. When
+    /// `None`, session-bound UDFs evaluated through the resulting
+    /// `ExecutionProps` see no session and should fail loudly.
+    pub session: Option<Arc<dyn SessionProvider>>,
 }
 
 impl Default for ExecutionProps {
@@ -58,7 +64,14 @@ impl ExecutionProps {
             alias_generator: Arc::new(AliasGenerator::new()),
             config_options: None,
             var_providers: None,
+            session: None,
         }
+    }
+
+    /// Set the session provider threaded into scalar UDF invocations.
+    pub fn with_session(mut self, session: Arc<dyn SessionProvider>) -> Self {
+        self.session = Some(session);
+        self
     }
 
     /// Set the query execution start time to use
@@ -126,7 +139,7 @@ mod test {
     fn debug() {
         let props = ExecutionProps::new();
         assert_eq!(
-            "ExecutionProps { query_execution_start_time: 1970-01-01T00:00:00Z, alias_generator: AliasGenerator { next_id: 1 }, config_options: None, var_providers: None }",
+            "ExecutionProps { query_execution_start_time: 1970-01-01T00:00:00Z, alias_generator: AliasGenerator { next_id: 1 }, config_options: None, var_providers: None, session: None }",
             format!("{props:?}")
         );
     }

@@ -44,6 +44,7 @@ use datafusion_common::{Result, ScalarValue, internal_err};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
+use datafusion_expr::session::SessionProvider;
 use datafusion_expr::{
     ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, Volatility,
     expr_vec_fmt,
@@ -56,6 +57,11 @@ pub struct ScalarFunctionExpr {
     args: Vec<Arc<dyn PhysicalExpr>>,
     return_field: FieldRef,
     config_options: Arc<ConfigOptions>,
+    /// Captured per-session context. Stamped at physical-planning time from
+    /// [`datafusion_expr::execution_props::ExecutionProps::session`] and
+    /// cloned into every invocation via
+    /// [`datafusion_expr::udf::ScalarFunctionArgs::session`].
+    session: Option<Arc<dyn SessionProvider>>,
 }
 
 impl Debug for ScalarFunctionExpr {
@@ -84,6 +90,7 @@ impl ScalarFunctionExpr {
             args,
             return_field,
             config_options,
+            session: None,
         }
     }
 
@@ -126,7 +133,21 @@ impl ScalarFunctionExpr {
             args,
             return_field,
             config_options,
+            session: None,
         })
+    }
+
+    /// Attach a `SessionProvider` to this physical expression. Stamped
+    /// during `create_physical_expr` from `ExecutionProps::session` and
+    /// passed into every invocation via `ScalarFunctionArgs::session`.
+    pub fn with_session(mut self, session: Option<Arc<dyn SessionProvider>>) -> Self {
+        self.session = session;
+        self
+    }
+
+    /// Access the captured session provider, if any.
+    pub fn session(&self) -> Option<&Arc<dyn SessionProvider>> {
+        self.session.as_ref()
     }
 
     /// Get the scalar function implementation
@@ -209,6 +230,7 @@ impl PartialEq for ScalarFunctionExpr {
             args,
             return_field,
             config_options,
+            session: _, // not part of structural identity; per-query ambient state
         } = self;
         fun.eq(&o.fun)
             && name.eq(&o.name)
@@ -228,6 +250,7 @@ impl Hash for ScalarFunctionExpr {
             args,
             return_field,
             config_options: _, // expensive to hash, and often equal
+            session: _,        // per-query ambient state; not part of identity
         } = self;
         fun.hash(state);
         name.hash(state);
@@ -281,6 +304,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
             number_rows: batch.num_rows(),
             return_field: Arc::clone(&self.return_field),
             config_options: Arc::clone(&self.config_options),
+            session: self.session.clone(),
         })?;
 
         if let ColumnarValue::Array(array) = &output
