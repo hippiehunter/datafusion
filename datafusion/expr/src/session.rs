@@ -89,6 +89,15 @@ pub trait SessionProvider: Debug + Send + Sync {
     /// variable name/value is rejected.
     fn set_session_var(&self, name: &str, value: &str, is_local: bool)
         -> Result<String>;
+
+    /// Raw pointer to the session's execution runtime context, used by
+    /// PL/pgSQL UDFs that need exception-block savepoint integration
+    /// (deferred constraint truncation, cascade queue rollback, FK
+    /// probe cache cleanup). The caller casts to the concrete type.
+    /// Returns null when no runtime context is available.
+    fn runtime_ctx_ptr(&self) -> *mut () {
+        std::ptr::null_mut()
+    }
 }
 
 /// A no-op `SessionProvider` useful for tests, ad-hoc expression evaluation
