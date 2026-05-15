@@ -1001,9 +1001,11 @@ pub fn try_type_union_resolution_with_struct(
 ///
 /// # Numeric / String comparisons
 ///
-/// When comparing numeric values and strings, both values will be coerced to
-/// strings.  For example when comparing `'2' > 1`,  the arguments will be
-/// coerced to `Utf8` for comparison
+/// Cross-type comparisons between a typed numeric and a typed string have no
+/// defined common type (matching PostgreSQL: `operator does not exist`).
+/// Unknown-typed string literals are pre-coerced by the planner before
+/// reaching this function. For the opt-in numeric-preferring variant used
+/// in different planning contexts, see [`comparison_coercion_numeric`].
 pub fn comparison_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     if lhs_type.equals_datatype(rhs_type) {
         // same type => equality is possible
@@ -1016,7 +1018,6 @@ pub fn comparison_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<D
         .or_else(|| string_coercion(lhs_type, rhs_type))
         .or_else(|| list_coercion(lhs_type, rhs_type))
         .or_else(|| null_coercion(lhs_type, rhs_type))
-        .or_else(|| string_numeric_coercion(lhs_type, rhs_type))
         .or_else(|| string_temporal_coercion(lhs_type, rhs_type))
         .or_else(|| binary_coercion(lhs_type, rhs_type))
         .or_else(|| struct_coercion(lhs_type, rhs_type))
@@ -1045,21 +1046,6 @@ pub fn comparison_coercion_numeric(
         .or_else(|| string_coercion(lhs_type, rhs_type))
         .or_else(|| null_coercion(lhs_type, rhs_type))
         .or_else(|| string_numeric_coercion_as_numeric(lhs_type, rhs_type))
-}
-
-/// Coerce `lhs_type` and `rhs_type` to a common type for the purposes of a comparison operation
-/// where one is numeric and one is `Utf8`/`LargeUtf8`.
-fn string_numeric_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
-    use arrow::datatypes::DataType::*;
-    match (lhs_type, rhs_type) {
-        (Utf8, _) if rhs_type.is_numeric() => Some(Utf8),
-        (LargeUtf8, _) if rhs_type.is_numeric() => Some(LargeUtf8),
-        (Utf8View, _) if rhs_type.is_numeric() => Some(Utf8View),
-        (_, Utf8) if lhs_type.is_numeric() => Some(Utf8),
-        (_, LargeUtf8) if lhs_type.is_numeric() => Some(LargeUtf8),
-        (_, Utf8View) if lhs_type.is_numeric() => Some(Utf8View),
-        _ => None,
-    }
 }
 
 /// Coerce `lhs_type` and `rhs_type` to a common type for the purposes of a comparison operation
