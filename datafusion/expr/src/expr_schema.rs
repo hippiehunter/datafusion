@@ -680,7 +680,12 @@ impl ExprSchemable for Expr {
         // like all of the binary expressions below. Perhaps Expr should track the
         // type of the expression?
 
-        if can_cast_types(&this_type, cast_to_type) {
+        if can_cast_types(&this_type, cast_to_type)
+            || matches!(
+                (&this_type, cast_to_type),
+                (DataType::Utf8 | DataType::LargeUtf8, DataType::FixedSizeBinary(_))
+            )
+        {
             match self {
                 Expr::ScalarSubquery(subquery) => {
                     Ok(Expr::ScalarSubquery(cast_subquery(subquery, cast_to_type)?))
