@@ -281,6 +281,10 @@ impl LogicalPlanBuilder {
 
                 if !data_type.equals_datatype(field_type)
                     && !can_cast_types(&data_type, field_type)
+                    && !matches!(
+                        (&data_type, field_type),
+                        (DataType::Utf8 | DataType::LargeUtf8, DataType::FixedSizeBinary(_))
+                    )
                 {
                     return exec_err!(
                         "type mismatch and can't cast to got {} and {}",
