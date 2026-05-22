@@ -575,18 +575,8 @@ impl TreeNodeRewriter for ConstEvaluator<'_> {
                 ConstSimplifyResult::NotSimplified(s, m) => {
                     Ok(Transformed::no(Expr::Literal(s, m)))
                 }
-                ConstSimplifyResult::SimplifyRuntimeError(err, expr) => {
-                    // For CAST expressions with literal inputs, propagate the error at plan time rather than deferring to execution time.
-                    // This provides clearer error messages and fails fast.
-                    if let Expr::Cast(Cast { ref expr, .. })
-                    | Expr::TryCast(TryCast { ref expr, .. }) = expr
-                        && matches!(expr.as_ref(), Expr::Literal(_, _))
-                    {
-                        return Err(err);
-                    }
-                    // For other expressions (like CASE, COALESCE), preserve the original
-                    // to allow short-circuit evaluation at execution time
-                    Ok(Transformed::yes(expr))
+                ConstSimplifyResult::SimplifyRuntimeError(_err, expr) => {
+                    Ok(Transformed::no(expr))
                 }
             },
             Some(false) => Ok(Transformed::no(expr)),
