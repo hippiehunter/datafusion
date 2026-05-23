@@ -188,12 +188,7 @@ impl FieldExt for Field {
         }
     }
 
-    fn retyped(mut self, new_data_type: DataType) -> Self {
-        if self.data_type() != &new_data_type && self.metadata().contains_key("pg_type") {
-            let mut metadata = self.metadata().clone();
-            metadata.remove("pg_type");
-            self = self.with_metadata(metadata);
-        }
+    fn retyped(self, new_data_type: DataType) -> Self {
         self.with_data_type(new_data_type)
     }
 
@@ -238,14 +233,8 @@ impl FieldExt for Arc<Field> {
 
     fn retyped(mut self, new_data_type: DataType) -> Self {
         if self.data_type() != &new_data_type {
-            let field = Arc::make_mut(&mut self);
-            field.set_data_type(new_data_type);
-            let metadata = field.metadata();
-            if metadata.contains_key("pg_type") {
-                let mut metadata = metadata.clone();
-                metadata.remove("pg_type");
-                field.set_metadata(metadata);
-            }
+            // avoid cloning if possible
+            Arc::make_mut(&mut self).set_data_type(new_data_type);
         }
         self
     }
