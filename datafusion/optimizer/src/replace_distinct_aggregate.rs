@@ -19,14 +19,15 @@
 
 use crate::optimizer::{ApplyOrder, ApplyOrder::BottomUp};
 use crate::{OptimizerConfig, OptimizerRule};
-use std::sync::Arc;
-
 use datafusion_common::tree_node::Transformed;
-use datafusion_common::{Column, Result};
+use datafusion_common::Result;
 use datafusion_expr::expr_rewriter::normalize_cols;
 use datafusion_expr::utils::expand_wildcard;
-use datafusion_expr::{Aggregate, Distinct, DistinctOn, Expr, LogicalPlan};
-use datafusion_expr::{ExprFunctionExt, Limit, LogicalPlanBuilder, col, lit};
+use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
+use datafusion_expr::{
+    Aggregate, Distinct, DistinctOn, Expr, Limit, LogicalPlan, LogicalPlanBuilder, WindowFrame,
+    WindowFunctionDefinition, col, lit,
+};
 
 /// Optimizer that replaces logical [[Distinct]] with a logical [[Aggregate]]
 ///
@@ -39,19 +40,17 @@ use datafusion_expr::{ExprFunctionExt, Limit, LogicalPlanBuilder, col, lit};
 /// SELECT a, b FROM tab GROUP BY a, b
 /// ```
 ///
-/// On the other hand, for a `DISTINCT ON` query the replacement is
-/// a bit more involved and effectively converts
+/// For a `DISTINCT ON` query the replacement uses a window function:
 /// ```text
 /// SELECT DISTINCT ON (a) b FROM tab ORDER BY a DESC, c
 /// ```
 ///
-/// into
+/// becomes
 /// ```text
 /// SELECT b FROM (
-///     SELECT a, FIRST_VALUE(b ORDER BY a DESC, c) AS b
+///     SELECT b, ROW_NUMBER() OVER (PARTITION BY a ORDER BY a DESC, c) AS __distinct_on_rn
 ///     FROM tab
-///     GROUP BY a
-/// )
+/// ) WHERE __distinct_on_rn = 1
 /// ORDER BY a DESC
 /// ```
 ///
@@ -131,68 +130,55 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
             })) => {
                 let expr_cnt = on_expr.len();
 
-                // Construct the aggregation expression to be used to fetch the selected expressions.
                 let registry = config.function_registry().ok_or_else(|| {
                     datafusion_common::DataFusionError::Internal(
-                        "DISTINCT ON requires a function registry (for first_value UDAF)".to_string(),
+                        "DISTINCT ON requires a function registry (for row_number UDWF)".to_string(),
                     )
                 })?;
-                let first_value_udaf: Arc<datafusion_expr::AggregateUDF> =
-                    registry.udaf("first_value")?;
-                let aggr_expr = select_expr.into_iter().map(|e| {
-                    if let Some(order_by) = &sort_expr {
-                        first_value_udaf
-                            .call(vec![e])
-                            .order_by(order_by.clone())
-                            .build()
-                            // guaranteed to be `Expr::AggregateFunction`
-                            .unwrap()
-                    } else {
-                        first_value_udaf.call(vec![e])
-                    }
-                });
+                let row_number_udwf = registry.udwf("row_number")?;
 
-                let aggr_expr = normalize_cols(aggr_expr, input.as_ref())?;
-                let group_expr = normalize_cols(on_expr, input.as_ref())?;
+                let order_by = sort_expr.clone().unwrap_or_default();
+                let partition_by = normalize_cols(on_expr.clone(), input.as_ref())?;
 
-                // Build the aggregation plan
-                let plan = LogicalPlan::Aggregate(Aggregate::try_new(
-                    input, group_expr, aggr_expr,
-                )?);
-                // TODO use LogicalPlanBuilder directly rather than recreating the Aggregate
-                // when https://github.com/apache/datafusion/issues/10485 is available
-                let lpb = LogicalPlanBuilder::from(plan);
+                let rn_expr = Expr::WindowFunction(Box::new(WindowFunction {
+                    fun: WindowFunctionDefinition::WindowUDF(row_number_udwf),
+                    params: WindowFunctionParams {
+                        args: vec![],
+                        partition_by,
+                        order_by,
+                        window_frame: WindowFrame::new(None),
+                        filter: None,
+                        null_treatment: None,
+                        distinct: false,
+                    },
+                }));
 
-                let plan = if let Some(mut sort_expr) = sort_expr {
-                    // While sort expressions were used in the `FIRST_VALUE` aggregation itself above,
-                    // this on it's own isn't enough to guarantee the proper output order of the grouping
-                    // (`ON`) expression, so we need to sort those as well.
+                let rn_col = "__distinct_on_rn";
+                let window_plan = LogicalPlanBuilder::from(input.as_ref().clone())
+                    .window(vec![rn_expr.alias(rn_col)])?
+                    .filter(col(rn_col).eq(lit(1i64)))?
+                    .build()?;
 
-                    // truncate the sort_expr to the length of on_expr
-                    sort_expr.truncate(expr_cnt);
-
-                    lpb.sort(sort_expr)?.build()?
-                } else {
-                    lpb.build()?
-                };
-
-                // Whereas the aggregation plan by default outputs both the grouping and the aggregation
-                // expressions, for `DISTINCT ON` we only need to emit the original selection expressions.
-
-                let project_exprs = plan
-                    .schema()
-                    .iter()
-                    .skip(expr_cnt)
+                let project_exprs = select_expr
+                    .into_iter()
                     .zip(schema.iter())
-                    .map(|((new_qualifier, new_field), (old_qualifier, old_field))| {
-                        col(Column::from((new_qualifier, new_field)))
-                            .alias_qualified(old_qualifier.cloned(), old_field.name())
+                    .map(|(expr, (qualifier, field))| {
+                        expr.alias_qualified(qualifier.cloned(), field.name())
                     })
                     .collect::<Vec<Expr>>();
 
-                let plan = LogicalPlanBuilder::from(plan)
+                let plan = LogicalPlanBuilder::from(window_plan)
                     .project(project_exprs)?
                     .build()?;
+
+                let plan = if let Some(mut sort_expr) = sort_expr {
+                    sort_expr.truncate(expr_cnt);
+                    LogicalPlanBuilder::from(plan)
+                        .sort(sort_expr)?
+                        .build()?
+                } else {
+                    plan
+                };
 
                 Ok(Transformed::yes(plan))
             }
