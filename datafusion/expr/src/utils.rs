@@ -381,18 +381,21 @@ fn exclude_using_columns(plan: &LogicalPlan) -> Result<HashSet<Column>> {
     let using_columns = plan.using_columns()?;
     let excluded = using_columns
         .into_iter()
-        // For each USING JOIN condition, only expand to one of each join column in projection
-        .flat_map(|cols| {
-            let mut cols = cols.into_iter().collect::<Vec<_>>();
-            // sort join columns to make sure we consistently keep the same
-            // qualified column
+        .flat_map(|uc| {
+            let mut cols = uc.columns.into_iter().collect::<Vec<_>>();
             cols.sort();
+            let preferred = uc.preferred;
             let mut out_column_names: HashSet<String> = HashSet::new();
             cols.into_iter().filter_map(move |c| {
                 if out_column_names.contains(&c.name) {
                     Some(c)
                 } else {
-                    out_column_names.insert(c.name);
+                    out_column_names.insert(c.name.clone());
+                    if let Some(ref pref) = preferred {
+                        if c != *pref {
+                            return Some(c);
+                        }
+                    }
                     None
                 }
             })

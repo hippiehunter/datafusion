@@ -720,7 +720,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
                     filter_expr,
                     &[&[plan.schema()], &fallback_schemas, &outer_query_schema_vec],
-                    &[using_columns],
+                    &[using_columns.into()],
                 )?;
 
                 Ok(LogicalPlan::Filter(Filter::try_new(

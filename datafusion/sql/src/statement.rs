@@ -2892,7 +2892,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
                     filter_expr,
                     &[&[scan.schema()]],
-                    &[using_columns],
+                    &[using_columns.into()],
                 )?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
@@ -3010,7 +3010,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             normalize_col_with_schemas_and_ambiguity_check(
                 expr,
                 &[&[&join_schema]],
-                &[using_columns],
+                &[using_columns.into()],
             )
         };
 
@@ -3260,7 +3260,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
                     filter_expr,
                     &[&[scan.schema()]],
-                    &[using_columns],
+                    &[using_columns.into()],
                 )?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
@@ -3656,7 +3656,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     let value = normalize_col_with_schemas_and_ambiguity_check(
                         value,
                         &[&[&combined_schema]],
-                        &[using_columns],
+                        &[using_columns.into()],
                     )?;
 
                     assignments.push(ConflictAssignment {
@@ -3674,7 +3674,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     Some(normalize_col_with_schemas_and_ambiguity_check(
                         expr,
                         &[&[&combined_schema]],
-                        &[using_columns],
+                        &[using_columns.into()],
                     )?)
                 } else {
                     None

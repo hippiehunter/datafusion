@@ -18,7 +18,6 @@
 //! Expression rewriter
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -29,7 +28,7 @@ use crate::{Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder};
 use datafusion_common::TableReference;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
-use datafusion_common::{Column, DFSchema, Result};
+use datafusion_common::{Column, DFSchema, Result, UsingColumns};
 
 mod guarantees;
 pub use guarantees::GuaranteeRewriter;
@@ -84,7 +83,7 @@ pub fn normalize_col(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
 pub fn normalize_col_with_schemas_and_ambiguity_check(
     expr: Expr,
     schemas: &[&[&DFSchema]],
-    using_columns: &[HashSet<Column>],
+    using_columns: &[UsingColumns],
 ) -> Result<Expr> {
     // Normalize column inside Unnest
     if let Expr::Unnest(Unnest { expr }) = expr {

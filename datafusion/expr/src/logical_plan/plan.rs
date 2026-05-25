@@ -63,7 +63,7 @@ use datafusion_common::tree_node::{
 use datafusion_common::{
     Column, Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
     FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues,
-    Result, ScalarValue, Spans, TableReference, UnnestOptions,
+    Result, ScalarValue, Spans, TableReference, UnnestOptions, UsingColumns,
     aggregate_functional_dependencies, assert_eq_or_internal_err, assert_or_internal_err,
     internal_err, plan_err,
 };
@@ -1181,34 +1181,39 @@ impl LogicalPlan {
     }
 
     /// returns all `Using` join columns in a logical plan
-    pub fn using_columns(&self) -> Result<Vec<HashSet<Column>>, DataFusionError> {
-        let mut using_columns: Vec<HashSet<Column>> = vec![];
+    pub fn using_columns(&self) -> Result<Vec<UsingColumns>, DataFusionError> {
+        let mut using_columns: Vec<UsingColumns> = vec![];
 
         self.apply_with_subqueries(|plan| {
             if let LogicalPlan::Join(Join {
                 join_constraint: JoinConstraint::Using,
+                join_type,
                 on,
                 ..
             }) = plan
             {
-                // The join keys in using-join must be columns.
-                let columns =
-                    on.iter().try_fold(HashSet::new(), |mut accumu, (l, r)| {
-                        let Some(l) = l.get_as_join_column() else {
-                            return internal_err!(
-                                "Invalid join key. Expected column, found {l:?}"
-                            );
-                        };
-                        let Some(r) = r.get_as_join_column() else {
-                            return internal_err!(
-                                "Invalid join key. Expected column, found {r:?}"
-                            );
-                        };
-                        accumu.insert(l.to_owned());
-                        accumu.insert(r.to_owned());
-                        Result::<_, DataFusionError>::Ok(accumu)
-                    })?;
-                using_columns.push(columns);
+                for (l, r) in on {
+                    let Some(l) = l.get_as_join_column() else {
+                        return internal_err!(
+                            "Invalid join key. Expected column, found {l:?}"
+                        );
+                    };
+                    let Some(r) = r.get_as_join_column() else {
+                        return internal_err!(
+                            "Invalid join key. Expected column, found {r:?}"
+                        );
+                    };
+                    let r_owned = r.to_owned();
+                    let mut columns = HashSet::new();
+                    columns.insert(l.to_owned());
+                    columns.insert(r_owned.clone());
+                    let preferred = if *join_type == JoinType::Right {
+                        Some(r_owned)
+                    } else {
+                        None
+                    };
+                    using_columns.push(UsingColumns { columns, preferred });
+                }
             }
             Ok(TreeNodeRecursion::Continue)
         })?;

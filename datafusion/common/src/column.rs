@@ -25,6 +25,42 @@ use arrow::datatypes::{Field, FieldRef};
 use std::collections::HashSet;
 use std::fmt;
 
+/// A set of columns tied together by a USING / NATURAL join clause, with an
+/// optional preferred column for ambiguous-reference resolution.
+///
+/// SQL standard: the shared columns of a USING join produce a single coalesced
+/// value.  For INNER / LEFT joins picking the left-side column is correct (it is
+/// never NULL when the row is present).  For RIGHT joins the left-side column
+/// **is** NULL on unmatched rows, so `preferred` is set to the right-side
+/// column to match PostgreSQL semantics.
+#[derive(Debug, Clone)]
+pub struct UsingColumns {
+    pub columns: HashSet<Column>,
+    pub preferred: Option<Column>,
+}
+
+impl UsingColumns {
+    pub fn new(columns: HashSet<Column>) -> Self {
+        Self {
+            columns,
+            preferred: None,
+        }
+    }
+
+    pub fn with_preferred(columns: HashSet<Column>, preferred: Column) -> Self {
+        Self {
+            columns,
+            preferred: Some(preferred),
+        }
+    }
+}
+
+impl From<HashSet<Column>> for UsingColumns {
+    fn from(columns: HashSet<Column>) -> Self {
+        Self::new(columns)
+    }
+}
+
 /// A named reference to a qualified field in a schema.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Column {
@@ -219,7 +255,7 @@ impl Column {
     pub fn normalize_with_schemas_and_ambiguity_check(
         self,
         schemas: &[&[&DFSchema]],
-        using_columns: &[HashSet<Column>],
+        using_columns: &[UsingColumns],
     ) -> Result<Self> {
         if self.relation.is_some() {
             return Ok(self);
@@ -234,28 +270,19 @@ impl Column {
                 0 => continue,
                 1 => return Ok(Column::from(qualified_fields[0])),
                 _ => {
-                    // More than 1 fields in this schema have their names set to self.name.
-                    //
-                    // This should only happen when a JOIN query with USING constraint references
-                    // join columns using unqualified column name. For example:
-                    //
-                    // ```sql
-                    // SELECT id FROM t1 JOIN t2 USING(id)
-                    // ```
-                    //
-                    // In this case, both `t1.id` and `t2.id` will match unqualified column `id`.
-                    // We will use the relation from the first matched field to normalize self.
-
-                    // Compare matched fields with one USING JOIN clause at a time
                     let columns = schema_level
                         .iter()
                         .flat_map(|s| s.columns_with_unqualified_name(&self.name))
                         .collect::<Vec<_>>();
                     for using_col in using_columns {
-                        let all_matched = columns.iter().all(|c| using_col.contains(c));
-                        // All matched fields belong to the same using column set, in other words
-                        // the same join clause. We simply pick the qualifier from the first match.
+                        let all_matched =
+                            columns.iter().all(|c| using_col.columns.contains(c));
                         if all_matched {
+                            if let Some(ref preferred) = using_col.preferred {
+                                if columns.contains(preferred) {
+                                    return Ok(preferred.clone());
+                                }
+                            }
                             return Ok(columns[0].clone());
                         }
                     }
@@ -416,13 +443,13 @@ mod tests {
         assert_eq!(col, Column::new(Some("t3"), "e"));
 
         // using column in first level (pick schema1)
-        let mut using_columns = HashSet::new();
-        using_columns.insert(Column::new(Some("t1"), "a"));
-        using_columns.insert(Column::new(Some("t3"), "a"));
+        let mut using_cols = HashSet::new();
+        using_cols.insert(Column::new(Some("t1"), "a"));
+        using_cols.insert(Column::new(Some("t3"), "a"));
         let col = Column::from_name("a");
         let col = col.normalize_with_schemas_and_ambiguity_check(
             &[&[&schema1, &schema3], &[&schema2]],
-            &[using_columns],
+            &[UsingColumns::new(using_cols)],
         )?;
         assert_eq!(col, Column::new(Some("t1"), "a"));
 
