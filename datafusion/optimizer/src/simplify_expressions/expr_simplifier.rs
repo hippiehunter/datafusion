@@ -648,6 +648,12 @@ impl<'a> ConstEvaluator<'a> {
             Expr::ScalarFunction(ScalarFunction { func, .. }) => {
                 Self::volatility_ok(func.signature().volatility)
             }
+            Expr::BinaryExpr(bin)
+                if matches!(bin.op, Operator::Divide | Operator::Modulo)
+                    && Self::is_decimal_expr(&bin.left) =>
+            {
+                false
+            }
             Expr::Literal(_, _)
             | Expr::Alias(..)
             | Expr::Unnest(_)
@@ -670,6 +676,14 @@ impl<'a> ConstEvaluator<'a> {
             | Expr::TryCast { .. }
             | Expr::InList { .. } => true,
         }
+    }
+
+    fn is_decimal_expr(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Literal(ScalarValue::Decimal128(_, _, _), _)
+                | Expr::Literal(ScalarValue::Decimal256(_, _, _), _)
+        )
     }
 
     /// Internal helper to evaluates an Expr
