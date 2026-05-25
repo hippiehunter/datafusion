@@ -193,6 +193,12 @@ impl<'a> BinaryTypeCoercer<'a> {
             _ => {}
         }
 
+        if matches!(self.op, Operator::Divide) {
+            if let Some(dt) = pg_decimal_division_result_type(lhs, rhs) {
+                return Ok(dt);
+            }
+        }
+
         use arrow::compute::kernels::numeric::*;
         let l = new_empty_array(lhs);
         let r = new_empty_array(rhs);
@@ -2322,6 +2328,44 @@ fn json_path_predicate_coercion(
         rhs: coerced_rhs,
         ret,
     })
+}
+
+fn pg_decimal_division_result_type(
+    lhs: &DataType,
+    rhs: &DataType,
+) -> Option<DataType> {
+    let (p1, s1) = decimal_precision_scale(lhs)?;
+    let (_p2, s2) = decimal_precision_scale(rhs)?;
+    let int_digits_1 = (p1 as i16 - s1 as i16).max(0);
+    let int_digits_2 = (_p2 as i16 - s2 as i16).max(0);
+    let weight1 = if int_digits_1 > 0 { (int_digits_1 - 1) / 4 } else { -1_i16 };
+    let weight2 = if int_digits_2 > 0 { (int_digits_2 - 1) / 4 } else { -1_i16 };
+    let qweight = weight1 - weight2;
+    let mut scale = 16_i16 - (qweight + 1) * 4;
+    scale = scale.max(s1 as i16).max(s2 as i16).max(0);
+    let scale = (scale as u8).min(38);
+    let precision = ((p1 as i16 - s1 as i16).max(0) as u8)
+        .saturating_add(scale)
+        .min(38);
+    match (lhs, rhs) {
+        (DataType::Decimal128(_, _), DataType::Decimal128(_, _)) => {
+            Some(DataType::Decimal128(precision, scale as i8))
+        }
+        (DataType::Decimal256(_, _), _) | (_, DataType::Decimal256(_, _)) => {
+            Some(DataType::Decimal256(precision, scale as i8))
+        }
+        _ => None,
+    }
+}
+
+fn decimal_precision_scale(dt: &DataType) -> Option<(u8, i8)> {
+    match dt {
+        DataType::Decimal32(p, s)
+        | DataType::Decimal64(p, s)
+        | DataType::Decimal128(p, s)
+        | DataType::Decimal256(p, s) => Some((*p, *s)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
