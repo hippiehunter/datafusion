@@ -475,9 +475,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let provider = self
                     .context_provider
                     .get_table_function_source(tbl_func_ref.table(), func_args)?;
-                let plan =
+                let plan = if let Some(inline_plan) = provider.get_logical_plan() {
+                    let inline_plan = inline_plan.into_owned();
+                    if inline_plan.all_out_ref_exprs().is_empty() {
+                        LogicalPlanBuilder::scan(
+                            tbl_func_ref.table(),
+                            provider,
+                            None,
+                        )?
+                        .build()?
+                    } else {
+                        LogicalPlanBuilder::new(inline_plan)
+                            .alias(tbl_func_ref.table())?
+                            .build()?
+                    }
+                } else {
                     LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                        .build()?;
+                        .build()?
+                };
                 (plan, alias)
             }
             TableFactor::MatchRecognize {
