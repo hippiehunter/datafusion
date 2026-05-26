@@ -1618,20 +1618,9 @@ pub fn unique_field_aliases(fields: &Fields) -> Vec<Option<String>> {
         .collect()
 }
 
-fn mark_field(schema: &DFSchema) -> (Option<TableReference>, Arc<Field>) {
-    let mut table_references = schema
-        .iter()
-        .filter_map(|(qualifier, _)| qualifier)
-        .collect::<Vec<_>>();
-    table_references.dedup();
-    let table_reference = if table_references.len() == 1 {
-        table_references.pop().cloned()
-    } else {
-        None
-    };
-
+fn mark_field(_schema: &DFSchema) -> (Option<TableReference>, Arc<Field>) {
     (
-        table_reference,
+        None,
         Arc::new(Field::new("mark", DataType::Boolean, false)),
     )
 }
