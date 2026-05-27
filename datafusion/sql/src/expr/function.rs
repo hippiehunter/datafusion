@@ -264,6 +264,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
 
+        // PostgreSQL typecast-as-function syntax: bpchar(expr) → CAST(expr AS CHARACTER)
+        if name.eq_ignore_ascii_case("bpchar") {
+            if let FunctionArguments::List(list) = &function.args {
+                if list.args.len() == 1 {
+                    if let FunctionArg::Unnamed(
+                        FunctionArgExpr::Expr(inner),
+                    ) = &list.args[0]
+                    {
+                        let inner_expr =
+                            self.sql_expr_to_logical_expr(inner.clone(), schema, planner_context)?;
+                        return Ok(Expr::Cast(datafusion_expr::Cast::new(
+                            Box::new(inner_expr),
+                            DataType::Utf8,
+                        )));
+                    }
+                }
+            }
+        }
+
         let function_args = FunctionArgs::try_new(function)?;
         let FunctionArgs {
             name: object_name,
@@ -1039,12 +1058,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Extract ORDER BY from the original query if present
         let order_by_exprs = to_order_by_exprs_with_select(query.order_by.clone(), None)?;
 
-        // Plan the subquery to get the logical plan
-        let old_outer_query_schema =
-            planner_context.set_outer_query_schema(Some(schema.clone().into()));
+        // Plan the subquery to get the logical plan.
+        // When ARRAY(SELECT ...) appears inside a trivial scalar subquery
+        // wrapper like (SELECT ARRAY(SELECT ... WHERE x = outer.col)),
+        // the wrapper's schema is empty. Preserve the existing outer
+        // query schema so correlation references resolve transitively.
+        let override_schema = !schema.fields().is_empty();
+        let old_outer_query_schema = if override_schema {
+            planner_context.set_outer_query_schema(Some(schema.clone().into()))
+        } else {
+            None
+        };
         let sub_plan = self.query_to_plan(query, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        planner_context.set_outer_query_schema(old_outer_query_schema);
+        if override_schema {
+            planner_context.set_outer_query_schema(old_outer_query_schema);
+        }
 
         // Validate that the subquery returns exactly one column
         if sub_plan.schema().fields().len() != 1 {
@@ -1086,6 +1115,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             order_by_sort_exprs,
             None, // no null treatment
         );
+
+        // Strip Sort and Projection from sub_plan so the Aggregate
+        // operates on the full schema. The Projection only selects the
+        // output column but hides correlation columns (like the join key)
+        // that the subquery decorrelator needs. The Sort is redundant since
+        // ORDER BY is embedded in the array_agg expression.
+        let mut sub_plan = sub_plan;
+        if let datafusion_expr::LogicalPlan::Sort(sort) = sub_plan {
+            sub_plan = std::sync::Arc::unwrap_or_clone(sort.input);
+        }
+        if let datafusion_expr::LogicalPlan::Projection(proj) = &sub_plan {
+            if proj.expr.len() == 1 {
+                sub_plan = std::sync::Arc::unwrap_or_clone(proj.input.clone());
+            }
+        }
 
         // Build the new subquery: SELECT ARRAY_AGG(col) FROM (original_query)
         let group_expr: Vec<Expr> = vec![];

@@ -120,6 +120,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
 
+        // Collapse trivial wrappers: (SELECT (SELECT agg(...) FROM ...))
+        // where the outer query is Projection([ScalarSubquery], EmptyRelation).
+        // This arises from ARRAY(SELECT ...) inside (SELECT ...) wrappers.
+        if let LogicalPlan::Projection(proj) = &sub_plan
+            && proj.expr.len() == 1
+            && matches!(proj.input.as_ref(), LogicalPlan::EmptyRelation(_))
+        {
+            let expr = &proj.expr[0];
+            let inner = match expr {
+                Expr::ScalarSubquery(sq) => Some(sq),
+                Expr::Alias(alias) => match alias.expr.as_ref() {
+                    Expr::ScalarSubquery(sq) => Some(sq),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(inner_sq) = inner {
+                return Ok(Expr::ScalarSubquery(inner_sq.clone()));
+            }
+        }
+
         self.validate_single_column(
             &sub_plan,
             &spans,
