@@ -47,7 +47,7 @@ use datafusion_expr::{
 use indexmap::IndexMap;
 use sqlparser::ast::{
     Distinct, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, NamedWindowExpr, OrderBy, SelectItemQualifiedWildcardKind,
+    GroupByExpr, Ident, NamedWindowExpr, OrderBy, SelectItemQualifiedWildcardKind,
     WildcardAdditionalOptions, WindowType, visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
@@ -79,6 +79,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if select.top.is_some() {
             return not_impl_err!("TOP");
         }
+
+        // Hoist any set-returning function in the projection into a LATERAL join
+        // before planning the FROM clause (PostgreSQL projection-SRF semantics).
+        Self::rewrite_projection_srfs_to_lateral(&mut select);
 
         // Process `from` clause
         let from = std::mem::take(&mut select.from);
@@ -648,8 +652,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return Ok(None);
         }
 
-        let func = match &select.projection[0] {
-            SelectItem::UnnamedExpr(SQLExpr::Function(f)) => f.clone(),
+        // Accept both a bare `srf(args)` and an aliased `srf(args) AS name`.
+        let (func, alias) = match &select.projection[0] {
+            SelectItem::UnnamedExpr(SQLExpr::Function(f)) => (f.clone(), None),
+            SelectItem::ExprWithAlias {
+                expr: SQLExpr::Function(f),
+                alias,
+            } => (f.clone(), Some(alias.clone())),
             _ => return Ok(None),
         };
 
@@ -680,12 +689,119 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Ok(provider) => {
                 let plan =
                     LogicalPlanBuilder::scan(&func_name, provider, None)?.build()?;
-                select.projection =
-                    vec![SelectItem::Wildcard(WildcardAdditionalOptions::default())];
+                // `SELECT srf(args) AS name` aliases the function's single output
+                // column to `name`; the unaliased form exposes all its columns.
+                select.projection = match alias {
+                    Some(alias) => {
+                        let col = plan.schema().field(0).name().clone();
+                        vec![SelectItem::ExprWithAlias {
+                            expr: SQLExpr::Identifier(Ident::new(col)),
+                            alias,
+                        }]
+                    }
+                    None => {
+                        vec![SelectItem::Wildcard(WildcardAdditionalOptions::default())]
+                    }
+                };
                 Ok(Some(plan))
             }
             Err(_) => Ok(None),
         }
+    }
+
+    /// PostgreSQL evaluates a set-returning function in the SELECT list as an
+    /// implicit LATERAL cross-join against the rest of the row. When such an SRF
+    /// appears with a FROM clause (so the empty-FROM `SELECT srf(args)` shorthand
+    /// does not apply), hoist each one into `CROSS JOIN LATERAL func(args)
+    /// AS __srf_n(col)` and replace the projection entry with a reference to that
+    /// column. Correlated args (e.g. `generate_series(array_lower(t.c,1),
+    /// array_upper(t.c,1))`) resolve against the outer relations via the lateral
+    /// planning path.
+    fn rewrite_projection_srfs_to_lateral(select: &mut Select) {
+        if select.from.is_empty() {
+            return;
+        }
+        let mut lateral_joins: Vec<sqlparser::ast::Join> = Vec::new();
+        for item in &mut select.projection {
+            let parts = match item {
+                SelectItem::UnnamedExpr(SQLExpr::Function(f)) => {
+                    Self::projection_srf_parts(f, None)
+                }
+                SelectItem::ExprWithAlias {
+                    expr: SQLExpr::Function(f),
+                    alias,
+                } => Self::projection_srf_parts(f, Some(alias.clone())),
+                _ => None,
+            };
+            let Some((func_name, func_args, col)) = parts else {
+                continue;
+            };
+            let srf_alias = Ident::new(format!("__srf_{}", lateral_joins.len()));
+            let table_alias = sqlparser::ast::TableAlias::new(
+                srf_alias.clone(),
+                vec![sqlparser::ast::TableAliasColumnDef {
+                    name: col.clone(),
+                    data_type: None,
+                }],
+            );
+            lateral_joins.push(sqlparser::ast::Join {
+                relation: sqlparser::ast::TableFactor::Function {
+                    lateral: true,
+                    name: func_name,
+                    args: func_args,
+                    alias: Some(table_alias),
+                },
+                global: false,
+                join_operator: sqlparser::ast::JoinOperator::CrossJoin(
+                    sqlparser::ast::JoinConstraint::None,
+                ),
+            });
+            let col_ref = SQLExpr::CompoundIdentifier(vec![srf_alias, col.clone()]);
+            *item = SelectItem::ExprWithAlias {
+                expr: col_ref,
+                alias: col,
+            };
+        }
+        if let Some(last) = select.from.last_mut() {
+            last.joins.extend(lateral_joins);
+        }
+    }
+
+    /// If `func` names a set-returning table function (mirroring the provider's
+    /// `get_table_function_source` set), return its name, argument list, and the
+    /// output column name (the projection alias, else the function name).
+    fn projection_srf_parts(
+        func: &sqlparser::ast::Function,
+        alias: Option<Ident>,
+    ) -> Option<(sqlparser::ast::ObjectName, Vec<FunctionArg>, Ident)> {
+        const SRF_TABLE_FUNCTIONS: &[&str] = &[
+            "generate_series",
+            "jsonb_each",
+            "jsonb_each_text",
+            "jsonb_object_keys",
+            "jsonb_array_elements",
+            "jsonb_array_elements_text",
+            "jsonb_path_query",
+            "regexp_matches",
+            "regexp_split_to_table",
+            "pg_get_sequence_data",
+            // `unnest` is intentionally excluded: DataFusion has native
+            // unnest-in-projection handling, which this rewrite must not shadow.
+            "pg_options_to_table",
+            "pg_partition_tree",
+        ];
+        let name = func.name.to_string().to_ascii_lowercase();
+        let base = name.rsplit('.').next().unwrap_or(name.as_str());
+        if !SRF_TABLE_FUNCTIONS.contains(&base) {
+            return None;
+        }
+        let args = match &func.args {
+            FunctionArguments::List(list) => list.args.clone(),
+            FunctionArguments::None => Vec::new(),
+            _ => return None,
+        };
+        let col = alias.unwrap_or_else(|| Ident::new(base.to_string()));
+        Some((func.name.clone(), args, col))
     }
 
     pub(crate) fn plan_selection(
