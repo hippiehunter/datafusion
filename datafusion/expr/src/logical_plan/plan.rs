@@ -3803,6 +3803,9 @@ pub struct TableScan {
     pub fetch: Option<usize>,
     /// Optional row-level lock requested for rows produced by this scan.
     pub row_lock: Option<TableScanRowLock>,
+    /// PostgreSQL `FROM ONLY <table>`: when true, descendant tables that
+    /// inherit from `table_name` must be excluded from the scan.
+    pub only: bool,
 }
 
 impl Debug for TableScan {
@@ -3815,6 +3818,7 @@ impl Debug for TableScan {
             .field("filters", &self.filters)
             .field("fetch", &self.fetch)
             .field("row_lock", &self.row_lock)
+            .field("only", &self.only)
             .finish_non_exhaustive()
     }
 }
@@ -3827,6 +3831,7 @@ impl PartialEq for TableScan {
             && self.filters == other.filters
             && self.fetch == other.fetch
             && self.row_lock == other.row_lock
+            && self.only == other.only
     }
 }
 
@@ -3848,6 +3853,8 @@ impl PartialOrd for TableScan {
             pub fetch: &'a Option<usize>,
             /// Optional row-level lock requested for rows produced by this scan.
             pub row_lock: &'a Option<TableScanRowLock>,
+            /// PostgreSQL `FROM ONLY` modifier.
+            pub only: &'a bool,
         }
         let comparable_self = ComparableTableScan {
             table_name: &self.table_name,
@@ -3855,6 +3862,7 @@ impl PartialOrd for TableScan {
             filters: &self.filters,
             fetch: &self.fetch,
             row_lock: &self.row_lock,
+            only: &self.only,
         };
         let comparable_other = ComparableTableScan {
             table_name: &other.table_name,
@@ -3862,6 +3870,7 @@ impl PartialOrd for TableScan {
             filters: &other.filters,
             fetch: &other.fetch,
             row_lock: &other.row_lock,
+            only: &other.only,
         };
         comparable_self
             .partial_cmp(&comparable_other)
@@ -3878,6 +3887,7 @@ impl Hash for TableScan {
         self.filters.hash(state);
         self.fetch.hash(state);
         self.row_lock.hash(state);
+        self.only.hash(state);
     }
 }
 
@@ -3932,6 +3942,7 @@ impl TableScan {
             filters,
             fetch,
             row_lock: None,
+            only: false,
         })
     }
 }
@@ -6110,6 +6121,7 @@ mod tests {
             filters: vec![],
             fetch: None,
             row_lock: None,
+            only: false,
         }));
         let col = schema.field_names()[0].clone();
 
@@ -6142,6 +6154,7 @@ mod tests {
             filters: vec![],
             fetch: None,
             row_lock: None,
+            only: false,
         }));
         let col = schema.field_names()[0].clone();
 

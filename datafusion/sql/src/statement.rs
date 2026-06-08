@@ -2444,6 +2444,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<Constraints> {
         let constraints = constraints
             .iter()
+            // EXCLUDE constraints are not representable as a DataFusion
+            // `Constraint`; the embedding engine carries them out-of-band
+            // (storage-parameter constraint hints), so drop them here.
+            .filter(|c| !matches!(c, TableConstraint::Exclude(_)))
             .map(|c: &TableConstraint| match c {
                 TableConstraint::Unique(unique) => {
                     let constraint_name = match &unique.name {
@@ -2549,6 +2553,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }),
                 TableConstraint::Index { .. } => {
                     _plan_err!("Indexes are not currently supported")
+                }
+                // Filtered out above; kept only for match exhaustiveness.
+                TableConstraint::Exclude { .. } => {
+                    _plan_err!("Exclusion constraints are handled out-of-band")
                 }
                 TableConstraint::FulltextOrSpatial { .. } => {
                     _plan_err!("Indexes are not currently supported")
@@ -2947,6 +2955,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 with_hints,
                 version,
                 with_ordinality,
+                only: _,
                 partitions,
                 json_path,
                 sample,

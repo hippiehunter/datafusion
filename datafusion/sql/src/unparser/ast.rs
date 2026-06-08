@@ -473,6 +473,7 @@ impl TableRelationBuilder {
             version: self.version.clone(),
             partitions: self.partitions.clone(),
             with_ordinality: false,
+            only: false,
             json_path: None,
             sample: None,
             index_hints: self.index_hints.clone(),

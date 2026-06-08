@@ -260,6 +260,7 @@ fn optimize_projections(
                 filters,
                 fetch,
                 row_lock,
+                only,
                 projected_schema: _,
             } = table_scan;
 
@@ -278,6 +279,7 @@ fn optimize_projections(
             )
             .map(|mut scan| {
                 scan.row_lock = row_lock;
+                scan.only = only;
                 scan
             })
             .map(LogicalPlan::TableScan)

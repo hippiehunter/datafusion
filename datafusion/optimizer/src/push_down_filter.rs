@@ -2850,6 +2850,7 @@ mod tests {
             source: Arc::new(test_provider),
             fetch: None,
             row_lock: None,
+            only: false,
         });
 
         Ok(LogicalPlanBuilder::from(table_scan))

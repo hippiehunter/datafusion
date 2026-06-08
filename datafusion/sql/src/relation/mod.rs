@@ -296,7 +296,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let relation_span = relation.span();
         let (plan, alias) = match relation {
             TableFactor::Table {
-                name, alias, args, ..
+                name,
+                alias,
+                args,
+                only,
+                ..
             } => {
                 if let Some(func_args) = args {
                     let tbl_func_name =
@@ -356,12 +360,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             self.context_provider.get_table_source(table_ref.clone()),
                         ) {
                             (Some(cte_plan), _) => Ok(cte_plan.clone()),
-                            (_, Ok(provider)) => LogicalPlanBuilder::scan(
-                                table_ref.clone(),
-                                provider,
-                                None,
-                            )?
-                            .build(),
+                            (_, Ok(provider)) => {
+                                let plan = LogicalPlanBuilder::scan(
+                                    table_ref.clone(),
+                                    provider,
+                                    None,
+                                )?
+                                .build()?;
+                                // Preserve the PostgreSQL `FROM ONLY t` modifier on
+                                // the scan so the engine can exclude inheriting
+                                // descendant tables.
+                                if only {
+                                    if let LogicalPlan::TableScan(mut scan) = plan {
+                                        scan.only = true;
+                                        Ok(LogicalPlan::TableScan(scan))
+                                    } else {
+                                        Ok(plan)
+                                    }
+                                } else {
+                                    Ok(plan)
+                                }
+                            }
                             (None, Err(e)) => {
                                 let e = e.with_diagnostic(Diagnostic::new_error(
                                     format!("table '{table_ref}' not found"),
