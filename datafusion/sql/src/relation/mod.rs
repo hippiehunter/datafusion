@@ -482,11 +482,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .into_iter()
                     .map(|arg| match arg {
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                        | FunctionArg::Variadic(FunctionArgExpr::Expr(expr))
                         | FunctionArg::Named {
                             arg: FunctionArgExpr::Expr(expr),
                             ..
                         } => {
-                            self.sql_expr_to_logical_expr(expr, &schema, planner_context)
+                            let expr = self.sql_expr_to_logical_expr(
+                                expr,
+                                &schema,
+                                planner_context,
+                            )?;
+                            // A bare column argument can only refer to the
+                            // enclosing (lateral) query, so carry its real
+                            // field so the table function receives a correctly
+                            // typed outer reference.
+                            Ok(match expr {
+                                Expr::Column(col) => {
+                                    match schema.qualified_field_from_column(&col) {
+                                        Ok((_, field)) => Expr::OuterReferenceColumn(
+                                            Arc::clone(field),
+                                            col,
+                                        ),
+                                        Err(_) => Expr::Column(col),
+                                    }
+                                }
+                                other => other,
+                            })
                         }
                         _ => plan_err!("Unsupported function argument: {arg:?}"),
                     })

@@ -639,11 +639,57 @@ impl ExprSchemable for Expr {
                 id: _,
                 field: Some(field),
             }) => Ok(Arc::clone(field).renamed(&schema_name)),
+            Expr::Case(case) => {
+                // CASE unifies its branch types, and extension typing (e.g.
+                // PostgreSQL's pg_type tag) rides field metadata here, so the
+                // output field keeps the metadata every contributing branch
+                // agrees on. Bare NULL branches adopt the unified type and
+                // contribute nothing — `CASE WHEN .. THEN NULL ELSE attrs END`
+                // keeps the metadata of `attrs`.
+                fn is_bare_null(expr: &Expr) -> bool {
+                    match expr {
+                        Expr::Literal(value, _) => value.is_null(),
+                        Expr::Cast(Cast { expr, .. })
+                        | Expr::TryCast(TryCast { expr, .. }) => is_bare_null(expr),
+                        _ => false,
+                    }
+                }
+                let branches = case
+                    .when_then_expr
+                    .iter()
+                    .map(|(_, then_expr)| then_expr.as_ref())
+                    .chain(case.else_expr.as_deref());
+                let mut metadata: Option<std::collections::BTreeMap<String, String>> =
+                    None;
+                for branch in branches {
+                    if is_bare_null(branch) {
+                        continue;
+                    }
+                    let branch_metadata = branch.metadata(schema)?;
+                    match &mut metadata {
+                        None => metadata = Some(branch_metadata.inner().clone()),
+                        Some(existing) => {
+                            existing
+                                .retain(|k, v| branch_metadata.inner().get(k) == Some(v));
+                        }
+                    }
+                }
+                let field = Field::new(
+                    &schema_name,
+                    self.get_type(schema)?,
+                    self.nullable(schema)?,
+                );
+                Ok(Arc::new(match metadata {
+                    Some(metadata) if !metadata.is_empty() => {
+                        field.with_field_metadata(&FieldMetadata::new(metadata))
+                    }
+                    _ => field,
+                }))
+            }
             Expr::Like(_)
             | Expr::SimilarTo(_)
             | Expr::Not(_)
             | Expr::Between(_)
-            | Expr::Case(_)
             | Expr::TryCast(_)
             | Expr::InList(_)
             | Expr::InSubquery(_)

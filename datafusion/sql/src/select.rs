@@ -46,8 +46,10 @@ use datafusion_expr::{
 
 use indexmap::IndexMap;
 use sqlparser::ast::{
-    Distinct, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, Ident, NamedWindowExpr, OrderBy, SelectItemQualifiedWildcardKind,
+    AttachedToken, Distinct, Expr as SQLExpr, FunctionArg, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Ident, Join, JoinConstraint, JoinOperator,
+    NamedWindowExpr, ObjectName, OrderBy, Query as SQLQuery, SelectFlavor,
+    SelectItemQualifiedWildcardKind, SetExpr, TableAlias, TableFactor,
     WildcardAdditionalOptions, WindowType, visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
@@ -83,6 +85,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Hoist any set-returning function in the projection into a LATERAL join
         // before planning the FROM clause (PostgreSQL projection-SRF semantics).
         Self::rewrite_projection_srfs_to_lateral(&mut select);
+        Self::rewrite_projection_tvf_star(&mut select);
 
         // Process `from` clause
         let from = std::mem::take(&mut select.from);
@@ -671,6 +674,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .into_iter()
                 .map(|arg| match arg {
                     FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                    | FunctionArg::Variadic(FunctionArgExpr::Expr(expr))
                     | FunctionArg::Named {
                         arg: FunctionArgExpr::Expr(expr),
                         ..
@@ -721,7 +725,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if select.from.is_empty() {
             return;
         }
-        let mut lateral_joins: Vec<sqlparser::ast::Join> = Vec::new();
+        let mut lateral_joins: Vec<Join> = Vec::new();
         for item in &mut select.projection {
             let parts = match item {
                 SelectItem::UnnamedExpr(SQLExpr::Function(f)) => {
@@ -737,23 +741,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 continue;
             };
             let srf_alias = Ident::new(format!("__srf_{}", lateral_joins.len()));
-            let table_alias = sqlparser::ast::TableAlias::new(
+            let table_alias = TableAlias::new(
                 srf_alias.clone(),
                 vec![sqlparser::ast::TableAliasColumnDef {
                     name: col.clone(),
                     data_type: None,
                 }],
             );
-            lateral_joins.push(sqlparser::ast::Join {
-                relation: sqlparser::ast::TableFactor::Function {
+            lateral_joins.push(Join {
+                relation: TableFactor::Function {
                     lateral: true,
                     name: func_name,
                     args: func_args,
                     alias: Some(table_alias),
                 },
                 global: false,
-                join_operator: sqlparser::ast::JoinOperator::CrossJoin(
-                    sqlparser::ast::JoinConstraint::None,
+                join_operator: JoinOperator::CrossJoin(
+                    JoinConstraint::None,
                 ),
             });
             let col_ref = SQLExpr::CompoundIdentifier(vec![srf_alias, col.clone()]);
@@ -767,13 +771,162 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
     }
 
+    /// PostgreSQL expands `(table_function(args)).*` in the select list into
+    /// the function's output columns, applying the function to each row the
+    /// rest of the query produces — a single row when the arguments contain
+    /// ungrouped aggregates, as in the logical-replication subscriber's
+    /// `SELECT (pg_get_publication_tables(VARIADIC array_agg(pubname::text))).*`
+    /// discovery query. Rewrite the select into the equivalent LATERAL join:
+    /// the original FROM/WHERE with the function arguments as its projection
+    /// becomes a derived table, and the function — its arguments redirected to
+    /// that derived table's columns — is cross-joined laterally so the normal
+    /// correlated table-function machinery plans it.
+    fn rewrite_projection_tvf_star(select: &mut Select) {
+        if select.projection.len() != 1
+            || select.from.is_empty()
+            || select.having.is_some()
+            || !select.named_window.is_empty()
+            || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers)
+                if exprs.is_empty() && modifiers.is_empty())
+        {
+            return;
+        }
+        let SelectItem::QualifiedWildcard(
+            SelectItemQualifiedWildcardKind::Expr(expr),
+            opts,
+        ) = &select.projection[0]
+        else {
+            return;
+        };
+        let func = match expr {
+            SQLExpr::Nested(inner) => match inner.as_ref() {
+                SQLExpr::Function(f) => f,
+                _ => return,
+            },
+            SQLExpr::Function(f) => f,
+            _ => return,
+        };
+        let name = func.name.to_string().to_ascii_lowercase();
+        let base = name.rsplit('.').next().unwrap_or(name.as_str());
+        if !Self::TVF_STAR_FUNCTIONS.contains(&base) {
+            return;
+        }
+        let FunctionArguments::List(arg_list) = &func.args else {
+            return;
+        };
+
+        // The function's arguments become the derived table's projection;
+        // each call-site argument becomes a (lateral) reference to the
+        // corresponding derived column, keeping any VARIADIC wrapper.
+        let args_alias = Ident::new("__tvf_args");
+        let mut derived_projection = Vec::with_capacity(arg_list.args.len());
+        let mut new_args = Vec::with_capacity(arg_list.args.len());
+        for (i, arg) in arg_list.args.iter().enumerate() {
+            let col_alias = Ident::new(format!("__tvf_arg{i}"));
+            let col_ref = FunctionArgExpr::Expr(SQLExpr::CompoundIdentifier(vec![
+                args_alias.clone(),
+                col_alias.clone(),
+            ]));
+            let (arg_expr, new_arg) = match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
+                    (e.clone(), FunctionArg::Unnamed(col_ref))
+                }
+                FunctionArg::Variadic(FunctionArgExpr::Expr(e)) => {
+                    (e.clone(), FunctionArg::Variadic(col_ref))
+                }
+                _ => return,
+            };
+            derived_projection.push(SelectItem::ExprWithAlias {
+                expr: arg_expr,
+                alias: col_alias,
+            });
+            new_args.push(new_arg);
+        }
+
+        let mut rewritten_func = func.clone();
+        let FunctionArguments::List(rewritten_args) = &mut rewritten_func.args else {
+            return;
+        };
+        rewritten_args.args = new_args;
+        let opts = opts.clone();
+
+        let inner_select = Select {
+            select_token: AttachedToken::empty(),
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: derived_projection,
+            into: None,
+            from: std::mem::take(&mut select.from),
+            selection: select.selection.take(),
+            group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
+            having: None,
+            named_window: Vec::new(),
+            connect_by: None,
+            flavor: SelectFlavor::Standard,
+        };
+        let derived = TableFactor::Derived {
+            lateral: false,
+            subquery: Box::new(SQLQuery {
+                with: None,
+                body: Box::new(SetExpr::Select(Box::new(inner_select))),
+                order_by: None,
+                limit_clause: None,
+                fetch: None,
+                locks: Vec::new(),
+                for_clause: None,
+            }),
+            alias: Some(TableAlias::new(args_alias, Vec::new())),
+        };
+
+        let tvf_alias = Ident::new("__tvf");
+        select.from = vec![TableWithJoins {
+            relation: derived,
+            joins: vec![Join {
+                relation: TableFactor::Function {
+                    lateral: true,
+                    name: rewritten_func.name.clone(),
+                    args: rewritten_args.args.clone(),
+                    alias: Some(TableAlias::new(tvf_alias.clone(), Vec::new())),
+                },
+                global: false,
+                join_operator: JoinOperator::CrossJoin(JoinConstraint::None),
+            }],
+        }];
+        select.projection = vec![SelectItem::QualifiedWildcard(
+            SelectItemQualifiedWildcardKind::ObjectName(ObjectName::from(vec![
+                tvf_alias,
+            ])),
+            opts,
+        )];
+    }
+
+    /// Table functions whose composite output `(<tvf>(args)).*` expands in the
+    /// select list: the projection-SRF set plus the logical-replication
+    /// catalog functions PostgreSQL subscribers call in that form.
+    const TVF_STAR_FUNCTIONS: &'static [&'static str] = &[
+        "generate_series",
+        "jsonb_each",
+        "jsonb_each_text",
+        "jsonb_object_keys",
+        "jsonb_array_elements",
+        "jsonb_array_elements_text",
+        "jsonb_path_query",
+        "regexp_matches",
+        "regexp_split_to_table",
+        "pg_get_sequence_data",
+        "pg_options_to_table",
+        "pg_partition_tree",
+        "pg_get_publication_tables",
+    ];
+
     /// If `func` names a set-returning table function (mirroring the provider's
     /// `get_table_function_source` set), return its name, argument list, and the
     /// output column name (the projection alias, else the function name).
     fn projection_srf_parts(
         func: &sqlparser::ast::Function,
         alias: Option<Ident>,
-    ) -> Option<(sqlparser::ast::ObjectName, Vec<FunctionArg>, Ident)> {
+    ) -> Option<(ObjectName, Vec<FunctionArg>, Ident)> {
         const SRF_TABLE_FUNCTIONS: &[&str] = &[
             "generate_series",
             "jsonb_each",

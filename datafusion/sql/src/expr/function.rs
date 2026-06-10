@@ -1083,17 +1083,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             );
         }
 
-        // Get the column expression from the subquery
-        let (qualifier, field) = sub_plan.schema().qualified_field(0);
-        let col_expr = Expr::Column(Column::new(qualifier.cloned(), field.name()));
-
         // Get array_agg function
         let array_agg_fn = self
             .context_provider
             .get_aggregate_meta("array_agg")
             .ok_or_else(|| internal_datafusion_err!("ARRAY_AGG function not found"))?;
 
-        // Convert ORDER BY to sort expressions if present
+        // Convert ORDER BY to sort expressions if present. ORDER BY resolves
+        // against the subquery's projected output schema, so capture it before
+        // stripping the projection below.
         let order_by_sort_exprs = if !order_by_exprs.is_empty() {
             self.order_by_to_sort_expr(
                 order_by_exprs,
@@ -1106,30 +1104,49 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             vec![]
         };
 
-        // Create ARRAY_AGG aggregate expression
-        let array_agg_expr = expr::AggregateFunction::new_udf(
-            array_agg_fn,
-            vec![col_expr],
-            false, // not distinct
-            None,  // no filter
-            order_by_sort_exprs,
-            None, // no null treatment
-        );
-
         // Strip Sort and Projection from sub_plan so the Aggregate
         // operates on the full schema. The Projection only selects the
         // output column but hides correlation columns (like the join key)
         // that the subquery decorrelator needs. The Sort is redundant since
         // ORDER BY is embedded in the array_agg expression.
+        //
+        // When the projection is a single computed expression
+        // (e.g. ARRAY(SELECT f(x) FROM t)), the projection's output field is
+        // named after the expression ("f(x)"), but that name does not exist in
+        // the stripped input's schema. Aggregating a plain column reference to
+        // it would fail to resolve, so feed the projection's actual expression
+        // to ARRAY_AGG instead.
         let mut sub_plan = sub_plan;
         if let datafusion_expr::LogicalPlan::Sort(sort) = sub_plan {
             sub_plan = std::sync::Arc::unwrap_or_clone(sort.input);
         }
-        if let datafusion_expr::LogicalPlan::Projection(proj) = &sub_plan {
+        let agg_arg = if let datafusion_expr::LogicalPlan::Projection(proj) = &sub_plan {
             if proj.expr.len() == 1 {
+                let projected = proj.expr[0].clone();
                 sub_plan = std::sync::Arc::unwrap_or_clone(proj.input.clone());
+                match projected {
+                    Expr::Column(_) => projected,
+                    Expr::Alias(alias) => *alias.expr,
+                    other => other,
+                }
+            } else {
+                let (qualifier, field) = sub_plan.schema().qualified_field(0);
+                Expr::Column(Column::new(qualifier.cloned(), field.name()))
             }
-        }
+        } else {
+            let (qualifier, field) = sub_plan.schema().qualified_field(0);
+            Expr::Column(Column::new(qualifier.cloned(), field.name()))
+        };
+
+        // Create ARRAY_AGG aggregate expression
+        let array_agg_expr = expr::AggregateFunction::new_udf(
+            array_agg_fn,
+            vec![agg_arg],
+            false, // not distinct
+            None,  // no filter
+            order_by_sort_exprs,
+            None, // no null treatment
+        );
 
         // Build the new subquery: SELECT ARRAY_AGG(col) FROM (original_query)
         let group_expr: Vec<Expr> = vec![];
