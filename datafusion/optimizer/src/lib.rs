@@ -50,6 +50,7 @@ pub mod eliminate_nested_union {
     #[deprecated(since = "52.0.0", note = "Please use OptimizeUnions instead")]
     pub type EliminateNestedUnion = OptimizeUnions;
 }
+pub mod eliminate_outer_join;
 pub mod extract_equijoin_predicate;
 pub mod filter_null_join_keys;
 pub mod optimize_projections;

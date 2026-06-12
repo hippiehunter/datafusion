@@ -37,6 +37,7 @@ use crate::eliminate_filter::EliminateFilter;
 use crate::eliminate_group_by_constant::EliminateGroupByConstant;
 use crate::eliminate_join::EliminateJoin;
 use crate::eliminate_limit::EliminateLimit;
+use crate::eliminate_outer_join::EliminateOuterJoin;
 use crate::extract_equijoin_predicate::ExtractEquijoinPredicate;
 use crate::filter_null_join_keys::FilterNullJoinKeys;
 use crate::optimize_projections::OptimizeProjections;
@@ -258,6 +259,7 @@ impl Optimizer {
             Arc::new(EliminateLimit::new()),
             Arc::new(PropagateEmptyRelation::new()),
             Arc::new(FilterNullJoinKeys::default()),
+            Arc::new(EliminateOuterJoin::new()),
             // Filters can't be pushed down past Limits, we should do PushDownFilter after PushDownLimit
             Arc::new(PushDownLimit::new()),
             Arc::new(PushDownFilter::new()),
