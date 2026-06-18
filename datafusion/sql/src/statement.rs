@@ -151,6 +151,19 @@ fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
         .collect()
 }
 
+/// Internal columns Gantry injects into a DML target's source schema (`_rowid`
+/// surrogate key for PK-less tables, `ctid` physical row id). They are not
+/// user-visible and must be excluded from `RETURNING *` expansion, otherwise a
+/// `RETURNING *` on such a target would leak them to the client and desync the
+/// output schema from the user-visible column-index resolution.
+const GANTRY_HIDDEN_DML_COLUMNS: [&str; 2] = ["_rowid", "ctid"];
+
+fn is_gantry_hidden_dml_column(name: &str) -> bool {
+    GANTRY_HIDDEN_DML_COLUMNS
+        .iter()
+        .any(|hidden| name.eq_ignore_ascii_case(hidden))
+}
+
 fn returning_columns_to_output_schema(
     target_schema: &DFSchema,
     returning_cols: &[String],
@@ -165,6 +178,9 @@ fn returning_columns_to_output_schema(
         if col_name == "*" {
             for idx in 0..target_schema.fields().len() {
                 let (qualifier, field) = target_schema.qualified_field(idx);
+                if is_gantry_hidden_dml_column(field.name()) {
+                    continue;
+                }
                 qualified_fields.push((qualifier.cloned(), Arc::clone(field)));
             }
             continue;
@@ -3077,6 +3093,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     })
                 }
                 ast::MergeAction::Delete { .. } => MergeAction::Delete,
+                ast::MergeAction::DoNothing => MergeAction::DoNothing,
             };
 
             merge_clauses.push(MergeClause {
@@ -3336,6 +3353,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         table_schema
                             .fields()
                             .iter()
+                            .filter(|field| {
+                                !is_gantry_hidden_dml_column(field.name())
+                            })
                             .map(|field| {
                                 Ok(Expr::Column(Column::from_name(field.name())))
                             })
@@ -3351,6 +3371,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             .enumerate()
                             .filter_map(|(idx, _)| {
                                 let (q, field) = table_schema.qualified_field(idx);
+                                if is_gantry_hidden_dml_column(field.name()) {
+                                    return None;
+                                }
                                 if q.map(|q| q.to_string().to_ascii_lowercase())
                                     == Some(
                                         qualifier.to_string().to_ascii_lowercase(),
