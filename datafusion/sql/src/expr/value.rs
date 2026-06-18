@@ -598,11 +598,20 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
     let digits = dec.digits();
     let (int_val, scale) = dec.into_bigint_and_exponent();
     if scale < i8::MIN as i64 {
-        return not_impl_err!(
-            "Decimal scale {} exceeds the minimum supported scale: {}",
-            scale,
-            i8::MIN
-        );
+        // Scale too small for a Decimal (huge-magnitude literal, e.g. 1.79e308).
+        // Represent as Float64 rather than rejecting, matching PG's handling of
+        // such literals once they reach a float column / float arithmetic.
+        return match unsigned_number.parse::<f64>() {
+            Ok(parsed) if parsed.is_finite() => {
+                let float_val = if negative { -parsed } else { parsed };
+                Ok(Expr::Literal(ScalarValue::Float64(Some(float_val)), None))
+            }
+            _ => not_impl_err!(
+                "Decimal scale {} exceeds the minimum supported scale: {}",
+                scale,
+                i8::MIN
+            ),
+        };
     }
     let precision = if scale > 0 {
         // arrow-rs requires the precision to include the positive scale.
@@ -636,11 +645,20 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
             None,
         ))
     } else {
-        not_impl_err!(
-            "Decimal precision {} exceeds the maximum supported precision: {}",
-            precision,
-            DECIMAL256_MAX_PRECISION
-        )
+        // A numeric literal too large for Decimal256 (e.g. scientific-notation
+        // literals like 1.79e308) is represented as Float64 rather than rejected,
+        // matching how such literals are used (float columns / float arithmetic).
+        match unsigned_number.parse::<f64>() {
+            Ok(parsed) if parsed.is_finite() => {
+                let float_val = if negative { -parsed } else { parsed };
+                Ok(Expr::Literal(ScalarValue::Float64(Some(float_val)), None))
+            }
+            _ => not_impl_err!(
+                "Decimal precision {} exceeds the maximum supported precision: {}",
+                precision,
+                DECIMAL256_MAX_PRECISION
+            ),
+        }
     }
 }
 
@@ -729,19 +747,26 @@ mod tests {
             assert_eq!(output, Expr::Literal(expect, None));
         }
 
-        // scale < i8::MIN
+        // scale < i8::MIN but finite as f64 -> Float64 (not rejected)
         assert_eq!(
-            parse_decimal("1e129", false).unwrap_err().strip_backtrace(),
-            "This feature is not implemented: Decimal scale -129 exceeds the minimum supported scale: -128"
+            parse_decimal("1e129", false).unwrap(),
+            Expr::Literal(
+                ScalarValue::Float64(Some("1e129".parse::<f64>().unwrap())),
+                None
+            )
         );
 
-        // Unsupported precision
+        // precision > DECIMAL256_MAX_PRECISION but finite as f64 -> Float64
         assert_eq!(
-            parse_decimal(&"1".repeat(77), false)
-                .unwrap_err()
-                .strip_backtrace(),
-            "This feature is not implemented: Decimal precision 77 exceeds the maximum supported precision: 76"
+            parse_decimal(&"1".repeat(77), false).unwrap(),
+            Expr::Literal(
+                ScalarValue::Float64(Some("1".repeat(77).parse::<f64>().unwrap())),
+                None
+            )
         );
+
+        // Non-finite as f64 (overflows) -> still rejected
+        assert!(parse_decimal("1e400", false).is_err());
     }
 
     #[test]
