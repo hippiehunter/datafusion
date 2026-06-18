@@ -1751,6 +1751,7 @@ impl Unparser<'_> {
                     ast::MergeAction::Update { assignments }
                 }
                 MergeAction::Delete => ast::MergeAction::Delete,
+                MergeAction::DoNothing => ast::MergeAction::DoNothing,
             };
 
             clauses.push(ast::MergeClause {

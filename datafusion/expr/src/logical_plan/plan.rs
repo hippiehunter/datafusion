@@ -1687,6 +1687,7 @@ impl LogicalPlan {
                             })
                         }
                         MergeAction::Delete => MergeAction::Delete,
+                        MergeAction::DoNothing => MergeAction::DoNothing,
                     };
 
                     clauses.push(MergeClause {

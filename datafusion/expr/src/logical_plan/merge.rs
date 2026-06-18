@@ -133,6 +133,7 @@ pub enum MergeAction {
     Insert(MergeInsertExpr),
     Update(MergeUpdateExpr),
     Delete,
+    DoNothing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]

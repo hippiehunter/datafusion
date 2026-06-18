@@ -617,6 +617,7 @@ impl LogicalPlan {
                             }
                         }
                         MergeAction::Delete => {}
+                        MergeAction::DoNothing => {}
                     }
                 }
                 Ok(TreeNodeRecursion::Continue)
