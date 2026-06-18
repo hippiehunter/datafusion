@@ -336,10 +336,11 @@ pub(crate) fn make_decimal_type(
 
 /// Normalize an owned identifier to a lowercase string, unless the identifier is quoted.
 pub(crate) fn normalize_ident(id: Ident) -> String {
-    match id.quote_style {
-        Some(_) => id.value,
-        None => id.value.to_ascii_lowercase(),
-    }
+    // Gantry lowercases identifiers at DDL time (table/column storage is
+    // case-insensitive), so a quoted reference must lowercase too or it can
+    // never match stored names (e.g. `CREATE TABLE (... "String" ...)` stores
+    // `string`, and `SELECT "String"` must resolve to it).
+    id.value.to_ascii_lowercase()
 }
 
 pub(crate) fn value_to_string(value: &Value) -> Option<String> {
