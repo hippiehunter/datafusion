@@ -268,12 +268,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if name.eq_ignore_ascii_case("bpchar") {
             if let FunctionArguments::List(list) = &function.args {
                 if list.args.len() == 1 {
-                    if let FunctionArg::Unnamed(
-                        FunctionArgExpr::Expr(inner),
-                    ) = &list.args[0]
+                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(inner)) =
+                        &list.args[0]
                     {
-                        let inner_expr =
-                            self.sql_expr_to_logical_expr(inner.clone(), schema, planner_context)?;
+                        let inner_expr = self.sql_expr_to_logical_expr(
+                            inner.clone(),
+                            schema,
+                            planner_context,
+                        )?;
                         return Ok(Expr::Cast(datafusion_expr::Cast::new(
                             Box::new(inner_expr),
                             DataType::Utf8,

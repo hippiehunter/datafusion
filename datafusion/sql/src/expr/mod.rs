@@ -16,7 +16,9 @@
 // under the License.
 
 use arrow::datatypes::{DataType, TimeUnit};
-use datafusion_expr::planner::{PlannerResult, RawBinaryExpr, RawCastExpr, RawFieldAccessExpr};
+use datafusion_expr::planner::{
+    PlannerResult, RawBinaryExpr, RawCastExpr, RawFieldAccessExpr,
+};
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
@@ -415,7 +417,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 expr,
                 data_type,
                 format,
-            } => self.sql_cast_to_expr(kind, *expr, &data_type, format, schema, planner_context),
+            } => self.sql_cast_to_expr(
+                kind,
+                *expr,
+                &data_type,
+                format,
+                schema,
+                planner_context,
+            ),
 
             SQLExpr::TypedString(TypedString {
                 data_type,
@@ -423,9 +432,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 uses_odbc_syntax: _,
             }) => {
                 if Self::is_regclass_sql_type(&data_type) {
-                    return self.sql_regclass_cast_from_arg_expr(
-                        lit(value.into_string().unwrap()),
-                    );
+                    return self.sql_regclass_cast_from_arg_expr(lit(value
+                        .into_string()
+                        .unwrap()));
                 }
 
                 self.finish_cast_expr(
@@ -1282,7 +1291,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Currently drops metadata attached to the type
         // https://github.com/apache/datafusion/issues/18060
         match cast_kind {
-            CastKind::TryCast => Ok(Expr::TryCast(TryCast::new(Box::new(expr), data_type))),
+            CastKind::TryCast => {
+                Ok(Expr::TryCast(TryCast::new(Box::new(expr), data_type)))
+            }
             CastKind::Cast | CastKind::DoubleColon => {
                 Ok(Expr::Cast(Cast::new(Box::new(expr), data_type)))
             }
@@ -1309,7 +1320,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )
             })?;
 
-        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(fun, vec![arg])))
+        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+            fun,
+            vec![arg],
+        )))
     }
 
     fn is_regclass_sql_type(data_type: &SQLDataType) -> bool {
@@ -1317,7 +1331,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             || matches!(
                 data_type,
                 SQLDataType::Custom(name, _)
-                    if name.to_string().eq_ignore_ascii_case("regclass")
+                    if name
+                        .0
+                        .last()
+                        .and_then(|part| part.as_ident())
+                        .is_some_and(|ident| ident.value.eq_ignore_ascii_case("regclass"))
             )
     }
 

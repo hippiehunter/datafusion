@@ -3514,6 +3514,25 @@ fn logical_plan(sql: &str) -> Result<LogicalPlan> {
     logical_plan_with_options(sql, ParserOptions::default())
 }
 
+#[test]
+fn regclass_cast_accepts_qualified_type_name() {
+    let state = MockSessionState::default().with_scalar_function(Arc::new(make_udf(
+        "__dbl_regclass_cast",
+        vec![DataType::Utf8],
+        DataType::UInt32,
+    )));
+    let context = MockContextProvider { state };
+    let planner = SqlToRel::new(&context);
+    let dialect = &PostgreSqlDialect {};
+    let mut ast =
+        DFParser::parse_sql_with_dialect("SELECT 'person'::pg_catalog.regclass", dialect)
+            .unwrap();
+
+    let plan = planner.statement_to_plan(ast.pop_front().unwrap()).unwrap();
+    let plan = format!("{plan:?}");
+    assert!(plan.contains("__dbl_regclass_cast"), "{plan}");
+}
+
 fn logical_plan_with_options(sql: &str, options: ParserOptions) -> Result<LogicalPlan> {
     let dialect = &PostgreSqlDialect {};
     logical_plan_with_dialect_and_options(sql, dialect, options)

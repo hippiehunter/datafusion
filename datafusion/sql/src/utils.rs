@@ -334,13 +334,16 @@ pub(crate) fn make_decimal_type(
     }
 }
 
-/// Normalize an owned identifier to a lowercase string, unless the identifier is quoted.
+/// Normalize an owned identifier following PostgreSQL rules: an unquoted
+/// identifier is ASCII-folded to lowercase, a quoted identifier is preserved
+/// verbatim and compares case-sensitively. This matches
+/// `datafusion_common::utils::parse_identifiers_normalized` so the SqlToRel
+/// column/alias path and `TableReference::parse_str` agree.
 pub(crate) fn normalize_ident(id: Ident) -> String {
-    // Gantry lowercases identifiers at DDL time (table/column storage is
-    // case-insensitive), so a quoted reference must lowercase too or it can
-    // never match stored names (e.g. `CREATE TABLE (... "String" ...)` stores
-    // `string`, and `SELECT "String"` must resolve to it).
-    id.value.to_ascii_lowercase()
+    match id.quote_style {
+        Some(_) => id.value,
+        None => id.value.to_ascii_lowercase(),
+    }
 }
 
 pub(crate) fn value_to_string(value: &Value) -> Option<String> {
