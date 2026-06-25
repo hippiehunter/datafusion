@@ -159,9 +159,7 @@ fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
 const GANTRY_HIDDEN_DML_COLUMNS: [&str; 2] = ["_rowid", "ctid"];
 
 fn is_gantry_hidden_dml_column(name: &str) -> bool {
-    GANTRY_HIDDEN_DML_COLUMNS
-        .iter()
-        .any(|hidden| name.eq_ignore_ascii_case(hidden))
+    GANTRY_HIDDEN_DML_COLUMNS.contains(&name)
 }
 
 fn returning_columns_to_output_schema(
@@ -236,7 +234,6 @@ fn rewrite_update_returning_exprs(
                     return Ok(Transformed::no(node));
                 };
 
-                let column_name_lc = column.name.to_ascii_lowercase();
                 let relation_is_target = column
                     .relation
                     .as_ref()
@@ -246,7 +243,7 @@ fn rewrite_update_returning_exprs(
                 // After UPDATE, RETURNING should observe target-table columns as their
                 // post-update values. These live in the projected DML input as unqualified
                 // columns named after the target table fields.
-                if target_column_names.contains(&column_name_lc)
+                if target_column_names.contains(&column.name)
                     && (column.relation.is_none() || relation_is_target)
                 {
                     return Ok(Transformed::yes(Expr::Column(Column::from_name(
@@ -3394,7 +3391,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             let target_column_names = table_schema
                 .fields()
                 .iter()
-                .map(|f| f.name().to_ascii_lowercase())
+                .map(|f| f.name().to_string())
                 .collect::<HashSet<_>>();
             let target_alias = table_alias
                 .as_ref()
