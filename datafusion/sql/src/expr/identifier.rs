@@ -18,11 +18,11 @@
 use arrow::datatypes::FieldRef;
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::{
-    Column, DFSchema, Result, Span, TableReference, assert_or_internal_err,
+    Column, DFSchema, Result, ScalarValue, Span, TableReference, assert_or_internal_err,
     exec_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::planner::PlannerResult;
-use datafusion_expr::{Case, Expr};
+use datafusion_expr::{Case, Expr, expr::ScalarFunction};
 use sqlparser::ast::{CaseWhen, Expr as SQLExpr, Ident};
 use std::sync::Arc;
 
@@ -89,6 +89,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
 
+            // Postgres whole-row reference: a bare identifier that names a
+            // relation in scope (rather than a column) resolves to a record of
+            // that relation's columns, e.g. `row_to_json(t)` over a subquery
+            // aliased `t`.
+            if let Some(record) =
+                self.try_plan_whole_row_reference(normalize_ident.as_str(), schema)
+            {
+                return Ok(record);
+            }
+
             // Default case
             let mut column = Column::new_unqualified(normalize_ident);
             if self.options.collect_spans
@@ -98,6 +108,38 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             Ok(Expr::Column(column))
         }
+    }
+
+    /// Expand a bare relation name used in value position into a record of all
+    /// that relation's columns: `named_struct('c1', rel.c1, 'c2', rel.c2, ...)`.
+    /// The field names become the record's attribute names (json keys for
+    /// `row_to_json`). Returns `None` when the name matches no relation in the
+    /// schema or when the context provides no `named_struct` implementation, so
+    /// the caller falls back to plain column resolution.
+    fn try_plan_whole_row_reference(
+        &self,
+        relation: &str,
+        schema: &DFSchema,
+    ) -> Option<Expr> {
+        let named_struct = self.context_provider.get_function_meta("named_struct")?;
+        let mut args: Vec<Expr> = Vec::new();
+        for (qualifier, field) in schema.iter() {
+            if qualifier.map(|q| q.table()) != Some(relation) {
+                continue;
+            }
+            args.push(Expr::Literal(
+                ScalarValue::Utf8(Some(field.name().clone())),
+                None,
+            ));
+            args.push(Expr::Column(Column::from((qualifier, field))));
+        }
+        if args.is_empty() {
+            return None;
+        }
+        Some(Expr::ScalarFunction(ScalarFunction::new_udf(
+            named_struct,
+            args,
+        )))
     }
 
     pub(crate) fn sql_compound_identifier_to_expr(
