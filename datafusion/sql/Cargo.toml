@@ -62,6 +62,7 @@ regex = { workspace = true }
 sqlparser = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 ctor = { workspace = true }
 datafusion-functions-aggregate = { workspace = true }
 env_logger = { workspace = true }
@@ -69,3 +70,7 @@ insta = { workspace = true }
 itertools = { workspace = true }
 paste = { workspace = true }
 rstest = { workspace = true }
+
+[[bench]]
+name = "sql_planner"
+harness = false
