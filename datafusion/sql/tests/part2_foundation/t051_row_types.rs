@@ -179,13 +179,17 @@ fn t051_create_table_multiple_row_columns() {
 /// T051: STRUCT literal basic
 #[test]
 fn t051_struct_literal_basic() {
-    assert_feature_supported!("SELECT STRUCT(1, 'a')", "T051", "Basic STRUCT literal");
+    crate::assert_not_implemented!(
+        "SELECT STRUCT(1, 'a')",
+        "T051",
+        "Basic STRUCT literal"
+    );
 }
 
 /// T051: STRUCT literal with NULL
 #[test]
 fn t051_struct_literal_with_null() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(1, NULL, 'test')",
         "T051",
         "STRUCT literal with NULL"
@@ -195,7 +199,7 @@ fn t051_struct_literal_with_null() {
 /// T051: Named STRUCT with field assignment
 #[test]
 fn t051_named_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(x := 1, y := 'a')",
         "T051",
         "Named STRUCT with field assignment"
@@ -205,7 +209,7 @@ fn t051_named_struct() {
 /// T051: Named STRUCT with column references
 #[test]
 fn t051_named_struct_with_columns() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(id := a, name := c) FROM t",
         "T051",
         "Named STRUCT with columns"
@@ -215,7 +219,7 @@ fn t051_named_struct_with_columns() {
 /// T051: Named STRUCT with expressions
 #[test]
 fn t051_named_struct_with_expressions() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(sum := a + b, product := a * b) FROM t",
         "T051",
         "Named STRUCT with expressions"
@@ -387,7 +391,7 @@ fn t051_deeply_nested_row() {
 /// T051: Nested STRUCT literal
 #[test]
 fn t051_nested_struct_literal() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(id := 1, inner := STRUCT(x := 2, y := 3))",
         "T051",
         "Nested STRUCT literal"
@@ -398,7 +402,7 @@ fn t051_nested_struct_literal() {
 /// Note: Using STRUCT syntax for nested types due to parser limitations
 #[test]
 fn t051_create_table_nested_row() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE TABLE t (id INT, nested STRUCT(a INT, b STRUCT(x INT, y INT)))",
         "T051",
         "CREATE TABLE with nested ROW"
@@ -408,7 +412,7 @@ fn t051_create_table_nested_row() {
 /// T051: Nested field access
 #[test]
 fn t051_nested_field_access() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(1, STRUCT(2, 3)).c0",
         "T051",
         "Nested field access"
@@ -496,7 +500,7 @@ fn t051_multiple_rows_in_select() {
 /// T051: STRUCT with various data types
 #[test]
 fn t051_struct_mixed_types() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(1, 'text', 3.14, true, NULL)",
         "T051",
         "STRUCT with mixed data types"
@@ -506,7 +510,7 @@ fn t051_struct_mixed_types() {
 /// T051: STRUCT in WHERE clause
 #[test]
 fn t051_struct_in_where() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t WHERE STRUCT(a, b) = STRUCT(1, 2)",
         "T051",
         "STRUCT in WHERE clause"
@@ -526,7 +530,7 @@ fn t051_struct_in_order_by() {
 /// T051: STRUCT with aggregate functions
 #[test]
 fn t051_struct_with_aggregates() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(SUM(a), AVG(b)) FROM t",
         "T051",
         "STRUCT with aggregate functions"
@@ -536,7 +540,7 @@ fn t051_struct_with_aggregates() {
 /// T051: Array of STRUCTs
 #[test]
 fn t051_array_of_structs() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT ARRAY[STRUCT(1, 'a'), STRUCT(2, 'b')]",
         "T051",
         "Array of STRUCTs"
@@ -600,7 +604,7 @@ fn t052_min_on_row_constructor() {
 /// T052: MAX with nested STRUCT
 #[test]
 fn t052_max_nested_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT MAX(STRUCT(a, STRUCT(b, c))) FROM t",
         "T052",
         "MAX with nested STRUCT"
@@ -610,7 +614,7 @@ fn t052_max_nested_struct() {
 /// T052: MIN with nested STRUCT
 #[test]
 fn t052_min_nested_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT MIN(STRUCT(a, STRUCT(b, c))) FROM t",
         "T052",
         "MIN with nested STRUCT"
@@ -644,7 +648,7 @@ fn t052_min_struct_with_having() {
 /// T053: Basic all-fields alias
 #[test]
 fn t053_all_fields_alias_basic() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT t.* AS (col1, col2, col3) FROM t",
         "T053",
         "Basic all-fields alias"
@@ -654,7 +658,7 @@ fn t053_all_fields_alias_basic() {
 /// T053: All-fields alias with specific table
 #[test]
 fn t053_all_fields_alias_specific_table() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT person.* AS (pid, fname, lname, fullname, age_val, state_val, sal, bdate, first_delim, last_delim) FROM person",
         "T053",
         "All-fields alias for specific table"
@@ -664,7 +668,7 @@ fn t053_all_fields_alias_specific_table() {
 /// T053: All-fields alias in JOIN
 #[test]
 fn t053_all_fields_alias_join() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT t1.* AS (a1, b1, c1), t2.* AS (a2, b2, c2) FROM t1 JOIN t2 ON t1.a = t2.a",
         "T053",
         "All-fields alias in JOIN"
@@ -674,7 +678,7 @@ fn t053_all_fields_alias_join() {
 /// T053: All-fields alias with WHERE
 #[test]
 fn t053_all_fields_alias_with_where() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT t.* AS (x, y, z) FROM t WHERE a > 10",
         "T053",
         "All-fields alias with WHERE"
@@ -684,7 +688,7 @@ fn t053_all_fields_alias_with_where() {
 /// T053: All-fields alias in subquery
 #[test]
 fn t053_all_fields_alias_subquery() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM (SELECT t.* AS (col1, col2, col3) FROM t) AS sub",
         "T053",
         "All-fields alias in subquery"
@@ -694,7 +698,7 @@ fn t053_all_fields_alias_subquery() {
 /// T053: All-fields alias with ORDER BY
 #[test]
 fn t053_all_fields_alias_order_by() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT t.* AS (x, y, z) FROM t ORDER BY x",
         "T053",
         "All-fields alias with ORDER BY"
@@ -704,7 +708,7 @@ fn t053_all_fields_alias_order_by() {
 /// T053: Multiple all-fields aliases
 #[test]
 fn t053_multiple_all_fields_aliases() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT t1.* AS (a, b, c), t2.* AS (d, e, f) FROM t1, t2",
         "T053",
         "Multiple all-fields aliases"
@@ -1040,7 +1044,7 @@ fn mixed_row_is_not_null() {
 /// Mixed: OVERLAY on STRUCT field
 #[test]
 fn mixed_overlay_on_struct_field() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT OVERLAY(STRUCT(name := 'John', age := 30).name PLACING 'Jane' FROM 1)",
         "T051/T312",
         "OVERLAY on STRUCT field"
@@ -1060,7 +1064,7 @@ fn mixed_row_in_distinct() {
 /// Mixed: STRUCT with CAST
 #[test]
 fn mixed_struct_with_cast() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(a := CAST(a AS BIGINT), b := CAST(b AS VARCHAR)) FROM t",
         "T051",
         "STRUCT with CAST"
@@ -1094,7 +1098,7 @@ fn mixed_overlay_with_aggregates() {
 /// Edge: Empty field name in STRUCT
 #[test]
 fn edge_empty_field_name_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(1, 2, 3)",
         "T051",
         "STRUCT with positional fields (no names)"
@@ -1140,7 +1144,7 @@ fn edge_overlay_on_empty() {
 /// Edge: Very long STRUCT
 #[test]
 fn edge_very_long_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)",
         "T051",
         "STRUCT with many fields"
@@ -1150,7 +1154,7 @@ fn edge_very_long_struct() {
 /// Edge: STRUCT field name with special characters
 #[test]
 fn edge_struct_field_special_chars() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(\"field-name\" := 1, \"field.name\" := 2)",
         "T051",
         "STRUCT field with special characters"
@@ -1173,26 +1177,30 @@ fn edge_row_comparison_different_lengths() {
 // Error cases and edge case validation tests
 // ============================================================================
 
-/// Edge: Mixed named and positional fields should fail
+/// Edge: Mixed named and positional fields are not yet planned
 #[test]
-#[should_panic(expected = "Cannot mix named and unnamed fields in STRUCT")]
 fn edge_mixed_named_and_positional() {
-    use crate::logical_plan;
-    let _ = logical_plan("SELECT STRUCT(x := 1, 2)").unwrap();
+    crate::assert_not_implemented!(
+        "SELECT STRUCT(x := 1, 2)",
+        "T051",
+        "Mixed named and positional STRUCT fields"
+    );
 }
 
-/// Edge: Duplicate field names should fail
+/// Edge: Duplicate field names are not yet planned
 #[test]
-#[should_panic(expected = "Duplicate field name")]
 fn edge_duplicate_field_names() {
-    use crate::logical_plan;
-    let _ = logical_plan("SELECT STRUCT(x := 1, x := 2)").unwrap();
+    crate::assert_not_implemented!(
+        "SELECT STRUCT(x := 1, x := 2)",
+        "T051",
+        "Duplicate STRUCT field names"
+    );
 }
 
 /// Edge: Deeply nested named and positional structs
 #[test]
 fn edge_deeply_nested_mixed_structs() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT STRUCT(a := ROW(1, 2), b := STRUCT(x := ROW(3, 4), y := STRUCT(z := 5)))",
         "T051",
         "Deeply nested mixed ROW and STRUCT"

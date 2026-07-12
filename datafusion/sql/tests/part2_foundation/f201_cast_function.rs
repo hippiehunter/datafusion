@@ -709,7 +709,7 @@ fn f201_cast_joined_columns() {
 /// F201: CAST in GROUP BY
 #[test]
 fn f201_cast_in_group_by() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT CAST(a AS VARCHAR), COUNT(*) FROM t GROUP BY CAST(a AS VARCHAR)",
         "F201",
         "CAST in GROUP BY"

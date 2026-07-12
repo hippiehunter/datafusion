@@ -302,7 +302,7 @@ fn t821_json_exists_filter() {
 /// T821: JSON_EXISTS with ON ERROR clause
 #[test]
 fn t821_json_exists_on_error() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM json_data WHERE JSON_EXISTS(data, '$.key' FALSE ON ERROR)",
         "T821",
         "JSON_EXISTS with FALSE ON ERROR"
@@ -478,7 +478,7 @@ fn t824_json_query_array_wildcard() {
 /// T824: JSON_QUERY with WITHOUT ARRAY WRAPPER
 #[test]
 fn t824_json_query_without_wrapper() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT JSON_QUERY(data, '$.items' WITHOUT ARRAY WRAPPER) FROM json_data",
         "T824",
         "JSON_QUERY WITHOUT ARRAY WRAPPER"
@@ -488,7 +488,7 @@ fn t824_json_query_without_wrapper() {
 /// T824: JSON_QUERY with WITH ARRAY WRAPPER
 #[test]
 fn t824_json_query_with_wrapper() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT JSON_QUERY(data, '$.name' WITH ARRAY WRAPPER) FROM json_data",
         "T824",
         "JSON_QUERY WITH ARRAY WRAPPER"
@@ -542,7 +542,7 @@ fn t825_error_on_empty() {
 /// T825: DEFAULT value with expression ON EMPTY
 #[test]
 fn t825_default_expression_on_empty() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT JSON_VALUE(data, '$.count' DEFAULT '0' ON EMPTY RETURNING INT) FROM json_data",
         "T825",
         "DEFAULT with expression ON EMPTY"

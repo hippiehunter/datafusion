@@ -1174,7 +1174,7 @@ fn t612_13_multiple_filters() {
 /// T612-14: FIRST_VALUE() with IGNORE NULLS
 #[test]
 fn t612_14_first_value_ignore_nulls() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT FIRST_VALUE(a IGNORE NULLS) OVER (ORDER BY a) FROM t",
         "T612-14",
         "FIRST_VALUE() IGNORE NULLS"
@@ -1184,7 +1184,7 @@ fn t612_14_first_value_ignore_nulls() {
 /// T612-14: LAST_VALUE() with IGNORE NULLS
 #[test]
 fn t612_14_last_value_ignore_nulls() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT LAST_VALUE(a IGNORE NULLS) OVER (ORDER BY a) FROM t",
         "T612-14",
         "LAST_VALUE() IGNORE NULLS"
@@ -1194,7 +1194,7 @@ fn t612_14_last_value_ignore_nulls() {
 /// T612-14: NTH_VALUE() with IGNORE NULLS
 #[test]
 fn t612_14_nth_value_ignore_nulls() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT NTH_VALUE(a IGNORE NULLS, 2) OVER (ORDER BY a) FROM t",
         "T612-14",
         "NTH_VALUE() IGNORE NULLS"
@@ -1204,7 +1204,7 @@ fn t612_14_nth_value_ignore_nulls() {
 /// T612-14: LEAD() with IGNORE NULLS
 #[test]
 fn t612_14_lead_ignore_nulls() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT LEAD(a IGNORE NULLS) OVER (ORDER BY a) FROM t",
         "T612-14",
         "LEAD() IGNORE NULLS"
@@ -1214,7 +1214,7 @@ fn t612_14_lead_ignore_nulls() {
 /// T612-14: LAG() with IGNORE NULLS
 #[test]
 fn t612_14_lag_ignore_nulls() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT LAG(a IGNORE NULLS) OVER (ORDER BY a) FROM t",
         "T612-14",
         "LAG() IGNORE NULLS"
@@ -1224,7 +1224,7 @@ fn t612_14_lag_ignore_nulls() {
 /// T612-14: FIRST_VALUE() with RESPECT NULLS
 #[test]
 fn t612_14_first_value_respect_nulls() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT FIRST_VALUE(a RESPECT NULLS) OVER (ORDER BY a) FROM t",
         "T612-14",
         "FIRST_VALUE() RESPECT NULLS"

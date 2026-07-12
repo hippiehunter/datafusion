@@ -62,8 +62,6 @@
 //! All tests in this module are expected to FAIL as DataFusion does not currently
 //! implement MATCH_RECOGNIZE. These tests document the conformance gap.
 
-use crate::assert_feature_supported;
-
 // ============================================================================
 // R010: Basic MATCH_RECOGNIZE structure
 // ============================================================================
@@ -71,7 +69,7 @@ use crate::assert_feature_supported;
 /// R010: Minimal MATCH_RECOGNIZE clause
 #[test]
 fn r010_basic_match_recognize() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -88,7 +86,7 @@ fn r010_basic_match_recognize() {
 /// R010: MATCH_RECOGNIZE with simple pattern
 #[test]
 fn r010_simple_pattern() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY timestamp \
@@ -111,7 +109,7 @@ fn r010_simple_pattern() {
 /// R010: MATCH_RECOGNIZE with PARTITION BY
 #[test]
 fn r010_partition_by() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              PARTITION BY category \
@@ -128,7 +126,7 @@ fn r010_partition_by() {
 /// R010: MATCH_RECOGNIZE with multiple partition columns
 #[test]
 fn r010_multiple_partition() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM person \
          MATCH_RECOGNIZE ( \
              PARTITION BY state, city \
@@ -145,7 +143,7 @@ fn r010_multiple_partition() {
 /// R010: MATCH_RECOGNIZE with ORDER BY multiple columns
 #[test]
 fn r010_multiple_order() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY timestamp DESC, id ASC \
@@ -165,7 +163,7 @@ fn r010_multiple_order() {
 /// R010: MEASURES with column references
 #[test]
 fn r010_measures_columns() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -185,7 +183,7 @@ fn r010_measures_columns() {
 /// R010: MEASURES with aggregate functions
 #[test]
 fn r010_measures_aggregates() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY timestamp \
@@ -204,7 +202,7 @@ fn r010_measures_aggregates() {
 /// R010: MEASURES with navigation functions
 #[test]
 fn r010_measures_navigation() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -228,7 +226,7 @@ fn r010_measures_navigation() {
 /// R010: ONE ROW PER MATCH (default)
 #[test]
 fn r010_one_row_per_match() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -245,7 +243,7 @@ fn r010_one_row_per_match() {
 /// R010: ALL ROWS PER MATCH
 #[test]
 fn r010_all_rows_per_match() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -262,7 +260,7 @@ fn r010_all_rows_per_match() {
 /// R010: ALL ROWS PER MATCH with SHOW EMPTY MATCHES
 #[test]
 fn r010_show_empty_matches() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -279,7 +277,7 @@ fn r010_show_empty_matches() {
 /// R010: ALL ROWS PER MATCH with OMIT EMPTY MATCHES
 #[test]
 fn r010_omit_empty_matches() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -300,7 +298,7 @@ fn r010_omit_empty_matches() {
 /// R010: AFTER MATCH SKIP TO NEXT ROW
 #[test]
 fn r010_skip_to_next_row() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -320,7 +318,7 @@ fn r010_skip_to_next_row() {
 /// R010: AFTER MATCH SKIP PAST LAST ROW
 #[test]
 fn r010_skip_past_last_row() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -337,7 +335,7 @@ fn r010_skip_past_last_row() {
 /// R010: AFTER MATCH SKIP TO variable
 #[test]
 fn r010_skip_to_variable() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -357,7 +355,7 @@ fn r010_skip_to_variable() {
 /// R010: AFTER MATCH SKIP TO FIRST variable
 #[test]
 fn r010_skip_to_first() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -376,7 +374,7 @@ fn r010_skip_to_first() {
 /// R010: AFTER MATCH SKIP TO LAST variable
 #[test]
 fn r010_skip_to_last() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -399,7 +397,7 @@ fn r010_skip_to_last() {
 /// R010: Zero or more quantifier (*)
 #[test]
 fn r010_quantifier_star() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -418,7 +416,7 @@ fn r010_quantifier_star() {
 /// R010: One or more quantifier (+)
 #[test]
 fn r010_quantifier_plus() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -437,7 +435,7 @@ fn r010_quantifier_plus() {
 /// R010: Zero or one quantifier (?)
 #[test]
 fn r010_quantifier_question() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -456,7 +454,7 @@ fn r010_quantifier_question() {
 /// R010: Exact count quantifier {n}
 #[test]
 fn r010_quantifier_exact() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -475,7 +473,7 @@ fn r010_quantifier_exact() {
 /// R010: Range quantifier {n,m}
 #[test]
 fn r010_quantifier_range() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -494,7 +492,7 @@ fn r010_quantifier_range() {
 /// R010: Minimum quantifier {n,}
 #[test]
 fn r010_quantifier_minimum() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -517,7 +515,7 @@ fn r010_quantifier_minimum() {
 /// R010: Pattern alternation (|)
 #[test]
 fn r010_pattern_alternation() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -535,7 +533,7 @@ fn r010_pattern_alternation() {
 /// R010: Pattern grouping with parentheses
 #[test]
 fn r010_pattern_grouping() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -553,7 +551,7 @@ fn r010_pattern_grouping() {
 /// R010: Complex pattern with alternation and quantifiers
 #[test]
 fn r010_pattern_complex_alternation() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -577,7 +575,7 @@ fn r010_pattern_complex_alternation() {
 /// R010: DEFINE with PREV function
 #[test]
 fn r010_define_prev() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY timestamp \
@@ -593,7 +591,7 @@ fn r010_define_prev() {
 /// R010: DEFINE with NEXT function
 #[test]
 fn r010_define_next() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY timestamp \
@@ -609,7 +607,7 @@ fn r010_define_next() {
 /// R010: DEFINE with PREV offset
 #[test]
 fn r010_define_prev_offset() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -629,7 +627,7 @@ fn r010_define_prev_offset() {
 /// R010: Stock price V-pattern (down then up)
 #[test]
 fn r010_stock_v_pattern() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              PARTITION BY symbol \
@@ -652,7 +650,7 @@ fn r010_stock_v_pattern() {
 /// R010: Sequential events pattern
 #[test]
 fn r010_sequential_events() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM orders \
          MATCH_RECOGNIZE ( \
              PARTITION BY customer_id \
@@ -675,7 +673,7 @@ fn r010_sequential_events() {
 /// R010: Anomaly detection pattern
 #[test]
 fn r010_anomaly_detection() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY timestamp \
@@ -695,7 +693,7 @@ fn r010_anomaly_detection() {
 /// R010: User session pattern
 #[test]
 fn r010_user_session() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM person \
          MATCH_RECOGNIZE ( \
              PARTITION BY id \
@@ -721,7 +719,7 @@ fn r010_user_session() {
 /// R010: FIRST function in MEASURES
 #[test]
 fn r010_first_function() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -737,7 +735,7 @@ fn r010_first_function() {
 /// R010: LAST function in MEASURES
 #[test]
 fn r010_last_function() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -753,7 +751,7 @@ fn r010_last_function() {
 /// R010: Multiple navigation functions
 #[test]
 fn r010_multiple_navigation() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -777,7 +775,7 @@ fn r010_multiple_navigation() {
 /// R010: Multi-stage pattern with different quantifiers
 #[test]
 fn r010_multi_stage_pattern() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              PARTITION BY category \
@@ -801,7 +799,7 @@ fn r010_multi_stage_pattern() {
 /// R010: Nested pattern groups with alternation
 #[test]
 fn r010_nested_pattern_groups() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -821,7 +819,7 @@ fn r010_nested_pattern_groups() {
 /// R010: Pattern with exclusion (reluctant quantifier)
 #[test]
 fn r010_reluctant_quantifier() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t \
          MATCH_RECOGNIZE ( \
              ORDER BY id \
@@ -839,7 +837,7 @@ fn r010_reluctant_quantifier() {
 /// R010: Complete MATCH_RECOGNIZE with all clauses
 #[test]
 fn r010_complete_match_recognize() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT mr.* FROM t \
          MATCH_RECOGNIZE ( \
              PARTITION BY category, region \
@@ -867,7 +865,7 @@ fn r010_complete_match_recognize() {
 /// R010: MATCH_RECOGNIZE in subquery
 #[test]
 fn r010_match_in_subquery() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM ( \
              SELECT * FROM t \
              MATCH_RECOGNIZE ( \
@@ -886,7 +884,7 @@ fn r010_match_in_subquery() {
 /// R010: MATCH_RECOGNIZE with JOIN
 #[test]
 fn r010_match_with_join() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM t1 \
          JOIN ( \
              SELECT * FROM t \

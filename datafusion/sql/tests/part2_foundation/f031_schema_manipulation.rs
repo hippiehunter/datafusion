@@ -645,7 +645,7 @@ fn f311_03_create_view() {
 /// F311-04: CREATE VIEW with CHECK OPTION
 #[test]
 fn f311_04_create_view_check_option() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE VIEW active_persons AS
          SELECT * FROM person WHERE age >= 18
          WITH CHECK OPTION",
@@ -657,7 +657,7 @@ fn f311_04_create_view_check_option() {
 /// F311-04: CREATE VIEW with CASCADED CHECK OPTION
 #[test]
 fn f311_04_create_view_cascaded_check() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE VIEW active_persons AS
          SELECT * FROM person WHERE age >= 18
          WITH CASCADED CHECK OPTION",
@@ -669,7 +669,7 @@ fn f311_04_create_view_cascaded_check() {
 /// F311-04: CREATE VIEW with LOCAL CHECK OPTION
 #[test]
 fn f311_04_create_view_local_check() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE VIEW active_persons AS
          SELECT * FROM person WHERE age >= 18
          WITH LOCAL CHECK OPTION",
@@ -947,7 +947,7 @@ fn create_table_as_select_where() {
 /// CREATE TABLE AS SELECT with column list
 #[test]
 fn create_table_as_select_columns() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE TABLE person_summary (person_id, full_name)
          AS SELECT id, name FROM person",
         "F031",

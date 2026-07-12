@@ -764,13 +764,14 @@ fn select_column_does_not_exist() {
 #[test]
 fn select_repeated_column() {
     let sql = "SELECT age, age FROM person";
-    let err = logical_plan(sql).expect_err("query should have failed");
-
-    assert_snapshot!(
-        err.strip_backtrace(),
-        @r#"
-        Error during planning: Projections require unique expression names but the expression "person.age" at position 0 and "person.age" at position 1 have the same name. Consider aliasing ("AS") one of them.
-        "#
+    let plan = logical_plan(sql).expect("duplicate output columns are disambiguated");
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["age", "person.age:1"]
     );
 }
 
@@ -1017,14 +1018,16 @@ fn table_with_column_alias_partial() {
 
 #[test]
 fn table_with_column_alias_duplicate_names() {
-    // Duplicate aliases - should fail during projection validation
+    // Duplicate aliases are made unique while preserving column order.
     let sql = "SELECT * FROM lineitem l (dup, dup, c)";
-    let err = logical_plan(sql).expect_err("Duplicate aliases should fail");
-    assert!(
-        err.to_string().contains("unique expression names")
-            || err.to_string().contains("dup"),
-        "Error should mention duplicate names: {}",
-        err
+    let plan = logical_plan(sql).expect("duplicate aliases should be disambiguated");
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["dup", "dup:1", "c"]
     );
 }
 
@@ -1206,7 +1209,7 @@ fn natural_right_join() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: a.l_item_id
+        Projection: b.l_item_id
           Right Join: Using a.l_item_id = b.l_item_id, a.l_description = b.l_description, a.price = b.price
             SubqueryAlias: a
               TableScan: lineitem
@@ -1674,13 +1677,14 @@ fn select_simple_aggregate_column_does_not_exist() {
 #[test]
 fn select_simple_aggregate_repeated_aggregate() {
     let sql = "SELECT MIN(age), MIN(age) FROM person";
-    let err = logical_plan(sql).expect_err("query should have failed");
-
-    assert_snapshot!(
-        err.strip_backtrace(),
-        @r#"
-        Error during planning: Projections require unique expression names but the expression "min(person.age)" at position 0 and "min(person.age)" at position 1 have the same name. Consider aliasing ("AS") one of them.
-        "#
+    let plan = logical_plan(sql).expect("duplicate aggregates are disambiguated");
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["min(person.age)", "min(person.age):1"]
     );
 }
 
@@ -1729,13 +1733,14 @@ fn select_from_typed_string_values() {
 #[test]
 fn select_simple_aggregate_repeated_aggregate_with_repeated_aliases() {
     let sql = "SELECT MIN(age) AS a, MIN(age) AS a FROM person";
-    let err = logical_plan(sql).expect_err("query should have failed");
-
-    assert_snapshot!(
-        err.strip_backtrace(),
-        @r#"
-        Error during planning: Projections require unique expression names but the expression "min(person.age) AS a" at position 0 and "min(person.age) AS a" at position 1 have the same name. Consider aliasing ("AS") one of them.
-        "#
+    let plan = logical_plan(sql).expect("duplicate aliases are disambiguated");
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["a", "a:1"]
     );
 }
 
@@ -1772,13 +1777,14 @@ fn select_simple_aggregate_with_groupby_with_aliases() {
 #[test]
 fn select_simple_aggregate_with_groupby_with_aliases_repeated() {
     let sql = "SELECT state AS a, MIN(age) AS a FROM person GROUP BY state";
-    let err = logical_plan(sql).expect_err("query should have failed");
-
-    assert_snapshot!(
-        err.strip_backtrace(),
-        @r#"
-        Error during planning: Projections require unique expression names but the expression "person.state AS a" at position 0 and "min(person.age) AS a" at position 1 have the same name. Consider aliasing ("AS") one of them.
-        "#
+    let plan = logical_plan(sql).expect("duplicate aliases are disambiguated");
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["a", "a:1"]
     );
 }
 
@@ -1907,13 +1913,14 @@ fn select_simple_aggregate_with_groupby_can_use_alias() {
 #[test]
 fn select_simple_aggregate_with_groupby_aggregate_repeated() {
     let sql = "SELECT state, MIN(age), MIN(age) FROM person GROUP BY state";
-    let err = logical_plan(sql).expect_err("query should have failed");
-
-    assert_snapshot!(
-        err.strip_backtrace(),
-        @r#"
-        Error during planning: Projections require unique expression names but the expression "min(person.age)" at position 1 and "min(person.age)" at position 2 have the same name. Consider aliasing ("AS") one of them.
-        "#
+    let plan = logical_plan(sql).expect("duplicate aggregates are disambiguated");
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["state", "min(person.age)", "min(person.age):1"]
     );
 }
 
@@ -5044,7 +5051,7 @@ fn test_using_join_wildcard_schema() {
         [
             "t1.a".to_string(),
             "t1.b".to_string(),
-            "t2.c".to_string(),
+            "t3.c".to_string(),
             "t3.d".to_string()
         ]
     );

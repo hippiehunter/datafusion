@@ -594,10 +594,10 @@ mod tests {
 
         let window_frame = ast::WindowFrame {
             units: ast::WindowFrameUnits::Rows,
-            start_bound: ast::WindowFrameBound::Preceding(Some(Box::new(
+            start_bound: ast::WindowFrameBound::Preceding(Some(ast::AstBox::new(
                 ast::Expr::value(ast::Value::Number("2".to_string(), false)),
             ))),
-            end_bound: Some(ast::WindowFrameBound::Preceding(Some(Box::new(
+            end_bound: Some(ast::WindowFrameBound::Preceding(Some(ast::AstBox::new(
                 ast::Expr::value(ast::Value::Number("1".to_string(), false)),
             )))),
             exclude: None,
@@ -657,7 +657,7 @@ mod tests {
         test_bound!(Range, None, ScalarValue::UInt64(None));
 
         // Number
-        let number = Some(Box::new(ast::Expr::Value(
+        let number = Some(ast::AstBox::new(ast::Expr::Value(
             ast::Value::Number("42".to_string(), false).into(),
         )));
         test_bound!(Rows, number.clone(), ScalarValue::UInt64(Some(42)));
@@ -669,8 +669,8 @@ mod tests {
         );
 
         // Interval
-        let number = Some(Box::new(ast::Expr::Interval(ast::Interval {
-            value: Box::new(ast::Expr::Value(
+        let number = Some(ast::AstBox::new(ast::Expr::Interval(ast::Interval {
+            value: ast::AstBox::new(ast::Expr::Value(
                 ast::Value::SingleQuotedString("1".to_string()).into(),
             )),
             leading_field: Some(ast::DateTimeField::Day),

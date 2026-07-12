@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Edge case tests for MATCH_RECOGNIZE implementation
+//! Edge-case coverage for the currently unsupported MATCH_RECOGNIZE syntax.
 
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -28,14 +28,23 @@ fn parse_sql(sql: &str) -> Result<(), String> {
         .map_err(|e| format!("Parse error: {}", e))
 }
 
+/// Keep valid MATCH_RECOGNIZE shapes executable while the parser lacks the
+/// feature. Once support lands, these assertions fail and must be promoted to
+/// positive parse/plan coverage.
+fn assert_match_recognize_not_supported(sql: &str) {
+    let error = parse_sql(sql).expect_err("MATCH_RECOGNIZE is not yet supported");
+    assert!(
+        error.contains("MATCH_RECOGNIZE"),
+        "unexpected parse error for {sql}: {error}"
+    );
+}
+
 #[test]
 fn test_empty_pattern() {
     // Empty PATTERN should be a parse error (handled by sqlparser)
     let sql =
         "SELECT * FROM t MATCH_RECOGNIZE (ORDER BY id PATTERN () DEFINE A AS value > 0)";
-    let result = parse_sql(sql);
-    // This may or may not fail depending on sqlparser implementation
-    println!("Empty pattern result: {:?}", result);
+    assert!(parse_sql(sql).is_err(), "an empty pattern must be rejected");
 }
 
 #[test]
@@ -47,12 +56,7 @@ fn test_complex_nested_pattern() {
                    PATTERN (((A | B)* C)+) \
                    DEFINE A AS value = 1, B AS value = 2, C AS value = 3 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Complex nested pattern should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -64,8 +68,7 @@ fn test_permute_pattern() {
                    PATTERN (PERMUTE(A, B, C)) \
                    DEFINE A AS value = 1, B AS value = 2, C AS value = 3 \
                )";
-    let result = parse_sql(sql);
-    assert!(result.is_ok(), "PERMUTE pattern should parse: {:?}", result);
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -79,12 +82,7 @@ fn test_deeply_nested_alternation() {
                        A AS value = 1, B AS value = 2, C AS value = 3, D AS value = 4, \
                        E AS value = 5, F AS value = 6, G AS value = 7, H AS value = 8 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Deeply nested alternation should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -97,12 +95,7 @@ fn test_pattern_without_define_for_all_symbols() {
                    PATTERN (STRT DOWN+ UP+) \
                    DEFINE DOWN AS value < 100, UP AS value > 100 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Pattern without DEFINE for all symbols should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -114,12 +107,7 @@ fn test_very_large_quantifier() {
                    PATTERN (A{1000,5000}) \
                    DEFINE A AS value > 0 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Very large quantifier should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -131,9 +119,10 @@ fn test_zero_range_quantifier() {
                    PATTERN (A{0,0}) \
                    DEFINE A AS value > 0 \
                )";
-    let result = parse_sql(sql);
-    // This might parse but should be semantically invalid
-    println!("Zero range quantifier result: {:?}", result);
+    assert!(
+        parse_sql(sql).is_err(),
+        "a zero-width quantifier range must be rejected"
+    );
 }
 
 #[test]
@@ -145,9 +134,10 @@ fn test_invalid_range_quantifier() {
                    PATTERN (A{5,2}) \
                    DEFINE A AS value > 0 \
                )";
-    let result = parse_sql(sql);
-    // This might parse but should be semantically invalid (min > max)
-    println!("Invalid range quantifier result: {:?}", result);
+    assert!(
+        parse_sql(sql).is_err(),
+        "a reversed quantifier range must be rejected"
+    );
 }
 
 #[test]
@@ -159,12 +149,7 @@ fn test_quoted_identifiers() {
                      PATTERN ("weird name"+)
                      DEFINE "weird name" AS value > 0
                  )"#;
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Quoted identifiers should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -176,8 +161,7 @@ fn test_deep_nesting() {
                    PATTERN (((((((((A))))))))) \
                    DEFINE A AS value > 0 \
                )";
-    let result = parse_sql(sql);
-    assert!(result.is_ok(), "Deep nesting should parse: {:?}", result);
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -191,12 +175,7 @@ fn test_multiple_quantifiers() {
                        A AS value = 1, B AS value = 2, C AS value = 3, \
                        D AS value = 4, E AS value = 5, F AS value = 6 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Multiple different quantifiers should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -208,8 +187,7 @@ fn test_exclude_pattern() {
                    PATTERN ({- A -} B+) \
                    DEFINE A AS value = 1, B AS value = 2 \
                )";
-    let result = parse_sql(sql);
-    assert!(result.is_ok(), "EXCLUDE pattern should parse: {:?}", result);
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -221,12 +199,7 @@ fn test_start_end_anchors() {
                    PATTERN (^ A+ $) \
                    DEFINE A AS value > 0 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Start/end anchors should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -243,12 +216,7 @@ fn test_complex_measures() {
                    PATTERN (A+) \
                    DEFINE A AS value > 0 \
                )";
-    let result = parse_sql(sql);
-    assert!(
-        result.is_ok(),
-        "Complex measures should parse: {:?}",
-        result
-    );
+    assert_match_recognize_not_supported(sql);
 }
 
 #[test]
@@ -262,13 +230,7 @@ fn test_all_after_match_skip_options() {
     ];
 
     for sql in sqls {
-        let result = parse_sql(sql);
-        assert!(
-            result.is_ok(),
-            "AFTER MATCH SKIP option should parse: {:?} for SQL: {}",
-            result,
-            sql
-        );
+        assert_match_recognize_not_supported(sql);
     }
 }
 
@@ -283,7 +245,6 @@ fn test_all_rows_per_match_options() {
     ];
 
     for sql in sqls {
-        let result = parse_sql(sql);
-        println!("ROWS PER MATCH test: {:?} for SQL: {}", result, sql);
+        assert_match_recognize_not_supported(sql);
     }
 }

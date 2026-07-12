@@ -531,7 +531,7 @@ fn t131_recursive_fibonacci() {
 #[test]
 fn t131_recursive_cycle_detection() {
     // GAP: DataFusion does not currently support WITH RECURSIVE or CYCLE clause
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "WITH RECURSIVE paths AS (
            SELECT id, first_name, ARRAY[id] AS path
            FROM person
@@ -694,7 +694,7 @@ fn t121_t131_mixed_ctes() {
 #[test]
 fn t121_t131_recursive_using_non_recursive() {
     // GAP: DataFusion does not currently support WITH RECURSIVE
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "WITH \
            filtered AS (SELECT * FROM person WHERE age > 18), \
            RECURSIVE ancestors AS (

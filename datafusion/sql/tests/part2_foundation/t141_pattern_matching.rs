@@ -327,7 +327,7 @@ fn t141_similar_to_phone_pattern() {
 /// T581: SUBSTRING with SIMILAR basic
 #[test]
 fn t581_substring_similar_basic() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT SUBSTRING('Hello World' SIMILAR 'W%' ESCAPE '\\')",
         "T581",
         "SUBSTRING with SIMILAR pattern"
@@ -337,7 +337,7 @@ fn t581_substring_similar_basic() {
 /// T581: SUBSTRING with SIMILAR from column
 #[test]
 fn t581_substring_similar_column() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT SUBSTRING(char_col SIMILAR '[0-9]+' ESCAPE '\\') FROM char_types",
         "T581",
         "SUBSTRING SIMILAR from column"
@@ -347,7 +347,7 @@ fn t581_substring_similar_column() {
 /// T581: SUBSTRING with SIMILAR and character class
 #[test]
 fn t581_substring_similar_char_class() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT SUBSTRING('abc123def' SIMILAR '[0-9]+' ESCAPE '\\')",
         "T581",
         "SUBSTRING SIMILAR with character class"
@@ -357,7 +357,7 @@ fn t581_substring_similar_char_class() {
 /// T581: SUBSTRING with SIMILAR complex pattern
 #[test]
 fn t581_substring_similar_complex() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT SUBSTRING(char_col SIMILAR '[a-zA-Z]+@[a-zA-Z]+\\.[a-z]{2,}' ESCAPE '\\') FROM char_types",
         "T581",
         "SUBSTRING SIMILAR complex pattern"

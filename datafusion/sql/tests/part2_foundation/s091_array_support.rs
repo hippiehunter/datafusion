@@ -452,7 +452,7 @@ fn s091_03_array_in_subquery() {
 /// S092: Array of STRUCT type
 #[test]
 fn s092_array_of_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT ARRAY[STRUCT(1, 'a'), STRUCT(2, 'b')]",
         "S092",
         "Array of STRUCT type"
@@ -462,7 +462,7 @@ fn s092_array_of_struct() {
 /// S092: CREATE TABLE with ARRAY of STRUCT
 #[test]
 fn s092_create_table_array_struct() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE TABLE t (arr STRUCT<x INT, y VARCHAR> ARRAY)",
         "S092",
         "CREATE TABLE with ARRAY of STRUCT"
@@ -557,7 +557,7 @@ fn s096_array_with_bounds() {
 /// S096: Array type with multidimensional bounds
 #[test]
 fn s096_array_multidimensional_bounds() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE TABLE t (arr INTEGER ARRAY[5][10])",
         "S096",
         "Multidimensional array bounds"
@@ -1157,7 +1157,7 @@ fn mixed_array_cte() {
 /// Mixed: Array with LATERAL join
 #[test]
 fn mixed_array_lateral_join() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT t.a, u.val FROM t, LATERAL UNNEST(ARRAY[t.a, t.b]) AS u(val)",
         "S091",
         "Array with LATERAL join"

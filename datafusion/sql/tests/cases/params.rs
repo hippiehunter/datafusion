@@ -174,12 +174,13 @@ fn test_non_prepare_statement_should_infer_types() {
 }
 
 #[test]
-#[should_panic(
-    expected = "Expected: [NOT] NULL | TRUE | FALSE | DISTINCT | [form] NORMALIZED | JSON | DOCUMENT | CONTENT after IS, found: $1"
-)]
 fn test_prepare_statement_to_plan_panic_is_param() {
     let sql = "PREPARE my_plan(INT) AS SELECT id, age  FROM person WHERE age is $1";
-    logical_plan(sql).unwrap();
+    let error = logical_plan(sql).expect_err("IS $1 should be rejected");
+    assert!(
+        error.to_string().contains("after IS, found: $1"),
+        "unexpected parser error: {error}"
+    );
 }
 
 #[test]

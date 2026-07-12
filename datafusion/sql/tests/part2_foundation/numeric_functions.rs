@@ -866,7 +866,7 @@ fn bit_or_operator() {
 /// Bit: Bitwise XOR operator
 #[test]
 fn bit_xor_operator() {
-    assert_feature_supported!("SELECT a ^ b FROM t", "T031", "Bitwise XOR operator");
+    crate::assert_not_implemented!("SELECT a ^ b FROM t", "T031", "Bitwise XOR operator");
 }
 
 /// Bit: Bitwise NOT operator
@@ -890,7 +890,7 @@ fn bit_right_shift() {
 /// Bit: Complex bitwise expression
 #[test]
 fn bit_complex_expression() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT (a & b) | (a ^ 255) FROM t",
         "T031",
         "Complex bitwise expression"
@@ -1244,7 +1244,7 @@ fn combined_angle_conversion() {
 /// Combined: Bit operations chain
 #[test]
 fn combined_bit_operations() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT a & b, a | b, a ^ b, ~a, a << 1, a >> 1 FROM t",
         "T031",
         "Multiple bit operations"

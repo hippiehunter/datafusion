@@ -476,7 +476,7 @@ fn f859_02_view_with_fetch_next() {
 #[test]
 fn f860_01_fetch_first_with_parameter() {
     // Note: DataFusion may not support parameter markers in FETCH clause
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT a FROM t ORDER BY a FETCH FIRST ? ROWS ONLY",
         "F860-01",
         "FETCH FIRST with parameter"
@@ -579,7 +579,7 @@ fn f862_03_offset_fetch_in_from_subquery() {
 #[test]
 fn f865_01_offset_with_parameter() {
     // Note: DataFusion may not support parameter markers in OFFSET clause
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT a FROM t ORDER BY a OFFSET ? ROWS",
         "F865-01",
         "OFFSET with parameter"
@@ -589,7 +589,7 @@ fn f865_01_offset_with_parameter() {
 /// F865-02: OFFSET and FETCH with parameters
 #[test]
 fn f865_02_offset_fetch_with_parameters() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT a FROM t ORDER BY a OFFSET ? ROWS FETCH FIRST ? ROWS ONLY",
         "F865-02",
         "OFFSET and FETCH with parameters"

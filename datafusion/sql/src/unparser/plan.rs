@@ -908,6 +908,16 @@ impl Unparser<'_> {
                                     "mark",
                                 ))?;
                                 select.replace_mark(&column, &exists_expr);
+                                // Mark columns produced by the logical-plan
+                                // builder may be unqualified even when the
+                                // marked input has a relation qualifier.
+                                // Replace that representation as well rather
+                                // than emitting a synthetic `mark` reference.
+                                let unqualified_mark =
+                                    self.col_to_sql(&Column::new_unqualified("mark"))?;
+                                if unqualified_mark != column {
+                                    select.replace_mark(&unqualified_mark, &exists_expr);
+                                }
                             }
                             _ => {
                                 select.selection(Some(exists_expr));

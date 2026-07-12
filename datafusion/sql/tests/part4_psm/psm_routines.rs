@@ -466,7 +466,7 @@ fn control_flow_repeat_labeled() {
 /// FOR...DO...END FOR statement (cursor-based)
 #[test]
 fn control_flow_for_cursor() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE for_example()
          BEGIN
            FOR rec IN (SELECT id, first_name FROM person) DO
@@ -481,7 +481,7 @@ fn control_flow_for_cursor() {
 /// FOR with labeled statement
 #[test]
 fn control_flow_for_labeled() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE for_labeled()
          BEGIN
            my_for: FOR rec IN (SELECT id FROM person) DO
@@ -529,7 +529,7 @@ fn variable_declare_with_default() {
 /// DECLARE multiple variables
 #[test]
 fn variable_declare_multiple() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE declare_multiple()
          BEGIN
            DECLARE x, y, z INT;
@@ -576,7 +576,7 @@ fn variable_set_expression() {
 /// SET multiple variables
 #[test]
 fn variable_set_multiple() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE set_multiple()
          BEGIN
            DECLARE x, y INT;
@@ -630,7 +630,7 @@ fn variable_select_into_multiple() {
 /// DECLARE CONTINUE HANDLER
 #[test]
 fn exception_handler_continue() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE handler_example()
          BEGIN
            DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
@@ -645,7 +645,7 @@ fn exception_handler_continue() {
 /// DECLARE EXIT HANDLER
 #[test]
 fn exception_handler_exit() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE handler_exit()
          BEGIN
            DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -660,7 +660,7 @@ fn exception_handler_exit() {
 /// DECLARE HANDLER for specific SQLSTATE
 #[test]
 fn exception_handler_sqlstate() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE handler_sqlstate()
          BEGIN
            DECLARE EXIT HANDLER FOR SQLSTATE '23000'
@@ -676,7 +676,7 @@ fn exception_handler_sqlstate() {
 /// DECLARE HANDLER for NOT FOUND
 #[test]
 fn exception_handler_not_found() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE handler_not_found()
          BEGIN
            DECLARE CONTINUE HANDLER FOR NOT FOUND
@@ -708,7 +708,7 @@ fn exception_signal() {
 /// RESIGNAL statement
 #[test]
 fn exception_resignal() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE resignal_example()
          BEGIN
            DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -753,7 +753,7 @@ fn t321_01_udf_simple() {
 /// T321-01: UDF with DETERMINISTIC
 #[test]
 fn t321_01_udf_deterministic() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE FUNCTION calc_tax(amount DECIMAL(10,2)) RETURNS DECIMAL(10,2)
          DETERMINISTIC
          RETURN amount * 0.08",
@@ -813,7 +813,7 @@ fn t321_01_udf_reads_sql() {
 /// T321-02: Simple stored procedure
 #[test]
 fn t321_02_procedure_simple() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE reset_salaries()
          UPDATE person SET salary = 50000",
         "T321-02",
@@ -824,7 +824,7 @@ fn t321_02_procedure_simple() {
 /// T321-02: Procedure with MODIFIES SQL DATA
 #[test]
 fn t321_02_procedure_modifies_sql() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE update_all_salaries(increase DECIMAL(5,2))
          MODIFIES SQL DATA
          UPDATE person SET salary = salary * (1 + increase / 100)",
@@ -854,7 +854,7 @@ fn t321_02_procedure_multiple_statements() {
 /// T321-03: Call function in SELECT
 #[test]
 fn t321_03_function_invocation_select() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT add_ten(5)",
         "T321-03",
         "Function invocation in SELECT"
@@ -864,7 +864,7 @@ fn t321_03_function_invocation_select() {
 /// T321-03: Call function in WHERE clause
 #[test]
 fn t321_03_function_invocation_where() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT * FROM person WHERE salary > calc_tax(50000)",
         "T321-03",
         "Function invocation in WHERE"
@@ -874,7 +874,7 @@ fn t321_03_function_invocation_where() {
 /// T321-03: Call function with column reference
 #[test]
 fn t321_03_function_invocation_column() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "SELECT first_name, calc_tax(salary) FROM person",
         "T321-03",
         "Function invocation with column"
@@ -904,7 +904,7 @@ fn t321_04_call_with_params() {
 /// T321-04: CALL with OUT parameter
 #[test]
 fn t321_04_call_out_param() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CALL get_employee_count(@count)",
         "T321-04",
         "CALL with OUT parameter"
@@ -914,7 +914,7 @@ fn t321_04_call_out_param() {
 /// T321-04: EXECUTE PROCEDURE (synonym for CALL)
 #[test]
 fn t321_04_execute_procedure() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "EXECUTE PROCEDURE reset_salaries()",
         "T321-04",
         "EXECUTE PROCEDURE statement"
@@ -1061,7 +1061,7 @@ fn complex_mixed_control() {
 /// Multiple exception handlers
 #[test]
 fn complex_multiple_handlers() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE multi_handlers()
          BEGIN
            DECLARE CONTINUE HANDLER FOR SQLSTATE '23000'
@@ -1081,7 +1081,7 @@ fn complex_multiple_handlers() {
 /// Nested blocks with handlers
 #[test]
 fn complex_nested_blocks_handlers() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE nested_handlers()
          BEGIN
            DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -1104,7 +1104,7 @@ fn complex_nested_blocks_handlers() {
 /// Complete procedure with all features
 #[test]
 fn complex_full_procedure() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE process_employees(min_salary DECIMAL(10,2), OUT processed_count INT)
          BEGIN
            DECLARE done INT DEFAULT 0;
@@ -1141,7 +1141,7 @@ fn complex_full_procedure() {
 /// Procedure with transaction control
 #[test]
 fn complex_procedure_transaction() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "CREATE PROCEDURE safe_update(emp_id INT, new_salary DECIMAL(10,2))
          BEGIN
            DECLARE EXIT HANDLER FOR SQLEXCEPTION

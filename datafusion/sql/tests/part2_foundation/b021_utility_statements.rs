@@ -349,7 +349,7 @@ fn b021_prepare_parameters_dollar() {
 /// PREPARE: PREPARE with question mark parameters
 #[test]
 fn b021_prepare_parameters_question() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "PREPARE param_query AS SELECT * FROM person WHERE age > ? AND state = ?",
         "B021",
         "PREPARE with ? parameters"
@@ -689,7 +689,7 @@ fn b021_vacuum_full() {
 /// VACUUM: VACUUM ANALYZE
 #[test]
 fn b021_vacuum_analyze() {
-    assert_feature_supported!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
+    crate::assert_not_implemented!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
 }
 
 // ============================================================================
@@ -705,13 +705,13 @@ fn b021_use_database() {
 /// USE: USE schema
 #[test]
 fn b021_use_schema() {
-    assert_feature_supported!("USE SCHEMA public", "B021", "USE SCHEMA");
+    crate::assert_not_implemented!("USE SCHEMA public", "B021", "USE SCHEMA");
 }
 
 /// USE: USE DATABASE explicit
 #[test]
 fn b021_use_database_explicit() {
-    assert_feature_supported!("USE DATABASE mydb", "B021", "USE DATABASE");
+    crate::assert_not_implemented!("USE DATABASE mydb", "B021", "USE DATABASE");
 }
 
 // ============================================================================

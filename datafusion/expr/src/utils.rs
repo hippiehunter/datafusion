@@ -384,21 +384,20 @@ fn exclude_using_columns(plan: &LogicalPlan) -> Result<HashSet<Column>> {
         .flat_map(|uc| {
             let mut cols = uc.columns.into_iter().collect::<Vec<_>>();
             cols.sort();
-            let preferred = uc.preferred;
-            let mut out_column_names: HashSet<String> = HashSet::new();
-            cols.into_iter().filter_map(move |c| {
-                if out_column_names.contains(&c.name) {
-                    Some(c)
-                } else {
-                    out_column_names.insert(c.name.clone());
-                    if let Some(ref pref) = preferred {
-                        if c != *pref {
-                            return Some(c);
-                        }
-                    }
-                    None
-                }
-            })
+            if let Some(preferred) = uc.preferred {
+                // RIGHT USING/NATURAL joins must retain the right-side
+                // coalesced column. The generic first-column rule would
+                // otherwise exclude both the earlier non-preferred column
+                // and the later preferred one.
+                cols.into_iter()
+                    .filter(|column| column != &preferred)
+                    .collect::<Vec<_>>()
+            } else {
+                let mut output_column_names: HashSet<String> = HashSet::new();
+                cols.into_iter()
+                    .filter(|column| !output_column_names.insert(column.name.clone()))
+                    .collect::<Vec<_>>()
+            }
         })
         .collect::<HashSet<_>>();
     Ok(excluded)

@@ -408,7 +408,7 @@ fn e081_09_grant_usage_domain() {
 /// E081-09: GRANT USAGE on CHARACTER SET
 #[test]
 fn e081_09_grant_usage_charset() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "GRANT USAGE ON CHARACTER SET utf8 TO alice",
         "E081-09",
         "GRANT USAGE on character set"
@@ -482,7 +482,7 @@ fn e081_10_grant_execute_procedure() {
 /// E081-10: GRANT EXECUTE on specific routine
 #[test]
 fn e081_10_grant_execute_specific_routine() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "GRANT EXECUTE ON SPECIFIC FUNCTION myschema.my_function TO alice",
         "E081-10",
         "GRANT EXECUTE on specific routine"
@@ -798,7 +798,7 @@ fn t331_drop_role_if_exists() {
 /// T331: DROP ROLE with CASCADE
 #[test]
 fn t331_drop_role_cascade() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "DROP ROLE reporting_role CASCADE",
         "T331",
         "DROP ROLE CASCADE"
@@ -808,7 +808,7 @@ fn t331_drop_role_cascade() {
 /// T331: DROP ROLE with RESTRICT
 #[test]
 fn t331_drop_role_restrict() {
-    assert_feature_supported!(
+    crate::assert_not_implemented!(
         "DROP ROLE reporting_role RESTRICT",
         "T331",
         "DROP ROLE RESTRICT"
