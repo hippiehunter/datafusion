@@ -41,12 +41,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// If false, interpret numeric literals as constant values.
     pub(crate) fn order_by_to_sort_expr(
         &self,
-        order_by_exprs: Vec<OrderByExpr>,
+        order_by_exprs: impl AsRef<[OrderByExpr]>,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
         literal_to_column: bool,
         additional_schema: Option<&DFSchema>,
     ) -> Result<Vec<SortExpr>> {
+        let order_by_exprs = order_by_exprs.as_ref();
         if order_by_exprs.is_empty() {
             return Ok(vec![]);
         }
@@ -112,7 +113,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.sql_expr_to_logical_expr(e, order_by_schema, planner_context)?
                 }
             };
-            sort_expr_vec.push(make_sort_expr(expr, asc, nulls_first));
+            sort_expr_vec.push(make_sort_expr(expr, *asc, *nulls_first));
         }
 
         Ok(sort_expr_vec)

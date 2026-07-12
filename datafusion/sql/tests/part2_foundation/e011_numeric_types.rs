@@ -32,7 +32,7 @@
 //!
 //! All E011 subfeatures are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // E011-01: INTEGER and SMALLINT data types
@@ -51,11 +51,7 @@ fn e011_01_integer_column() {
 /// E011-01: INT abbreviation for INTEGER
 #[test]
 fn e011_01_int_abbreviation() {
-    assert_feature_supported!(
-        "CREATE TABLE t (x INT)",
-        "E011-01",
-        "INT abbreviation"
-    );
+    assert_feature_supported!("CREATE TABLE t (x INT)", "E011-01", "INT abbreviation");
 }
 
 /// E011-01: SMALLINT data type in column definition
@@ -71,21 +67,13 @@ fn e011_01_smallint_column() {
 /// E011-01: INTEGER literal in SELECT
 #[test]
 fn e011_01_integer_literal() {
-    assert_feature_supported!(
-        "SELECT 42",
-        "E011-01",
-        "INTEGER literal"
-    );
+    assert_feature_supported!("SELECT 42", "E011-01", "INTEGER literal");
 }
 
 /// E011-01: Negative integer literal
 #[test]
 fn e011_01_negative_integer() {
-    assert_feature_supported!(
-        "SELECT -42",
-        "E011-01",
-        "Negative integer literal"
-    );
+    assert_feature_supported!("SELECT -42", "E011-01", "Negative integer literal");
 }
 
 // ============================================================================
@@ -95,11 +83,7 @@ fn e011_01_negative_integer() {
 /// E011-02: REAL data type in column definition
 #[test]
 fn e011_02_real_column() {
-    assert_feature_supported!(
-        "CREATE TABLE t (x REAL)",
-        "E011-02",
-        "REAL data type"
-    );
+    assert_feature_supported!("CREATE TABLE t (x REAL)", "E011-02", "REAL data type");
 }
 
 /// E011-02: DOUBLE PRECISION data type in column definition
@@ -125,11 +109,7 @@ fn e011_02_double_abbreviation() {
 /// E011-02: FLOAT data type in column definition
 #[test]
 fn e011_02_float_column() {
-    assert_feature_supported!(
-        "CREATE TABLE t (x FLOAT)",
-        "E011-02",
-        "FLOAT data type"
-    );
+    assert_feature_supported!("CREATE TABLE t (x FLOAT)", "E011-02", "FLOAT data type");
 }
 
 /// E011-02: FLOAT with precision
@@ -145,21 +125,13 @@ fn e011_02_float_with_precision() {
 /// E011-02: Floating-point literal
 #[test]
 fn e011_02_float_literal() {
-    assert_feature_supported!(
-        "SELECT 3.14159",
-        "E011-02",
-        "Floating-point literal"
-    );
+    assert_feature_supported!("SELECT 3.14159", "E011-02", "Floating-point literal");
 }
 
 /// E011-02: Scientific notation literal
 #[test]
 fn e011_02_scientific_notation() {
-    assert_feature_supported!(
-        "SELECT 1.23E10",
-        "E011-02",
-        "Scientific notation"
-    );
+    assert_feature_supported!("SELECT 1.23E10", "E011-02", "Scientific notation");
 }
 
 // ============================================================================
@@ -224,71 +196,43 @@ fn e011_03_dec_abbreviation() {
 /// E011-04: Addition operator
 #[test]
 fn e011_04_addition() {
-    assert_feature_supported!(
-        "SELECT 1 + 2",
-        "E011-04",
-        "Addition operator"
-    );
+    assert_feature_supported!("SELECT 1 + 2", "E011-04", "Addition operator");
 }
 
 /// E011-04: Subtraction operator
 #[test]
 fn e011_04_subtraction() {
-    assert_feature_supported!(
-        "SELECT 5 - 3",
-        "E011-04",
-        "Subtraction operator"
-    );
+    assert_feature_supported!("SELECT 5 - 3", "E011-04", "Subtraction operator");
 }
 
 /// E011-04: Multiplication operator
 #[test]
 fn e011_04_multiplication() {
-    assert_feature_supported!(
-        "SELECT 4 * 3",
-        "E011-04",
-        "Multiplication operator"
-    );
+    assert_feature_supported!("SELECT 4 * 3", "E011-04", "Multiplication operator");
 }
 
 /// E011-04: Division operator
 #[test]
 fn e011_04_division() {
-    assert_feature_supported!(
-        "SELECT 10 / 2",
-        "E011-04",
-        "Division operator"
-    );
+    assert_feature_supported!("SELECT 10 / 2", "E011-04", "Division operator");
 }
 
 /// E011-04: Modulo operator (standard uses MOD function, but % is common)
 #[test]
 fn e011_04_modulo() {
-    assert_feature_supported!(
-        "SELECT 10 % 3",
-        "E011-04",
-        "Modulo operator"
-    );
+    assert_feature_supported!("SELECT 10 % 3", "E011-04", "Modulo operator");
 }
 
 /// E011-04: Unary plus
 #[test]
 fn e011_04_unary_plus() {
-    assert_feature_supported!(
-        "SELECT +42",
-        "E011-04",
-        "Unary plus"
-    );
+    assert_feature_supported!("SELECT +42", "E011-04", "Unary plus");
 }
 
 /// E011-04: Unary minus
 #[test]
 fn e011_04_unary_minus() {
-    assert_feature_supported!(
-        "SELECT -42",
-        "E011-04",
-        "Unary minus"
-    );
+    assert_feature_supported!("SELECT -42", "E011-04", "Unary minus");
 }
 
 /// E011-04: Arithmetic with columns
@@ -446,21 +390,13 @@ fn e011_06_literal_decimal_comparison() {
 /// T071: BIGINT data type (optional feature, but widely used)
 #[test]
 fn t071_bigint_column() {
-    assert_feature_supported!(
-        "CREATE TABLE t (x BIGINT)",
-        "T071",
-        "BIGINT data type"
-    );
+    assert_feature_supported!("CREATE TABLE t (x BIGINT)", "T071", "BIGINT data type");
 }
 
 /// T071: BIGINT literal (large number)
 #[test]
 fn t071_bigint_literal() {
-    assert_feature_supported!(
-        "SELECT 9223372036854775807",
-        "T071",
-        "BIGINT literal"
-    );
+    assert_feature_supported!("SELECT 9223372036854775807", "T071", "BIGINT literal");
 }
 
 // ============================================================================
@@ -473,7 +409,8 @@ fn e011_summary_all_subfeatures() {
     // in a realistic scenario
 
     // Create table with all numeric types
-    assert_plans!("CREATE TABLE all_nums (
+    assert_plans!(
+        "CREATE TABLE all_nums (
         int_col INTEGER,
         small_col SMALLINT,
         big_col BIGINT,
@@ -482,7 +419,8 @@ fn e011_summary_all_subfeatures() {
         float_col FLOAT,
         decimal_col DECIMAL(10, 2),
         numeric_col NUMERIC(8, 4)
-    )");
+    )"
+    );
 
     // Query with arithmetic and comparisons using the numeric_types table columns
     assert_plans!(

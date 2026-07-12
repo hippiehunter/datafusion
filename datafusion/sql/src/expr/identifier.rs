@@ -23,7 +23,7 @@ use datafusion_common::{
 };
 use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{Case, Expr, expr::ScalarFunction};
-use sqlparser::ast::{CaseWhen, Expr as SQLExpr, Ident};
+use sqlparser::ast::{AstBox as SQLBox, CaseWhen, Expr as SQLExpr, Ident};
 use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -32,14 +32,14 @@ use datafusion_expr::UNNAMED_TABLE;
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn sql_identifier_to_expr(
         &self,
-        id: Ident,
+        id: &Ident,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let id_span = id.span;
         if id.value.starts_with('@') {
             // TODO: figure out if ScalarVariables should be insensitive.
-            let var_names = vec![id.value];
+            let var_names = vec![id.value.clone()];
             let field = self
                 .context_provider
                 .get_variable_field(&var_names)
@@ -57,7 +57,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // interpret names with '.' as if they were
             // compound identifiers, but this is not a compound
             // identifier. (e.g. it is "foo.bar" not foo.bar)
-            let normalize_ident = self.ident_normalizer.normalize(id);
+            let normalize_ident = self.ident_normalizer.normalize(id.clone());
 
             // Check for qualified field with unqualified name
             if let Ok((qualifier, _)) =
@@ -144,7 +144,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(crate) fn sql_compound_identifier_to_expr(
         &self,
-        ids: Vec<Ident>,
+        ids: &[Ident],
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -157,7 +157,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         if ids[0].value.starts_with('@') {
             let var_names: Vec<_> = ids
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|id| self.ident_normalizer.normalize(id))
                 .collect();
             let field = self
@@ -174,7 +175,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Ok(Expr::ScalarVariable(field, var_names))
         } else {
             let ids = ids
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|id| self.ident_normalizer.normalize(id))
                 .collect::<Vec<_>>();
 
@@ -264,15 +266,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn sql_case_identifier_to_expr(
         &self,
-        operand: Option<Box<SQLExpr>>,
-        conditions: Vec<CaseWhen>,
-        else_result: Option<Box<SQLExpr>>,
+        operand: Option<&SQLBox<SQLExpr>>,
+        conditions: &[CaseWhen],
+        else_result: Option<&SQLBox<SQLExpr>>,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let expr = if let Some(e) = operand {
             Some(Box::new(self.sql_expr_to_logical_expr(
-                *e,
+                e.as_ref(),
                 schema,
                 planner_context,
             )?))
@@ -280,16 +282,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             None
         };
         let when_then_expr = conditions
-            .into_iter()
+            .iter()
             .map(|e| {
                 Ok((
                     Box::new(self.sql_expr_to_logical_expr(
-                        e.condition,
+                        &e.condition,
                         schema,
                         planner_context,
                     )?),
                     Box::new(self.sql_expr_to_logical_expr(
-                        e.result,
+                        &e.result,
                         schema,
                         planner_context,
                     )?),
@@ -298,7 +300,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .collect::<Result<Vec<_>>>()?;
         let else_expr = if let Some(e) = else_result {
             Some(Box::new(self.sql_expr_to_logical_expr(
-                *e,
+                e.as_ref(),
                 schema,
                 planner_context,
             )?))

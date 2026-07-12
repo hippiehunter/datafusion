@@ -535,7 +535,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 .with_name(self.ident_normalizer.normalize(column.name))
                 .with_nullable(!not_nullable);
 
-            let identity_meta = extract_identity_metadata(&column.options, &column.data_type);
+            let identity_meta =
+                extract_identity_metadata(&column.options, &column.data_type);
             if !identity_meta.is_empty() {
                 let mut metadata = field.metadata().clone();
                 metadata.extend(identity_meta);
@@ -742,11 +743,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             && let Some(data_type) = type_planner.plan_type(sql_type)?
         {
             let field: Field = data_type.into_nullable_field();
-            let field = if let Some(metadata) = type_planner.plan_field_metadata(sql_type)? {
-                field.with_metadata(metadata)
-            } else {
-                field
-            };
+            let field =
+                if let Some(metadata) = type_planner.plan_field_metadata(sql_type)? {
+                    field.with_metadata(metadata)
+                } else {
+                    field
+                };
             return Ok(Arc::new(field));
         }
 
@@ -1239,9 +1241,7 @@ fn extract_identity_metadata(
     options: &[ColumnOptionDef],
     data_type: &SQLDataType,
 ) -> HashMap<String, String> {
-    use sqlparser::ast::{
-        GeneratedAs, IdentityPropertyFormatKind, IdentityPropertyKind,
-    };
+    use sqlparser::ast::{GeneratedAs, IdentityPropertyFormatKind, IdentityPropertyKind};
 
     let mut meta = HashMap::new();
 
@@ -1272,7 +1272,8 @@ fn extract_identity_metadata(
                     GeneratedAs::Always | GeneratedAs::ByDefault
                 ) =>
             {
-                let (start, increment) = parse_sequence_options(sequence_options.as_deref());
+                let (start, increment) =
+                    parse_sequence_options(sequence_options.as_deref());
                 meta.insert("identity_start".to_string(), start.to_string());
                 meta.insert("identity_increment".to_string(), increment.to_string());
                 let gen_kind = match generated_as {
@@ -1285,9 +1286,8 @@ fn extract_identity_metadata(
             }
             ColumnOption::Identity(identity_kind) => {
                 let property = match identity_kind {
-                    IdentityPropertyKind::Identity(p) | IdentityPropertyKind::Autoincrement(p) => {
-                        p
-                    }
+                    IdentityPropertyKind::Identity(p)
+                    | IdentityPropertyKind::Autoincrement(p) => p,
                 };
                 let (start, increment) = match &property.parameters {
                     Some(
@@ -1308,10 +1308,7 @@ fn extract_identity_metadata(
                 generated_as: GeneratedAs::ExpStored,
                 ..
             } => {
-                meta.insert(
-                    "generated_stored_expr".to_string(),
-                    expr.to_string(),
-                );
+                meta.insert("generated_stored_expr".to_string(), expr.to_string());
                 return meta;
             }
             _ => {}
@@ -1321,7 +1318,9 @@ fn extract_identity_metadata(
     meta
 }
 
-fn parse_sequence_options(options: Option<&[sqlparser::ast::SequenceOptions]>) -> (i64, i64) {
+fn parse_sequence_options(
+    options: Option<&[sqlparser::ast::SequenceOptions]>,
+) -> (i64, i64) {
     let mut start = 1i64;
     let mut increment = 1i64;
     if let Some(options) = options {
@@ -1346,12 +1345,14 @@ fn parse_sequence_options(options: Option<&[sqlparser::ast::SequenceOptions]>) -
 
 fn expr_to_i64(expr: &sqlparser::ast::Expr) -> Result<i64> {
     match expr {
-        sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan { value, .. }) => match value {
-            sqlparser::ast::Value::Number(n, _) => n
-                .parse::<i64>()
-                .map_err(|e| plan_datafusion_err!("Invalid identity value: {e}")),
-            _ => plan_err!("Expected numeric identity value"),
-        },
+        sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan { value, .. }) => {
+            match value {
+                sqlparser::ast::Value::Number(n, _) => n
+                    .parse::<i64>()
+                    .map_err(|e| plan_datafusion_err!("Invalid identity value: {e}")),
+                _ => plan_err!("Expected numeric identity value"),
+            }
+        }
         sqlparser::ast::Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Minus,
             expr,

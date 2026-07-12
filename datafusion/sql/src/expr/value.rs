@@ -168,11 +168,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn sql_array_literal(
         &self,
-        elements: Vec<SQLExpr>,
+        elements: &[SQLExpr],
         schema: &DFSchema,
     ) -> Result<Expr> {
         let values = elements
-            .into_iter()
+            .iter()
             .map(|element| {
                 self.sql_expr_to_logical_expr(element, schema, &mut PlannerContext::new())
             })
@@ -207,7 +207,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn sql_interval_to_expr(
         &self,
         negative: bool,
-        interval: Interval,
+        interval: &Interval,
     ) -> Result<Expr> {
         if interval.leading_precision.is_some() {
             return not_impl_err!(
@@ -220,7 +220,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let (Some(leading), Some(last)) =
             (&interval.leading_field, &interval.last_field)
         {
-            let raw_value = interval_literal(*interval.value, negative)?;
+            let raw_value = interval_literal(interval.value.as_ref(), negative)?;
             let compound_value = parse_compound_interval(&raw_value, leading, last)?;
             let config = IntervalParseConfig::new(IntervalUnit::Second);
             let val = parse_interval_month_day_nano_config(&compound_value, config)?;
@@ -234,7 +234,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             );
         }
 
-        if let SQLExpr::BinaryOp { left, op, right } = *interval.value {
+        let interval_value = interval.value.as_ref();
+        if let SQLExpr::BinaryOp { left, op, right } = interval_value {
             let df_op = match op {
                 BinaryOperator::Plus => Operator::Plus,
                 BinaryOperator::Minus => Operator::Minus,
@@ -242,25 +243,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     return not_impl_err!("Unsupported interval operator: {op:?}");
                 }
             };
-            let left_expr = self.sql_interval_to_expr(
+            let left_expr = self.sql_interval_value_to_expr(
                 negative,
-                Interval {
-                    value: left,
-                    leading_field: interval.leading_field.clone(),
-                    leading_precision: None,
-                    last_field: None,
-                    fractional_seconds_precision: None,
-                },
+                left.as_ref(),
+                interval.leading_field.as_ref(),
             )?;
-            let right_expr = self.sql_interval_to_expr(
+            let right_expr = self.sql_interval_value_to_expr(
                 false,
-                Interval {
-                    value: right,
-                    leading_field: interval.leading_field,
-                    leading_precision: None,
-                    last_field: None,
-                    fractional_seconds_precision: None,
-                },
+                right.as_ref(),
+                interval.leading_field.as_ref(),
             )?;
             return Ok(Expr::BinaryExpr(BinaryExpr::new(
                 Box::new(left_expr),
@@ -269,11 +260,41 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             )));
         }
 
-        let value = interval_literal(*interval.value, negative)?;
+        self.sql_interval_value_to_expr(
+            negative,
+            interval_value,
+            interval.leading_field.as_ref(),
+        )
+    }
+
+    fn sql_interval_value_to_expr(
+        &self,
+        negative: bool,
+        interval_value: &SQLExpr,
+        leading_field: Option<&DateTimeField>,
+    ) -> Result<Expr> {
+        if let SQLExpr::BinaryOp { left, op, right } = interval_value {
+            let df_op = match op {
+                BinaryOperator::Plus => Operator::Plus,
+                BinaryOperator::Minus => Operator::Minus,
+                _ => return not_impl_err!("Unsupported interval operator: {op:?}"),
+            };
+            let left_expr =
+                self.sql_interval_value_to_expr(negative, left.as_ref(), leading_field)?;
+            let right_expr =
+                self.sql_interval_value_to_expr(false, right.as_ref(), leading_field)?;
+            return Ok(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(left_expr),
+                df_op,
+                Box::new(right_expr),
+            )));
+        }
+
+        let value = interval_literal(interval_value, negative)?;
 
         // leading_field really means the unit if specified
         // For example, "month" in  `INTERVAL '5' month`
-        let value = match interval.leading_field.as_ref() {
+        let value = match leading_field {
             Some(leading_field) => format!("{value} {leading_field}"),
             None => value,
         };
@@ -285,17 +306,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 }
 
-fn interval_literal(interval_value: SQLExpr, negative: bool) -> Result<String> {
+fn interval_literal(interval_value: &SQLExpr, negative: bool) -> Result<String> {
     let s = match interval_value {
         SQLExpr::Value(ValueWithSpan {
             value: Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
             span: _,
-        }) => s,
+        }) => s.clone(),
         SQLExpr::Value(ValueWithSpan {
-            value: Value::Number(ref v, long),
+            value: Value::Number(v, long),
             span: _,
         }) => {
-            if long {
+            if *long {
                 return not_impl_err!(
                     "Unsupported interval argument. Long number not supported: {interval_value:?}"
                 );
@@ -313,7 +334,7 @@ fn interval_literal(interval_value: SQLExpr, negative: bool) -> Result<String> {
                     );
                 }
             };
-            interval_literal(*expr, negative)?
+            interval_literal(expr.as_ref(), negative)?
         }
         _ => {
             return not_impl_err!(

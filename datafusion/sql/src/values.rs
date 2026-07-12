@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -26,28 +27,23 @@ use sqlparser::ast::{
 };
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
-    pub(super) fn sql_values_to_plan(
+    pub(super) fn sql_values_to_plan_ref(
         &self,
-        values: SQLValues,
+        values: &SQLValues,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        let SQLValues {
-            explicit_row: _,
-            rows,
-            ..
-        } = values;
-
         let empty_schema = Arc::new(DFSchema::empty());
         let defaults = planner_context.take_values_defaults();
         let table_schema = planner_context.table_schema();
-        let values = rows
-            .into_iter()
+        let values = values
+            .rows
+            .iter()
             .map(|row| {
-                row.into_iter()
+                row.iter()
                     .enumerate()
                     .map(|(idx, v)| {
                         if let (Some(defaults), SQLExpr::Identifier(ident)) =
-                            (defaults.as_ref(), &v)
+                            (defaults.as_ref(), v)
                         {
                             if is_default_identifier(ident) {
                                 let default_expr = defaults
@@ -61,16 +57,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             .as_ref()
                             .and_then(|s| s.fields().get(idx))
                             .map(|f| f.data_type());
-                        let v = maybe_rewrite_pg_array_literal(v, target_type);
-                        self.sql_to_expr(v, &empty_schema, planner_context)
+                        let v = maybe_rewrite_pg_array_literal_ref(v, target_type);
+                        self.sql_to_expr_ref(v.as_ref(), &empty_schema, planner_context)
                     })
                     .collect::<Result<Vec<_>>>()
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let schema = planner_context
-            .table_schema()
-            .unwrap_or(empty_schema);
+        let schema = planner_context.table_schema().unwrap_or(empty_schema);
         if schema.fields().is_empty() {
             LogicalPlanBuilder::values(values)?.build()
         } else {
@@ -86,30 +80,30 @@ fn is_default_identifier(ident: &Ident) -> bool {
 /// Rewrite a PostgreSQL-style array literal (`'{1,2,3}'`) to `SQLExpr::Array`
 /// when the target column is a List type. This allows the downstream planner
 /// to handle array construction with proper type information.
-pub(crate) fn maybe_rewrite_pg_array_literal(
-    expr: SQLExpr,
+pub(crate) fn maybe_rewrite_pg_array_literal_ref<'a>(
+    expr: &'a SQLExpr,
     target_type: Option<&DataType>,
-) -> SQLExpr {
+) -> Cow<'a, SQLExpr> {
     let is_list = matches!(
         target_type,
         Some(DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _))
     );
     if !is_list {
-        return expr;
+        return Cow::Borrowed(expr);
     }
     if let SQLExpr::Value(ValueWithSpan {
-        value: Value::SingleQuotedString(ref s),
+        value: Value::SingleQuotedString(s),
         ..
     }) = expr
     {
         let trimmed = s.trim();
         if trimmed.starts_with('{') && trimmed.ends_with('}') && trimmed.len() >= 2 {
             if let Some(array_expr) = parse_pg_array_literal_to_sql_array(trimmed) {
-                return array_expr;
+                return Cow::Owned(array_expr);
             }
         }
     }
-    expr
+    Cow::Borrowed(expr)
 }
 
 /// Parse a PostgreSQL array literal string like `{1,2,3}` or `{"tag1","tag2"}`

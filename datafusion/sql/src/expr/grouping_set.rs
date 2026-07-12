@@ -24,14 +24,14 @@ use sqlparser::ast::Expr as SQLExpr;
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn sql_grouping_sets_to_expr(
         &self,
-        exprs: Vec<Vec<SQLExpr>>,
+        exprs: &[Vec<SQLExpr>],
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let args: Result<Vec<Vec<_>>> = exprs
-            .into_iter()
+            .iter()
             .map(|v| {
-                v.into_iter()
+                v.iter()
                     .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
                     .collect()
             })
@@ -41,19 +41,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn sql_rollup_to_expr(
         &self,
-        exprs: Vec<Vec<SQLExpr>>,
+        exprs: &[Vec<SQLExpr>],
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let args: Result<Vec<_>> = exprs
-            .into_iter()
+            .iter()
             .map(|v| {
                 if v.len() != 1 {
                     plan_err!(
                         "Tuple expressions are not supported for Rollup expressions"
                     )
                 } else {
-                    self.sql_expr_to_logical_expr(v[0].clone(), schema, planner_context)
+                    self.sql_expr_to_logical_expr(&v[0], schema, planner_context)
                 }
             })
             .collect();
@@ -62,17 +62,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn sql_cube_to_expr(
         &self,
-        exprs: Vec<Vec<SQLExpr>>,
+        exprs: &[Vec<SQLExpr>],
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let args: Result<Vec<_>> = exprs
-            .into_iter()
+            .iter()
             .map(|v| {
                 if v.len() != 1 {
                     plan_err!("Tuple expressions not are supported for Cube expressions")
                 } else {
-                    self.sql_expr_to_logical_expr(v[0].clone(), schema, planner_context)
+                    self.sql_expr_to_logical_expr(&v[0], schema, planner_context)
                 }
             })
             .collect();

@@ -23,7 +23,7 @@
 use datafusion_common::DataFusionError;
 use datafusion_common::config::SqlParserOptions;
 use datafusion_common::{Diagnostic, Span, sql_err};
-use sqlparser::ast::{ExprWithAlias, Ident, OrderByOptions};
+use sqlparser::ast::{AstBox as SQLBox, ExprWithAlias, Ident, OrderByOptions};
 use sqlparser::tokenizer::TokenWithSpan;
 use sqlparser::{
     ast::{
@@ -485,7 +485,7 @@ impl<'a> DFParserBuilder<'a> {
 /// Helper enum for parsing COPY statements
 enum CopySource {
     Table(ObjectName),
-    Query(Box<Query>),
+    Query(SQLBox<Query>),
 }
 
 impl<'a> DFParser<'a> {
@@ -667,7 +667,6 @@ impl<'a> DFParser<'a> {
             })
     }
 
-
     /// Parse a SQL `COPY TO` or `COPY FROM` statement
     pub fn parse_copy(&mut self) -> Result<Statement, DataFusionError> {
         // First, parse the table name or query
@@ -687,9 +686,9 @@ impl<'a> DFParser<'a> {
             let table_name = self.parser.parse_object_name(true)?;
             // Check if there's a column list
             let columns = if self.parser.consume_token(&Token::LParen) {
-                let cols = self.parser.parse_comma_separated(|p| {
-                    Ok(p.parse_identifier()?.value)
-                })?;
+                let cols = self
+                    .parser
+                    .parse_comma_separated(|p| Ok(p.parse_identifier()?.value))?;
                 self.parser.expect_token(&Token::RParen)?;
                 cols
             } else {
@@ -706,7 +705,7 @@ impl<'a> DFParser<'a> {
 
         // Must be COPY TO
         let source = match table_or_query {
-            CopySource::Query(q) => CopyToSource::Query(q),
+            CopySource::Query(q) => CopyToSource::Query(Box::new(SQLBox::into_owned(q))),
             CopySource::Table(t) => CopyToSource::Relation(t),
         };
 
@@ -822,10 +821,10 @@ impl<'a> DFParser<'a> {
 
         // Parse optional STORED AS and OPTIONS clauses
         loop {
-            if let Some(keyword) = self.parser.parse_one_of_keywords(&[
-                Keyword::STORED,
-                Keyword::OPTIONS,
-            ]) {
+            if let Some(keyword) = self
+                .parser
+                .parse_one_of_keywords(&[Keyword::STORED, Keyword::OPTIONS])
+            {
                 match keyword {
                     Keyword::STORED => {
                         self.parser.expect_keyword(Keyword::AS)?;
@@ -907,7 +906,9 @@ impl<'a> DFParser<'a> {
             Token::Word(word) => Ok(Value::SingleQuotedString(word.value.to_string())),
             Token::SingleQuotedString(s) => Ok(Value::SingleQuotedString(s.to_string())),
             Token::DoubleQuotedString(s) => Ok(Value::DoubleQuotedString(s.to_string())),
-            Token::EscapedStringLiteral(s) => Ok(Value::EscapedStringLiteral(s.to_string())),
+            Token::EscapedStringLiteral(s) => {
+                Ok(Value::EscapedStringLiteral(s.to_string()))
+            }
             Token::Number(n, l) => Ok(Value::Number(n.to_string(), l)),
             _ => self.expected("string or numeric value", &static_token),
         }
@@ -964,7 +965,7 @@ impl<'a> DFParser<'a> {
                 Token::EOF | Token::SemiColon => break,
                 _ => {
                     let err_token = self.parser.peek_token().clone().to_static();
-                    return self.expected("configuration parameter", &err_token)
+                    return self.expected("configuration parameter", &err_token);
                 }
             }
         }
@@ -989,15 +990,17 @@ impl<'a> DFParser<'a> {
         // ABORT token already consumed by parse_statement()
 
         // Optional WORK or TRANSACTION keyword
-        let _ = self.parser.parse_one_of_keywords(&[Keyword::WORK, Keyword::TRANSACTION]);
+        let _ = self
+            .parser
+            .parse_one_of_keywords(&[Keyword::WORK, Keyword::TRANSACTION]);
 
         // Parse optional AND [NO] CHAIN
         let chain = if self.parser.parse_keyword(Keyword::AND) {
             let no = self.parser.parse_keyword(Keyword::NO);
             self.parser.expect_keyword(Keyword::CHAIN)?;
-            !no  // chain = true if AND CHAIN, false if AND NO CHAIN
+            !no // chain = true if AND CHAIN, false if AND NO CHAIN
         } else {
-            false  // no AND clause means chain = false (default)
+            false // no AND clause means chain = false (default)
         };
 
         // Create a Rollback statement (ABORT is equivalent to ROLLBACK in PostgreSQL)
@@ -1076,10 +1079,8 @@ impl<'a> DFParser<'a> {
                 break;
             } else if !comma {
                 let err_token = self.parser.peek_token().clone().to_static();
-                return self.expected(
-                    "',' or ')' after partition definition",
-                    &err_token,
-                );
+                return self
+                    .expected("',' or ')' after partition definition", &err_token);
             }
         }
         Ok(partitions)
@@ -1150,10 +1151,8 @@ impl<'a> DFParser<'a> {
                     let column_def = self.parse_column_def()?;
                     columns.push(column_def);
                 } else {
-                    return self.expected(
-                        "column name or constraint definition",
-                        &static_token,
-                    );
+                    return self
+                        .expected("column name or constraint definition", &static_token);
                 }
             }
             let comma = self.parser.consume_token(&Token::Comma);
@@ -1162,10 +1161,7 @@ impl<'a> DFParser<'a> {
                 break;
             } else if !comma {
                 let err_token = self.parser.peek_token().clone().to_static();
-                return self.expected(
-                    "',' or ')' after column definition",
-                    &err_token,
-                );
+                return self.expected("',' or ')' after column definition", &err_token);
             }
         }
 
@@ -1384,7 +1380,6 @@ impl<'a> DFParser<'a> {
         }
         Ok(options)
     }
-
 }
 
 #[cfg(test)]
@@ -1848,13 +1843,13 @@ mod tests {
             table_partition_cols: vec![],
             order_exprs: vec![vec![OrderByExpr {
                 expr: Expr::BinaryOp {
-                    left: Box::new(Identifier(Ident {
+                    left: SQLBox::new(Identifier(Ident {
                         value: "c1".to_owned(),
                         quote_style: None,
                         span: Span::empty(),
                     })),
                     op: BinaryOperator::Minus,
-                    right: Box::new(Identifier(Ident {
+                    right: SQLBox::new(Identifier(Ident {
                         value: "c2".to_owned(),
                         quote_style: None,
                         span: Span::empty(),
@@ -1898,13 +1893,13 @@ mod tests {
             table_partition_cols: vec!["c1".into()],
             order_exprs: vec![vec![OrderByExpr {
                 expr: Expr::BinaryOp {
-                    left: Box::new(Identifier(Ident {
+                    left: SQLBox::new(Identifier(Ident {
                         value: "c1".to_owned(),
                         quote_style: None,
                         span: Span::empty(),
                     })),
                     op: BinaryOperator::Minus,
-                    right: Box::new(Identifier(Ident {
+                    right: SQLBox::new(Identifier(Ident {
                         value: "c2".to_owned(),
                         quote_style: None,
                         span: Span::empty(),
@@ -1966,13 +1961,13 @@ mod tests {
             table_partition_cols: vec!["c1".into()],
             order_exprs: vec![vec![OrderByExpr {
                 expr: Expr::BinaryOp {
-                    left: Box::new(Identifier(Ident {
+                    left: SQLBox::new(Identifier(Ident {
                         value: "c1".to_owned(),
                         quote_style: None,
                         span: Span::empty(),
                     })),
                     op: BinaryOperator::Minus,
-                    right: Box::new(Identifier(Ident {
+                    right: SQLBox::new(Identifier(Ident {
                         value: "c2".to_owned(),
                         quote_style: None,
                         span: Span::empty(),
@@ -2111,7 +2106,7 @@ mod tests {
         let sql =
             "COPY (SELECT 1) TO bar STORED AS CSV OPTIONS ('format.has_header' 'true')";
         let expected = Statement::CopyTo(CopyToStatement {
-            source: CopyToSource::Query(query),
+            source: CopyToSource::Query(Box::new(SQLBox::into_owned(query))),
             target: "bar".to_string(),
             partitioned_by: vec![],
             stored_as: Some("CSV".to_owned()),

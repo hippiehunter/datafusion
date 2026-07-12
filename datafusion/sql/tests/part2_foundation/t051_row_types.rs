@@ -135,11 +135,7 @@ fn t051_row_constructor_with_subquery() {
 /// T051: Empty ROW constructor
 #[test]
 fn t051_row_constructor_empty() {
-    assert_feature_supported!(
-        "SELECT ROW()",
-        "T051",
-        "Empty ROW constructor"
-    );
+    assert_feature_supported!("SELECT ROW()", "T051", "Empty ROW constructor");
 }
 
 // ============================================================================
@@ -183,11 +179,7 @@ fn t051_create_table_multiple_row_columns() {
 /// T051: STRUCT literal basic
 #[test]
 fn t051_struct_literal_basic() {
-    assert_feature_supported!(
-        "SELECT STRUCT(1, 'a')",
-        "T051",
-        "Basic STRUCT literal"
-    );
+    assert_feature_supported!("SELECT STRUCT(1, 'a')", "T051", "Basic STRUCT literal");
 }
 
 /// T051: STRUCT literal with NULL
@@ -1112,11 +1104,7 @@ fn edge_empty_field_name_struct() {
 /// Edge: Single element ROW
 #[test]
 fn edge_single_element_row() {
-    assert_feature_supported!(
-        "SELECT ROW(42)",
-        "T051",
-        "Single element ROW"
-    );
+    assert_feature_supported!("SELECT ROW(42)", "T051", "Single element ROW");
 }
 
 /// Edge: ROW with all NULLs

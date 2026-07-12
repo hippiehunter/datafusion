@@ -662,11 +662,7 @@ fn f401_02_full_join_aggregate() {
 /// F401-04: Basic CROSS JOIN
 #[test]
 fn f401_04_cross_join() {
-    assert_feature_supported!(
-        "SELECT * FROM t1 CROSS JOIN t2",
-        "F401-04",
-        "CROSS JOIN"
-    );
+    assert_feature_supported!("SELECT * FROM t1 CROSS JOIN t2", "F401-04", "CROSS JOIN");
 }
 
 /// F401-04: CROSS JOIN with WHERE clause (filtered Cartesian product)

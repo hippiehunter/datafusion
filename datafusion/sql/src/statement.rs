@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::str::FromStr;
@@ -40,8 +41,8 @@ use datafusion_common::{
     schema_err, unqualified_field_not_found,
 };
 use datafusion_expr::dml::{
-    ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, InsertOp, OnConflict,
-    OnConflictAction,
+    ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, InsertOp,
+    OnConflict, OnConflictAction,
 };
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::builder::project;
@@ -55,8 +56,8 @@ use datafusion_expr::{
     CreateMaterializedView, CreateMemoryTable, CreateProcedure, CreatePropertyGraph,
     CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable, DmlStatement,
     DropAssertion, DropCatalogSchema, DropFunction, DropIndex, DropMaterializedView,
-    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation, Execute,
-    Explain, ExplainFormat, Expr, ExprSchemable, Filter, Grant, GrantRole,
+    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation,
+    Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter, Grant, GrantRole,
     GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause,
     GraphVertexTableDefinition, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
     MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
@@ -68,10 +69,10 @@ use datafusion_expr::{
     Volatility, WriteOp, cast, col,
 };
 use sqlparser::ast::{
-    self, BeginTransactionKind, IndexColumn, IndexType, OnConflict as SqlOnConflict,
-    OnConflictAction as SqlOnConflictAction, OnInsert, OrderByExpr, OrderByOptions,
-    OverridingKind, Set, ShowStatementIn, ShowStatementOptions,
-    TableObject, UpdateTableFromKind, ValueWithSpan,
+    self, AstBox as SQLBox, BeginTransactionKind, IndexColumn, IndexType,
+    OnConflict as SqlOnConflict, OnConflictAction as SqlOnConflictAction, OnInsert,
+    OrderByExpr, OrderByOptions, OverridingKind, Set, ShowStatementIn,
+    ShowStatementOptions, TableObject, UpdateTableFromKind, ValueWithSpan,
 };
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
@@ -91,9 +92,7 @@ fn ident_to_string(ident: &Ident) -> String {
 /// sqlparser `Display` impl so the engine layer sees the user's literal
 /// without losing escaping; the engine layer is responsible for
 /// interpreting the string ("manual", "incremental", "60s", …).
-fn mv_with_options_to_map(
-    options: Vec<SqlOption>,
-) -> Result<BTreeMap<String, String>> {
+fn mv_with_options_to_map(options: Vec<SqlOption>) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for option in options {
         let name = match option {
@@ -418,6 +417,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         )
     }
 
+    /// Generate a logical plan while borrowing an SQL statement.
+    ///
+    /// The returned plan owns all translated semantic data and never retains
+    /// the syntax reference. Query and DML traversal stays borrowed; branches
+    /// that require a semantic AST rewrite create an explicit scratch clone.
+    pub fn sql_statement_to_plan_ref(
+        &self,
+        statement: &Statement,
+    ) -> Result<LogicalPlan> {
+        self.sql_statement_to_plan_with_context_ref(statement, &mut PlannerContext::new())
+    }
+
     /// Generate a logical plan from an SQL statement
     pub fn sql_statement_to_plan_with_context(
         &self,
@@ -425,6 +436,97 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         self.sql_statement_to_plan_with_context_impl(statement, planner_context)
+    }
+
+    /// Generate a logical plan with caller-provided context while borrowing
+    /// the SQL statement.
+    pub fn sql_statement_to_plan_with_context_ref(
+        &self,
+        statement: &Statement,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        match statement {
+            Statement::Query(query) => {
+                self.query_to_plan_ref(query.as_ref(), planner_context)
+            }
+            Statement::ExplainTable {
+                describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
+                table_name,
+                ..
+            } => self.describe_table_to_plan(table_name.clone()),
+            Statement::Explain {
+                describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
+                statement,
+                ..
+            } => match statement.as_ref() {
+                Statement::Query(query) => {
+                    self.describe_query_to_plan_ref(query.as_ref())
+                }
+                _ => {
+                    not_impl_err!("Describing statements other than SELECT not supported")
+                }
+            },
+            Statement::Insert(insert) => {
+                self.insert_statement_to_plan_ref(insert, planner_context)
+            }
+            Statement::Delete(Delete {
+                tables,
+                using,
+                selection,
+                returning,
+                from,
+                order_by,
+                limit,
+                ..
+            }) => {
+                if !tables.is_empty() {
+                    return plan_err!("DELETE <TABLE> not supported");
+                }
+                if !order_by.is_empty() {
+                    return plan_err!("Delete-order-by clause not yet supported");
+                }
+                if limit.is_some() {
+                    return plan_err!("Delete-limit clause not yet supported");
+                }
+                let table = self.get_delete_target_ref(from)?;
+                self.delete_to_plan_ref(
+                    table,
+                    using.as_deref(),
+                    selection.as_ref(),
+                    returning.as_deref(),
+                    planner_context,
+                )
+            }
+            Statement::Update(update) => {
+                let from_clauses = update.from.as_ref().map(|from| match from {
+                    UpdateTableFromKind::AfterSet(from_clauses) => {
+                        from_clauses.as_slice()
+                    }
+                });
+                if from_clauses.is_some_and(|from| from.len() > 1) {
+                    return plan_err!(
+                        "Multiple tables in UPDATE SET FROM not yet supported"
+                    );
+                }
+                if update.limit.is_some() {
+                    return not_impl_err!("Update-limit clause not supported");
+                }
+                self.update_to_plan_ref(
+                    &update.table,
+                    &update.assignments,
+                    from_clauses.and_then(|from| from.first()),
+                    update.selection.as_ref(),
+                    update.returning.as_deref(),
+                    planner_context,
+                )
+            }
+            // Statement families whose DataFusion logical nodes intentionally
+            // retain parser AST payloads detach at this explicit boundary.
+            _ => self.sql_statement_to_plan_with_context_impl(
+                statement.clone(),
+                planner_context,
+            ),
+        }
     }
 
     fn sql_statement_to_plan_with_context_impl(
@@ -442,8 +544,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 describe_alias: DescribeAlias::Describe | DescribeAlias::Desc, // only parse 'DESCRIBE statement' or 'DESC statement' and not 'EXPLAIN statement'
                 statement,
                 ..
-            } => match *statement {
-                Statement::Query(query) => self.describe_query_to_plan(*query),
+            } => match SQLBox::into_owned(statement) {
+                Statement::Query(query) => {
+                    self.describe_query_to_plan(SQLBox::into_owned(query))
+                }
                 _ => {
                     not_impl_err!("Describing statements other than SELECT not supported")
                 }
@@ -457,10 +561,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 ..
             } => {
                 let format = format.map(|format| format.to_string());
-                let statement = DFStatement::Statement(statement);
+                let statement =
+                    DFStatement::Statement(Box::new(SQLBox::into_owned(statement)));
                 self.explain_to_plan(verbose, analyze, format, statement)
             }
-            Statement::Query(query) => self.query_to_plan(*query, planner_context),
+            Statement::Query(query) => {
+                self.query_to_plan(SQLBox::into_owned(query), planner_context)
+            }
             Statement::ShowVariable { variable, .. } => {
                 self.show_variable_to_plan(&variable)
             }
@@ -565,7 +672,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 match query {
                     Some(query) => {
-                        let plan = self.query_to_plan(*query, planner_context)?;
+                        let plan = self
+                            .query_to_plan(SQLBox::into_owned(query), planner_context)?;
                         let input_schema = plan.schema();
 
                         let plan = if has_columns {
@@ -660,8 +768,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let mut plan =
-                    self.query_to_plan(*view.query, &mut PlannerContext::new())?;
+                let mut plan = self.query_to_plan(
+                    SQLBox::into_owned(view.query),
+                    &mut PlannerContext::new(),
+                )?;
                 plan = self.apply_expr_alias(plan, columns)?;
 
                 if view.materialized {
@@ -805,11 +915,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     owned_by,
                 },
             ))),
-            Statement::CreateAssertion(ast::CreateAssertion { name, expr, .. }) => {
-                Ok(LogicalPlan::Ddl(DdlStatement::CreateAssertion(
-                    CreateAssertion { name, expr },
-                )))
-            }
+            Statement::CreateAssertion(ast::CreateAssertion { name, expr, .. }) => Ok(
+                LogicalPlan::Ddl(DdlStatement::CreateAssertion(CreateAssertion {
+                    name,
+                    expr: Box::new(SQLBox::into_owned(expr)),
+                })),
+            ),
             Statement::DropAssertion(ast::DropAssertion {
                 name, if_exists, ..
             }) => Ok(LogicalPlan::Ddl(DdlStatement::DropAssertion(
@@ -1017,7 +1128,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Build logical plan for inner statement of the prepare statement
                 let plan = self.sql_statement_to_plan_with_context_impl(
-                    *statement,
+                    SQLBox::into_owned(statement),
                     &mut planner_context,
                 )?;
 
@@ -1359,7 +1470,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.insert_to_plan(
                         table_name,
                         columns,
-                        source.unwrap(),
+                        Box::new(SQLBox::into_owned(source.unwrap())),
                         overwrite,
                         replace_into,
                         on_conflict,
@@ -1438,7 +1549,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 into,
                 table,
                 source,
-                on,
+                Box::new(SQLBox::into_owned(on)),
                 clauses,
                 output,
                 planner_context,
@@ -2134,6 +2245,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(table_with_joins)
     }
 
+    fn get_delete_target_ref<'a>(
+        &self,
+        from: &'a FromTable,
+    ) -> Result<&'a TableWithJoins> {
+        let from = match from {
+            FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
+        };
+        if from.len() != 1 {
+            return not_impl_err!(
+                "DELETE FROM only supports single table, got {}: {from:?}",
+                from.len()
+            );
+        }
+        let table = &from[0];
+        if !table.joins.is_empty() {
+            return not_impl_err!("DELETE FROM only supports single table, got: joins");
+        }
+        Ok(table)
+    }
+
     /// Generate a logical plan from a "SHOW TABLES" query
     fn show_tables_to_plan(&self) -> Result<LogicalPlan> {
         if self.has_table("information_schema", "tables") {
@@ -2162,7 +2293,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     fn describe_query_to_plan(&self, query: Query) -> Result<LogicalPlan> {
-        let plan = self.query_to_plan(query, &mut PlannerContext::new())?;
+        self.describe_query_to_plan_ref(&query)
+    }
+
+    fn describe_query_to_plan_ref(&self, query: &Query) -> Result<LogicalPlan> {
+        let plan = self.query_to_plan_ref(query, &mut PlannerContext::new())?;
 
         let schema = Arc::new(plan.schema().as_arrow().clone());
 
@@ -2877,6 +3012,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         returning: Option<Vec<SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        self.delete_to_plan_ref(
+            &table,
+            using.as_deref(),
+            predicate_expr.as_ref(),
+            returning.as_deref(),
+            outer_planner_context,
+        )
+    }
+
+    fn delete_to_plan_ref(
+        &self,
+        table: &TableWithJoins,
+        using: Option<&[TableWithJoins]>,
+        predicate_expr: Option<&SQLExpr>,
+        returning: Option<&[SelectItem]>,
+        outer_planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
         // Extract table name from the TableWithJoins
         let table_name = match &table.relation {
             TableFactor::Table { name, .. } => name.clone(),
@@ -2894,16 +3046,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Build scan, joining with USING tables if present (similar to UPDATE FROM)
         // This implements PostgreSQL's DELETE ... USING syntax where additional
         // tables can be specified to form joins for the WHERE clause.
-        let mut input_tables = vec![table];
+        let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
         if let Some(using_tables) = using {
-            input_tables.extend(using_tables);
+            let old_outer_from_schema =
+                planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
+            for using_table in using_tables {
+                let right =
+                    self.plan_table_with_joins_ref(using_table, &mut planner_context)?;
+                scan = LogicalPlanBuilder::from(scan).cross_join(right)?.build()?;
+                planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
+            }
+            planner_context.set_outer_from_schema(old_outer_from_schema);
         }
-        let scan = self.plan_from_tables(input_tables, &mut planner_context)?;
 
         let source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
-                let filter_expr = self.sql_to_expr(
+                let filter_expr = self.sql_to_expr_ref(
                     predicate_expr,
                     scan.schema(),
                     &mut planner_context,
@@ -2919,8 +3078,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        let returning_col_names =
-            returning.map(|items| select_items_to_column_names(&items));
+        let returning_col_names = returning.map(select_items_to_column_names);
         let returning_output_schema = returning_col_names
             .as_ref()
             .map(|cols| {
@@ -3118,6 +3276,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         returning: Option<Vec<SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        self.update_to_plan_ref(
+            &table,
+            assignments,
+            from.as_ref(),
+            predicate_expr.as_ref(),
+            returning.as_deref(),
+            outer_planner_context,
+        )
+    }
+
+    fn update_to_plan_ref(
+        &self,
+        table: &TableWithJoins,
+        assignments: &[Assignment],
+        from: Option<&TableWithJoins>,
+        predicate_expr: Option<&SQLExpr>,
+        returning: Option<&[SelectItem]>,
+        outer_planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
         let (table_name, table_alias) = match &table.relation {
             TableFactor::Table { name, alias, .. } => (name.clone(), alias.clone()),
             _ => plan_err!("Cannot update non-table relation!")?,
@@ -3134,7 +3311,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Overwrite with assignment expressions
         // Clone the outer planner context to inherit CTEs
         let mut planner_context = outer_planner_context.clone();
-        let mut assign_map: HashMap<String, SQLExpr> = HashMap::new();
+        let mut assign_map: HashMap<String, Cow<'_, SQLExpr>> = HashMap::new();
 
         // Helper function to extract column name from ObjectName
         let extract_column_name = |obj_name: &ObjectName| -> Result<String> {
@@ -3162,7 +3339,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             col_name
                         );
                     }
-                    assign_map.insert(col_name, assign.value.clone());
+                    assign_map.insert(col_name, Cow::Borrowed(&assign.value));
                 }
                 AssignmentTarget::Tuple(col_names) => {
                     // Tuple assignment: (a, b) = (val1, val2)
@@ -3179,13 +3356,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                     // Expand tuple value
                     let values = match &assign.value {
-                        SQLExpr::Tuple(exprs) => exprs.clone(),
+                        SQLExpr::Tuple(exprs) => {
+                            exprs.iter().map(Cow::Borrowed).collect()
+                        }
                         SQLExpr::Nested(inner) => {
                             // Handle ((a, b)) case
                             if let SQLExpr::Tuple(exprs) = inner.as_ref() {
-                                exprs.clone()
+                                exprs.iter().map(Cow::Borrowed).collect()
                             } else {
-                                vec![*inner.clone()]
+                                vec![Cow::Borrowed(inner.as_ref())]
                             }
                         }
                         SQLExpr::Subquery(query) => {
@@ -3232,7 +3411,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                         select.projection = vec![projection[idx].clone()];
                                     }
 
-                                    SQLExpr::Subquery(Box::new(wrapper_query))
+                                    Cow::Owned(SQLExpr::Subquery(SQLBox::new(
+                                        wrapper_query,
+                                    )))
                                 })
                                 .collect()
                         }
@@ -3265,15 +3446,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         // Build scan, join with from table if it exists.
-        let mut input_tables = vec![table];
-        input_tables.extend(from);
-        let scan = self.plan_from_tables(input_tables, &mut planner_context)?;
+        let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
+        if let Some(from) = from {
+            let old_outer_from_schema =
+                planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
+            let right = self.plan_table_with_joins_ref(from, &mut planner_context)?;
+            scan = LogicalPlanBuilder::from(scan).cross_join(right)?.build()?;
+            planner_context.set_outer_from_schema(old_outer_from_schema);
+        }
 
         // Filter
         let mut source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
-                let filter_expr = self.sql_to_expr(
+                let filter_expr = self.sql_to_expr_ref(
                     predicate_expr,
                     scan.schema(),
                     &mut planner_context,
@@ -3295,12 +3481,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .map(|(qualifier, field)| {
                 let expr = match assign_map.remove(field.name()) {
                     Some(new_value) => {
-                        let new_value = crate::values::maybe_rewrite_pg_array_literal(
-                            new_value,
+                        let new_value = crate::values::maybe_rewrite_pg_array_literal_ref(
+                            new_value.as_ref(),
                             Some(field.data_type()),
                         );
-                        let mut expr = self.sql_to_expr(
-                            new_value,
+                        let mut expr = self.sql_to_expr_ref(
+                            new_value.as_ref(),
                             source.schema(),
                             &mut planner_context,
                         )?;
@@ -3334,7 +3520,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut returning_col_names = None;
         let mut output_schema = None;
         if let Some(returning_items) = returning {
-            let prepared = self.prepare_select_exprs(
+            let prepared = self.prepare_select_exprs_ref(
                 &source,
                 returning_items,
                 false,
@@ -3346,45 +3532,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     datafusion_expr::select_expr::SelectExpr::Expression(expr) => {
                         vec![Ok(expr)]
                     }
-                    datafusion_expr::select_expr::SelectExpr::Wildcard(_) => {
-                        table_schema
-                            .fields()
-                            .iter()
-                            .filter(|field| {
-                                !is_gantry_hidden_dml_column(field.name())
-                            })
-                            .map(|field| {
-                                Ok(Expr::Column(Column::from_name(field.name())))
-                            })
-                            .collect()
-                    }
+                    datafusion_expr::select_expr::SelectExpr::Wildcard(_) => table_schema
+                        .fields()
+                        .iter()
+                        .filter(|field| !is_gantry_hidden_dml_column(field.name()))
+                        .map(|field| Ok(Expr::Column(Column::from_name(field.name()))))
+                        .collect(),
                     datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(
                         qualifier,
                         _,
-                    ) => {
-                        table_schema
-                            .fields()
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(idx, _)| {
-                                let (q, field) = table_schema.qualified_field(idx);
-                                if is_gantry_hidden_dml_column(field.name()) {
-                                    return None;
-                                }
-                                if q.map(|q| q.to_string().to_ascii_lowercase())
-                                    == Some(
-                                        qualifier.to_string().to_ascii_lowercase(),
-                                    )
-                                {
-                                    Some(Ok(Expr::Column(Column::from_name(
-                                        field.name(),
-                                    ))))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    }
+                    ) => table_schema
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, _)| {
+                            let (q, field) = table_schema.qualified_field(idx);
+                            if is_gantry_hidden_dml_column(field.name()) {
+                                return None;
+                            }
+                            if q.map(|q| q.to_string().to_ascii_lowercase())
+                                == Some(qualifier.to_string().to_ascii_lowercase())
+                            {
+                                Some(Ok(Expr::Column(Column::from_name(field.name()))))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -3446,6 +3620,84 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn insert_statement_to_plan_ref(
+        &self,
+        insert: &Insert,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        let table_name = match &insert.table {
+            TableObject::TableName(table_name) => table_name,
+            TableObject::TableFunction(_) => {
+                return not_impl_err!("INSERT INTO table functions not supported");
+            }
+        };
+        if insert.partitioned.is_some() {
+            return plan_err!("Partitioned inserts not yet supported");
+        }
+        if !insert.after_columns.is_empty() {
+            return plan_err!("After-columns clause not supported");
+        }
+        let on_conflict = match &insert.on {
+            Some(OnInsert::OnConflict(conflict)) => Some(conflict),
+            Some(OnInsert::DuplicateKeyUpdate(_)) => {
+                return plan_err!("ON DUPLICATE KEY UPDATE not supported");
+            }
+            Some(other) => {
+                return plan_err!("Unsupported INSERT ON clause: {other:?}");
+            }
+            None => None,
+        };
+        if insert.ignore {
+            return plan_err!("Insert-ignore clause not supported");
+        }
+        if let Some(table_alias) = &insert.table_alias {
+            return plan_err!(
+                "Inserts with a table alias not supported: {table_alias:?}"
+            );
+        }
+        if let Some(priority) = &insert.priority {
+            return plan_err!(
+                "Inserts with a `PRIORITY` clause not supported: {priority:?}"
+            );
+        }
+        if insert.insert_alias.is_some() {
+            return plan_err!("Inserts with an alias not supported");
+        }
+        if !insert.assignments.is_empty() {
+            return plan_err!("Inserts with assignments not supported");
+        }
+
+        let is_overriding_system =
+            matches!(insert.overriding, Some(OverridingKind::SystemValue));
+        let mut plan = if let Some(source) = &insert.source {
+            self.insert_to_plan_ref(
+                table_name,
+                &insert.columns,
+                source.as_ref(),
+                insert.overwrite,
+                insert.replace_into,
+                on_conflict,
+                insert.returning.as_deref(),
+                planner_context,
+            )?
+        } else {
+            self.insert_default_values_to_plan(
+                table_name.clone(),
+                insert.columns.clone(),
+                insert.overwrite,
+                insert.replace_into,
+                on_conflict.cloned(),
+                planner_context,
+            )?
+        };
+
+        if is_overriding_system && let LogicalPlan::Dml(dml) = &mut plan {
+            dml.overriding_system_value = true;
+        }
+        Ok(plan)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn insert_to_plan(
         &self,
         table_name: ObjectName,
@@ -3457,8 +3709,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         returning: Option<Vec<SelectItem>>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        self.insert_to_plan_ref(
+            &table_name,
+            &columns,
+            source.as_ref(),
+            overwrite,
+            replace_into,
+            on_conflict.as_ref(),
+            returning.as_deref(),
+            outer_planner_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_to_plan_ref(
+        &self,
+        table_name: &ObjectName,
+        columns: &[Ident],
+        source: &Query,
+        overwrite: bool,
+        replace_into: bool,
+        on_conflict: Option<&SqlOnConflict>,
+        returning: Option<&[SelectItem]>,
+        outer_planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
         // Do a table lookup to verify the table exists
-        let table_name = self.object_name_to_table_reference(table_name)?;
+        let table_name = self.object_name_to_table_reference(table_name.clone())?;
         let table_source = self.context_provider.get_table_source(table_name.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
 
@@ -3485,7 +3761,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         } else {
             let mut value_indices = vec![None; table_schema.fields().len()];
             let fields = columns
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(i, c)| {
                     let c = self.ident_normalizer.normalize(c);
@@ -3508,7 +3785,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // infer types for Values clause... other types should be resolvable the regular way
         let mut prepare_param_data_types = BTreeMap::new();
-        if let SetExpr::Values(ast::Values { rows, .. }) = (*source.body).clone() {
+        if let SetExpr::Values(ast::Values { rows, .. }) = source.body.as_ref() {
             for row in rows.iter() {
                 for (idx, val) in row.iter().enumerate() {
                     if let SQLExpr::Value(ValueWithSpan {
@@ -3548,7 +3825,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .collect::<Vec<_>>();
             planner_context.set_values_defaults(Some(defaults));
         }
-        let source = self.query_to_plan(*source, &mut planner_context)?;
+        let source = self.query_to_plan_ref(source, &mut planner_context)?;
         if fields.len() != source.schema().fields().len() {
             plan_err!("Column count doesn't match insert query!")?;
         }
@@ -3603,8 +3880,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             )?,
         };
 
-        let returning_col_names =
-            returning.map(|items| select_items_to_column_names(&items));
+        let returning_col_names = returning.map(select_items_to_column_names);
         let returning_output_schema = returning_col_names
             .as_ref()
             .map(|cols| {
@@ -3641,13 +3917,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// the values that would have been inserted).
     fn plan_on_conflict(
         &self,
-        conflict: SqlOnConflict,
+        conflict: &SqlOnConflict,
         table_name: &TableReference,
         table_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<OnConflict> {
         // Plan the action
-        let action = match conflict.action {
+        let action = match &conflict.action {
             SqlOnConflictAction::DoNothing => OnConflictAction::DoNothing,
             SqlOnConflictAction::DoUpdate(do_update) => {
                 // Create qualified schemas for both the target table and EXCLUDED pseudo-table.
@@ -3673,9 +3949,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Plan the assignments
                 let mut assignments = Vec::with_capacity(do_update.assignments.len());
-                for assignment in do_update.assignments {
-                    let value = self.sql_to_expr(
-                        assignment.value,
+                for assignment in &do_update.assignments {
+                    let value = self.sql_to_expr_ref(
+                        &assignment.value,
                         &combined_schema,
                         planner_context,
                     )?;
@@ -3689,15 +3965,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )?;
 
                     assignments.push(ConflictAssignment {
-                        target: assignment.target,
+                        target: assignment.target.clone(),
                         value,
                     });
                 }
 
                 // Plan the optional WHERE clause
-                let selection = if let Some(selection) = do_update.selection {
-                    let expr =
-                        self.sql_to_expr(selection, &combined_schema, planner_context)?;
+                let selection = if let Some(selection) = &do_update.selection {
+                    let expr = self.sql_to_expr_ref(
+                        selection,
+                        &combined_schema,
+                        planner_context,
+                    )?;
                     let mut using_columns = HashSet::new();
                     expr_to_columns(&expr, &mut using_columns)?;
                     Some(normalize_col_with_schemas_and_ambiguity_check(
@@ -3713,15 +3992,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        let conflict_target = conflict.conflict_target.map(|ct| match ct {
-            ast::ConflictTarget::Columns(idents) => {
-                ConflictTarget::Columns(
-                    idents
-                        .into_iter()
-                        .map(|ident| ident.value)
-                        .collect(),
-                )
-            }
+        let conflict_target = conflict.conflict_target.as_ref().map(|ct| match ct {
+            ast::ConflictTarget::Columns(idents) => ConflictTarget::Columns(
+                idents.iter().map(|ident| ident.value.clone()).collect(),
+            ),
             ast::ConflictTarget::OnConstraint(name) => {
                 ConflictTarget::OnConstraint(name.to_string())
             }
@@ -3770,7 +4044,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let source = Box::new(Query {
             with: None,
-            body: Box::new(SetExpr::Values(ast::Values {
+            body: SQLBox::new(SetExpr::Values(ast::Values {
                 explicit_row: false,
                 rows: vec![default_row],
                 value_keyword: false,

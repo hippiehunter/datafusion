@@ -132,11 +132,7 @@ fn s091_01_array_constructor_all_nulls() {
 /// S091-01: Empty ARRAY constructor
 #[test]
 fn s091_01_array_constructor_empty() {
-    assert_feature_supported!(
-        "SELECT ARRAY[]",
-        "S091-01",
-        "Empty ARRAY constructor"
-    );
+    assert_feature_supported!("SELECT ARRAY[]", "S091-01", "Empty ARRAY constructor");
 }
 
 /// S091-01: ARRAY constructor with column references
@@ -575,11 +571,7 @@ fn s096_array_multidimensional_bounds() {
 /// S098: Basic ARRAY_AGG function
 #[test]
 fn s098_array_agg_basic() {
-    assert_feature_supported!(
-        "SELECT ARRAY_AGG(a) FROM t",
-        "S098",
-        "Basic ARRAY_AGG"
-    );
+    assert_feature_supported!("SELECT ARRAY_AGG(a) FROM t", "S098", "Basic ARRAY_AGG");
 }
 
 /// S098: ARRAY_AGG with ORDER BY
@@ -719,11 +711,7 @@ fn s098_array_agg_join() {
 /// S301: Basic UNNEST function
 #[test]
 fn s301_unnest_basic() {
-    assert_feature_supported!(
-        "SELECT UNNEST(ARRAY[1, 2, 3])",
-        "S301",
-        "Basic UNNEST"
-    );
+    assert_feature_supported!("SELECT UNNEST(ARRAY[1, 2, 3])", "S301", "Basic UNNEST");
 }
 
 /// S301: UNNEST on array column

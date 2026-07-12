@@ -57,11 +57,7 @@ fn f201_cast_to_varchar() {
 /// F201: CAST literal value
 #[test]
 fn f201_cast_literal() {
-    assert_feature_supported!(
-        "SELECT CAST(42 AS VARCHAR)",
-        "F201",
-        "CAST literal value"
-    );
+    assert_feature_supported!("SELECT CAST(42 AS VARCHAR)", "F201", "CAST literal value");
 }
 
 /// F201: CAST in WHERE clause
@@ -551,11 +547,7 @@ fn f201_cast_null_to_varchar() {
 /// F201: CAST NULL to DATE
 #[test]
 fn f201_cast_null_to_date() {
-    assert_feature_supported!(
-        "SELECT CAST(NULL AS DATE)",
-        "F201",
-        "CAST NULL to DATE"
-    );
+    assert_feature_supported!("SELECT CAST(NULL AS DATE)", "F201", "CAST NULL to DATE");
 }
 
 /// F201: CAST nullable column
@@ -815,11 +807,7 @@ fn f201_cast_to_char() {
 /// F201: CAST to TEXT
 #[test]
 fn f201_cast_to_text() {
-    assert_feature_supported!(
-        "SELECT CAST(a AS TEXT) FROM t",
-        "F201",
-        "CAST to TEXT"
-    );
+    assert_feature_supported!("SELECT CAST(a AS TEXT) FROM t", "F201", "CAST to TEXT");
 }
 
 /// F201: CAST to REAL (alias for FLOAT)

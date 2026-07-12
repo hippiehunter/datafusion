@@ -23,15 +23,16 @@
 use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::{not_impl_err, tree_node::TreeNode, Result, ScalarValue};
+use datafusion_common::{Result, ScalarValue, not_impl_err, tree_node::TreeNode};
+use datafusion_expr::Expr;
 use datafusion_expr::logical_plan::psm::{
     HandlerCondition, HandlerType, PsmBlock, PsmCase, PsmElseIf, PsmHandler, PsmIf,
     PsmReturn, PsmSetVariable, PsmStatement, PsmStatementKind, PsmVariable, PsmWhen,
     PsmWhile, RegionInfo,
 };
-use datafusion_expr::Expr;
 use sqlparser::ast::{
-    self, ConditionalStatements, DeclareAssignment, Ident, ReturnStatementValue, Statement,
+    self, ConditionalStatements, DeclareAssignment, Ident, ReturnStatementValue,
+    Statement,
 };
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
@@ -118,9 +119,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             // CASE ... WHEN ... END CASE
-            Statement::Case(case_stmt) => {
-                self.plan_psm_case(case_stmt, planner_context)
-            }
+            Statement::Case(case_stmt) => self.plan_psm_case(case_stmt, planner_context),
 
             // RAISE statement (exception/error signaling)
             Statement::Raise(raise_stmt) => {
@@ -189,7 +188,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     None
                 };
 
-                let plan = self.sql_statement_to_plan_with_context(other.clone(), planner_context)?;
+                let plan = self
+                    .sql_statement_to_plan_with_context(other.clone(), planner_context)?;
 
                 // Restore the old outer query schema
                 planner_context.set_outer_query_schema(old_outer);
@@ -241,7 +241,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 DeclareAssignment::DuckAssignment(e) => e.as_ref().clone(),
                 DeclareAssignment::MsSqlAssignment(e) => e.as_ref().clone(),
                 DeclareAssignment::For(_) => {
-                    return not_impl_err!("FOR assignment in DECLARE not supported")
+                    return not_impl_err!("FOR assignment in DECLARE not supported");
                 }
             };
             let planned = self.sql_to_expr(expr, &schema, planner_context)?;
@@ -291,7 +291,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Extract handler information from declare_type
         // Pattern match on the DeclareType enum
         let (handler_type, condition, statement) = match declare_type {
-            ast::DeclareType::Handler { handler_type: sql_handler_type } => {
+            ast::DeclareType::Handler {
+                handler_type: sql_handler_type,
+            } => {
                 // Map sqlparser handler type to DataFusion HandlerType
                 let handler_type = match sql_handler_type {
                     ast::DeclareHandlerType::Continue => HandlerType::Continue,
@@ -370,11 +372,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .collect();
 
                 // Get the first value
-                let value = values
-                    .first()
-                    .ok_or_else(|| datafusion_common::DataFusionError::Plan(
+                let value = values.first().ok_or_else(|| {
+                    datafusion_common::DataFusionError::Plan(
                         "SET statement must have a value".to_string(),
-                    ))?;
+                    )
+                })?;
 
                 // Plan the value expression
                 let value_expr =
@@ -406,11 +408,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .collect();
 
                 // For now, only support single value
-                let value = values
-                    .first()
-                    .ok_or_else(|| datafusion_common::DataFusionError::Plan(
+                let value = values.first().ok_or_else(|| {
+                    datafusion_common::DataFusionError::Plan(
                         "SET statement must have a value".to_string(),
-                    ))?;
+                    )
+                })?;
 
                 let value_expr =
                     self.sql_to_expr(value.clone(), &schema, planner_context)?;
@@ -445,12 +447,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let (value, has_subquery) = match &ret.value {
             Some(ReturnStatementValue::Expr(expr)) => {
-                let planned =
-                    self.sql_to_expr(expr.clone(), &schema, planner_context)?;
+                let planned = self.sql_to_expr(expr.clone(), &schema, planner_context)?;
                 let has_subquery = Self::expr_contains_subquery(&planned);
                 (Some(planned), has_subquery)
             }
-            Some(ReturnStatementValue::Next(_)) | Some(ReturnStatementValue::NextNoExpr) => {
+            Some(ReturnStatementValue::Next(_))
+            | Some(ReturnStatementValue::NextNoExpr) => {
                 // RETURN NEXT is PostgreSQL-specific, not supported yet
                 return not_impl_err!("RETURN NEXT is not supported");
             }
@@ -477,7 +479,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         Ok(PsmStatement::new(
-            PsmStatementKind::Return(PsmReturn { value, has_subquery }),
+            PsmStatementKind::Return(PsmReturn {
+                value,
+                has_subquery,
+            }),
             info,
         ))
     }
@@ -604,12 +609,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let schema = planner_context.psm_schema();
 
         // Plan condition - required for WHILE
-        let condition_expr =
-            while_stmt.condition.clone().ok_or_else(|| {
-                datafusion_common::DataFusionError::Plan(
-                    "WHILE statement must have a condition".to_string(),
-                )
-            })?;
+        let condition_expr = while_stmt.condition.clone().ok_or_else(|| {
+            datafusion_common::DataFusionError::Plan(
+                "WHILE statement must have a condition".to_string(),
+            )
+        })?;
         let condition = self.sql_to_expr(condition_expr, &schema, planner_context)?;
         let condition_has_subquery = Self::expr_contains_subquery(&condition);
 
@@ -768,13 +772,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // Process USING clause items
         for item in &raise_stmt.using {
-            let planned = self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
+            let planned =
+                self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
             let option_ident = Ident::new(item.option.to_string());
             set_items.push((option_ident, planned));
         }
 
         Ok(PsmStatement::procedural(PsmStatementKind::Signal(
-            PsmSignal { sqlstate, set_items },
+            PsmSignal {
+                sqlstate,
+                set_items,
+            },
         )))
     }
 
@@ -794,12 +802,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Process SET items
         let mut set_items = Vec::new();
         for item in &signal_stmt.set_items {
-            let planned = self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
+            let planned =
+                self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
             set_items.push((item.name.clone(), planned));
         }
 
         Ok(PsmStatement::procedural(PsmStatementKind::Signal(
-            PsmSignal { sqlstate, set_items },
+            PsmSignal {
+                sqlstate,
+                set_items,
+            },
         )))
     }
 
@@ -819,12 +831,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Process SET items
         let mut set_items = Vec::new();
         for item in &resignal_stmt.set_items {
-            let planned = self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
+            let planned =
+                self.sql_to_expr(item.value.clone(), &schema, planner_context)?;
             set_items.push((item.name.clone(), planned));
         }
 
         Ok(PsmStatement::procedural(PsmStatementKind::Resignal(
-            PsmResignal { sqlstate, set_items },
+            PsmResignal {
+                sqlstate,
+                set_items,
+            },
         )))
     }
 

@@ -31,7 +31,8 @@ fn parse_sql(sql: &str) -> Result<(), String> {
 #[test]
 fn test_empty_pattern() {
     // Empty PATTERN should be a parse error (handled by sqlparser)
-    let sql = "SELECT * FROM t MATCH_RECOGNIZE (ORDER BY id PATTERN () DEFINE A AS value > 0)";
+    let sql =
+        "SELECT * FROM t MATCH_RECOGNIZE (ORDER BY id PATTERN () DEFINE A AS value > 0)";
     let result = parse_sql(sql);
     // This may or may not fail depending on sqlparser implementation
     println!("Empty pattern result: {:?}", result);
@@ -47,7 +48,11 @@ fn test_complex_nested_pattern() {
                    DEFINE A AS value = 1, B AS value = 2, C AS value = 3 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Complex nested pattern should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Complex nested pattern should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -75,7 +80,11 @@ fn test_deeply_nested_alternation() {
                        E AS value = 5, F AS value = 6, G AS value = 7, H AS value = 8 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Deeply nested alternation should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Deeply nested alternation should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -89,7 +98,11 @@ fn test_pattern_without_define_for_all_symbols() {
                    DEFINE DOWN AS value < 100, UP AS value > 100 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Pattern without DEFINE for all symbols should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Pattern without DEFINE for all symbols should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -102,7 +115,11 @@ fn test_very_large_quantifier() {
                    DEFINE A AS value > 0 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Very large quantifier should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Very large quantifier should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -143,7 +160,11 @@ fn test_quoted_identifiers() {
                      DEFINE "weird name" AS value > 0
                  )"#;
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Quoted identifiers should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Quoted identifiers should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -171,7 +192,11 @@ fn test_multiple_quantifiers() {
                        D AS value = 4, E AS value = 5, F AS value = 6 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Multiple different quantifiers should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Multiple different quantifiers should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -197,7 +222,11 @@ fn test_start_end_anchors() {
                    DEFINE A AS value > 0 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Start/end anchors should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Start/end anchors should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -215,7 +244,11 @@ fn test_complex_measures() {
                    DEFINE A AS value > 0 \
                )";
     let result = parse_sql(sql);
-    assert!(result.is_ok(), "Complex measures should parse: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Complex measures should parse: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -230,7 +263,12 @@ fn test_all_after_match_skip_options() {
 
     for sql in sqls {
         let result = parse_sql(sql);
-        assert!(result.is_ok(), "AFTER MATCH SKIP option should parse: {:?} for SQL: {}", result, sql);
+        assert!(
+            result.is_ok(),
+            "AFTER MATCH SKIP option should parse: {:?} for SQL: {}",
+            result,
+            sql
+        );
     }
 }
 

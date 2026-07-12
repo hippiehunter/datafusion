@@ -66,11 +66,7 @@ fn e111_select_literal_string() {
 /// E111: SELECT without FROM - arithmetic expression
 #[test]
 fn e111_select_expression_arithmetic() {
-    assert_feature_supported!(
-        "SELECT 1 + 2",
-        "E111",
-        "SELECT without FROM - arithmetic"
-    );
+    assert_feature_supported!("SELECT 1 + 2", "E111", "SELECT without FROM - arithmetic");
 }
 
 /// E111: SELECT without FROM - complex expression
@@ -210,11 +206,7 @@ fn e111_select_nested() {
 /// E131: NULL literal in SELECT
 #[test]
 fn e131_null_literal() {
-    assert_feature_supported!(
-        "SELECT NULL",
-        "E131",
-        "NULL literal"
-    );
+    assert_feature_supported!("SELECT NULL", "E131", "NULL literal");
 }
 
 /// E131: NULL literal with alias
@@ -310,11 +302,7 @@ fn e131_null_in_update() {
 /// E131: NULL handling in COUNT aggregate
 #[test]
 fn e131_null_count() {
-    assert_feature_supported!(
-        "SELECT COUNT(a) FROM t",
-        "E131",
-        "COUNT ignores NULLs"
-    );
+    assert_feature_supported!("SELECT COUNT(a) FROM t", "E131", "COUNT ignores NULLs");
 }
 
 /// E131: NULL handling in COUNT(*)
@@ -330,41 +318,25 @@ fn e131_null_count_star() {
 /// E131: NULL handling in SUM aggregate
 #[test]
 fn e131_null_sum() {
-    assert_feature_supported!(
-        "SELECT SUM(a) FROM t",
-        "E131",
-        "SUM ignores NULLs"
-    );
+    assert_feature_supported!("SELECT SUM(a) FROM t", "E131", "SUM ignores NULLs");
 }
 
 /// E131: NULL handling in AVG aggregate
 #[test]
 fn e131_null_avg() {
-    assert_feature_supported!(
-        "SELECT AVG(a) FROM t",
-        "E131",
-        "AVG ignores NULLs"
-    );
+    assert_feature_supported!("SELECT AVG(a) FROM t", "E131", "AVG ignores NULLs");
 }
 
 /// E131: NULL handling in MIN aggregate
 #[test]
 fn e131_null_min() {
-    assert_feature_supported!(
-        "SELECT MIN(a) FROM t",
-        "E131",
-        "MIN ignores NULLs"
-    );
+    assert_feature_supported!("SELECT MIN(a) FROM t", "E131", "MIN ignores NULLs");
 }
 
 /// E131: NULL handling in MAX aggregate
 #[test]
 fn e131_null_max() {
-    assert_feature_supported!(
-        "SELECT MAX(a) FROM t",
-        "E131",
-        "MAX ignores NULLs"
-    );
+    assert_feature_supported!("SELECT MAX(a) FROM t", "E131", "MAX ignores NULLs");
 }
 
 /// E131: COALESCE with NULL values
@@ -390,11 +362,7 @@ fn e131_coalesce_all_null() {
 /// E131: NULLIF function
 #[test]
 fn e131_nullif() {
-    assert_feature_supported!(
-        "SELECT NULLIF(a, 0) FROM t",
-        "E131",
-        "NULLIF function"
-    );
+    assert_feature_supported!("SELECT NULLIF(a, 0) FROM t", "E131", "NULLIF function");
 }
 
 /// E131: NULL in CASE WHEN condition
@@ -744,11 +712,7 @@ fn e161_comment_create() {
 /// E161: Empty multi-line comment
 #[test]
 fn e161_empty_multi_line() {
-    assert_feature_supported!(
-        "/**/SELECT 1",
-        "E161",
-        "Empty multi-line comment"
-    );
+    assert_feature_supported!("/**/SELECT 1", "E161", "Empty multi-line comment");
 }
 
 /// E161: Comment with dashes inside

@@ -29,32 +29,40 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         t: TableWithJoins,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        self.plan_table_with_joins_ref(&t, planner_context)
+    }
+
+    pub(crate) fn plan_table_with_joins_ref(
+        &self,
+        t: &TableWithJoins,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
         let mut left = if is_lateral(&t.relation) {
-            self.create_relation_subquery(t.relation, planner_context)?
+            self.create_relation_subquery_ref(&t.relation, planner_context)?
         } else {
-            self.create_relation(t.relation, planner_context)?
+            self.create_relation_ref(&t.relation, planner_context)?
         };
         let old_outer_from_schema = planner_context.outer_from_schema();
-        for join in t.joins {
+        for join in &t.joins {
             planner_context.extend_outer_from_schema(left.schema())?;
-            left = self.parse_relation_join(left, join, planner_context)?;
+            left = self.parse_relation_join_ref(left, join, planner_context)?;
         }
         planner_context.set_outer_from_schema(old_outer_from_schema);
         Ok(left)
     }
 
-    pub(crate) fn parse_relation_join(
+    pub(crate) fn parse_relation_join_ref(
         &self,
         left: LogicalPlan,
-        join: Join,
+        join: &Join,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let right = if is_lateral_join(&join)? {
-            self.create_relation_subquery(join.relation, planner_context)?
+            self.create_relation_subquery_ref(&join.relation, planner_context)?
         } else {
-            self.create_relation(join.relation, planner_context)?
+            self.create_relation_ref(&join.relation, planner_context)?
         };
-        match join.join_operator {
+        match &join.join_operator {
             JoinOperator::LeftOuter(constraint) | JoinOperator::Left(constraint) => {
                 self.parse_join(left, right, constraint, JoinType::Left, planner_context)
             }
@@ -114,7 +122,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         left: LogicalPlan,
         right: LogicalPlan,
-        constraint: JoinConstraint,
+        constraint: &JoinConstraint,
         join_type: JoinType,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
@@ -122,22 +130,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             JoinConstraint::On(sql_expr) => {
                 let join_schema = left.schema().join(right.schema())?;
                 // parse ON expression
-                let expr = self.sql_to_expr(sql_expr, &join_schema, planner_context)?;
+                let expr = self.sql_to_expr_ref(
+                    sql_expr.as_ref(),
+                    &join_schema,
+                    planner_context,
+                )?;
                 LogicalPlanBuilder::from(left)
                     .join_on(right, join_type, Some(expr))?
                     .build()
             }
             JoinConstraint::Using(object_names) => {
                 let keys = object_names
-                    .into_iter()
+                    .iter()
                     .map(|object_name| {
-                        let ObjectName(mut object_names) = object_name;
+                        let ObjectName(object_names) = object_name;
                         if object_names.len() != 1 {
                             not_impl_err!(
-                                "Invalid identifier in USING clause. Expected single identifier, got {}", ObjectName(object_names)
+                                "Invalid identifier in USING clause. Expected single identifier, got {}", object_name
                             )
                         } else {
-                            let id = object_names.swap_remove(0);
+                            let id = &object_names[0];
                             id.as_ident()
                                 .ok_or_else(|| {
                                     plan_datafusion_err!(

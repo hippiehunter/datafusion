@@ -213,12 +213,22 @@ pub(crate) fn resolve_positions_to_exprs(
     fn literal_position(expr: &Expr) -> Option<i64> {
         match expr {
             Expr::Literal(ScalarValue::Int8(Some(position)), _) => Some(*position as i64),
-            Expr::Literal(ScalarValue::Int16(Some(position)), _) => Some(*position as i64),
-            Expr::Literal(ScalarValue::Int32(Some(position)), _) => Some(*position as i64),
+            Expr::Literal(ScalarValue::Int16(Some(position)), _) => {
+                Some(*position as i64)
+            }
+            Expr::Literal(ScalarValue::Int32(Some(position)), _) => {
+                Some(*position as i64)
+            }
             Expr::Literal(ScalarValue::Int64(Some(position)), _) => Some(*position),
-            Expr::Literal(ScalarValue::UInt8(Some(position)), _) => Some(*position as i64),
-            Expr::Literal(ScalarValue::UInt16(Some(position)), _) => Some(*position as i64),
-            Expr::Literal(ScalarValue::UInt32(Some(position)), _) => Some(*position as i64),
+            Expr::Literal(ScalarValue::UInt8(Some(position)), _) => {
+                Some(*position as i64)
+            }
+            Expr::Literal(ScalarValue::UInt16(Some(position)), _) => {
+                Some(*position as i64)
+            }
+            Expr::Literal(ScalarValue::UInt32(Some(position)), _) => {
+                Some(*position as i64)
+            }
             Expr::Literal(ScalarValue::UInt64(Some(position)), _) => {
                 i64::try_from(*position).ok()
             }
@@ -870,8 +880,12 @@ mod tests {
         assert_eq!(
             transformed_exprs,
             vec![
-                Expr::Column(Column::from_name("__unnest_placeholder(struct_col).field1")),
-                Expr::Column(Column::from_name("__unnest_placeholder(struct_col).field2")),
+                Expr::Column(Column::from_name(
+                    "__unnest_placeholder(struct_col).field1"
+                )),
+                Expr::Column(Column::from_name(
+                    "__unnest_placeholder(struct_col).field2"
+                )),
             ]
         );
         column_unnests_eq(

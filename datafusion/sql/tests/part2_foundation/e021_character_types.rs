@@ -38,7 +38,7 @@
 //!
 //! All E021 subfeatures are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // E021-01: CHARACTER data type
@@ -147,31 +147,19 @@ fn e021_02_multiple_char_columns() {
 /// E021-03: Basic character literal in SELECT
 #[test]
 fn e021_03_character_literal() {
-    assert_feature_supported!(
-        "SELECT 'hello'",
-        "E021-03",
-        "Character literal"
-    );
+    assert_feature_supported!("SELECT 'hello'", "E021-03", "Character literal");
 }
 
 /// E021-03: Empty string literal
 #[test]
 fn e021_03_empty_string() {
-    assert_feature_supported!(
-        "SELECT ''",
-        "E021-03",
-        "Empty string literal"
-    );
+    assert_feature_supported!("SELECT ''", "E021-03", "Empty string literal");
 }
 
 /// E021-03: Character literal with spaces
 #[test]
 fn e021_03_literal_with_spaces() {
-    assert_feature_supported!(
-        "SELECT 'hello world'",
-        "E021-03",
-        "Literal with spaces"
-    );
+    assert_feature_supported!("SELECT 'hello world'", "E021-03", "Literal with spaces");
 }
 
 /// E021-03: Character literal with special characters
@@ -187,11 +175,7 @@ fn e021_03_literal_special_chars() {
 /// E021-03: Escaped single quote in character literal
 #[test]
 fn e021_03_escaped_quote() {
-    assert_feature_supported!(
-        "SELECT 'don''t'",
-        "E021-03",
-        "Escaped single quote"
-    );
+    assert_feature_supported!("SELECT 'don''t'", "E021-03", "Escaped single quote");
 }
 
 /// E021-03: Character literal in WHERE clause
@@ -231,11 +215,7 @@ fn e021_04_char_length_abbreviation() {
 /// E021-04: LENGTH function (common variant)
 #[test]
 fn e021_04_length_function() {
-    assert_feature_supported!(
-        "SELECT LENGTH('hello')",
-        "E021-04",
-        "LENGTH function"
-    );
+    assert_feature_supported!("SELECT LENGTH('hello')", "E021-04", "LENGTH function");
 }
 
 /// E021-04: CHARACTER_LENGTH on column
@@ -387,21 +367,13 @@ fn e021_07_complex_concatenation() {
 /// E021-08: UPPER function
 #[test]
 fn e021_08_upper_function() {
-    assert_feature_supported!(
-        "SELECT UPPER('hello')",
-        "E021-08",
-        "UPPER function"
-    );
+    assert_feature_supported!("SELECT UPPER('hello')", "E021-08", "UPPER function");
 }
 
 /// E021-08: LOWER function
 #[test]
 fn e021_08_lower_function() {
-    assert_feature_supported!(
-        "SELECT LOWER('HELLO')",
-        "E021-08",
-        "LOWER function"
-    );
+    assert_feature_supported!("SELECT LOWER('HELLO')", "E021-08", "LOWER function");
 }
 
 /// E021-08: UPPER on column
@@ -451,11 +423,7 @@ fn e021_08_combined_case_conversion() {
 /// E021-09: TRIM both sides (default)
 #[test]
 fn e021_09_trim_both() {
-    assert_feature_supported!(
-        "SELECT TRIM('  hello  ')",
-        "E021-09",
-        "TRIM both sides"
-    );
+    assert_feature_supported!("SELECT TRIM('  hello  ')", "E021-09", "TRIM both sides");
 }
 
 /// E021-09: TRIM LEADING
@@ -511,21 +479,13 @@ fn e021_09_trim_custom_char() {
 /// E021-09: LTRIM function (common variant)
 #[test]
 fn e021_09_ltrim_function() {
-    assert_feature_supported!(
-        "SELECT LTRIM('  hello')",
-        "E021-09",
-        "LTRIM function"
-    );
+    assert_feature_supported!("SELECT LTRIM('  hello')", "E021-09", "LTRIM function");
 }
 
 /// E021-09: RTRIM function (common variant)
 #[test]
 fn e021_09_rtrim_function() {
-    assert_feature_supported!(
-        "SELECT RTRIM('hello  ')",
-        "E021-09",
-        "RTRIM function"
-    );
+    assert_feature_supported!("SELECT RTRIM('hello  ')", "E021-09", "RTRIM function");
 }
 
 // ============================================================================
@@ -710,13 +670,15 @@ fn e021_summary_all_subfeatures() {
     // in a realistic scenario
 
     // Create table with character types
-    assert_plans!("CREATE TABLE users (
+    assert_plans!(
+        "CREATE TABLE users (
         id INT,
         username VARCHAR(50),
         email VARCHAR(100),
         first_name CHAR(30),
         last_name CHAR(30)
-    )");
+    )"
+    );
 
     // Query using various character operations
     assert_plans!(

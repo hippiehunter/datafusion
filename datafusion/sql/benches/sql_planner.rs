@@ -30,6 +30,8 @@ use datafusion_expr::{
 };
 use datafusion_sql::parser::DFParser;
 use datafusion_sql::planner::{ContextProvider, ParserOptions, SqlToRel};
+use sqlparser::ParsedSql;
+use sqlparser::dialect::PostgreSqlDialect;
 
 struct CountingAllocator;
 
@@ -221,17 +223,22 @@ fn planner<'a>(provider: &'a BenchProvider) -> SqlToRel<'a, BenchProvider> {
 }
 
 fn parse_and_plan(provider: &BenchProvider, case: &QueryCase) {
+    black_box(owned_plan(provider, case));
+}
+
+fn owned_plan(
+    provider: &BenchProvider,
+    case: &QueryCase,
+) -> datafusion_expr::LogicalPlan {
     let mut statements =
         DFParser::parse_sql(case.sql).expect("benchmark SQL should parse");
     let statement = statements
         .pop_front()
         .expect("benchmark SQL should contain one statement");
     assert!(statements.is_empty());
-    black_box(
-        planner(provider)
-            .statement_to_plan(statement)
-            .expect("benchmark SQL should plan"),
-    );
+    planner(provider)
+        .statement_to_plan(statement)
+        .expect("benchmark SQL should plan")
 }
 
 fn run_workload(provider: &BenchProvider) {
@@ -240,26 +247,113 @@ fn run_workload(provider: &BenchProvider) {
     }
 }
 
-fn allocation_report() {
-    let provider = BenchProvider::new();
-    run_workload(&provider);
+fn parse_document_and_plan(provider: &BenchProvider, case: &QueryCase) {
+    black_box(document_plan(provider, case));
+}
 
+fn document_plan(
+    provider: &BenchProvider,
+    case: &QueryCase,
+) -> datafusion_expr::LogicalPlan {
+    let document = ParsedSql::parse(&PostgreSqlDialect {}, case.sql)
+        .expect("benchmark SQL should parse");
+    let [statement] = document.statements() else {
+        panic!("benchmark SQL should contain one statement")
+    };
+    planner(provider)
+        .sql_statement_to_plan_ref(statement)
+        .expect("benchmark SQL should plan")
+}
+
+fn run_document_workload(provider: &BenchProvider) {
+    for case in WORKLOAD {
+        parse_document_and_plan(provider, case);
+    }
+}
+
+fn parse_document_clone_and_plan(provider: &BenchProvider, case: &QueryCase) {
+    black_box(document_clone_plan(provider, case));
+}
+
+fn document_clone_plan(
+    provider: &BenchProvider,
+    case: &QueryCase,
+) -> datafusion_expr::LogicalPlan {
+    let document = ParsedSql::parse(&PostgreSqlDialect {}, case.sql)
+        .expect("benchmark SQL should parse");
+    let [statement] = document.statements() else {
+        panic!("benchmark SQL should contain one statement")
+    };
+    planner(provider)
+        .sql_statement_to_plan(statement.clone())
+        .expect("benchmark SQL should plan")
+}
+
+fn run_document_clone_workload(provider: &BenchProvider) {
+    for case in WORKLOAD {
+        parse_document_clone_and_plan(provider, case);
+    }
+}
+
+fn reset_allocations() {
     ALLOCATIONS.store(0, Ordering::Relaxed);
     REALLOCATIONS.store(0, Ordering::Relaxed);
     REQUESTED_BYTES.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::SeqCst);
-    run_workload(&provider);
-    COUNTING.store(false, Ordering::SeqCst);
+}
 
-    println!("pipeline       SQL   allocs  reallocs   bytes allocated");
-    println!("-------------- --- -------- -------- ---------------");
+fn print_allocations(pipeline: &str) {
     println!(
-        "parse_plan     {:>3} {:>8} {:>8} {:>15}",
+        "{pipeline:<24} {:>3} {:>8} {:>8} {:>15}",
         WORKLOAD.len(),
         ALLOCATIONS.load(Ordering::Relaxed),
         REALLOCATIONS.load(Ordering::Relaxed),
         REQUESTED_BYTES.load(Ordering::Relaxed),
     );
+}
+
+fn allocation_report() {
+    let provider = BenchProvider::new();
+    for case in WORKLOAD {
+        let owned = owned_plan(&provider, case).display_indent().to_string();
+        let document = document_plan(&provider, case).display_indent().to_string();
+        let cloned = document_clone_plan(&provider, case)
+            .display_indent()
+            .to_string();
+        assert_eq!(
+            owned, document,
+            "owned and document planners diverged for {}",
+            case.name,
+        );
+        assert_eq!(
+            document, cloned,
+            "borrowed and clone-adapter planners diverged for {}",
+            case.name,
+        );
+    }
+    run_workload(&provider);
+    run_document_workload(&provider);
+    run_document_clone_workload(&provider);
+
+    println!("pipeline                 SQL   allocs  reallocs   bytes allocated");
+    println!("------------------------ --- -------- -------- ---------------");
+
+    reset_allocations();
+    COUNTING.store(true, Ordering::SeqCst);
+    run_workload(&provider);
+    COUNTING.store(false, Ordering::SeqCst);
+    print_allocations("parse_plan_owned");
+
+    reset_allocations();
+    COUNTING.store(true, Ordering::SeqCst);
+    run_document_workload(&provider);
+    COUNTING.store(false, Ordering::SeqCst);
+    print_allocations("parse_plan_document");
+
+    reset_allocations();
+    COUNTING.store(true, Ordering::SeqCst);
+    run_document_clone_workload(&provider);
+    COUNTING.store(false, Ordering::SeqCst);
+    print_allocations("document_clone_adapter");
 }
 
 fn criterion_report() {
@@ -276,6 +370,12 @@ fn criterion_report() {
     group.throughput(Throughput::Bytes(sql_bytes));
     group.bench_function("parse_plan/workload", |bencher| {
         bencher.iter(|| run_workload(black_box(&provider)));
+    });
+    group.bench_function("parse_plan_document/workload", |bencher| {
+        bencher.iter(|| run_document_workload(black_box(&provider)));
+    });
+    group.bench_function("document_clone_adapter/workload", |bencher| {
+        bencher.iter(|| run_document_clone_workload(black_box(&provider)));
     });
     for case in WORKLOAD {
         group.throughput(Throughput::Bytes(case.sql.len() as u64));

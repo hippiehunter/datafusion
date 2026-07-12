@@ -28,14 +28,14 @@ use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, TableSource};
 use sqlparser::ast::{Ident, Query, SelectItem, SetExpr, SetOperator, With};
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
-    pub(super) fn plan_with_clause(
+    pub(super) fn plan_with_clause_ref(
         &self,
-        with: With,
+        with: &With,
         planner_context: &mut PlannerContext,
     ) -> Result<()> {
         let is_recursive = with.recursive;
         // Process CTEs from top to bottom
-        for cte in with.cte_tables {
+        for cte in &with.cte_tables {
             // A `WITH` block can't use the same name more than once
             let cte_name = self.ident_normalizer.normalize(cte.alias.name.clone());
             if planner_context.contains_cte(&cte_name) {
@@ -49,37 +49,46 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // to recursive_cte() so the work table has the correct schema for self-references.
             let cte_plan = if is_recursive {
                 // Extract column aliases from cte.alias.columns
-                let column_aliases: Vec<Ident> =
-                    cte.alias.columns.iter().map(|c| c.name.clone()).collect();
-                self.recursive_cte(&cte_name, *cte.query, column_aliases, planner_context)?
+                let column_aliases = cte
+                    .alias
+                    .columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>();
+                self.recursive_cte_ref(
+                    &cte_name,
+                    cte.query.as_ref(),
+                    &column_aliases,
+                    planner_context,
+                )?
             } else {
-                self.non_recursive_cte(*cte.query, planner_context)?
+                self.non_recursive_cte_ref(cte.query.as_ref(), planner_context)?
             };
 
             // Each `WITH` block can change the column names in the last
             // projection (e.g. "WITH table(t1, t2) AS SELECT 1, 2").
             // For recursive CTEs, column aliases have already been applied within recursive_cte(),
             // but apply_table_alias will still apply the table name alias.
-            let final_plan = self.apply_table_alias(cte_plan, cte.alias)?;
+            let final_plan = self.apply_table_alias(cte_plan, cte.alias.clone())?;
             // Export the CTE to the outer query
             planner_context.insert_cte(cte_name, final_plan);
         }
         Ok(())
     }
 
-    fn non_recursive_cte(
+    fn non_recursive_cte_ref(
         &self,
-        cte_query: Query,
+        cte_query: &Query,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        self.query_to_plan(cte_query, planner_context)
+        self.query_to_plan_ref(cte_query, planner_context)
     }
 
-    fn recursive_cte(
+    fn recursive_cte_ref(
         &self,
         cte_name: &str,
-        mut cte_query: Query,
-        column_aliases: Vec<Ident>,
+        cte_query: &Query,
+        column_aliases: &[Ident],
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         if !self
@@ -91,17 +100,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return not_impl_err!("Recursive CTEs are not enabled");
         }
 
-        let (left_expr, right_expr, set_quantifier) = match *cte_query.body {
+        let (left_expr, right_expr, set_quantifier) = match cte_query.body.as_ref() {
             SetExpr::SetOperation {
                 op: SetOperator::Union,
                 left,
                 right,
                 set_quantifier,
-            } => (left, right, set_quantifier),
-            other => {
+            } => (left.as_ref(), right.as_ref(), set_quantifier),
+            _ => {
                 // If the query is not a UNION, then it is not a recursive CTE
-                *cte_query.body = other;
-                return self.non_recursive_cte(cte_query, planner_context);
+                return self.non_recursive_cte_ref(cte_query, planner_context);
             }
         };
 
@@ -120,12 +128,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // If column aliases are provided, inject them into the AST before compiling.
         // This ensures columns get unique names even if the SELECT has duplicate literals
         // (e.g., SELECT 1, 0, 1 with aliases (n, a, b) becomes SELECT 1 AS n, 0 AS a, 1 AS b).
-        let left_expr = if !column_aliases.is_empty() {
-            self.inject_column_aliases_into_set_expr(*left_expr, &column_aliases)?
+        let static_plan = if column_aliases.is_empty() {
+            self.set_expr_to_plan_ref(left_expr, planner_context)?
         } else {
-            *left_expr
+            let aliased = self
+                .inject_column_aliases_into_set_expr(left_expr.clone(), column_aliases)?;
+            self.set_expr_to_plan(aliased, planner_context)?
         };
-        let static_plan = self.set_expr_to_plan(left_expr, planner_context)?;
 
         // Since the recursive CTEs include a component that references a
         // table with its name, like the example below:
@@ -189,7 +198,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // this uses the named_relation we inserted above to resolve the
         // relation. This ensures that the recursive term uses the named relation logical plan
         // and thus the 'continuance' physical plan as its input and source
-        let recursive_plan = self.set_expr_to_plan(*right_expr, planner_context)?;
+        let recursive_plan = self.set_expr_to_plan_ref(right_expr, planner_context)?;
 
         // Check if the recursive term references the CTE itself,
         // if not, it is a non-recursive CTE
@@ -201,12 +210,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 SetOperator::Union,
                 static_plan,
                 recursive_plan,
-                set_quantifier,
+                set_quantifier.clone(),
             );
         }
 
         // ---------- Step 4: Create the final plan ------------------
-        let distinct = !Self::is_union_all(set_quantifier)?;
+        let distinct = !Self::is_union_all(set_quantifier.clone())?;
         LogicalPlanBuilder::from(static_plan)
             .to_recursive_query(name, recursive_plan, distinct)?
             .build()
@@ -264,13 +273,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     if i < projection.len() {
                         let item = &mut projection[i];
                         // Convert the item to have an alias
-                        *item = match std::mem::replace(item, SelectItem::Wildcard(Default::default())) {
-                            SelectItem::UnnamedExpr(expr) => {
-                                SelectItem::ExprWithAlias {
-                                    expr,
-                                    alias: alias.clone(),
-                                }
-                            }
+                        *item = match std::mem::replace(
+                            item,
+                            SelectItem::Wildcard(Default::default()),
+                        ) {
+                            SelectItem::UnnamedExpr(expr) => SelectItem::ExprWithAlias {
+                                expr,
+                                alias: alias.clone(),
+                            },
                             SelectItem::ExprWithAlias { expr, alias: _ } => {
                                 // Replace existing alias with the CTE column alias
                                 SelectItem::ExprWithAlias {

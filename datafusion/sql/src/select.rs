@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -46,9 +47,9 @@ use datafusion_expr::{
 
 use indexmap::IndexMap;
 use sqlparser::ast::{
-    AttachedToken, Distinct, Expr as SQLExpr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Ident, Join, JoinConstraint, JoinOperator,
-    NamedWindowExpr, ObjectName, OrderBy, Query as SQLQuery, SelectFlavor,
+    AstBox as SQLBox, AttachedToken, Distinct, Expr as SQLExpr, FunctionArg,
+    FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Join, JoinConstraint,
+    JoinOperator, NamedWindowExpr, ObjectName, OrderBy, Query as SQLQuery, SelectFlavor,
     SelectItemQualifiedWildcardKind, SetExpr, TableAlias, TableFactor,
     WildcardAdditionalOptions, WindowType, visit_expressions_mut,
 };
@@ -77,43 +78,73 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         query_order_by: Option<OrderBy>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        Self::rewrite_projection_srfs_to_lateral(&mut select);
+        Self::rewrite_projection_tvf_star(&mut select);
+
+        let srf_plan = if select.from.is_empty() {
+            self.try_rewrite_srf_select(&mut select, planner_context)?
+        } else {
+            None
+        };
+
+        self.select_to_plan_ref_prepared(
+            &select,
+            query_order_by.as_ref(),
+            planner_context,
+            srf_plan,
+        )
+    }
+
+    pub(super) fn select_to_plan_ref(
+        &self,
+        select: &Select,
+        query_order_by: Option<&OrderBy>,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        if Self::select_requires_owned_rewrite(select) {
+            return self.select_to_plan(
+                select.clone(),
+                query_order_by.cloned(),
+                planner_context,
+            );
+        }
+        self.select_to_plan_ref_prepared(select, query_order_by, planner_context, None)
+    }
+
+    fn select_to_plan_ref_prepared(
+        &self,
+        select: &Select,
+        query_order_by: Option<&OrderBy>,
+        planner_context: &mut PlannerContext,
+        srf_plan: Option<LogicalPlan>,
+    ) -> Result<LogicalPlan> {
         // Check for unsupported syntax first
         if select.top.is_some() {
             return not_impl_err!("TOP");
         }
 
-        // Hoist any set-returning function in the projection into a LATERAL join
-        // before planning the FROM clause (PostgreSQL projection-SRF semantics).
-        Self::rewrite_projection_srfs_to_lateral(&mut select);
-        Self::rewrite_projection_tvf_star(&mut select);
-
         // Process `from` clause
-        let from = std::mem::take(&mut select.from);
-        let plan = self.plan_from_tables(from, planner_context)?;
+        let plan = match srf_plan {
+            Some(plan) => plan,
+            None => self.plan_from_tables_ref(&select.from, planner_context)?,
+        };
         let empty_from = matches!(plan, LogicalPlan::EmptyRelation(_));
 
-        // Detect set-returning functions in SELECT with no FROM clause.
-        // PostgreSQL allows `SELECT srf(args)` as shorthand for `SELECT * FROM srf(args)`.
-        let (plan, empty_from) = if empty_from {
-            match self.try_rewrite_srf_select(&mut select, planner_context) {
-                Ok(Some(srf_plan)) => (srf_plan, false),
-                _ => (plan, true),
-            }
-        } else {
-            (plan, empty_from)
-        };
-
         // Process `where` clause
-        let base_plan = self.plan_selection(select.selection, plan, planner_context)?;
+        let base_plan =
+            self.plan_selection_ref(select.selection.as_deref(), plan, planner_context)?;
 
         // Handle named windows before processing the projection expression
         check_conflicting_windows(&select.named_window)?;
-        self.match_window_definitions(&mut select.projection, &select.named_window)?;
+        let mut projection = Cow::Borrowed(select.projection.as_slice());
+        if !select.named_window.is_empty() {
+            self.match_window_definitions(projection.to_mut(), &select.named_window)?;
+        }
 
         // Process the SELECT expressions
-        let select_exprs = self.prepare_select_exprs(
+        let select_exprs = self.prepare_select_exprs_ref(
             &base_plan,
-            select.projection,
+            projection.as_ref(),
             empty_from,
             planner_context,
         )?;
@@ -148,6 +179,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Optionally the HAVING expression.
         let having_expr_opt = select
             .having
+            .as_deref()
             .map::<Result<Expr>, _>(|having_expr| {
                 let having_expr = self.sql_expr_to_logical_expr(
                     having_expr,
@@ -173,9 +205,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .transpose()?;
 
         // All of the group by expressions
-        let group_by_exprs = if let GroupByExpr::Expressions(exprs, _) = select.group_by {
+        let group_by_exprs = if let GroupByExpr::Expressions(exprs, _) = &select.group_by
+        {
             exprs
-                .into_iter()
+                .iter()
                 .map(|e| {
                     let group_by_expr = self.sql_expr_to_logical_expr(
                         e,
@@ -368,7 +401,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let plan = self.try_process_unnest(plan, select_exprs_post_aggr)?;
 
         // Process distinct clause
-        let plan = match select.distinct {
+        let plan = match &select.distinct {
             None => Ok(plan),
             Some(Distinct::Distinct) => {
                 LogicalPlanBuilder::from(plan).distinct()?.build()
@@ -384,7 +417,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
 
                 let on_expr = on_expr
-                    .into_iter()
+                    .iter()
                     .map(|e| {
                         self.sql_expr_to_logical_expr(e, plan.schema(), planner_context)
                     })
@@ -713,6 +746,49 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
     }
 
+    fn select_requires_owned_rewrite(select: &Select) -> bool {
+        let has_projection_srf = select.projection.iter().any(|item| match item {
+            SelectItem::UnnamedExpr(SQLExpr::Function(function)) => {
+                Self::projection_srf_parts(function, None).is_some()
+            }
+            SelectItem::ExprWithAlias {
+                expr: SQLExpr::Function(function),
+                alias,
+            } => Self::projection_srf_parts(function, Some(alias.clone())).is_some(),
+            _ => false,
+        });
+
+        has_projection_srf || Self::is_projection_tvf_star(select)
+    }
+
+    fn is_projection_tvf_star(select: &Select) -> bool {
+        if select.projection.len() != 1
+            || select.from.is_empty()
+            || select.having.is_some()
+            || !select.named_window.is_empty()
+            || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers)
+                if exprs.is_empty() && modifiers.is_empty())
+        {
+            return false;
+        }
+        let SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::Expr(expr), _) =
+            &select.projection[0]
+        else {
+            return false;
+        };
+        let function = match expr {
+            SQLExpr::Nested(inner) => match inner.as_ref() {
+                SQLExpr::Function(function) => function,
+                _ => return false,
+            },
+            SQLExpr::Function(function) => function,
+            _ => return false,
+        };
+        let name = function.name.to_string().to_ascii_lowercase();
+        let base = name.rsplit('.').next().unwrap_or(name.as_str());
+        Self::TVF_STAR_FUNCTIONS.contains(&base)
+    }
+
     /// PostgreSQL evaluates a set-returning function in the SELECT list as an
     /// implicit LATERAL cross-join against the rest of the row. When such an SRF
     /// appears with a FROM clause (so the empty-FROM `SELECT srf(args)` shorthand
@@ -756,9 +832,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     alias: Some(table_alias),
                 },
                 global: false,
-                join_operator: JoinOperator::CrossJoin(
-                    JoinConstraint::None,
-                ),
+                join_operator: JoinOperator::CrossJoin(JoinConstraint::None),
             });
             let col_ref = SQLExpr::CompoundIdentifier(vec![srf_alias, col.clone()]);
             *item = SelectItem::ExprWithAlias {
@@ -867,9 +941,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         };
         let derived = TableFactor::Derived {
             lateral: false,
-            subquery: Box::new(SQLQuery {
+            subquery: SQLBox::new(SQLQuery {
                 with: None,
-                body: Box::new(SetExpr::Select(Box::new(inner_select))),
+                body: SQLBox::new(SetExpr::Select(SQLBox::new(inner_select))),
                 order_by: None,
                 limit_clause: None,
                 fetch: None,
@@ -957,9 +1031,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Some((func.name.clone(), args, col))
     }
 
-    pub(crate) fn plan_selection(
+    pub(crate) fn plan_selection_ref(
         &self,
-        selection: Option<SQLExpr>,
+        selection: Option<&SQLExpr>,
         plan: LogicalPlan,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
@@ -973,7 +1047,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .unwrap_or_else(Vec::new);
 
                 let filter_expr =
-                    self.sql_to_expr(predicate_expr, plan.schema(), planner_context)?;
+                    self.sql_to_expr_ref(predicate_expr, plan.schema(), planner_context)?;
 
                 // Check for aggregation functions
                 let aggregate_exprs =
@@ -1001,23 +1075,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
     }
 
-    pub(crate) fn plan_from_tables(
+    pub(crate) fn plan_from_tables_ref(
         &self,
-        mut from: Vec<TableWithJoins>,
+        from: &[TableWithJoins],
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         match from.len() {
             0 => Ok(LogicalPlanBuilder::empty(true).build()?),
-            1 => {
-                let input = from.remove(0);
-                self.plan_table_with_joins(input, planner_context)
-            }
+            1 => self.plan_table_with_joins_ref(&from[0], planner_context),
             _ => {
-                let mut from = from.into_iter();
+                let mut from = from.iter();
 
                 let mut left = LogicalPlanBuilder::from({
                     let input = from.next().unwrap();
-                    self.plan_table_with_joins(input, planner_context)?
+                    self.plan_table_with_joins_ref(input, planner_context)?
                 });
                 let old_outer_from_schema = {
                     let left_schema = Some(Arc::clone(left.schema()));
@@ -1025,7 +1096,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 };
                 for input in from {
                     // Join `input` with the current result (`left`).
-                    let right = self.plan_table_with_joins(input, planner_context)?;
+                    let right = self.plan_table_with_joins_ref(input, planner_context)?;
                     left = left.cross_join(right)?;
                     // Update the outer FROM schema.
                     let left_schema = Some(Arc::clone(left.schema()));
@@ -1037,11 +1108,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
     }
 
-    /// Returns the `Expr`'s corresponding to a SQL query's SELECT expressions.
-    pub(crate) fn prepare_select_exprs(
+    pub(crate) fn prepare_select_exprs_ref(
         &self,
         plan: &LogicalPlan,
-        projection: Vec<SelectItem>,
+        projection: &[SelectItem],
         empty_from: bool,
         planner_context: &mut PlannerContext,
     ) -> Result<Vec<SelectExpr>> {
@@ -1049,7 +1119,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut error_builder = DataFusionErrorBuilder::new();
 
         for expr in projection {
-            match self.sql_select_to_rex(expr, plan, empty_from, planner_context) {
+            match self.sql_select_to_rex_ref(expr, plan, empty_from, planner_context) {
                 Ok(expr) => prepared_select_exprs.push(expr),
                 Err(err) => error_builder.add_error(err),
             }
@@ -1057,17 +1127,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         error_builder.error_or(prepared_select_exprs)
     }
 
-    /// Generate a relational expression from a select SQL expression
-    fn sql_select_to_rex(
+    fn sql_select_to_rex_ref(
         &self,
-        sql: SelectItem,
+        sql: &SelectItem,
         plan: &LogicalPlan,
         empty_from: bool,
         planner_context: &mut PlannerContext,
     ) -> Result<SelectExpr> {
         match sql {
             SelectItem::UnnamedExpr(expr) => {
-                let expr = self.sql_to_expr(expr, plan.schema(), planner_context)?;
+                let expr = self.sql_to_expr_ref(expr, plan.schema(), planner_context)?;
                 let col = normalize_col_with_schemas_and_ambiguity_check(
                     expr,
                     &[&[plan.schema()]],
@@ -1078,13 +1147,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             SelectItem::ExprWithAlias { expr, alias } => {
                 let select_expr =
-                    self.sql_to_expr(expr, plan.schema(), planner_context)?;
+                    self.sql_to_expr_ref(expr, plan.schema(), planner_context)?;
                 let col = normalize_col_with_schemas_and_ambiguity_check(
                     select_expr,
                     &[&[plan.schema()]],
                     &plan.using_columns()?,
                 )?;
-                let name = self.ident_normalizer.normalize(alias);
+                let name = self.ident_normalizer.normalize(alias.clone());
                 // avoiding adding an alias if the column name is the same.
                 let expr = match &col {
                     Expr::Column(column) if column.name.eq(&name) => col,
@@ -1119,7 +1188,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         );
                     }
                 };
-                let qualifier = self.object_name_to_table_reference(object_name)?;
+                let qualifier =
+                    self.object_name_to_table_reference(object_name.clone())?;
                 let planned_options = self.plan_wildcard_options(
                     plan,
                     empty_from,
@@ -1156,21 +1226,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         plan: &LogicalPlan,
         empty_from: bool,
         planner_context: &mut PlannerContext,
-        options: WildcardAdditionalOptions,
+        options: &WildcardAdditionalOptions,
     ) -> Result<WildcardOptions> {
         let planned_option = WildcardOptions {
-            ilike: options.opt_ilike,
-            except: options.opt_except,
+            ilike: options.opt_ilike.clone(),
+            except: options.opt_except.clone(),
             replace: None,
-            rename: options.opt_rename,
+            rename: options.opt_rename.clone(),
         };
-        if let Some(replace) = options.opt_replace {
+        if let Some(replace) = &options.opt_replace {
             let replace_expr = replace
                 .items
                 .iter()
                 .map(|item| {
-                    self.sql_select_to_rex(
-                        SelectItem::UnnamedExpr(item.expr.clone()),
+                    self.sql_select_to_rex_ref(
+                        &SelectItem::UnnamedExpr(item.expr.clone()),
                         plan,
                         empty_from,
                         planner_context,
@@ -1185,7 +1255,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .collect::<Vec<_>>();
 
             let planned_replace = PlannedReplaceSelectItem {
-                items: replace.items.into_iter().map(|i| *i).collect(),
+                items: replace
+                    .items
+                    .iter()
+                    .map(|item| item.as_ref().clone())
+                    .collect(),
                 planned_expressions: replace_expr,
             };
             Ok(planned_option.with_replace(planned_replace))

@@ -51,19 +51,22 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use arrow::datatypes::*;
+use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{DFSchema, GetExt, Result, TableReference, plan_err, not_impl_err};
+use datafusion_common::{
+    DFSchema, GetExt, Result, TableReference, not_impl_err, plan_err,
+};
+use datafusion_expr::function::PartitionEvaluatorArgs;
+use datafusion_expr::planner::ExprPlanner;
 use datafusion_expr::{
     AggregateUDF, ColumnarValue, PartitionEvaluator, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, TableSource, TypeSignature, Volatility, WindowUDF, WindowUDFImpl,
+    ScalarUDFImpl, Signature, TableSource, TypeSignature, Volatility, WindowUDF,
+    WindowUDFImpl,
 };
-use datafusion_expr::planner::ExprPlanner;
-use datafusion_common::ScalarValue;
-use datafusion_expr::function::PartitionEvaluatorArgs;
 use datafusion_sql::parser::DFParser;
 use datafusion_sql::planner::{ContextProvider, ParserOptions, SqlToRel};
-use sqlparser::dialect::{Dialect, PostgreSqlDialect, MsSqlDialect};
+use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 
 // Import aggregate function stubs from datafusion_expr::test::function_stub
 use datafusion_expr::test::function_stub::{
@@ -767,8 +770,16 @@ stub_nullary_datetime_udf!(CurrentDate, "current_date", DataType::Date32);
 stub_nullary_datetime_udf!(Now, "now", DataType::Timestamp(TimeUnit::Nanosecond, None));
 
 // Datetime functions with optional precision - can be called as CURRENT_TIME() or CURRENT_TIME(3)
-stub_optional_precision_datetime_udf!(CurrentTime, "current_time", DataType::Time64(TimeUnit::Nanosecond));
-stub_optional_precision_datetime_udf!(CurrentTimestamp, "current_timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None));
+stub_optional_precision_datetime_udf!(
+    CurrentTime,
+    "current_time",
+    DataType::Time64(TimeUnit::Nanosecond)
+);
+stub_optional_precision_datetime_udf!(
+    CurrentTimestamp,
+    "current_timestamp",
+    DataType::Timestamp(TimeUnit::Nanosecond, None)
+);
 
 // CASE and conditional (F261)
 stub_scalar_udf!(Case, "case");
@@ -809,8 +820,16 @@ stub_scalar_udf!(DateAdd, "date_add");
 stub_scalar_udf!(DateSub, "date_sub");
 stub_scalar_udf!(DateTrunc, "date_trunc");
 // LocalTime and LocalTimestamp support optional precision argument
-stub_optional_precision_datetime_udf!(LocalTime, "localtime", DataType::Time64(TimeUnit::Nanosecond));
-stub_optional_precision_datetime_udf!(LocalTimestamp, "localtimestamp", DataType::Timestamp(TimeUnit::Nanosecond, None));
+stub_optional_precision_datetime_udf!(
+    LocalTime,
+    "localtime",
+    DataType::Time64(TimeUnit::Nanosecond)
+);
+stub_optional_precision_datetime_udf!(
+    LocalTimestamp,
+    "localtimestamp",
+    DataType::Timestamp(TimeUnit::Nanosecond, None)
+);
 
 // Trigonometric functions
 stub_numeric_udf!(Sin, "sin");
@@ -896,7 +915,10 @@ impl ScalarUDFImpl for GetField {
         Ok(DataType::Null)
     }
 
-    fn return_field_from_args(&self, args: datafusion_expr::ReturnFieldArgs) -> Result<Arc<Field>> {
+    fn return_field_from_args(
+        &self,
+        args: datafusion_expr::ReturnFieldArgs,
+    ) -> Result<Arc<Field>> {
         if args.arg_fields.len() != 2 {
             return plan_err!("get_field requires exactly 2 arguments");
         }
@@ -966,9 +988,15 @@ impl ScalarUDFImpl for MakeArray {
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         // Return List type based on first argument type, or Null for empty arrays
         if arg_types.is_empty() {
-            Ok(DataType::List(Arc::new(Field::new_list_field(DataType::Null, true))))
+            Ok(DataType::List(Arc::new(Field::new_list_field(
+                DataType::Null,
+                true,
+            ))))
         } else {
-            Ok(DataType::List(Arc::new(Field::new_list_field(arg_types[0].clone(), true))))
+            Ok(DataType::List(Arc::new(Field::new_list_field(
+                arg_types[0].clone(),
+                true,
+            ))))
         }
     }
 
@@ -1020,12 +1048,20 @@ impl ScalarUDFImpl for RowConstructor {
         Ok(DataType::Struct(Fields::empty()))
     }
 
-    fn return_field_from_args(&self, args: datafusion_expr::ReturnFieldArgs) -> Result<Arc<Field>> {
-        let fields: Vec<Field> = args.arg_fields
+    fn return_field_from_args(
+        &self,
+        args: datafusion_expr::ReturnFieldArgs,
+    ) -> Result<Arc<Field>> {
+        let fields: Vec<Field> = args
+            .arg_fields
             .iter()
             .enumerate()
             .map(|(idx, field)| {
-                Field::new(format!("c{}", idx), field.data_type().clone(), field.is_nullable())
+                Field::new(
+                    format!("c{}", idx),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
             })
             .collect();
 
@@ -1080,13 +1116,18 @@ impl ScalarUDFImpl for NamedStructConstructor {
         Ok(DataType::Struct(Fields::empty()))
     }
 
-    fn return_field_from_args(&self, args: datafusion_expr::ReturnFieldArgs) -> Result<Arc<Field>> {
+    fn return_field_from_args(
+        &self,
+        args: datafusion_expr::ReturnFieldArgs,
+    ) -> Result<Arc<Field>> {
         // Args are interleaved: [name1, value1, name2, value2, ...]
         // Scalar arguments contains the names (at even indices)
         // arg_fields contains the field types (at odd indices for values)
 
         if args.arg_fields.len() % 2 != 0 {
-            return plan_err!("named_struct requires an even number of arguments (name-value pairs)");
+            return plan_err!(
+                "named_struct requires an even number of arguments (name-value pairs)"
+            );
         }
 
         let mut fields = Vec::new();
@@ -1095,7 +1136,9 @@ impl ScalarUDFImpl for NamedStructConstructor {
             let field_name = match args.scalar_arguments.get(i) {
                 Some(Some(ScalarValue::Utf8(Some(name)))) => name.clone(),
                 Some(Some(ScalarValue::LargeUtf8(Some(name)))) => name.clone(),
-                _ => return plan_err!("named_struct field names must be string literals"),
+                _ => {
+                    return plan_err!("named_struct field names must be string literals");
+                }
             };
 
             // Get the field type from the value at i+1
@@ -1121,7 +1164,9 @@ impl ScalarUDFImpl for NamedStructConstructor {
 
 pub fn named_struct_constructor_udf() -> Arc<ScalarUDF> {
     static INSTANCE: std::sync::LazyLock<Arc<ScalarUDF>> =
-        std::sync::LazyLock::new(|| Arc::new(ScalarUDF::from(NamedStructConstructor::default())));
+        std::sync::LazyLock::new(|| {
+            Arc::new(ScalarUDF::from(NamedStructConstructor::default()))
+        });
     Arc::clone(&INSTANCE)
 }
 
@@ -1651,7 +1696,9 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "is_json_object" => Some(is_json_object_udf()),
             "is_json_scalar" => Some(is_json_scalar_udf()),
             "is_json_value" => Some(is_json_value_udf()),
-            "is_json_object_with_unique_keys" => Some(is_json_object_with_unique_keys_udf()),
+            "is_json_object_with_unique_keys" => {
+                Some(is_json_object_with_unique_keys_udf())
+            }
 
             // MATCH_RECOGNIZE navigation functions (T625) - also available as scalars
             "first" => Some(first_scalar_udf()),
@@ -1840,7 +1887,11 @@ impl ExprPlanner for ConformanceExprPlanner {
     ) -> Result<PlannerResult<RawFieldAccessExpr>> {
         // Handle field access for arrays, structs, and lists
         match &expr.field_access {
-            GetFieldAccess::ListRange { start, stop, stride } => {
+            GetFieldAccess::ListRange {
+                start,
+                stop,
+                stride,
+            } => {
                 // Convert array[start:stop:stride] to array_slice(array, start, stop, stride)
                 let func = array_slice_udf();
                 let args = vec![
@@ -1893,9 +1944,9 @@ impl ExprPlanner for ConformanceExprPlanner {
         for name in nested_names {
             let func = get_field_udf();
             let args = vec![expr, datafusion_expr::lit(name.clone())];
-            expr = Expr::ScalarFunction(
-                datafusion_expr::expr::ScalarFunction::new_udf(func, args),
-            );
+            expr = Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+                func, args,
+            ));
         }
 
         Ok(PlannerResult::Planned(expr))
@@ -2045,9 +2096,7 @@ macro_rules! assert_not_implemented {
             "Feature {} ({}) appears to be implemented now!\n\
              SQL: {}\n\
              Please update this test to use assert_parses! or assert_plans! instead.",
-            $feature_id,
-            $description,
-            $sql
+            $feature_id, $description, $sql
         );
     }};
 }
@@ -2262,7 +2311,9 @@ impl<'a, F: ConformanceFunctionProvider> ConformanceContextProvider<'a, F> {
     }
 }
 
-impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextProvider<'a, F> {
+impl<'a, F: ConformanceFunctionProvider> ContextProvider
+    for ConformanceContextProvider<'a, F>
+{
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {
         let schema_name = name.schema().unwrap_or("");
         let table_name = name.table();
@@ -2369,7 +2420,11 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 // Columns for MATCH_RECOGNIZE (R010) conformance tests
                 Field::new("id", DataType::Int32, true),
                 Field::new("value", DataType::Int32, true),
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ),
                 Field::new("category", DataType::Utf8, true),
                 Field::new("region", DataType::Utf8, true),
                 Field::new("price", DataType::Float64, true),
@@ -2439,13 +2494,17 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                     DataType::Timestamp(TimeUnit::Nanosecond, None),
                     false,
                 ),
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None), true), // For R010 tests
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ), // For R010 tests
                 Field::new("First Name", DataType::Utf8, true), // Delimited identifier test
                 Field::new("Last Name", DataType::Utf8, true), // Delimited identifier test
                 Field::new("middle_name", DataType::Utf8, true), // For T151 tests
                 Field::new("maiden_name", DataType::Utf8, true), // For T151 tests
                 Field::new("spouse_name", DataType::Utf8, true), // For T151 tests
-                Field::new("status", DataType::Utf8, true), // For F031 view tests
+                Field::new("status", DataType::Utf8, true),    // For F031 view tests
                 Field::new("action", DataType::Utf8, true), // For R010 user session pattern tests
             ])),
 
@@ -2475,7 +2534,10 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
             "array_types" => Ok(Schema::new(vec![
                 Field::new(
                     "int_array",
-                    DataType::List(Arc::new(Field::new_list_field(DataType::Int32, true))),
+                    DataType::List(Arc::new(Field::new_list_field(
+                        DataType::Int32,
+                        true,
+                    ))),
                     true,
                 ),
                 Field::new(
@@ -2506,10 +2568,14 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
             "events" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int32, false),
                 Field::new("event_data", DataType::Utf8, true), // JSON as string
-                Field::new("metadata", DataType::Utf8, true), // JSON as string
+                Field::new("metadata", DataType::Utf8, true),   // JSON as string
                 Field::new("event_date", DataType::Date32, true), // For datetime tests
                 Field::new("event_time", DataType::Time64(TimeUnit::Nanosecond), true), // For datetime tests
-                Field::new("event_timestamp", DataType::Timestamp(TimeUnit::Nanosecond, None), true), // For datetime tests
+                Field::new(
+                    "event_timestamp",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ), // For datetime tests
             ])),
 
             // Stock prices table for financial/analytics tests
@@ -2553,7 +2619,11 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
                 Field::new("id", DataType::Int32, false),
                 Field::new("User Name", DataType::Utf8, false),
                 Field::new("email_address", DataType::Utf8, false),
-                Field::new("created_at_", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+                Field::new(
+                    "created_at_",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ),
                 Field::new("Status", DataType::Utf8, true),
             ])),
 
@@ -2612,17 +2682,26 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider for ConformanceContextP
 
     fn udf_names(&self) -> Vec<String> {
         // Return the required scalar functions (even if not all are implemented)
-        REQUIRED_SCALAR_FUNCTIONS.iter().map(|s| s.to_string()).collect()
+        REQUIRED_SCALAR_FUNCTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     fn udaf_names(&self) -> Vec<String> {
         // Return the required aggregate functions
-        REQUIRED_AGGREGATE_FUNCTIONS.iter().map(|s| s.to_string()).collect()
+        REQUIRED_AGGREGATE_FUNCTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     fn udwf_names(&self) -> Vec<String> {
         // Return the required window functions
-        REQUIRED_WINDOW_FUNCTIONS.iter().map(|s| s.to_string()).collect()
+        REQUIRED_WINDOW_FUNCTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
@@ -2663,9 +2742,7 @@ pub fn parse_psm_sql(sql: &str) -> Result<()> {
 ///
 /// Uses MsSqlDialect for PSM syntax (BEGIN/END blocks, etc.)
 /// Note: MsSqlDialect requires @ prefix for variables.
-pub fn logical_plan_psm(
-    sql: &str,
-) -> Result<datafusion_expr::logical_plan::LogicalPlan> {
+pub fn logical_plan_psm(sql: &str) -> Result<datafusion_expr::logical_plan::LogicalPlan> {
     let dialect = MsSqlDialect {};
     logical_plan_with_dialect_and_options(sql, &dialect, ParserOptions::default())
 }
@@ -2692,9 +2769,7 @@ pub fn logical_plan_postgres(
 /// Uses the default PostgreSqlDialect and DataFusionFunctionProvider.
 /// Downstream users can use `logical_plan_with_provider` to use their own
 /// function implementations.
-pub fn logical_plan(
-    sql: &str,
-) -> Result<datafusion_expr::logical_plan::LogicalPlan> {
+pub fn logical_plan(sql: &str) -> Result<datafusion_expr::logical_plan::LogicalPlan> {
     logical_plan_with_options(sql, ParserOptions::default())
 }
 
@@ -2808,7 +2883,10 @@ mod tests {
             _schema: &DFSchema,
         ) -> Result<PlannerResult<RawCastExpr>> {
             if matches!(expr.cast_kind, CastKind::Cast | CastKind::DoubleColon)
-                && matches!(expr.sql_data_type, SQLDataType::Int(_) | SQLDataType::Integer(_))
+                && matches!(
+                    expr.sql_data_type,
+                    SQLDataType::Int(_) | SQLDataType::Integer(_)
+                )
             {
                 return Ok(PlannerResult::Planned(Expr::Literal(
                     ScalarValue::Utf8(Some("planned_cast".to_string())),
@@ -2953,12 +3031,26 @@ mod tests {
 
     #[test]
     fn test_information_schema_constraints() {
-        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS").is_ok());
-        assert!(logical_plan("SELECT * FROM information_schema.table_constraints").is_ok());
-        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS").is_ok());
-        assert!(logical_plan("SELECT * FROM information_schema.referential_constraints").is_ok());
-        assert!(logical_plan("SELECT * FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS").is_ok());
-        assert!(logical_plan("SELECT * FROM information_schema.check_constraints").is_ok());
+        assert!(
+            logical_plan("SELECT * FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS").is_ok()
+        );
+        assert!(
+            logical_plan("SELECT * FROM information_schema.table_constraints").is_ok()
+        );
+        assert!(
+            logical_plan("SELECT * FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS")
+                .is_ok()
+        );
+        assert!(
+            logical_plan("SELECT * FROM information_schema.referential_constraints")
+                .is_ok()
+        );
+        assert!(
+            logical_plan("SELECT * FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS").is_ok()
+        );
+        assert!(
+            logical_plan("SELECT * FROM information_schema.check_constraints").is_ok()
+        );
     }
 
     #[test]
@@ -2986,17 +3078,47 @@ mod tests {
         let ctx = ConformanceContextProvider::new(&provider);
 
         // Test case-insensitive schema matching
-        assert!(ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "tables")).is_ok());
-        assert!(ctx.get_table_source(TableReference::partial("information_schema", "tables")).is_ok());
-        assert!(ctx.get_table_source(TableReference::partial("Information_Schema", "TABLES")).is_ok());
+        assert!(
+            ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "tables"))
+                .is_ok()
+        );
+        assert!(
+            ctx.get_table_source(TableReference::partial("information_schema", "tables"))
+                .is_ok()
+        );
+        assert!(
+            ctx.get_table_source(TableReference::partial("Information_Schema", "TABLES"))
+                .is_ok()
+        );
 
         // Test case-insensitive table matching
-        assert!(ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "COLUMNS")).is_ok());
-        assert!(ctx.get_table_source(TableReference::partial("information_schema", "columns")).is_ok());
-        assert!(ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "CoLuMnS")).is_ok());
+        assert!(
+            ctx.get_table_source(TableReference::partial(
+                "INFORMATION_SCHEMA",
+                "COLUMNS"
+            ))
+            .is_ok()
+        );
+        assert!(
+            ctx.get_table_source(TableReference::partial(
+                "information_schema",
+                "columns"
+            ))
+            .is_ok()
+        );
+        assert!(
+            ctx.get_table_source(TableReference::partial(
+                "INFORMATION_SCHEMA",
+                "CoLuMnS"
+            ))
+            .is_ok()
+        );
 
         // Test invalid table in INFORMATION_SCHEMA
-        let result = ctx.get_table_source(TableReference::partial("INFORMATION_SCHEMA", "nonexistent"));
+        let result = ctx.get_table_source(TableReference::partial(
+            "INFORMATION_SCHEMA",
+            "nonexistent",
+        ));
         assert!(result.is_err());
 
         // Test that empty schema doesn't match INFORMATION_SCHEMA
@@ -3004,7 +3126,21 @@ mod tests {
         assert!(result.is_err()); // Should not find INFORMATION_SCHEMA.TABLES
 
         // Test Full reference (catalog.schema.table) - should also work
-        assert!(ctx.get_table_source(TableReference::full("catalog", "INFORMATION_SCHEMA", "tables")).is_ok());
-        assert!(ctx.get_table_source(TableReference::full("cat", "information_schema", "COLUMNS")).is_ok());
+        assert!(
+            ctx.get_table_source(TableReference::full(
+                "catalog",
+                "INFORMATION_SCHEMA",
+                "tables"
+            ))
+            .is_ok()
+        );
+        assert!(
+            ctx.get_table_source(TableReference::full(
+                "cat",
+                "information_schema",
+                "COLUMNS"
+            ))
+            .is_ok()
+        );
     }
 }

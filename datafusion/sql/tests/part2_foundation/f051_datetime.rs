@@ -73,11 +73,7 @@ fn f051_01_date_column() {
 /// F051-01: DATE literal syntax
 #[test]
 fn f051_01_date_literal() {
-    assert_feature_supported!(
-        "SELECT DATE '2024-01-15'",
-        "F051-01",
-        "DATE literal"
-    );
+    assert_feature_supported!("SELECT DATE '2024-01-15'", "F051-01", "DATE literal");
 }
 
 /// F051-01: DATE literal in WHERE clause
@@ -157,11 +153,7 @@ fn f051_02_time_with_precision() {
 /// F051-02: TIME literal syntax
 #[test]
 fn f051_02_time_literal() {
-    assert_feature_supported!(
-        "SELECT TIME '12:30:45'",
-        "F051-02",
-        "TIME literal"
-    );
+    assert_feature_supported!("SELECT TIME '12:30:45'", "F051-02", "TIME literal");
 }
 
 /// F051-02: TIME literal with fractional seconds
@@ -503,11 +495,7 @@ fn f051_05_cast_column() {
 /// F051-06: CURRENT_DATE function
 #[test]
 fn f051_06_current_date() {
-    assert_feature_supported!(
-        "SELECT CURRENT_DATE",
-        "F051-06",
-        "CURRENT_DATE function"
-    );
+    assert_feature_supported!("SELECT CURRENT_DATE", "F051-06", "CURRENT_DATE function");
 }
 
 /// F051-06: CURRENT_DATE in WHERE clause
@@ -547,11 +535,7 @@ fn f051_06_current_date_select() {
 /// F051-07: LOCALTIME function
 #[test]
 fn f051_07_localtime() {
-    assert_feature_supported!(
-        "SELECT LOCALTIME",
-        "F051-07",
-        "LOCALTIME function"
-    );
+    assert_feature_supported!("SELECT LOCALTIME", "F051-07", "LOCALTIME function");
 }
 
 /// F051-07: LOCALTIME with precision
@@ -695,11 +679,7 @@ fn f052_interval_literal_month() {
 /// F052: INTERVAL literal - DAY
 #[test]
 fn f052_interval_literal_day() {
-    assert_feature_supported!(
-        "SELECT INTERVAL '7' DAY",
-        "F052",
-        "INTERVAL literal DAY"
-    );
+    assert_feature_supported!("SELECT INTERVAL '7' DAY", "F052", "INTERVAL literal DAY");
 }
 
 /// F052: INTERVAL literal - HOUR
@@ -1165,11 +1145,7 @@ fn f411_03_at_time_zone_offset() {
 /// CURRENT_TIME function
 #[test]
 fn current_time_function() {
-    assert_feature_supported!(
-        "SELECT CURRENT_TIME",
-        "F051",
-        "CURRENT_TIME function"
-    );
+    assert_feature_supported!("SELECT CURRENT_TIME", "F051", "CURRENT_TIME function");
 }
 
 /// CURRENT_TIMESTAMP function
@@ -1185,11 +1161,7 @@ fn current_timestamp_function() {
 /// NOW function (common alias for CURRENT_TIMESTAMP)
 #[test]
 fn now_function() {
-    assert_feature_supported!(
-        "SELECT NOW()",
-        "F051",
-        "NOW function"
-    );
+    assert_feature_supported!("SELECT NOW()", "F051", "NOW function");
 }
 
 /// DATE_PART function (synonym for EXTRACT)
@@ -1367,14 +1339,16 @@ fn f051_f052_summary_comprehensive() {
     // intervals, arithmetic, and extraction
 
     // Create table with all datetime types
-    assert_plans!("CREATE TABLE events (
+    assert_plans!(
+        "CREATE TABLE events (
         event_id INTEGER,
         event_date DATE,
         event_time TIME,
         event_timestamp TIMESTAMP,
         duration INTERVAL DAY,
         timezone_timestamp TIMESTAMP WITH TIME ZONE
-    )");
+    )"
+    );
 
     // Complex query using all datetime features
     assert_plans!(

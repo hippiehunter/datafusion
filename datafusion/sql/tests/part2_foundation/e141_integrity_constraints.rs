@@ -35,7 +35,7 @@
 //!
 //! All E141 subfeatures are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // E141-01: NOT NULL constraints
@@ -656,7 +656,8 @@ fn e141_summary_all_subfeatures() {
     // in a realistic scenario with related tables
 
     // Parent table with PRIMARY KEY
-    assert_plans!("CREATE TABLE person (
+    assert_plans!(
+        "CREATE TABLE person (
         id INT CONSTRAINT pk_person PRIMARY KEY,
         first_name VARCHAR(50) CONSTRAINT nn_first_name NOT NULL,
         last_name VARCHAR(50) CONSTRAINT nn_last_name NOT NULL,
@@ -664,7 +665,8 @@ fn e141_summary_all_subfeatures() {
         age INT CONSTRAINT chk_age CHECK (age >= 0 AND age <= 150),
         status VARCHAR(20) DEFAULT 'active',
         CONSTRAINT chk_status CHECK (status IN ('active', 'inactive', 'pending'))
-    )");
+    )"
+    );
 
     // Child table with FOREIGN KEY
     assert_plans!("CREATE TABLE orders (

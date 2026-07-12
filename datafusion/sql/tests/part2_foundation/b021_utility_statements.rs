@@ -40,7 +40,7 @@
 //!
 //! Tests that fail indicate gaps in DataFusion's utility statement support.
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // COPY Statement
@@ -49,11 +49,7 @@ use crate::{assert_plans, assert_feature_supported};
 /// COPY: Basic COPY TO with table source
 #[test]
 fn b021_copy_to_basic() {
-    assert_feature_supported!(
-        "COPY t TO 'output.csv'",
-        "B021",
-        "COPY table TO file"
-    );
+    assert_feature_supported!("COPY t TO 'output.csv'", "B021", "COPY table TO file");
 }
 
 /// COPY: COPY TO with format options
@@ -208,11 +204,7 @@ fn b021_copy_from_parquet() {
 /// EXPLAIN: Basic EXPLAIN SELECT
 #[test]
 fn b021_explain_select() {
-    assert_feature_supported!(
-        "EXPLAIN SELECT * FROM t",
-        "B021",
-        "EXPLAIN SELECT"
-    );
+    assert_feature_supported!("EXPLAIN SELECT * FROM t", "B021", "EXPLAIN SELECT");
 }
 
 /// EXPLAIN: EXPLAIN with WHERE clause
@@ -397,11 +389,7 @@ fn b021_prepare_delete() {
 /// EXECUTE: Basic EXECUTE statement
 #[test]
 fn b021_execute_basic() {
-    assert_feature_supported!(
-        "EXECUTE my_query",
-        "B021",
-        "EXECUTE prepared statement"
-    );
+    assert_feature_supported!("EXECUTE my_query", "B021", "EXECUTE prepared statement");
 }
 
 /// EXECUTE: EXECUTE with USING clause
@@ -447,21 +435,13 @@ fn b021_deallocate_prepare() {
 /// DEALLOCATE: DEALLOCATE ALL
 #[test]
 fn b021_deallocate_all() {
-    assert_feature_supported!(
-        "DEALLOCATE ALL",
-        "B021",
-        "DEALLOCATE ALL"
-    );
+    assert_feature_supported!("DEALLOCATE ALL", "B021", "DEALLOCATE ALL");
 }
 
 /// DEALLOCATE: DEALLOCATE PREPARE ALL
 #[test]
 fn b021_deallocate_prepare_all() {
-    assert_feature_supported!(
-        "DEALLOCATE PREPARE ALL",
-        "B021",
-        "DEALLOCATE PREPARE ALL"
-    );
+    assert_feature_supported!("DEALLOCATE PREPARE ALL", "B021", "DEALLOCATE PREPARE ALL");
 }
 
 // ============================================================================
@@ -491,51 +471,31 @@ fn b021_show_quoted_variable() {
 /// SHOW: SHOW ALL variables
 #[test]
 fn b021_show_all() {
-    assert_feature_supported!(
-        "SHOW ALL",
-        "B021",
-        "SHOW ALL variables"
-    );
+    assert_feature_supported!("SHOW ALL", "B021", "SHOW ALL variables");
 }
 
 /// SHOW: SHOW TABLES (if supported)
 #[test]
 fn b021_show_tables() {
-    assert_feature_supported!(
-        "SHOW TABLES",
-        "B021",
-        "SHOW TABLES"
-    );
+    assert_feature_supported!("SHOW TABLES", "B021", "SHOW TABLES");
 }
 
 /// SHOW: SHOW COLUMNS (if supported)
 #[test]
 fn b021_show_columns() {
-    assert_feature_supported!(
-        "SHOW COLUMNS FROM person",
-        "B021",
-        "SHOW COLUMNS"
-    );
+    assert_feature_supported!("SHOW COLUMNS FROM person", "B021", "SHOW COLUMNS");
 }
 
 /// SET: SET variable to value
 #[test]
 fn b021_set_variable() {
-    assert_feature_supported!(
-        "SET max_parallel_workers = 8",
-        "B021",
-        "SET variable"
-    );
+    assert_feature_supported!("SET max_parallel_workers = 8", "B021", "SET variable");
 }
 
 /// SET: SET variable to string value
 #[test]
 fn b021_set_string_value() {
-    assert_feature_supported!(
-        "SET timezone = 'UTC'",
-        "B021",
-        "SET string variable"
-    );
+    assert_feature_supported!("SET timezone = 'UTC'", "B021", "SET string variable");
 }
 
 /// SET: SET with dotted variable name
@@ -581,31 +541,19 @@ fn b021_set_default() {
 /// SET: SET TIME ZONE
 #[test]
 fn b021_set_time_zone() {
-    assert_feature_supported!(
-        "SET TIME ZONE 'UTC'",
-        "B021",
-        "SET TIME ZONE"
-    );
+    assert_feature_supported!("SET TIME ZONE 'UTC'", "B021", "SET TIME ZONE");
 }
 
 /// RESET: RESET variable to default
 #[test]
 fn b021_reset_variable() {
-    assert_feature_supported!(
-        "RESET max_parallel_workers",
-        "B021",
-        "RESET variable"
-    );
+    assert_feature_supported!("RESET max_parallel_workers", "B021", "RESET variable");
 }
 
 /// RESET: RESET ALL variables
 #[test]
 fn b021_reset_all() {
-    assert_feature_supported!(
-        "RESET ALL",
-        "B021",
-        "RESET ALL"
-    );
+    assert_feature_supported!("RESET ALL", "B021", "RESET ALL");
 }
 
 // ============================================================================
@@ -615,21 +563,13 @@ fn b021_reset_all() {
 /// DESCRIBE: DESCRIBE table
 #[test]
 fn b021_describe_table() {
-    assert_feature_supported!(
-        "DESCRIBE person",
-        "B021",
-        "DESCRIBE table"
-    );
+    assert_feature_supported!("DESCRIBE person", "B021", "DESCRIBE table");
 }
 
 /// DESCRIBE: DESC abbreviation
 #[test]
 fn b021_desc_table() {
-    assert_feature_supported!(
-        "DESC person",
-        "B021",
-        "DESC table"
-    );
+    assert_feature_supported!("DESC person", "B021", "DESC table");
 }
 
 /// DESCRIBE: DESCRIBE with schema qualifier
@@ -669,21 +609,13 @@ fn b021_describe_aggregation_query() {
 /// TRUNCATE: Basic TRUNCATE TABLE
 #[test]
 fn b021_truncate_basic() {
-    assert_feature_supported!(
-        "TRUNCATE TABLE t",
-        "B021",
-        "TRUNCATE TABLE"
-    );
+    assert_feature_supported!("TRUNCATE TABLE t", "B021", "TRUNCATE TABLE");
 }
 
 /// TRUNCATE: TRUNCATE without TABLE keyword
 #[test]
 fn b021_truncate_no_table_keyword() {
-    assert_feature_supported!(
-        "TRUNCATE person",
-        "B021",
-        "TRUNCATE without TABLE"
-    );
+    assert_feature_supported!("TRUNCATE person", "B021", "TRUNCATE without TABLE");
 }
 
 /// TRUNCATE: TRUNCATE with qualified name
@@ -703,21 +635,13 @@ fn b021_truncate_qualified() {
 /// ANALYZE: ANALYZE table
 #[test]
 fn b021_analyze_table() {
-    assert_feature_supported!(
-        "ANALYZE TABLE person",
-        "B021",
-        "ANALYZE TABLE"
-    );
+    assert_feature_supported!("ANALYZE TABLE person", "B021", "ANALYZE TABLE");
 }
 
 /// ANALYZE: ANALYZE without TABLE keyword
 #[test]
 fn b021_analyze_no_table_keyword() {
-    assert_feature_supported!(
-        "ANALYZE person",
-        "B021",
-        "ANALYZE without TABLE"
-    );
+    assert_feature_supported!("ANALYZE person", "B021", "ANALYZE without TABLE");
 }
 
 /// ANALYZE: ANALYZE with qualified name
@@ -747,41 +671,25 @@ fn b021_analyze_compute_statistics() {
 /// VACUUM: Basic VACUUM
 #[test]
 fn b021_vacuum_basic() {
-    assert_feature_supported!(
-        "VACUUM",
-        "B021",
-        "VACUUM"
-    );
+    assert_feature_supported!("VACUUM", "B021", "VACUUM");
 }
 
 /// VACUUM: VACUUM specific table
 #[test]
 fn b021_vacuum_table() {
-    assert_feature_supported!(
-        "VACUUM person",
-        "B021",
-        "VACUUM table"
-    );
+    assert_feature_supported!("VACUUM person", "B021", "VACUUM table");
 }
 
 /// VACUUM: VACUUM FULL
 #[test]
 fn b021_vacuum_full() {
-    assert_feature_supported!(
-        "VACUUM FULL person",
-        "B021",
-        "VACUUM FULL"
-    );
+    assert_feature_supported!("VACUUM FULL person", "B021", "VACUUM FULL");
 }
 
 /// VACUUM: VACUUM ANALYZE
 #[test]
 fn b021_vacuum_analyze() {
-    assert_feature_supported!(
-        "VACUUM ANALYZE person",
-        "B021",
-        "VACUUM ANALYZE"
-    );
+    assert_feature_supported!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
 }
 
 // ============================================================================
@@ -791,31 +699,19 @@ fn b021_vacuum_analyze() {
 /// USE: USE database
 #[test]
 fn b021_use_database() {
-    assert_feature_supported!(
-        "USE mydb",
-        "B021",
-        "USE database"
-    );
+    assert_feature_supported!("USE mydb", "B021", "USE database");
 }
 
 /// USE: USE schema
 #[test]
 fn b021_use_schema() {
-    assert_feature_supported!(
-        "USE SCHEMA public",
-        "B021",
-        "USE SCHEMA"
-    );
+    assert_feature_supported!("USE SCHEMA public", "B021", "USE SCHEMA");
 }
 
 /// USE: USE DATABASE explicit
 #[test]
 fn b021_use_database_explicit() {
-    assert_feature_supported!(
-        "USE DATABASE mydb",
-        "B021",
-        "USE DATABASE"
-    );
+    assert_feature_supported!("USE DATABASE mydb", "B021", "USE DATABASE");
 }
 
 // ============================================================================
@@ -825,71 +721,43 @@ fn b021_use_database_explicit() {
 /// BEGIN TRANSACTION
 #[test]
 fn b021_begin_transaction() {
-    assert_feature_supported!(
-        "BEGIN",
-        "B021",
-        "BEGIN transaction"
-    );
+    assert_feature_supported!("BEGIN", "B021", "BEGIN transaction");
 }
 
 /// BEGIN TRANSACTION explicit
 #[test]
 fn b021_begin_transaction_explicit() {
-    assert_feature_supported!(
-        "BEGIN TRANSACTION",
-        "B021",
-        "BEGIN TRANSACTION"
-    );
+    assert_feature_supported!("BEGIN TRANSACTION", "B021", "BEGIN TRANSACTION");
 }
 
 /// START TRANSACTION
 #[test]
 fn b021_start_transaction() {
-    assert_feature_supported!(
-        "START TRANSACTION",
-        "B021",
-        "START TRANSACTION"
-    );
+    assert_feature_supported!("START TRANSACTION", "B021", "START TRANSACTION");
 }
 
 /// COMMIT
 #[test]
 fn b021_commit() {
-    assert_feature_supported!(
-        "COMMIT",
-        "B021",
-        "COMMIT transaction"
-    );
+    assert_feature_supported!("COMMIT", "B021", "COMMIT transaction");
 }
 
 /// COMMIT TRANSACTION
 #[test]
 fn b021_commit_transaction() {
-    assert_feature_supported!(
-        "COMMIT TRANSACTION",
-        "B021",
-        "COMMIT TRANSACTION"
-    );
+    assert_feature_supported!("COMMIT TRANSACTION", "B021", "COMMIT TRANSACTION");
 }
 
 /// ROLLBACK
 #[test]
 fn b021_rollback() {
-    assert_feature_supported!(
-        "ROLLBACK",
-        "B021",
-        "ROLLBACK transaction"
-    );
+    assert_feature_supported!("ROLLBACK", "B021", "ROLLBACK transaction");
 }
 
 /// ROLLBACK TRANSACTION
 #[test]
 fn b021_rollback_transaction() {
-    assert_feature_supported!(
-        "ROLLBACK TRANSACTION",
-        "B021",
-        "ROLLBACK TRANSACTION"
-    );
+    assert_feature_supported!("ROLLBACK TRANSACTION", "B021", "ROLLBACK TRANSACTION");
 }
 
 // ============================================================================

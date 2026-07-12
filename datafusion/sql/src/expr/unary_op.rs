@@ -27,8 +27,8 @@ use sqlparser::ast::{Expr as SQLExpr, UnaryOperator, Value, ValueWithSpan};
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(crate) fn parse_sql_unary_op(
         &self,
-        op: UnaryOperator,
-        expr: SQLExpr,
+        op: &UnaryOperator,
+        expr: &SQLExpr,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -68,7 +68,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     SQLExpr::Value(ValueWithSpan {
                         value: Value::Number(n, _),
                         span: _,
-                    }) => self.parse_sql_number(&n, true),
+                    }) => self.parse_sql_number(n, true),
                     SQLExpr::Interval(interval) => {
                         self.sql_interval_to_expr(true, interval)
                     }

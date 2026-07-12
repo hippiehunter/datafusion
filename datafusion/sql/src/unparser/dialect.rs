@@ -30,7 +30,8 @@ use regex::Regex;
 use sqlparser::tokenizer::Span;
 use sqlparser::{
     ast::{
-        self, BinaryOperator, Function, Ident, ObjectName, TimezoneInfo, WindowFrameBound,
+        self, AstBox as SQLBox, BinaryOperator, Function, Ident, ObjectName, TimezoneInfo,
+        WindowFrameBound,
     },
     keywords::ALL_KEYWORDS,
 };
@@ -336,7 +337,7 @@ impl PostgreSqlDialect {
                 // Wrap the expression in a new cast
                 *expr = ast::Expr::Cast {
                     kind: ast::CastKind::Cast,
-                    expr: Box::new(expr.clone()),
+                    expr: SQLBox::new(expr.clone()),
                     data_type: ast::DataType::Numeric(ast::ExactNumberInfo::None),
                     format: None,
                 };

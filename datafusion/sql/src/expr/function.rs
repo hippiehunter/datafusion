@@ -29,9 +29,9 @@ use datafusion_expr::{
     planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
 };
 use sqlparser::ast::{
-    DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction, FunctionArg,
-    FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments,
-    ObjectName, OrderByExpr, Spanned, WindowType,
+    AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
+    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
+    FunctionArguments, ObjectName, OrderByExpr, Spanned, WindowType,
 };
 
 /// Suggest a valid function based on an invalid input function name
@@ -77,48 +77,45 @@ fn find_closest_match(candidates: Vec<String>, target: &str) -> Option<String> {
 
 /// Arguments for a function call extracted from the SQL AST
 #[derive(Debug)]
-struct FunctionArgs {
+struct FunctionArgs<'a> {
     /// Function name
-    name: ObjectName,
+    name: &'a ObjectName,
     /// Argument expressions
-    args: Vec<FunctionArg>,
+    args: &'a [FunctionArg],
     /// ORDER BY clause, if any
-    order_by: Vec<OrderByExpr>,
+    order_by: &'a [OrderByExpr],
     /// OVER clause, if any
-    over: Option<WindowType>,
+    over: Option<&'a WindowType>,
     /// FILTER clause, if any
-    filter: Option<Box<SQLExpr>>,
+    filter: Option<&'a SQLBox<SQLExpr>>,
     /// NULL treatment clause, if any
     null_treatment: Option<NullTreatment>,
     /// DISTINCT
     distinct: bool,
     /// WITHIN GROUP clause, if any
-    within_group: Vec<OrderByExpr>,
+    within_group: &'a [OrderByExpr],
     /// Was the function called without parenthesis, i.e. could this also be a column reference?
     function_without_parentheses: bool,
 }
 
-impl FunctionArgs {
-    fn try_new(function: SQLFunction) -> Result<Self> {
-        let SQLFunction {
-            name,
-            args,
-            over,
-            filter,
-            mut null_treatment,
-            within_group,
-            ..
-        } = function;
+impl<'a> FunctionArgs<'a> {
+    fn try_new(function: &'a SQLFunction) -> Result<Self> {
+        let name = &function.name;
+        let args = &function.args;
+        let over = function.over.as_ref();
+        let filter = function.filter.as_ref();
+        let mut null_treatment = function.null_treatment.as_ref();
+        let within_group = function.within_group.as_slice();
 
         // Handle no argument form (aka `current_time`  as opposed to `current_time()`)
         let FunctionArguments::List(args) = args else {
             return Ok(Self {
                 name,
-                args: vec![],
-                order_by: vec![],
+                args: &[],
+                order_by: &[],
                 over,
                 filter,
-                null_treatment: null_treatment.map(|v| v.into()),
+                null_treatment: null_treatment.cloned().map(Into::into),
                 distinct: false,
                 within_group,
                 function_without_parentheses: matches!(args, FunctionArguments::None),
@@ -160,7 +157,7 @@ impl FunctionArgs {
                             "Calling {name}: Duplicated ORDER BY clause in function arguments"
                         );
                     }
-                    order_by = Some(oby);
+                    order_by = Some(oby.as_slice());
                 }
                 FunctionArgumentClause::Limit(limit) => {
                     return not_impl_err!(
@@ -221,11 +218,11 @@ impl FunctionArgs {
 
         Ok(Self {
             name,
-            args,
+            args: args.as_slice(),
             order_by,
             over,
             filter,
-            null_treatment: null_treatment.map(|v| v.into()),
+            null_treatment: null_treatment.cloned().map(Into::into),
             distinct,
             within_group,
             function_without_parentheses: false,
@@ -239,7 +236,7 @@ type WithinGroupExtraction = (Vec<SortExpr>, Vec<Expr>, Vec<Option<String>>);
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn sql_function_to_expr(
         &self,
-        function: SQLFunction,
+        function: &SQLFunction,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -257,7 +254,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if name.eq_ignore_ascii_case("array") {
             if let FunctionArguments::Subquery(query) = &function.args {
                 return self.plan_array_subquery_constructor(
-                    query.as_ref().clone(),
+                    query.as_ref(),
                     schema,
                     planner_context,
                 );
@@ -272,7 +269,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         &list.args[0]
                     {
                         let inner_expr = self.sql_expr_to_logical_expr(
-                            inner.clone(),
+                            inner,
                             schema,
                             planner_context,
                         )?;
@@ -341,8 +338,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "make_map" => true,
             "map" => {
                 // for map, check if this is the first syntax variant (two-array)
-                let args =
-                    self.function_args_to_expr(args.clone(), schema, planner_context)?;
+                let args = self.function_args_to_expr(args, schema, planner_context)?;
 
                 let is_two_array_syntax = args.len() == 2
                     && args.iter().all(|arg| {
@@ -368,7 +364,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         if use_plan_make_map {
             let mut fn_args =
-                self.function_args_to_expr(args.clone(), schema, planner_context)?;
+                self.function_args_to_expr(args, schema, planner_context)?;
 
             for planner in self.context_provider.get_expr_planners().iter() {
                 match planner.plan_make_map(fn_args)? {
@@ -388,11 +384,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 | "information_schema._pg_expandarray"
         ) {
             if let Some(fm) = self.context_provider.get_function_meta(&name) {
-                let (srf_args, arg_names) = self.function_args_to_expr_with_names(
-                    args.clone(),
-                    schema,
-                    planner_context,
-                )?;
+                let (srf_args, arg_names) =
+                    self.function_args_to_expr_with_names(args, schema, planner_context)?;
                 if arg_names.iter().any(|arg_name| arg_name.is_some()) {
                     return plan_err!(
                         "Function '{}' does not support named arguments",
@@ -495,14 +488,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let Some(WindowType::WindowSpec(window)) = over {
             let partition_by = window
                 .partition_by
-                .into_iter()
+                .iter()
                 // Ignore window spec PARTITION BY for scalar values
                 // as they do not change and thus do not generate new partitions
                 .filter(|e| !matches!(e, sqlparser::ast::Expr::Value { .. },))
                 .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
                 .collect::<Result<Vec<_>>>()?;
             let mut order_by = self.order_by_to_sort_expr(
-                window.order_by,
+                &window.order_by,
                 schema,
                 planner_context,
                 // Numeric literals in window function ORDER BY are treated as constants
@@ -573,7 +566,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 // Plan FILTER clause if present
                 let filter = filter
-                    .map(|e| self.sql_expr_to_logical_expr(*e, schema, planner_context))
+                    .map(|e| {
+                        self.sql_expr_to_logical_expr(e.as_ref(), schema, planner_context)
+                    })
                     .transpose()?
                     .map(Box::new);
 
@@ -690,7 +685,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 };
 
                 let filter: Option<Box<Expr>> = filter
-                    .map(|e| self.sql_expr_to_logical_expr(*e, schema, planner_context))
+                    .map(|e| {
+                        self.sql_expr_to_logical_expr(e.as_ref(), schema, planner_context)
+                    })
                     .transpose()?
                     .map(Box::new);
 
@@ -803,14 +800,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .collect::<Result<Vec<_>, ()>>();
             if let Ok(ids) = maybe_ids {
                 if ids.len() == 1 {
-                    return self.sql_identifier_to_expr(
-                        ids.into_iter().next().unwrap(),
-                        schema,
-                        planner_context,
-                    );
+                    return self.sql_identifier_to_expr(&ids[0], schema, planner_context);
                 } else {
                     return self.sql_compound_identifier_to_expr(
-                        ids,
+                        &ids,
                         schema,
                         planner_context,
                     );
@@ -835,7 +828,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn sql_fn_name_to_expr(
         &self,
-        expr: SQLExpr,
+        expr: &SQLExpr,
         fn_name: &str,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
@@ -875,7 +868,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn sql_fn_arg_to_logical_expr(
         &self,
-        sql: FunctionArg,
+        sql: &FunctionArg,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -886,7 +879,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn sql_fn_arg_to_logical_expr_with_name(
         &self,
-        sql: FunctionArg,
+        sql: &FunctionArg,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<(Expr, Option<String>)> {
@@ -897,7 +890,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 operator: _,
             } => {
                 let expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
-                let arg_name = crate::utils::normalize_ident(name);
+                let arg_name = crate::utils::normalize_ident(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             FunctionArg::Named {
@@ -910,7 +903,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     qualifier: None,
                     options: Box::new(WildcardOptions::default()),
                 };
-                let arg_name = crate::utils::normalize_ident(name);
+                let arg_name = crate::utils::normalize_ident(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => {
@@ -926,7 +919,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok((expr, None))
             }
             FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(object_name)) => {
-                let qualifier = self.object_name_to_table_reference(object_name)?;
+                let qualifier =
+                    self.object_name_to_table_reference(object_name.clone())?;
                 // Sanity check on qualifier with schema
                 let qualified_indices = schema.fields_indices_with_qualified(&qualifier);
                 if qualified_indices.is_empty() {
@@ -947,7 +941,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 operator: _,
             } => {
                 let expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
-                let arg_name = crate::utils::normalize_ident(name);
+                let arg_name = crate::utils::normalize_ident(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             FunctionArg::ExprNamed {
@@ -960,7 +954,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     qualifier: None,
                     options: Box::new(WildcardOptions::default()),
                 };
-                let arg_name = crate::utils::normalize_ident(name);
+                let arg_name = crate::utils::normalize_ident(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             // JSON_OBJECT uses string literal as key name: JSON_OBJECT('key': value)
@@ -974,8 +968,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
                 // Extract the string value from the literal to use as the key name
                 let key_name = match value {
-                    sqlparser::ast::Value::SingleQuotedString(s) => Some(s),
-                    sqlparser::ast::Value::DoubleQuotedString(s) => Some(s),
+                    sqlparser::ast::Value::SingleQuotedString(s) => Some(s.clone()),
+                    sqlparser::ast::Value::DoubleQuotedString(s) => Some(s.clone()),
                     _ => None,
                 };
                 Ok((value_expr, key_name))
@@ -986,23 +980,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn function_args_to_expr(
         &self,
-        args: Vec<FunctionArg>,
+        args: &[FunctionArg],
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Vec<Expr>> {
-        args.into_iter()
+        args.iter()
             .map(|a| self.sql_fn_arg_to_logical_expr(a, schema, planner_context))
             .collect::<Result<Vec<Expr>>>()
     }
 
     pub(super) fn function_args_to_expr_with_names(
         &self,
-        args: Vec<FunctionArg>,
+        args: &[FunctionArg],
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<(Vec<Expr>, Vec<Option<String>>)> {
         let results: Result<Vec<(Expr, Option<String>)>> = args
-            .into_iter()
+            .iter()
             .map(|a| {
                 self.sql_fn_arg_to_logical_expr_with_name(a, schema, planner_context)
             })
@@ -1015,7 +1009,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn extract_and_prepend_within_group_args(
         &self,
-        within_group: Vec<OrderByExpr>,
+        within_group: &[OrderByExpr],
         mut args: Vec<Expr>,
         mut arg_names: Vec<Option<String>>,
         schema: &DFSchema,
@@ -1051,14 +1045,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// `(SELECT ARRAY_AGG(col ORDER BY x) FROM t)` as a ScalarSubquery
     pub(super) fn plan_array_subquery_constructor(
         &self,
-        query: sqlparser::ast::Query,
+        query: &sqlparser::ast::Query,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         use crate::query::to_order_by_exprs_with_select;
 
         // Extract ORDER BY from the original query if present
-        let order_by_exprs = to_order_by_exprs_with_select(query.order_by.clone(), None)?;
+        let order_by_exprs =
+            to_order_by_exprs_with_select(query.order_by.as_ref(), None)?;
 
         // Plan the subquery to get the logical plan.
         // When ARRAY(SELECT ...) appears inside a trivial scalar subquery
@@ -1071,7 +1066,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         } else {
             None
         };
-        let sub_plan = self.query_to_plan(query, planner_context)?;
+        let sub_plan = self.query_to_plan_ref(query, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         if override_schema {
             planner_context.set_outer_query_schema(old_outer_query_schema);

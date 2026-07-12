@@ -48,11 +48,7 @@ use crate::assert_feature_supported;
 /// E091-01: Basic AVG function
 #[test]
 fn e091_01_avg_basic() {
-    assert_feature_supported!(
-        "SELECT AVG(a) FROM t",
-        "E091-01",
-        "AVG function"
-    );
+    assert_feature_supported!("SELECT AVG(a) FROM t", "E091-01", "AVG function");
 }
 
 /// E091-01: AVG with WHERE clause
@@ -152,21 +148,13 @@ fn e091_01_avg_expression() {
 /// E091-02: COUNT(*) - count all rows
 #[test]
 fn e091_02_count_star() {
-    assert_feature_supported!(
-        "SELECT COUNT(*) FROM t",
-        "E091-02",
-        "COUNT(*)"
-    );
+    assert_feature_supported!("SELECT COUNT(*) FROM t", "E091-02", "COUNT(*)");
 }
 
 /// E091-02: COUNT(column) - count non-NULL values
 #[test]
 fn e091_02_count_column() {
-    assert_feature_supported!(
-        "SELECT COUNT(a) FROM t",
-        "E091-02",
-        "COUNT(column)"
-    );
+    assert_feature_supported!("SELECT COUNT(a) FROM t", "E091-02", "COUNT(column)");
 }
 
 /// E091-02: COUNT with WHERE clause
@@ -246,11 +234,7 @@ fn e091_02_count_case() {
 /// E091-03: Basic MAX function
 #[test]
 fn e091_03_max_basic() {
-    assert_feature_supported!(
-        "SELECT MAX(a) FROM t",
-        "E091-03",
-        "MAX function"
-    );
+    assert_feature_supported!("SELECT MAX(a) FROM t", "E091-03", "MAX function");
 }
 
 /// E091-03: MAX with WHERE clause
@@ -350,11 +334,7 @@ fn e091_03_max_expression() {
 /// E091-04: Basic MIN function
 #[test]
 fn e091_04_min_basic() {
-    assert_feature_supported!(
-        "SELECT MIN(a) FROM t",
-        "E091-04",
-        "MIN function"
-    );
+    assert_feature_supported!("SELECT MIN(a) FROM t", "E091-04", "MIN function");
 }
 
 /// E091-04: MIN with WHERE clause
@@ -454,11 +434,7 @@ fn e091_04_min_expression() {
 /// E091-05: Basic SUM function
 #[test]
 fn e091_05_sum_basic() {
-    assert_feature_supported!(
-        "SELECT SUM(a) FROM t",
-        "E091-05",
-        "SUM function"
-    );
+    assert_feature_supported!("SELECT SUM(a) FROM t", "E091-05", "SUM function");
 }
 
 /// E091-05: SUM with WHERE clause
@@ -568,41 +544,25 @@ fn e091_06_count_all() {
 /// E091-06: SUM(ALL column)
 #[test]
 fn e091_06_sum_all() {
-    assert_feature_supported!(
-        "SELECT SUM(ALL a) FROM t",
-        "E091-06",
-        "SUM(ALL column)"
-    );
+    assert_feature_supported!("SELECT SUM(ALL a) FROM t", "E091-06", "SUM(ALL column)");
 }
 
 /// E091-06: AVG(ALL column)
 #[test]
 fn e091_06_avg_all() {
-    assert_feature_supported!(
-        "SELECT AVG(ALL a) FROM t",
-        "E091-06",
-        "AVG(ALL column)"
-    );
+    assert_feature_supported!("SELECT AVG(ALL a) FROM t", "E091-06", "AVG(ALL column)");
 }
 
 /// E091-06: MAX(ALL column)
 #[test]
 fn e091_06_max_all() {
-    assert_feature_supported!(
-        "SELECT MAX(ALL a) FROM t",
-        "E091-06",
-        "MAX(ALL column)"
-    );
+    assert_feature_supported!("SELECT MAX(ALL a) FROM t", "E091-06", "MAX(ALL column)");
 }
 
 /// E091-06: MIN(ALL column)
 #[test]
 fn e091_06_min_all() {
-    assert_feature_supported!(
-        "SELECT MIN(ALL a) FROM t",
-        "E091-06",
-        "MIN(ALL column)"
-    );
+    assert_feature_supported!("SELECT MIN(ALL a) FROM t", "E091-06", "MIN(ALL column)");
 }
 
 /// E091-06: ALL with expression

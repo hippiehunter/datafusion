@@ -51,7 +51,9 @@ use datafusion_expr::{
     logical_plan::DdlStatement, logical_plan::Statement as PlanStatement,
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
-use sqlparser::ast::{self, Ident, OrderByKind, SetExpr, TableAliasColumnDef};
+use sqlparser::ast::{
+    self, AstBox as SQLBox, Ident, OrderByKind, SetExpr, TableAliasColumnDef,
+};
 use std::{sync::Arc, vec};
 
 /// Convert a DataFusion [`LogicalPlan`] to [`ast::Statement`]
@@ -190,9 +192,9 @@ impl Unparser<'_> {
 
         let body = self.select_to_sql_expr(plan, &mut query_builder)?;
 
-        let query = query_builder.unwrap().body(Box::new(body)).build()?;
+        let query = query_builder.unwrap().body(SQLBox::new(body)).build()?;
 
-        Ok(ast::Statement::Query(Box::new(query)))
+        Ok(ast::Statement::Query(SQLBox::new(query)))
     }
 
     /// Convert a RecursiveQuery to a SQL statement with WITH RECURSIVE clause.
@@ -234,8 +236,8 @@ impl Unparser<'_> {
         let union_body = SetExpr::SetOperation {
             op: ast::SetOperator::Union,
             set_quantifier,
-            left: Box::new(static_body),
-            right: Box::new(recursive_body),
+            left: SQLBox::new(static_body),
+            right: SQLBox::new(recursive_body),
         };
 
         // Get column names from static term schema
@@ -252,7 +254,7 @@ impl Unparser<'_> {
         // Create the CTE query (the body inside the WITH clause)
         let cte_query = ast::Query {
             with: None,
-            body: Box::new(union_body),
+            body: SQLBox::new(union_body),
             order_by: None,
             limit_clause: None,
             fetch: None,
@@ -267,7 +269,7 @@ impl Unparser<'_> {
                 columns,
                 implicit: false,
             },
-            query: Box::new(cte_query),
+            query: SQLBox::new(cte_query),
             from: None,
             materialized: None,
             closing_paren_token: AttachedToken::empty(),
@@ -294,8 +296,9 @@ impl Unparser<'_> {
             into: None,
             from: vec![ast::TableWithJoins {
                 relation: ast::TableFactor::Table {
-                    name: ast::ObjectName::from(vec![self
-                        .new_ident_quoted_if_needs(name.clone())]),
+                    name: ast::ObjectName::from(vec![
+                        self.new_ident_quoted_if_needs(name.clone()),
+                    ]),
                     alias: None,
                     args: None,
                     with_hints: vec![],
@@ -319,8 +322,8 @@ impl Unparser<'_> {
 
         // Build the final query with WITH clause
         let query = ast::Query {
-            with: Some(with_clause),
-            body: Box::new(SetExpr::Select(Box::new(outer_select))),
+            with: Some(SQLBox::new(with_clause)),
+            body: SQLBox::new(SetExpr::Select(SQLBox::new(outer_select))),
             order_by: None,
             limit_clause: None,
             fetch: None,
@@ -328,7 +331,7 @@ impl Unparser<'_> {
             for_clause: None,
         };
 
-        Ok(ast::Statement::Query(Box::new(query)))
+        Ok(ast::Statement::Query(SQLBox::new(query)))
     }
 
     fn select_to_sql_expr(
@@ -348,7 +351,7 @@ impl Unparser<'_> {
 
         // If we were able to construct a full body (i.e. UNION ALL), return it
         if let Some(body) = query.as_mut().and_then(|q| q.take_body()) {
-            return Ok(*body);
+            return Ok(SQLBox::into_owned(body));
         }
 
         // If no projection is set, add a wildcard projection to the select
@@ -363,7 +366,7 @@ impl Unparser<'_> {
         twj.relation(relation_builder);
         select_builder.push_from(twj);
 
-        Ok(SetExpr::Select(Box::new(select_builder.build()?)))
+        Ok(SetExpr::Select(SQLBox::new(select_builder.build()?)))
     }
 
     /// Reconstructs a SELECT SQL statement from a logical plan by unprojecting column expressions
@@ -874,7 +877,7 @@ impl Unparser<'_> {
                         exists_select.projection(vec![ast::SelectItem::UnnamedExpr(
                             ast::Expr::value(ast::Value::Number("1".to_string(), false)),
                         )]);
-                        query_builder.body(Box::new(SetExpr::Select(Box::new(
+                        query_builder.body(SQLBox::new(SetExpr::Select(SQLBox::new(
                             exists_select.build()?,
                         ))));
 
@@ -887,7 +890,7 @@ impl Unparser<'_> {
                             _ => unreachable!(),
                         };
                         let exists_expr = ast::Expr::Exists {
-                            subquery: Box::new(query_builder.build()?),
+                            subquery: SQLBox::new(query_builder.build()?),
                             negated,
                         };
 
@@ -1038,8 +1041,8 @@ impl Unparser<'_> {
                     .reduce(|a, b| SetExpr::SetOperation {
                         op: ast::SetOperator::Union,
                         set_quantifier,
-                        left: Box::new(b),
-                        right: Box::new(a),
+                        left: SQLBox::new(b),
+                        right: SQLBox::new(a),
                     })
                     .unwrap();
 
@@ -1048,7 +1051,7 @@ impl Unparser<'_> {
                         "UNION ALL operator only valid in a statement context"
                     );
                 };
-                query.body(Box::new(union_expr));
+                query.body(SQLBox::new(union_expr));
 
                 Ok(())
             }
@@ -1516,7 +1519,7 @@ impl Unparser<'_> {
         };
 
         let constraint = match condition {
-            Some(filter) => ast::JoinConstraint::On(filter),
+            Some(filter) => ast::JoinConstraint::On(SQLBox::new(filter)),
             None => ast::JoinConstraint::None,
         };
 
@@ -1561,16 +1564,16 @@ impl Unparser<'_> {
                     rollback_token: AttachedToken::empty(),
                 })
             }
-            PlanStatement::SetTransaction(set_txn) => Ok(ast::Statement::Set(
-                ast::SetStatement {
+            PlanStatement::SetTransaction(set_txn) => {
+                Ok(ast::Statement::Set(ast::SetStatement {
                     token: AttachedToken::empty(),
                     inner: ast::Set::SetTransaction {
                         modes: set_txn.modes.clone(),
                         snapshot: set_txn.snapshot.clone(),
                         session: set_txn.session,
                     },
-                },
-            )),
+                }))
+            }
             PlanStatement::Grant(grant) => Ok(ast::Statement::Grant {
                 privileges: grant.privileges.clone(),
                 objects: grant.objects.clone(),
@@ -1645,21 +1648,21 @@ impl Unparser<'_> {
                 })
             }
             PlanStatement::TransactionEnd(end) => match end.conclusion {
-                datafusion_expr::TransactionConclusion::Commit => Ok(
-                    ast::Statement::Commit {
+                datafusion_expr::TransactionConclusion::Commit => {
+                    Ok(ast::Statement::Commit {
                         chain: end.chain,
                         end: false,
                         modifier: None,
                         commit_token: AttachedToken::empty(),
-                    },
-                ),
-                datafusion_expr::TransactionConclusion::Rollback => Ok(
-                    ast::Statement::Rollback {
+                    })
+                }
+                datafusion_expr::TransactionConclusion::Rollback => {
+                    Ok(ast::Statement::Rollback {
                         chain: end.chain,
                         savepoint: None,
                         rollback_token: AttachedToken::empty(),
-                    },
-                ),
+                    })
+                }
             },
             _ => not_impl_err!("Unsupported statement: {statement:?}"),
         }
@@ -1694,7 +1697,7 @@ impl Unparser<'_> {
     fn merge_to_sql(&self, merge: &Merge) -> Result<ast::Statement> {
         let table = self.plan_to_table_factor(&merge.target)?;
         let source = self.plan_to_table_factor(&merge.source)?;
-        let on = Box::new(self.expr_to_sql(&merge.on)?);
+        let on = SQLBox::new(self.expr_to_sql(&merge.on)?);
         let mut clauses = Vec::with_capacity(merge.clauses.len());
 
         for clause in &merge.clauses {
@@ -1729,11 +1732,11 @@ impl Unparser<'_> {
                         .columns
                         .iter()
                         .flat_map(|obj_name| {
-                            obj_name.0.iter().filter_map(|part| {
-                                match part {
-                                    ast::ObjectNamePart::Identifier(ident) => Some(ident.clone()),
-                                    _ => None,
+                            obj_name.0.iter().filter_map(|part| match part {
+                                ast::ObjectNamePart::Identifier(ident) => {
+                                    Some(ident.clone())
                                 }
+                                _ => None,
                             })
                         })
                         .collect();
@@ -1775,7 +1778,7 @@ impl Unparser<'_> {
     fn plan_to_query(&self, plan: &LogicalPlan) -> Result<ast::Query> {
         let statement = self.plan_to_sql(plan)?;
         if let ast::Statement::Query(query) = statement {
-            Ok(*query)
+            Ok(SQLBox::into_owned(query))
         } else {
             internal_err!("Subquery must be a Query, but found {statement:?}")
         }
@@ -1806,9 +1809,7 @@ impl Unparser<'_> {
                         if !Self::is_scan_with_pushdown(scan) =>
                     {
                         Ok(ast::TableFactor::Table {
-                            name: self.table_reference_to_object_name(
-                                &scan.table_name,
-                            ),
+                            name: self.table_reference_to_object_name(&scan.table_name),
                             alias: Some(alias_name),
                             args: None,
                             with_hints: vec![],
@@ -1823,14 +1824,14 @@ impl Unparser<'_> {
                     }
                     _ => Ok(ast::TableFactor::Derived {
                         lateral: false,
-                        subquery: Box::new(self.plan_to_query(&alias.input)?),
+                        subquery: SQLBox::new(self.plan_to_query(&alias.input)?),
                         alias: Some(alias_name),
                     }),
                 }
             }
             _ => Ok(ast::TableFactor::Derived {
                 lateral: false,
-                subquery: Box::new(self.plan_to_query(plan)?),
+                subquery: SQLBox::new(self.plan_to_query(plan)?),
                 alias: None,
             }),
         }

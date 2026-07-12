@@ -38,7 +38,7 @@
 //!
 //! F031 is a CORE feature (mandatory for SQL:2016 conformance).
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // F031-01: CREATE TABLE statement to create persistent base tables
@@ -47,11 +47,7 @@ use crate::{assert_plans, assert_feature_supported};
 /// F031-01: Basic CREATE TABLE with single column
 #[test]
 fn f031_01_create_table_basic() {
-    assert_feature_supported!(
-        "CREATE TABLE t (x INT)",
-        "F031-01",
-        "Basic CREATE TABLE"
-    );
+    assert_feature_supported!("CREATE TABLE t (x INT)", "F031-01", "Basic CREATE TABLE");
 }
 
 /// F031-01: CREATE TABLE with multiple columns
@@ -409,31 +405,19 @@ fn f031_04_alter_table_add_if_not_exists() {
 /// F031-13: DROP TABLE basic
 #[test]
 fn f031_13_drop_table_basic() {
-    assert_feature_supported!(
-        "DROP TABLE t",
-        "F031-13",
-        "Basic DROP TABLE"
-    );
+    assert_feature_supported!("DROP TABLE t", "F031-13", "Basic DROP TABLE");
 }
 
 /// F031-13: DROP TABLE with RESTRICT
 #[test]
 fn f031_13_drop_table_restrict() {
-    assert_feature_supported!(
-        "DROP TABLE t RESTRICT",
-        "F031-13",
-        "DROP TABLE RESTRICT"
-    );
+    assert_feature_supported!("DROP TABLE t RESTRICT", "F031-13", "DROP TABLE RESTRICT");
 }
 
 /// F031-13: DROP TABLE with CASCADE
 #[test]
 fn f031_13_drop_table_cascade() {
-    assert_feature_supported!(
-        "DROP TABLE t CASCADE",
-        "F031-13",
-        "DROP TABLE CASCADE"
-    );
+    assert_feature_supported!("DROP TABLE t CASCADE", "F031-13", "DROP TABLE CASCADE");
 }
 
 /// F031-13: DROP TABLE IF EXISTS
@@ -483,41 +467,25 @@ fn f031_13_drop_table_if_exists_cascade() {
 /// F031-16: DROP VIEW basic
 #[test]
 fn f031_16_drop_view_basic() {
-    assert_feature_supported!(
-        "DROP VIEW v",
-        "F031-16",
-        "Basic DROP VIEW"
-    );
+    assert_feature_supported!("DROP VIEW v", "F031-16", "Basic DROP VIEW");
 }
 
 /// F031-16: DROP VIEW with RESTRICT
 #[test]
 fn f031_16_drop_view_restrict() {
-    assert_feature_supported!(
-        "DROP VIEW v RESTRICT",
-        "F031-16",
-        "DROP VIEW RESTRICT"
-    );
+    assert_feature_supported!("DROP VIEW v RESTRICT", "F031-16", "DROP VIEW RESTRICT");
 }
 
 /// F031-16: DROP VIEW with CASCADE
 #[test]
 fn f031_16_drop_view_cascade() {
-    assert_feature_supported!(
-        "DROP VIEW v CASCADE",
-        "F031-16",
-        "DROP VIEW CASCADE"
-    );
+    assert_feature_supported!("DROP VIEW v CASCADE", "F031-16", "DROP VIEW CASCADE");
 }
 
 /// F031-16: DROP VIEW IF EXISTS
 #[test]
 fn f031_16_drop_view_if_exists() {
-    assert_feature_supported!(
-        "DROP VIEW IF EXISTS v",
-        "F031-16",
-        "DROP VIEW IF EXISTS"
-    );
+    assert_feature_supported!("DROP VIEW IF EXISTS v", "F031-16", "DROP VIEW IF EXISTS");
 }
 
 /// F031-16: DROP VIEW with qualified name
@@ -558,11 +526,7 @@ fn f031_16_drop_view_if_exists_cascade() {
 #[test]
 fn f031_19_revoke_basic() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!(
-        "REVOKE SELECT ON t FROM user1",
-        "F031-19",
-        "Basic REVOKE"
-    );
+    assert_feature_supported!("REVOKE SELECT ON t FROM user1", "F031-19", "Basic REVOKE");
 }
 
 /// F031-19: REVOKE with RESTRICT
@@ -871,11 +835,7 @@ fn f381_alter_table_drop_constraint_cascade() {
 /// DROP SCHEMA basic
 #[test]
 fn drop_schema_basic() {
-    assert_feature_supported!(
-        "DROP SCHEMA schema_name",
-        "F031",
-        "Basic DROP SCHEMA"
-    );
+    assert_feature_supported!("DROP SCHEMA schema_name", "F031", "Basic DROP SCHEMA");
 }
 
 /// DROP SCHEMA IF EXISTS
@@ -951,11 +911,7 @@ fn create_index_if_not_exists() {
 /// DROP INDEX basic
 #[test]
 fn drop_index_basic() {
-    assert_feature_supported!(
-        "DROP INDEX idx_name",
-        "F031",
-        "Basic DROP INDEX"
-    );
+    assert_feature_supported!("DROP INDEX idx_name", "F031", "Basic DROP INDEX");
 }
 
 /// DROP INDEX IF EXISTS
@@ -1081,26 +1037,32 @@ fn f031_f311_summary_ddl_workflow() {
     assert_plans!("CREATE SCHEMA IF NOT EXISTS myschema");
 
     // Create base tables
-    assert_plans!("CREATE TABLE IF NOT EXISTS person (
+    assert_plans!(
+        "CREATE TABLE IF NOT EXISTS person (
         id INT PRIMARY KEY,
         first_name VARCHAR(50) NOT NULL,
         last_name VARCHAR(50) NOT NULL,
         email VARCHAR(100) UNIQUE,
         age INT CHECK (age >= 0 AND age <= 150),
         status VARCHAR(20) DEFAULT 'active'
-    )");
+    )"
+    );
 
-    assert_plans!("CREATE TABLE IF NOT EXISTS orders (
+    assert_plans!(
+        "CREATE TABLE IF NOT EXISTS orders (
         order_id INT PRIMARY KEY,
         customer_id INT NOT NULL,
         order_date DATE DEFAULT CURRENT_DATE,
         total DECIMAL(10,2) DEFAULT 0.00,
         FOREIGN KEY(customer_id) REFERENCES person(id)
-    )");
+    )"
+    );
 
     // Create views
-    assert_plans!("CREATE VIEW active_customers AS
-                   SELECT * FROM person WHERE status = 'active'");
+    assert_plans!(
+        "CREATE VIEW active_customers AS
+                   SELECT * FROM person WHERE status = 'active'"
+    );
 
     assert_plans!("CREATE VIEW customer_order_summary AS
                    SELECT p.id, p.first_name, p.last_name, COUNT(o.order_id) as order_count
@@ -1170,11 +1132,14 @@ fn f031_ctas_workflow() {
     assert_plans!("CREATE TABLE person_copy AS SELECT * FROM person");
 
     // CTAS with filtering
-    assert_plans!("CREATE TABLE adults AS
-                   SELECT * FROM person WHERE age >= 18");
+    assert_plans!(
+        "CREATE TABLE adults AS
+                   SELECT * FROM person WHERE age >= 18"
+    );
 
     // CTAS with aggregation
-    assert_plans!("CREATE TABLE age_groups AS
+    assert_plans!(
+        "CREATE TABLE age_groups AS
                    SELECT
                      CASE
                        WHEN age < 18 THEN 'minor'
@@ -1183,7 +1148,8 @@ fn f031_ctas_workflow() {
                      END as age_group,
                      COUNT(*) as count
                    FROM person
-                   GROUP BY age_group");
+                   GROUP BY age_group"
+    );
 
     // Drop created tables
     assert_plans!("DROP TABLE age_groups");

@@ -60,11 +60,7 @@ use crate::assert_feature_supported;
 /// T621: ABS - absolute value
 #[test]
 fn t621_abs_basic() {
-    assert_feature_supported!(
-        "SELECT ABS(a) FROM t",
-        "T621",
-        "ABS function"
-    );
+    assert_feature_supported!("SELECT ABS(a) FROM t", "T621", "ABS function");
 }
 
 /// T621: ABS with negative literal
@@ -80,21 +76,13 @@ fn t621_abs_negative() {
 /// T621: ABS with NULL handling
 #[test]
 fn t621_abs_null() {
-    assert_feature_supported!(
-        "SELECT ABS(NULL) FROM t",
-        "T621",
-        "ABS with NULL"
-    );
+    assert_feature_supported!("SELECT ABS(NULL) FROM t", "T621", "ABS with NULL");
 }
 
 /// T621: ABS with expression
 #[test]
 fn t621_abs_expression() {
-    assert_feature_supported!(
-        "SELECT ABS(a - b) FROM t",
-        "T621",
-        "ABS with expression"
-    );
+    assert_feature_supported!("SELECT ABS(a - b) FROM t", "T621", "ABS with expression");
 }
 
 /// T621: ABS with floating point
@@ -110,31 +98,19 @@ fn t621_abs_float() {
 /// T621: MOD - modulo operation
 #[test]
 fn t621_mod_basic() {
-    assert_feature_supported!(
-        "SELECT MOD(a, 10) FROM t",
-        "T621",
-        "MOD function"
-    );
+    assert_feature_supported!("SELECT MOD(a, 10) FROM t", "T621", "MOD function");
 }
 
 /// T621: MOD with literals
 #[test]
 fn t621_mod_literals() {
-    assert_feature_supported!(
-        "SELECT MOD(17, 5) FROM t",
-        "T621",
-        "MOD with literals"
-    );
+    assert_feature_supported!("SELECT MOD(17, 5) FROM t", "T621", "MOD with literals");
 }
 
 /// T621: MOD with NULL handling
 #[test]
 fn t621_mod_null() {
-    assert_feature_supported!(
-        "SELECT MOD(a, NULL) FROM t",
-        "T621",
-        "MOD with NULL"
-    );
+    assert_feature_supported!("SELECT MOD(a, NULL) FROM t", "T621", "MOD with NULL");
 }
 
 /// T621: MOD with expressions
@@ -150,11 +126,7 @@ fn t621_mod_expression() {
 /// T621: SIGN - sign of number
 #[test]
 fn t621_sign_basic() {
-    assert_feature_supported!(
-        "SELECT SIGN(a) FROM t",
-        "T621",
-        "SIGN function"
-    );
+    assert_feature_supported!("SELECT SIGN(a) FROM t", "T621", "SIGN function");
 }
 
 /// T621: SIGN with positive number
@@ -180,21 +152,13 @@ fn t621_sign_negative() {
 /// T621: SIGN with zero
 #[test]
 fn t621_sign_zero() {
-    assert_feature_supported!(
-        "SELECT SIGN(0) FROM t",
-        "T621",
-        "SIGN with zero"
-    );
+    assert_feature_supported!("SELECT SIGN(0) FROM t", "T621", "SIGN with zero");
 }
 
 /// T621: SIGN with NULL
 #[test]
 fn t621_sign_null() {
-    assert_feature_supported!(
-        "SELECT SIGN(NULL) FROM t",
-        "T621",
-        "SIGN with NULL"
-    );
+    assert_feature_supported!("SELECT SIGN(NULL) FROM t", "T621", "SIGN with NULL");
 }
 
 // ============================================================================
@@ -224,21 +188,13 @@ fn t621_ceiling_basic() {
 /// T621: CEIL with literal
 #[test]
 fn t621_ceil_literal() {
-    assert_feature_supported!(
-        "SELECT CEIL(3.14) FROM t",
-        "T621",
-        "CEIL with literal"
-    );
+    assert_feature_supported!("SELECT CEIL(3.14) FROM t", "T621", "CEIL with literal");
 }
 
 /// T621: CEIL with NULL
 #[test]
 fn t621_ceil_null() {
-    assert_feature_supported!(
-        "SELECT CEIL(NULL) FROM t",
-        "T621",
-        "CEIL with NULL"
-    );
+    assert_feature_supported!("SELECT CEIL(NULL) FROM t", "T621", "CEIL with NULL");
 }
 
 /// T621: CEIL with expression
@@ -264,21 +220,13 @@ fn t621_floor_basic() {
 /// T621: FLOOR with literal
 #[test]
 fn t621_floor_literal() {
-    assert_feature_supported!(
-        "SELECT FLOOR(3.14) FROM t",
-        "T621",
-        "FLOOR with literal"
-    );
+    assert_feature_supported!("SELECT FLOOR(3.14) FROM t", "T621", "FLOOR with literal");
 }
 
 /// T621: FLOOR with NULL
 #[test]
 fn t621_floor_null() {
-    assert_feature_supported!(
-        "SELECT FLOOR(NULL) FROM t",
-        "T621",
-        "FLOOR with NULL"
-    );
+    assert_feature_supported!("SELECT FLOOR(NULL) FROM t", "T621", "FLOOR with NULL");
 }
 
 /// T621: FLOOR with negative number
@@ -324,11 +272,7 @@ fn t621_round_literal() {
 /// T621: ROUND with NULL
 #[test]
 fn t621_round_null() {
-    assert_feature_supported!(
-        "SELECT ROUND(NULL, 2) FROM t",
-        "T621",
-        "ROUND with NULL"
-    );
+    assert_feature_supported!("SELECT ROUND(NULL, 2) FROM t", "T621", "ROUND with NULL");
 }
 
 /// T621: ROUND with negative decimal places
@@ -374,11 +318,7 @@ fn t621_trunc_literal() {
 /// T621: TRUNC with NULL
 #[test]
 fn t621_trunc_null() {
-    assert_feature_supported!(
-        "SELECT TRUNC(NULL, 2) FROM t",
-        "T621",
-        "TRUNC with NULL"
-    );
+    assert_feature_supported!("SELECT TRUNC(NULL, 2) FROM t", "T621", "TRUNC with NULL");
 }
 
 /// T621: TRUNC without decimal places
@@ -398,11 +338,7 @@ fn t621_trunc_no_places() {
 /// T621: POWER - raise to power
 #[test]
 fn t621_power_basic() {
-    assert_feature_supported!(
-        "SELECT POWER(a, 2) FROM t",
-        "T621",
-        "POWER function"
-    );
+    assert_feature_supported!("SELECT POWER(a, 2) FROM t", "T621", "POWER function");
 }
 
 /// T621: POWER with literals
@@ -418,11 +354,7 @@ fn t621_power_literals() {
 /// T621: POWER with NULL
 #[test]
 fn t621_power_null() {
-    assert_feature_supported!(
-        "SELECT POWER(NULL, 2) FROM t",
-        "T621",
-        "POWER with NULL"
-    );
+    assert_feature_supported!("SELECT POWER(NULL, 2) FROM t", "T621", "POWER with NULL");
 }
 
 /// T621: POWER with fractional exponent
@@ -448,31 +380,19 @@ fn t621_power_negative() {
 /// T621: SQRT - square root
 #[test]
 fn t621_sqrt_basic() {
-    assert_feature_supported!(
-        "SELECT SQRT(a) FROM t",
-        "T621",
-        "SQRT function"
-    );
+    assert_feature_supported!("SELECT SQRT(a) FROM t", "T621", "SQRT function");
 }
 
 /// T621: SQRT with literal
 #[test]
 fn t621_sqrt_literal() {
-    assert_feature_supported!(
-        "SELECT SQRT(16) FROM t",
-        "T621",
-        "SQRT with literal"
-    );
+    assert_feature_supported!("SELECT SQRT(16) FROM t", "T621", "SQRT with literal");
 }
 
 /// T621: SQRT with NULL
 #[test]
 fn t621_sqrt_null() {
-    assert_feature_supported!(
-        "SELECT SQRT(NULL) FROM t",
-        "T621",
-        "SQRT with NULL"
-    );
+    assert_feature_supported!("SELECT SQRT(NULL) FROM t", "T621", "SQRT with NULL");
 }
 
 /// T621: SQRT with expression
@@ -488,131 +408,79 @@ fn t621_sqrt_expression() {
 /// T621: EXP - exponential function
 #[test]
 fn t621_exp_basic() {
-    assert_feature_supported!(
-        "SELECT EXP(a) FROM t",
-        "T621",
-        "EXP function"
-    );
+    assert_feature_supported!("SELECT EXP(a) FROM t", "T621", "EXP function");
 }
 
 /// T621: EXP with literal
 #[test]
 fn t621_exp_literal() {
-    assert_feature_supported!(
-        "SELECT EXP(1) FROM t",
-        "T621",
-        "EXP with literal"
-    );
+    assert_feature_supported!("SELECT EXP(1) FROM t", "T621", "EXP with literal");
 }
 
 /// T621: EXP with NULL
 #[test]
 fn t621_exp_null() {
-    assert_feature_supported!(
-        "SELECT EXP(NULL) FROM t",
-        "T621",
-        "EXP with NULL"
-    );
+    assert_feature_supported!("SELECT EXP(NULL) FROM t", "T621", "EXP with NULL");
 }
 
 /// T623: LN - natural logarithm
 #[test]
 fn t623_ln_basic() {
-    assert_feature_supported!(
-        "SELECT LN(a) FROM t",
-        "T623",
-        "LN function"
-    );
+    assert_feature_supported!("SELECT LN(a) FROM t", "T623", "LN function");
 }
 
 /// T623: LN with literal
 #[test]
 fn t623_ln_literal() {
-    assert_feature_supported!(
-        "SELECT LN(2.718281828) FROM t",
-        "T623",
-        "LN with literal"
-    );
+    assert_feature_supported!("SELECT LN(2.718281828) FROM t", "T623", "LN with literal");
 }
 
 /// T623: LN with NULL
 #[test]
 fn t623_ln_null() {
-    assert_feature_supported!(
-        "SELECT LN(NULL) FROM t",
-        "T623",
-        "LN with NULL"
-    );
+    assert_feature_supported!("SELECT LN(NULL) FROM t", "T623", "LN with NULL");
 }
 
 /// T623: LOG - logarithm with base
 #[test]
 fn t623_log_basic() {
-    assert_feature_supported!(
-        "SELECT LOG(10, a) FROM t",
-        "T623",
-        "LOG with base"
-    );
+    assert_feature_supported!("SELECT LOG(10, a) FROM t", "T623", "LOG with base");
 }
 
 /// T623: LOG with literals
 #[test]
 fn t623_log_literals() {
-    assert_feature_supported!(
-        "SELECT LOG(2, 1024) FROM t",
-        "T623",
-        "LOG with literals"
-    );
+    assert_feature_supported!("SELECT LOG(2, 1024) FROM t", "T623", "LOG with literals");
 }
 
 /// T623: LOG10 - base-10 logarithm
 #[test]
 fn t623_log10_basic() {
-    assert_feature_supported!(
-        "SELECT LOG10(a) FROM t",
-        "T623",
-        "LOG10 function"
-    );
+    assert_feature_supported!("SELECT LOG10(a) FROM t", "T623", "LOG10 function");
 }
 
 /// T623: LOG10 with literal
 #[test]
 fn t623_log10_literal() {
-    assert_feature_supported!(
-        "SELECT LOG10(1000) FROM t",
-        "T623",
-        "LOG10 with literal"
-    );
+    assert_feature_supported!("SELECT LOG10(1000) FROM t", "T623", "LOG10 with literal");
 }
 
 /// T623: LOG10 with NULL
 #[test]
 fn t623_log10_null() {
-    assert_feature_supported!(
-        "SELECT LOG10(NULL) FROM t",
-        "T623",
-        "LOG10 with NULL"
-    );
+    assert_feature_supported!("SELECT LOG10(NULL) FROM t", "T623", "LOG10 with NULL");
 }
 
 /// T623: LOG2 - base-2 logarithm
 #[test]
 fn t623_log2_basic() {
-    assert_feature_supported!(
-        "SELECT LOG2(a) FROM t",
-        "T623",
-        "LOG2 function"
-    );
+    assert_feature_supported!("SELECT LOG2(a) FROM t", "T623", "LOG2 function");
 }
 
 /// T623: LOG2 with literal
 #[test]
 fn t623_log2_literal() {
-    assert_feature_supported!(
-        "SELECT LOG2(1024) FROM t",
-        "T623",
-        "LOG2 with literal"
-    );
+    assert_feature_supported!("SELECT LOG2(1024) FROM t", "T623", "LOG2 with literal");
 }
 
 // ============================================================================
@@ -622,11 +490,7 @@ fn t623_log2_literal() {
 /// T622: SIN - sine function
 #[test]
 fn t622_sin_basic() {
-    assert_feature_supported!(
-        "SELECT SIN(a) FROM t",
-        "T622",
-        "SIN function"
-    );
+    assert_feature_supported!("SELECT SIN(a) FROM t", "T622", "SIN function");
 }
 
 /// T622: SIN with literal
@@ -642,51 +506,31 @@ fn t622_sin_literal() {
 /// T622: SIN with NULL
 #[test]
 fn t622_sin_null() {
-    assert_feature_supported!(
-        "SELECT SIN(NULL) FROM t",
-        "T622",
-        "SIN with NULL"
-    );
+    assert_feature_supported!("SELECT SIN(NULL) FROM t", "T622", "SIN with NULL");
 }
 
 /// T622: COS - cosine function
 #[test]
 fn t622_cos_basic() {
-    assert_feature_supported!(
-        "SELECT COS(a) FROM t",
-        "T622",
-        "COS function"
-    );
+    assert_feature_supported!("SELECT COS(a) FROM t", "T622", "COS function");
 }
 
 /// T622: COS with literal
 #[test]
 fn t622_cos_literal() {
-    assert_feature_supported!(
-        "SELECT COS(3.14159) FROM t",
-        "T622",
-        "COS with literal"
-    );
+    assert_feature_supported!("SELECT COS(3.14159) FROM t", "T622", "COS with literal");
 }
 
 /// T622: COS with NULL
 #[test]
 fn t622_cos_null() {
-    assert_feature_supported!(
-        "SELECT COS(NULL) FROM t",
-        "T622",
-        "COS with NULL"
-    );
+    assert_feature_supported!("SELECT COS(NULL) FROM t", "T622", "COS with NULL");
 }
 
 /// T622: TAN - tangent function
 #[test]
 fn t622_tan_basic() {
-    assert_feature_supported!(
-        "SELECT TAN(a) FROM t",
-        "T622",
-        "TAN function"
-    );
+    assert_feature_supported!("SELECT TAN(a) FROM t", "T622", "TAN function");
 }
 
 /// T622: TAN with literal
@@ -702,131 +546,79 @@ fn t622_tan_literal() {
 /// T622: TAN with NULL
 #[test]
 fn t622_tan_null() {
-    assert_feature_supported!(
-        "SELECT TAN(NULL) FROM t",
-        "T622",
-        "TAN with NULL"
-    );
+    assert_feature_supported!("SELECT TAN(NULL) FROM t", "T622", "TAN with NULL");
 }
 
 /// T622: ASIN - arcsine function
 #[test]
 fn t622_asin_basic() {
-    assert_feature_supported!(
-        "SELECT ASIN(a / 100.0) FROM t",
-        "T622",
-        "ASIN function"
-    );
+    assert_feature_supported!("SELECT ASIN(a / 100.0) FROM t", "T622", "ASIN function");
 }
 
 /// T622: ASIN with literal
 #[test]
 fn t622_asin_literal() {
-    assert_feature_supported!(
-        "SELECT ASIN(0.5) FROM t",
-        "T622",
-        "ASIN with literal"
-    );
+    assert_feature_supported!("SELECT ASIN(0.5) FROM t", "T622", "ASIN with literal");
 }
 
 /// T622: ASIN with NULL
 #[test]
 fn t622_asin_null() {
-    assert_feature_supported!(
-        "SELECT ASIN(NULL) FROM t",
-        "T622",
-        "ASIN with NULL"
-    );
+    assert_feature_supported!("SELECT ASIN(NULL) FROM t", "T622", "ASIN with NULL");
 }
 
 /// T622: ACOS - arccosine function
 #[test]
 fn t622_acos_basic() {
-    assert_feature_supported!(
-        "SELECT ACOS(a / 100.0) FROM t",
-        "T622",
-        "ACOS function"
-    );
+    assert_feature_supported!("SELECT ACOS(a / 100.0) FROM t", "T622", "ACOS function");
 }
 
 /// T622: ACOS with literal
 #[test]
 fn t622_acos_literal() {
-    assert_feature_supported!(
-        "SELECT ACOS(0.5) FROM t",
-        "T622",
-        "ACOS with literal"
-    );
+    assert_feature_supported!("SELECT ACOS(0.5) FROM t", "T622", "ACOS with literal");
 }
 
 /// T622: ACOS with NULL
 #[test]
 fn t622_acos_null() {
-    assert_feature_supported!(
-        "SELECT ACOS(NULL) FROM t",
-        "T622",
-        "ACOS with NULL"
-    );
+    assert_feature_supported!("SELECT ACOS(NULL) FROM t", "T622", "ACOS with NULL");
 }
 
 /// T622: ATAN - arctangent function
 #[test]
 fn t622_atan_basic() {
-    assert_feature_supported!(
-        "SELECT ATAN(a) FROM t",
-        "T622",
-        "ATAN function"
-    );
+    assert_feature_supported!("SELECT ATAN(a) FROM t", "T622", "ATAN function");
 }
 
 /// T622: ATAN with literal
 #[test]
 fn t622_atan_literal() {
-    assert_feature_supported!(
-        "SELECT ATAN(1) FROM t",
-        "T622",
-        "ATAN with literal"
-    );
+    assert_feature_supported!("SELECT ATAN(1) FROM t", "T622", "ATAN with literal");
 }
 
 /// T622: ATAN with NULL
 #[test]
 fn t622_atan_null() {
-    assert_feature_supported!(
-        "SELECT ATAN(NULL) FROM t",
-        "T622",
-        "ATAN with NULL"
-    );
+    assert_feature_supported!("SELECT ATAN(NULL) FROM t", "T622", "ATAN with NULL");
 }
 
 /// T622: ATAN2 - two-argument arctangent
 #[test]
 fn t622_atan2_basic() {
-    assert_feature_supported!(
-        "SELECT ATAN2(a, b) FROM t",
-        "T622",
-        "ATAN2 function"
-    );
+    assert_feature_supported!("SELECT ATAN2(a, b) FROM t", "T622", "ATAN2 function");
 }
 
 /// T622: ATAN2 with literals
 #[test]
 fn t622_atan2_literals() {
-    assert_feature_supported!(
-        "SELECT ATAN2(1, 1) FROM t",
-        "T622",
-        "ATAN2 with literals"
-    );
+    assert_feature_supported!("SELECT ATAN2(1, 1) FROM t", "T622", "ATAN2 with literals");
 }
 
 /// T622: ATAN2 with NULL
 #[test]
 fn t622_atan2_null() {
-    assert_feature_supported!(
-        "SELECT ATAN2(NULL, b) FROM t",
-        "T622",
-        "ATAN2 with NULL"
-    );
+    assert_feature_supported!("SELECT ATAN2(NULL, b) FROM t", "T622", "ATAN2 with NULL");
 }
 
 // ============================================================================
@@ -836,91 +628,55 @@ fn t622_atan2_null() {
 /// T622: SINH - hyperbolic sine
 #[test]
 fn t622_sinh_basic() {
-    assert_feature_supported!(
-        "SELECT SINH(a) FROM t",
-        "T622",
-        "SINH function"
-    );
+    assert_feature_supported!("SELECT SINH(a) FROM t", "T622", "SINH function");
 }
 
 /// T622: SINH with literal
 #[test]
 fn t622_sinh_literal() {
-    assert_feature_supported!(
-        "SELECT SINH(1) FROM t",
-        "T622",
-        "SINH with literal"
-    );
+    assert_feature_supported!("SELECT SINH(1) FROM t", "T622", "SINH with literal");
 }
 
 /// T622: SINH with NULL
 #[test]
 fn t622_sinh_null() {
-    assert_feature_supported!(
-        "SELECT SINH(NULL) FROM t",
-        "T622",
-        "SINH with NULL"
-    );
+    assert_feature_supported!("SELECT SINH(NULL) FROM t", "T622", "SINH with NULL");
 }
 
 /// T622: COSH - hyperbolic cosine
 #[test]
 fn t622_cosh_basic() {
-    assert_feature_supported!(
-        "SELECT COSH(a) FROM t",
-        "T622",
-        "COSH function"
-    );
+    assert_feature_supported!("SELECT COSH(a) FROM t", "T622", "COSH function");
 }
 
 /// T622: COSH with literal
 #[test]
 fn t622_cosh_literal() {
-    assert_feature_supported!(
-        "SELECT COSH(1) FROM t",
-        "T622",
-        "COSH with literal"
-    );
+    assert_feature_supported!("SELECT COSH(1) FROM t", "T622", "COSH with literal");
 }
 
 /// T622: COSH with NULL
 #[test]
 fn t622_cosh_null() {
-    assert_feature_supported!(
-        "SELECT COSH(NULL) FROM t",
-        "T622",
-        "COSH with NULL"
-    );
+    assert_feature_supported!("SELECT COSH(NULL) FROM t", "T622", "COSH with NULL");
 }
 
 /// T622: TANH - hyperbolic tangent
 #[test]
 fn t622_tanh_basic() {
-    assert_feature_supported!(
-        "SELECT TANH(a) FROM t",
-        "T622",
-        "TANH function"
-    );
+    assert_feature_supported!("SELECT TANH(a) FROM t", "T622", "TANH function");
 }
 
 /// T622: TANH with literal
 #[test]
 fn t622_tanh_literal() {
-    assert_feature_supported!(
-        "SELECT TANH(1) FROM t",
-        "T622",
-        "TANH with literal"
-    );
+    assert_feature_supported!("SELECT TANH(1) FROM t", "T622", "TANH with literal");
 }
 
 /// T622: TANH with NULL
 #[test]
 fn t622_tanh_null() {
-    assert_feature_supported!(
-        "SELECT TANH(NULL) FROM t",
-        "T622",
-        "TANH with NULL"
-    );
+    assert_feature_supported!("SELECT TANH(NULL) FROM t", "T622", "TANH with NULL");
 }
 
 // ============================================================================
@@ -930,11 +686,7 @@ fn t622_tanh_null() {
 /// T622: DEGREES - convert radians to degrees
 #[test]
 fn t622_degrees_basic() {
-    assert_feature_supported!(
-        "SELECT DEGREES(a) FROM t",
-        "T622",
-        "DEGREES function"
-    );
+    assert_feature_supported!("SELECT DEGREES(a) FROM t", "T622", "DEGREES function");
 }
 
 /// T622: DEGREES with literal
@@ -950,21 +702,13 @@ fn t622_degrees_literal() {
 /// T622: DEGREES with NULL
 #[test]
 fn t622_degrees_null() {
-    assert_feature_supported!(
-        "SELECT DEGREES(NULL) FROM t",
-        "T622",
-        "DEGREES with NULL"
-    );
+    assert_feature_supported!("SELECT DEGREES(NULL) FROM t", "T622", "DEGREES with NULL");
 }
 
 /// T622: RADIANS - convert degrees to radians
 #[test]
 fn t622_radians_basic() {
-    assert_feature_supported!(
-        "SELECT RADIANS(a) FROM t",
-        "T622",
-        "RADIANS function"
-    );
+    assert_feature_supported!("SELECT RADIANS(a) FROM t", "T622", "RADIANS function");
 }
 
 /// T622: RADIANS with literal
@@ -980,11 +724,7 @@ fn t622_radians_literal() {
 /// T622: RADIANS with NULL
 #[test]
 fn t622_radians_null() {
-    assert_feature_supported!(
-        "SELECT RADIANS(NULL) FROM t",
-        "T622",
-        "RADIANS with NULL"
-    );
+    assert_feature_supported!("SELECT RADIANS(NULL) FROM t", "T622", "RADIANS with NULL");
 }
 
 // ============================================================================
@@ -994,21 +734,13 @@ fn t622_radians_null() {
 /// Statistical: RANDOM - random number generator
 #[test]
 fn stat_random_basic() {
-    assert_feature_supported!(
-        "SELECT RANDOM() FROM t",
-        "T621",
-        "RANDOM function"
-    );
+    assert_feature_supported!("SELECT RANDOM() FROM t", "T621", "RANDOM function");
 }
 
 /// Statistical: RAND - random number (alternative)
 #[test]
 fn stat_rand_basic() {
-    assert_feature_supported!(
-        "SELECT RAND() FROM t",
-        "T621",
-        "RAND function"
-    );
+    assert_feature_supported!("SELECT RAND() FROM t", "T621", "RAND function");
 }
 
 /// Statistical: RANDOM in expression
@@ -1064,11 +796,7 @@ fn stat_greatest_literals() {
 /// Statistical: LEAST - minimum of values
 #[test]
 fn stat_least_basic() {
-    assert_feature_supported!(
-        "SELECT LEAST(a, b) FROM t",
-        "T621",
-        "LEAST function"
-    );
+    assert_feature_supported!("SELECT LEAST(a, b) FROM t", "T621", "LEAST function");
 }
 
 /// Statistical: LEAST with multiple values
@@ -1108,91 +836,55 @@ fn stat_least_literals() {
 /// Bit: BIT_AND aggregate function
 #[test]
 fn bit_and_aggregate() {
-    assert_feature_supported!(
-        "SELECT BIT_AND(a) FROM t",
-        "T031",
-        "BIT_AND aggregate"
-    );
+    assert_feature_supported!("SELECT BIT_AND(a) FROM t", "T031", "BIT_AND aggregate");
 }
 
 /// Bit: BIT_OR aggregate function
 #[test]
 fn bit_or_aggregate() {
-    assert_feature_supported!(
-        "SELECT BIT_OR(a) FROM t",
-        "T031",
-        "BIT_OR aggregate"
-    );
+    assert_feature_supported!("SELECT BIT_OR(a) FROM t", "T031", "BIT_OR aggregate");
 }
 
 /// Bit: BIT_XOR aggregate function
 #[test]
 fn bit_xor_aggregate() {
-    assert_feature_supported!(
-        "SELECT BIT_XOR(a) FROM t",
-        "T031",
-        "BIT_XOR aggregate"
-    );
+    assert_feature_supported!("SELECT BIT_XOR(a) FROM t", "T031", "BIT_XOR aggregate");
 }
 
 /// Bit: Bitwise AND operator
 #[test]
 fn bit_and_operator() {
-    assert_feature_supported!(
-        "SELECT a & b FROM t",
-        "T031",
-        "Bitwise AND operator"
-    );
+    assert_feature_supported!("SELECT a & b FROM t", "T031", "Bitwise AND operator");
 }
 
 /// Bit: Bitwise OR operator
 #[test]
 fn bit_or_operator() {
-    assert_feature_supported!(
-        "SELECT a | b FROM t",
-        "T031",
-        "Bitwise OR operator"
-    );
+    assert_feature_supported!("SELECT a | b FROM t", "T031", "Bitwise OR operator");
 }
 
 /// Bit: Bitwise XOR operator
 #[test]
 fn bit_xor_operator() {
-    assert_feature_supported!(
-        "SELECT a ^ b FROM t",
-        "T031",
-        "Bitwise XOR operator"
-    );
+    assert_feature_supported!("SELECT a ^ b FROM t", "T031", "Bitwise XOR operator");
 }
 
 /// Bit: Bitwise NOT operator
 #[test]
 fn bit_not_operator() {
-    assert_feature_supported!(
-        "SELECT ~a FROM t",
-        "T031",
-        "Bitwise NOT operator"
-    );
+    assert_feature_supported!("SELECT ~a FROM t", "T031", "Bitwise NOT operator");
 }
 
 /// Bit: Left shift operator
 #[test]
 fn bit_left_shift() {
-    assert_feature_supported!(
-        "SELECT a << 2 FROM t",
-        "T031",
-        "Left shift operator"
-    );
+    assert_feature_supported!("SELECT a << 2 FROM t", "T031", "Left shift operator");
 }
 
 /// Bit: Right shift operator
 #[test]
 fn bit_right_shift() {
-    assert_feature_supported!(
-        "SELECT a >> 2 FROM t",
-        "T031",
-        "Right shift operator"
-    );
+    assert_feature_supported!("SELECT a >> 2 FROM t", "T031", "Right shift operator");
 }
 
 /// Bit: Complex bitwise expression
@@ -1222,31 +914,19 @@ fn bit_in_where() {
 /// Utility: PI constant
 #[test]
 fn util_pi_basic() {
-    assert_feature_supported!(
-        "SELECT PI() FROM t",
-        "T621",
-        "PI function"
-    );
+    assert_feature_supported!("SELECT PI() FROM t", "T621", "PI function");
 }
 
 /// Utility: PI in calculation
 #[test]
 fn util_pi_calculation() {
-    assert_feature_supported!(
-        "SELECT 2 * PI() * a FROM t",
-        "T621",
-        "PI in calculation"
-    );
+    assert_feature_supported!("SELECT 2 * PI() * a FROM t", "T621", "PI in calculation");
 }
 
 /// Utility: NULLIF - return NULL if equal
 #[test]
 fn util_nullif_basic() {
-    assert_feature_supported!(
-        "SELECT NULLIF(a, b) FROM t",
-        "T621",
-        "NULLIF function"
-    );
+    assert_feature_supported!("SELECT NULLIF(a, b) FROM t", "T621", "NULLIF function");
 }
 
 /// Utility: NULLIF with literals
@@ -1312,31 +992,19 @@ fn util_coalesce_literals() {
 /// Utility: NVL - Oracle-style NULL replacement
 #[test]
 fn util_nvl_basic() {
-    assert_feature_supported!(
-        "SELECT NVL(a, 0) FROM t",
-        "T621",
-        "NVL function"
-    );
+    assert_feature_supported!("SELECT NVL(a, 0) FROM t", "T621", "NVL function");
 }
 
 /// Utility: NVL with NULL
 #[test]
 fn util_nvl_null() {
-    assert_feature_supported!(
-        "SELECT NVL(NULL, b) FROM t",
-        "T621",
-        "NVL with NULL"
-    );
+    assert_feature_supported!("SELECT NVL(NULL, b) FROM t", "T621", "NVL with NULL");
 }
 
 /// Utility: IFNULL - MySQL-style NULL replacement
 #[test]
 fn util_ifnull_basic() {
-    assert_feature_supported!(
-        "SELECT IFNULL(a, 0) FROM t",
-        "T621",
-        "IFNULL function"
-    );
+    assert_feature_supported!("SELECT IFNULL(a, 0) FROM t", "T621", "IFNULL function");
 }
 
 /// Utility: IFNULL with NULL

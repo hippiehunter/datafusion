@@ -376,11 +376,7 @@ fn upper_basic() {
 
 #[test]
 fn upper_null() {
-    assert_feature_supported!(
-        "SELECT UPPER(NULL)",
-        "E021-08",
-        "UPPER with NULL"
-    );
+    assert_feature_supported!("SELECT UPPER(NULL)", "E021-08", "UPPER with NULL");
 }
 
 #[test]
@@ -412,11 +408,7 @@ fn lower_basic() {
 
 #[test]
 fn lower_null() {
-    assert_feature_supported!(
-        "SELECT LOWER(NULL)",
-        "E021-08",
-        "LOWER with NULL"
-    );
+    assert_feature_supported!("SELECT LOWER(NULL)", "E021-08", "LOWER with NULL");
 }
 
 #[test]
@@ -489,11 +481,7 @@ fn trim_custom_char() {
 
 #[test]
 fn trim_null() {
-    assert_feature_supported!(
-        "SELECT TRIM(NULL)",
-        "E021-09",
-        "TRIM with NULL"
-    );
+    assert_feature_supported!("SELECT TRIM(NULL)", "E021-09", "TRIM with NULL");
 }
 
 #[test]
@@ -889,11 +877,7 @@ fn rpad_where_clause() {
 
 #[test]
 fn ltrim_basic() {
-    assert_feature_supported!(
-        "SELECT LTRIM('  hello')",
-        "E021-09",
-        "LTRIM basic usage"
-    );
+    assert_feature_supported!("SELECT LTRIM('  hello')", "E021-09", "LTRIM basic usage");
 }
 
 #[test]
@@ -907,11 +891,7 @@ fn ltrim_custom_char() {
 
 #[test]
 fn ltrim_null() {
-    assert_feature_supported!(
-        "SELECT LTRIM(NULL)",
-        "E021-09",
-        "LTRIM with NULL"
-    );
+    assert_feature_supported!("SELECT LTRIM(NULL)", "E021-09", "LTRIM with NULL");
 }
 
 #[test]
@@ -925,11 +905,7 @@ fn ltrim_column() {
 
 #[test]
 fn rtrim_basic() {
-    assert_feature_supported!(
-        "SELECT RTRIM('hello  ')",
-        "E021-09",
-        "RTRIM basic usage"
-    );
+    assert_feature_supported!("SELECT RTRIM('hello  ')", "E021-09", "RTRIM basic usage");
 }
 
 #[test]
@@ -943,11 +919,7 @@ fn rtrim_custom_char() {
 
 #[test]
 fn rtrim_null() {
-    assert_feature_supported!(
-        "SELECT RTRIM(NULL)",
-        "E021-09",
-        "RTRIM with NULL"
-    );
+    assert_feature_supported!("SELECT RTRIM(NULL)", "E021-09", "RTRIM with NULL");
 }
 
 #[test]
@@ -1034,11 +1006,7 @@ fn reverse_basic() {
 
 #[test]
 fn reverse_null() {
-    assert_feature_supported!(
-        "SELECT REVERSE(NULL)",
-        "STRING_FUNC",
-        "REVERSE with NULL"
-    );
+    assert_feature_supported!("SELECT REVERSE(NULL)", "STRING_FUNC", "REVERSE with NULL");
 }
 
 #[test]
@@ -1093,11 +1061,7 @@ fn repeat_zero() {
 
 #[test]
 fn repeat_one() {
-    assert_feature_supported!(
-        "SELECT REPEAT('hello', 1)",
-        "STRING_FUNC",
-        "REPEAT once"
-    );
+    assert_feature_supported!("SELECT REPEAT('hello', 1)", "STRING_FUNC", "REPEAT once");
 }
 
 #[test]
@@ -1134,20 +1098,12 @@ fn repeat_where_clause() {
 
 #[test]
 fn space_basic() {
-    assert_feature_supported!(
-        "SELECT SPACE(5)",
-        "STRING_FUNC",
-        "SPACE basic usage"
-    );
+    assert_feature_supported!("SELECT SPACE(5)", "STRING_FUNC", "SPACE basic usage");
 }
 
 #[test]
 fn space_zero() {
-    assert_feature_supported!(
-        "SELECT SPACE(0)",
-        "STRING_FUNC",
-        "SPACE zero length"
-    );
+    assert_feature_supported!("SELECT SPACE(0)", "STRING_FUNC", "SPACE zero length");
 }
 
 #[test]
@@ -1175,38 +1131,22 @@ fn space_where_clause() {
 
 #[test]
 fn ascii_basic() {
-    assert_feature_supported!(
-        "SELECT ASCII('A')",
-        "STRING_FUNC",
-        "ASCII basic usage"
-    );
+    assert_feature_supported!("SELECT ASCII('A')", "STRING_FUNC", "ASCII basic usage");
 }
 
 #[test]
 fn ascii_lowercase() {
-    assert_feature_supported!(
-        "SELECT ASCII('a')",
-        "STRING_FUNC",
-        "ASCII lowercase char"
-    );
+    assert_feature_supported!("SELECT ASCII('a')", "STRING_FUNC", "ASCII lowercase char");
 }
 
 #[test]
 fn ascii_string() {
-    assert_feature_supported!(
-        "SELECT ASCII('hello')",
-        "STRING_FUNC",
-        "ASCII on string"
-    );
+    assert_feature_supported!("SELECT ASCII('hello')", "STRING_FUNC", "ASCII on string");
 }
 
 #[test]
 fn ascii_null() {
-    assert_feature_supported!(
-        "SELECT ASCII(NULL)",
-        "STRING_FUNC",
-        "ASCII with NULL"
-    );
+    assert_feature_supported!("SELECT ASCII(NULL)", "STRING_FUNC", "ASCII with NULL");
 }
 
 #[test]
@@ -1234,29 +1174,17 @@ fn ascii_where_clause() {
 
 #[test]
 fn chr_basic() {
-    assert_feature_supported!(
-        "SELECT CHR(65)",
-        "STRING_FUNC",
-        "CHR basic usage"
-    );
+    assert_feature_supported!("SELECT CHR(65)", "STRING_FUNC", "CHR basic usage");
 }
 
 #[test]
 fn chr_lowercase() {
-    assert_feature_supported!(
-        "SELECT CHR(97)",
-        "STRING_FUNC",
-        "CHR lowercase char"
-    );
+    assert_feature_supported!("SELECT CHR(97)", "STRING_FUNC", "CHR lowercase char");
 }
 
 #[test]
 fn chr_null() {
-    assert_feature_supported!(
-        "SELECT CHR(NULL)",
-        "STRING_FUNC",
-        "CHR with NULL"
-    );
+    assert_feature_supported!("SELECT CHR(NULL)", "STRING_FUNC", "CHR with NULL");
 }
 
 #[test]
@@ -1270,11 +1198,7 @@ fn chr_expression() {
 
 #[test]
 fn char_function() {
-    assert_feature_supported!(
-        "SELECT CHAR(65)",
-        "STRING_FUNC",
-        "CHAR function"
-    );
+    assert_feature_supported!("SELECT CHAR(65)", "STRING_FUNC", "CHAR function");
 }
 
 // ============================================================================
@@ -1311,11 +1235,7 @@ fn initcap_uppercase() {
 
 #[test]
 fn initcap_null() {
-    assert_feature_supported!(
-        "SELECT INITCAP(NULL)",
-        "STRING_FUNC",
-        "INITCAP with NULL"
-    );
+    assert_feature_supported!("SELECT INITCAP(NULL)", "STRING_FUNC", "INITCAP with NULL");
 }
 
 #[test]

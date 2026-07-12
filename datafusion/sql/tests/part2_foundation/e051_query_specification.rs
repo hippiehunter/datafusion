@@ -49,11 +49,7 @@ use crate::assert_feature_supported;
 /// E051-01: Basic SELECT DISTINCT
 #[test]
 fn e051_01_select_distinct() {
-    assert_feature_supported!(
-        "SELECT DISTINCT a FROM t",
-        "E051-01",
-        "SELECT DISTINCT"
-    );
+    assert_feature_supported!("SELECT DISTINCT a FROM t", "E051-01", "SELECT DISTINCT");
 }
 
 /// E051-01: SELECT DISTINCT with multiple columns
@@ -289,11 +285,7 @@ fn e051_06_having_or() {
 /// E051-07: Table qualified asterisk
 #[test]
 fn e051_07_qualified_asterisk() {
-    assert_feature_supported!(
-        "SELECT t.* FROM t",
-        "E051-07",
-        "Qualified asterisk"
-    );
+    assert_feature_supported!("SELECT t.* FROM t", "E051-07", "Qualified asterisk");
 }
 
 /// E051-07: Qualified asterisk in join
@@ -333,21 +325,13 @@ fn e051_07_mixed_asterisk_columns() {
 /// E051-08: Basic table alias
 #[test]
 fn e051_08_table_alias() {
-    assert_feature_supported!(
-        "SELECT x.a FROM t AS x",
-        "E051-08",
-        "Table alias with AS"
-    );
+    assert_feature_supported!("SELECT x.a FROM t AS x", "E051-08", "Table alias with AS");
 }
 
 /// E051-08: Table alias without AS
 #[test]
 fn e051_08_table_alias_implicit() {
-    assert_feature_supported!(
-        "SELECT x.a FROM t x",
-        "E051-08",
-        "Table alias without AS"
-    );
+    assert_feature_supported!("SELECT x.a FROM t x", "E051-08", "Table alias without AS");
 }
 
 /// E051-08: Multiple table aliases in join

@@ -18,9 +18,8 @@
 use crate::logical_plan;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{
-    assert_contains,
-    metadata::{format_type_and_metadata, ScalarAndMetadata},
-    ParamValues, ScalarValue,
+    ParamValues, ScalarValue, assert_contains,
+    metadata::{ScalarAndMetadata, format_type_and_metadata},
 };
 use datafusion_expr::{LogicalPlan, Prepare, Statement};
 use insta::assert_snapshot;
@@ -129,10 +128,12 @@ fn test_prepare_statement_to_plan_panic_prepare_wrong_syntax() {
     // param is not number following the $ sign
     // panic due to error returned from the parser
     let sql = "PREPARE AS SELECT id, age  FROM person WHERE age = $foo";
-    assert!(logical_plan(sql)
-        .unwrap_err()
-        .strip_backtrace()
-        .contains("Expected: AS, found: SELECT"))
+    assert!(
+        logical_plan(sql)
+            .unwrap_err()
+            .strip_backtrace()
+            .contains("Expected: AS, found: SELECT")
+    )
 }
 
 #[test]
@@ -375,8 +376,7 @@ fn test_prepare_statement_to_plan_params_as_constants() {
 #[test]
 fn test_infer_types_from_join() {
     let test = ParameterTest {
-        sql:
-            "SELECT id, order_id FROM person JOIN orders ON id = customer_id and age = $1",
+        sql: "SELECT id, order_id FROM person JOIN orders ON id = customer_id and age = $1",
         expected_types: vec![("$1", Some(DataType::Int32))],
         param_values: vec![ScalarValue::Int32(Some(10))],
     };

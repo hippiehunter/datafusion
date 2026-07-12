@@ -207,41 +207,31 @@ fn pgq001_create_property_graph_if_not_exists() {
 /// PGQ002: Basic DROP PROPERTY GRAPH
 #[test]
 fn pgq002_drop_property_graph_basic() {
-    assert_plans!(
-        "DROP PROPERTY GRAPH social_network"
-    );
+    assert_plans!("DROP PROPERTY GRAPH social_network");
 }
 
 /// PGQ002: DROP PROPERTY GRAPH IF EXISTS
 #[test]
 fn pgq002_drop_property_graph_if_exists() {
-    assert_plans!(
-        "DROP PROPERTY GRAPH IF EXISTS social_network"
-    );
+    assert_plans!("DROP PROPERTY GRAPH IF EXISTS social_network");
 }
 
 /// PGQ002: DROP PROPERTY GRAPH CASCADE
 #[test]
 fn pgq002_drop_property_graph_cascade() {
-    assert_plans!(
-        "DROP PROPERTY GRAPH social_network CASCADE"
-    );
+    assert_plans!("DROP PROPERTY GRAPH social_network CASCADE");
 }
 
 /// PGQ002: DROP PROPERTY GRAPH RESTRICT
 #[test]
 fn pgq002_drop_property_graph_restrict() {
-    assert_plans!(
-        "DROP PROPERTY GRAPH social_network RESTRICT"
-    );
+    assert_plans!("DROP PROPERTY GRAPH social_network RESTRICT");
 }
 
 /// PGQ002: DROP PROPERTY GRAPH IF EXISTS CASCADE
 #[test]
 fn pgq002_drop_property_graph_if_exists_cascade() {
-    assert_plans!(
-        "DROP PROPERTY GRAPH IF EXISTS social_network CASCADE"
-    );
+    assert_plans!("DROP PROPERTY GRAPH IF EXISTS social_network CASCADE");
 }
 
 // ============================================================================

@@ -28,12 +28,12 @@ use std::vec;
 use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::MockContextProvider;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{assert_contains, DataFusionError, Result};
+use datafusion_common::{DataFusionError, Result, assert_contains};
 use datafusion_expr::{
-    col, logical_plan::LogicalPlan, test::function_stub::sum_udaf, ColumnarValue,
-    CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy,
-    Volatility,
+    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs,
+    ScalarUDF, ScalarUDFImpl, Signature, TableScanRowLockMode,
+    TableScanRowLockWaitPolicy, Volatility, col, logical_plan::LogicalPlan,
+    test::function_stub::sum_udaf,
 };
 use datafusion_sql::{
     parser::DFParser,
@@ -53,7 +53,7 @@ use datafusion_functions_aggregate::{
 // or datafusion_functions_window are disabled as those crates were removed.
 use insta::{allow_duplicates, assert_snapshot};
 use rstest::rstest;
-use sqlparser::dialect::{Dialect, PostgreSqlDialect, MySqlDialect};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 
 mod cases;
 mod common;
@@ -1449,8 +1449,8 @@ fn select_aggregate_with_group_by_with_having_using_column_by_alias() {
 }
 
 #[test]
-fn select_aggregate_with_group_by_with_having_using_columns_with_and_without_their_aliases(
-) {
+fn select_aggregate_with_group_by_with_having_using_columns_with_and_without_their_aliases()
+ {
     let sql = "SELECT first_name AS fn, MAX(age) AS max_age
                    FROM person
                    GROUP BY first_name
@@ -1557,8 +1557,8 @@ fn select_aggregate_aliased_with_group_by_with_having_referencing_aggregate_by_i
 }
 
 #[test]
-fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compound_aggregate_by_its_alias(
-) {
+fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compound_aggregate_by_its_alias()
+ {
     let sql = "SELECT first_name, MAX(age) + 1 AS max_age_plus_one
                    FROM person
                    GROUP BY first_name
@@ -1576,8 +1576,8 @@ fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compo
 }
 
 #[test]
-fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not_in_select(
-) {
+fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not_in_select()
+ {
     let sql = "SELECT first_name, MAX(age)
                    FROM person
                    GROUP BY first_name

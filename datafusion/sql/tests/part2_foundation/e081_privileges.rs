@@ -67,7 +67,7 @@
 //! grantee ::= PUBLIC | authorization_identifier
 //! ```
 
-use crate::{assert_parses, assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_parses, assert_plans};
 
 // ============================================================================
 // E081-01: SELECT privilege at table level
@@ -556,11 +556,7 @@ fn grant_all_privileges() {
 /// GRANT ALL (shorthand)
 #[test]
 fn grant_all() {
-    assert_feature_supported!(
-        "GRANT ALL ON person TO alice",
-        "E081",
-        "GRANT ALL"
-    );
+    assert_feature_supported!("GRANT ALL ON person TO alice", "E081", "GRANT ALL");
 }
 
 /// GRANT ALL PRIVILEGES with GRANT OPTION
@@ -670,11 +666,7 @@ fn revoke_all_privileges() {
 /// REVOKE ALL
 #[test]
 fn revoke_all() {
-    assert_feature_supported!(
-        "REVOKE ALL ON person FROM alice",
-        "E081",
-        "REVOKE ALL"
-    );
+    assert_feature_supported!("REVOKE ALL ON person FROM alice", "E081", "REVOKE ALL");
 }
 
 /// REVOKE from multiple grantees
@@ -774,11 +766,7 @@ fn revoke_execute() {
 /// T331: CREATE ROLE
 #[test]
 fn t331_create_role() {
-    assert_feature_supported!(
-        "CREATE ROLE reporting_role",
-        "T331",
-        "CREATE ROLE"
-    );
+    assert_feature_supported!("CREATE ROLE reporting_role", "T331", "CREATE ROLE");
 }
 
 /// T331: CREATE ROLE with quoted identifier
@@ -794,11 +782,7 @@ fn t331_create_role_quoted() {
 /// T331: DROP ROLE
 #[test]
 fn t331_drop_role() {
-    assert_feature_supported!(
-        "DROP ROLE reporting_role",
-        "T331",
-        "DROP ROLE"
-    );
+    assert_feature_supported!("DROP ROLE reporting_role", "T331", "DROP ROLE");
 }
 
 /// T331: DROP ROLE with IF EXISTS
@@ -1115,7 +1099,9 @@ fn e081_summary_all_features() {
     // Comprehensive privilege test combining all E081 features
     assert_plans!("CREATE ROLE admin");
     assert_plans!("CREATE ROLE read_only");
-    assert_plans!("GRANT SELECT, INSERT, UPDATE, DELETE ON person TO admin WITH GRANT OPTION");
+    assert_plans!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON person TO admin WITH GRANT OPTION"
+    );
     assert_plans!("GRANT SELECT ON person TO read_only");
     assert_plans!("GRANT UPDATE (salary) ON person TO admin");
     assert_plans!("GRANT REFERENCES (id) ON person TO admin");

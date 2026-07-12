@@ -32,7 +32,7 @@ use datafusion_expr::{
 };
 
 use indexmap::IndexSet;
-use sqlparser::ast;
+use sqlparser::ast::{self, AstBox as SQLBox};
 use sqlparser::tokenizer::Span;
 
 /// Recursively searches children of [LogicalPlan] to find an Aggregate node if exists
@@ -431,7 +431,7 @@ pub(crate) fn date_part_to_sql(
 
                 return Ok(Some(ast::Expr::Extract {
                     field,
-                    expr: Box::new(date_expr),
+                    expr: SQLBox::new(date_expr),
                     syntax: ast::ExtractSyntax::From,
                 }));
             }

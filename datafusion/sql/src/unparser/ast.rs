@@ -20,13 +20,13 @@ use std::ops::ControlFlow;
 
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
-    self, LimitClause, OrderByKind, SelectFlavor, visit_expressions_mut,
+    self, AstBox as SQLBox, LimitClause, OrderByKind, SelectFlavor, visit_expressions_mut,
 };
 
 #[derive(Clone)]
 pub struct QueryBuilder {
     with: Option<ast::With>,
-    body: Option<Box<ast::SetExpr>>,
+    body: Option<SQLBox<ast::SetExpr>>,
     order_by_kind: Option<OrderByKind>,
     limit: Option<ast::Expr>,
     limit_by: Vec<ast::Expr>,
@@ -43,11 +43,11 @@ impl QueryBuilder {
         self.with = value;
         self
     }
-    pub fn body(&mut self, value: Box<ast::SetExpr>) -> &mut Self {
+    pub fn body(&mut self, value: SQLBox<ast::SetExpr>) -> &mut Self {
         self.body = Some(value);
         self
     }
-    pub fn take_body(&mut self) -> Option<Box<ast::SetExpr>> {
+    pub fn take_body(&mut self) -> Option<SQLBox<ast::SetExpr>> {
         self.body.take()
     }
     pub fn order_by(&mut self, value: OrderByKind) -> &mut Self {
@@ -95,18 +95,18 @@ impl QueryBuilder {
             });
 
         Ok(ast::Query {
-            with: self.with.clone(),
+            with: self.with.clone().map(SQLBox::new),
             body: match self.body {
                 Some(ref value) => value.clone(),
                 None => return Err(Into::into(UninitializedFieldError::from("body"))),
             },
             order_by,
-            limit_clause: Some(LimitClause::LimitOffset {
+            limit_clause: Some(SQLBox::new(LimitClause::LimitOffset {
                 limit: self.limit.clone(),
                 offset: self.offset.clone(),
                 limit_by: self.limit_by.clone(),
-            }),
-            fetch: self.fetch.clone(),
+            })),
+            fetch: self.fetch.clone().map(SQLBox::new),
             locks: self.locks.clone(),
             for_clause: self.for_clause.clone(),
         })
@@ -224,9 +224,9 @@ impl SelectBuilder {
         match (&self.selection, value) {
             (Some(existing_selection), Some(new_selection)) => {
                 self.selection = Some(ast::Expr::BinaryOp {
-                    left: Box::new(existing_selection.clone()),
+                    left: SQLBox::new(existing_selection.clone()),
                     op: ast::BinaryOperator::And,
-                    right: Box::new(new_selection),
+                    right: SQLBox::new(new_selection),
                 });
             }
             (None, Some(new_selection)) => {
@@ -253,7 +253,7 @@ impl SelectBuilder {
         Ok(ast::Select {
             distinct: self.distinct.clone(),
             top_before_distinct: false,
-            top: self.top.clone(),
+            top: self.top.clone().map(SQLBox::new),
             projection: self.projection.clone(),
             into: self.into.clone(),
             from: self
@@ -261,14 +261,14 @@ impl SelectBuilder {
                 .iter()
                 .filter_map(|b| b.build().transpose())
                 .collect::<Result<Vec<_>, BuilderError>>()?,
-            selection: self.selection.clone(),
+            selection: self.selection.clone().map(SQLBox::new),
             group_by: match self.group_by {
                 Some(ref value) => value.clone(),
                 None => {
                     return Err(Into::into(UninitializedFieldError::from("group_by")));
                 }
             },
-            having: self.having.clone(),
+            having: self.having.clone().map(SQLBox::new),
             named_window: self.named_window.clone(),
             connect_by: None,
             select_token: AttachedToken::empty(),
@@ -466,11 +466,12 @@ impl TableRelationBuilder {
                 None => return Err(Into::into(UninitializedFieldError::from("name"))),
             },
             alias: self.alias.clone(),
-            args: self.args.clone().map(|args| ast::TableFunctionArgs {
-                args,
-            }),
+            args: self
+                .args
+                .clone()
+                .map(|args| ast::TableFunctionArgs { args }),
             with_hints: self.with_hints.clone(),
-            version: self.version.clone(),
+            version: self.version.clone().map(SQLBox::new),
             partitions: self.partitions.clone(),
             with_ordinality: false,
             only: false,
@@ -499,7 +500,7 @@ impl Default for TableRelationBuilder {
 #[derive(Clone)]
 pub struct DerivedRelationBuilder {
     lateral: Option<bool>,
-    subquery: Option<Box<ast::Query>>,
+    subquery: Option<SQLBox<ast::Query>>,
     alias: Option<ast::TableAlias>,
 }
 
@@ -508,7 +509,7 @@ impl DerivedRelationBuilder {
         self.lateral = Some(value);
         self
     }
-    pub fn subquery(&mut self, value: Box<ast::Query>) -> &mut Self {
+    pub fn subquery(&mut self, value: SQLBox<ast::Query>) -> &mut Self {
         self.subquery = Some(value);
         self
     }

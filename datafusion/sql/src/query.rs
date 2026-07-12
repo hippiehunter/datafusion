@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -39,8 +40,10 @@ use sqlparser::tokenizer::Span;
 
 /// Internal representation of limit/offset with WITH TIES support
 #[derive(Debug, Clone)]
-struct LimitInfo {
-    limit_clause: Option<LimitClause>,
+struct LimitInfo<'a> {
+    limit: Option<&'a SQLExpr>,
+    offset: Option<&'a SQLExpr>,
+    limit_by: &'a [SQLExpr],
     with_ties: bool,
     /// If true, the limit value represents a percentage of total rows
     is_percent: bool,
@@ -59,39 +62,41 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         query: Query,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        self.query_to_plan_ref(&query, outer_planner_context)
+    }
+
+    /// Generate a logical plan while borrowing a parsed query document.
+    pub(crate) fn query_to_plan_ref(
+        &self,
+        query: &Query,
+        outer_planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
         // Each query has its own planner context, including CTEs that are visible within that query.
         // It also inherits the CTEs from the outer query by cloning the outer planner context.
         let mut query_plan_context = outer_planner_context.clone();
         let planner_context = &mut query_plan_context;
 
-        let Query {
-            with,
-            body,
-            order_by,
-            limit_clause,
-            fetch,
-            locks,
-            for_clause: _,
-            ..
-        } = query;
-
         // Combine FETCH clause with LIMIT/OFFSET handling
-        let limit_info = self.combine_limit_and_fetch(limit_clause, fetch)?;
+        let limit_info = self.combine_limit_and_fetch(
+            query.limit_clause.as_deref(),
+            query.fetch.as_deref(),
+        )?;
 
-        if let Some(with) = with {
-            self.plan_with_clause(with, planner_context)?;
+        if let Some(with) = query.with.as_deref() {
+            self.plan_with_clause_ref(with, planner_context)?;
         }
 
-        let set_expr = *body;
-        match set_expr {
-            SetExpr::Select(mut select) => {
-                let select_into = select.into.take();
-                let plan =
-                    self.select_to_plan(*select, order_by.clone(), planner_context)?;
+        match query.body.as_ref() {
+            SetExpr::Select(select) => {
+                let plan = self.select_to_plan_ref(
+                    select.as_ref(),
+                    query.order_by.as_ref(),
+                    planner_context,
+                )?;
                 let plan = self.limit(plan, limit_info.clone(), planner_context)?;
-                let plan = self.apply_query_locks(plan, locks)?;
+                let plan = self.apply_query_locks(plan, &query.locks)?;
                 // Process the `SELECT INTO` after `LIMIT`.
-                self.select_into(plan, select_into)
+                self.select_into_ref(plan, select.into.as_ref())
             }
             other => {
                 // The functions called from `set_expr_to_plan()` need more than 128KB
@@ -100,9 +105,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let plan = {
                     // scope for dropping _guard
                     let _guard = StackGuard::new(256 * 1024);
-                    self.set_expr_to_plan(other, planner_context)
+                    self.set_expr_to_plan_ref(other, planner_context)
                 }?;
-                let oby_exprs = to_order_by_exprs(order_by)?;
+                let oby_exprs = to_order_by_exprs(query.order_by.as_ref())?;
                 let order_by_rex = self.order_by_to_sort_expr(
                     oby_exprs,
                     plan.schema(),
@@ -112,7 +117,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )?;
                 let plan = self.order_by(plan, order_by_rex)?;
                 let plan = self.limit(plan, limit_info, planner_context)?;
-                self.apply_query_locks(plan, locks)
+                self.apply_query_locks(plan, &query.locks)
             }
         }
     }
@@ -120,19 +125,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     fn apply_query_locks(
         &self,
         plan: LogicalPlan,
-        locks: Vec<LockClause>,
+        locks: &[LockClause],
     ) -> Result<LogicalPlan> {
         if locks.is_empty() {
             return Ok(plan);
         }
 
         let planned_locks = locks
-            .into_iter()
+            .iter()
             .map(|lock| {
                 let row_lock = table_scan_row_lock(&lock);
                 let target = lock
                     .of
-                    .map(|name| self.object_name_to_table_reference(name))
+                    .as_ref()
+                    .map(|name| self.object_name_to_table_reference(name.clone()))
                     .transpose()?;
                 Ok(PlannedLockClause { row_lock, target })
             })
@@ -163,23 +169,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// - `[OFFSET m ROWS] FETCH FIRST n ROWS ONLY` (SQL standard)
     ///
     /// This method converts FETCH to the internal LimitInfo representation.
-    fn combine_limit_and_fetch(
+    fn combine_limit_and_fetch<'a>(
         &self,
-        limit_clause: Option<LimitClause>,
-        fetch: Option<Fetch>,
-    ) -> Result<LimitInfo> {
+        limit_clause: Option<&'a LimitClause>,
+        fetch: Option<&'a Fetch>,
+    ) -> Result<LimitInfo<'a>> {
         let Some(fetch) = fetch else {
-            // No FETCH clause, use LIMIT/OFFSET as-is
-            return Ok(LimitInfo {
-                limit_clause,
-                with_ties: false,
-                is_percent: false,
-            });
+            return self.limit_info_from_clause(limit_clause, false, false);
         };
 
         // Extract the fetch quantity (number of rows to return) and with_ties flag
         // Note: For FETCH PERCENT, the quantity represents a percentage value
-        let fetch_quantity = fetch.quantity;
+        let fetch_quantity = fetch.quantity.as_ref();
         let with_ties = fetch.with_ties;
         let is_percent = fetch.percent;
 
@@ -189,15 +190,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // Only FETCH, no LIMIT/OFFSET
                 // Convert FETCH to LimitClause
                 match fetch_quantity {
-                    Some(quantity) => Some(LimitClause::LimitOffset {
-                        limit: Some(quantity),
-                        offset: None,
-                        limit_by: vec![],
-                    }),
-                    None => {
-                        // FETCH FIRST ROWS ONLY with no quantity - return all rows
-                        None
-                    }
+                    Some(quantity) => Some((Some(quantity), None, &[][..])),
+                    None => None,
                 }
             }
             Some(LimitClause::LimitOffset {
@@ -213,20 +207,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 // OFFSET with FETCH - combine them
                 match fetch_quantity {
-                    Some(quantity) => Some(LimitClause::LimitOffset {
-                        limit: Some(quantity),
-                        offset,
-                        limit_by,
-                    }),
+                    Some(quantity) => Some((
+                        Some(quantity),
+                        offset.as_ref().map(|offset| &offset.value),
+                        limit_by.as_slice(),
+                    )),
                     None => {
                         // OFFSET with FETCH FIRST ROWS ONLY (no quantity)
                         // Keep offset but no limit
                         if offset.is_some() || !limit_by.is_empty() {
-                            Some(LimitClause::LimitOffset {
-                                limit: None,
-                                offset,
-                                limit_by,
-                            })
+                            Some((
+                                None,
+                                offset.as_ref().map(|offset| &offset.value),
+                                limit_by.as_slice(),
+                            ))
                         } else {
                             None
                         }
@@ -241,8 +235,41 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
+        let (limit, offset, limit_by) = limit_clause.unwrap_or((None, None, &[]));
         Ok(LimitInfo {
-            limit_clause,
+            limit,
+            offset,
+            limit_by,
+            with_ties,
+            is_percent,
+        })
+    }
+
+    fn limit_info_from_clause<'a>(
+        &self,
+        limit_clause: Option<&'a LimitClause>,
+        with_ties: bool,
+        is_percent: bool,
+    ) -> Result<LimitInfo<'a>> {
+        let (limit, offset, limit_by) = match limit_clause {
+            None => (None, None, &[][..]),
+            Some(LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => (
+                limit.as_ref(),
+                offset.as_ref().map(|offset| &offset.value),
+                limit_by.as_slice(),
+            ),
+            Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
+                (Some(limit), Some(offset), &[][..])
+            }
+        };
+        Ok(LimitInfo {
+            limit,
+            offset,
+            limit_by,
             with_ties,
             is_percent,
         })
@@ -252,62 +279,45 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     fn limit(
         &self,
         input: LogicalPlan,
-        limit_info: LimitInfo,
+        limit_info: LimitInfo<'_>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let LimitInfo {
-            limit_clause,
+            limit,
+            offset,
+            limit_by,
             with_ties,
             is_percent: _is_percent,
         } = limit_info;
 
         // WITH TIES requires ORDER BY
         if with_ties && !matches!(input, LogicalPlan::Sort(_)) {
-            return plan_err!(
-                "FETCH WITH TIES requires an ORDER BY clause"
-            );
+            return plan_err!("FETCH WITH TIES requires an ORDER BY clause");
         }
 
-        let Some(limit_clause) = limit_clause else {
+        if limit.is_none() && offset.is_none() && limit_by.is_empty() {
             return Ok(input);
-        };
+        }
 
         let empty_schema = DFSchema::empty();
 
-        let (skip, fetch, limit_by_exprs) = match limit_clause {
-            LimitClause::LimitOffset {
-                limit,
-                offset,
-                limit_by,
-            } => {
-                let skip = offset
-                    .map(|o| self.sql_to_expr(o.value, &empty_schema, planner_context))
-                    .transpose()?;
+        let skip = offset
+            .map(|o| self.sql_to_expr_ref(o, &empty_schema, planner_context))
+            .transpose()?;
 
-                let fetch = limit
-                    .map(|e| self.sql_to_expr(e, &empty_schema, planner_context))
-                    .transpose()?;
+        let fetch = limit
+            .map(|e| self.sql_to_expr_ref(e, &empty_schema, planner_context))
+            .transpose()?;
 
-                // For FETCH PERCENT: Currently we accept the syntax but treat it as a simple limit
-                // The percentage value will be used directly as the limit count (not semantically correct,
-                // but allows the query to plan for conformance testing)
-                // TODO: Implement proper FETCH PERCENT by calculating percentage of table rows
+        // For FETCH PERCENT: Currently we accept the syntax but treat it as a simple limit
+        // The percentage value will be used directly as the limit count (not semantically correct,
+        // but allows the query to plan for conformance testing)
+        // TODO: Implement proper FETCH PERCENT by calculating percentage of table rows
 
-                let limit_by_exprs = limit_by
-                    .into_iter()
-                    .map(|e| self.sql_to_expr(e, &empty_schema, planner_context))
-                    .collect::<Result<Vec<_>>>()?;
-
-                (skip, fetch, limit_by_exprs)
-            }
-            LimitClause::OffsetCommaLimit { offset, limit } => {
-                let skip =
-                    Some(self.sql_to_expr(offset, &empty_schema, planner_context)?);
-                let fetch =
-                    Some(self.sql_to_expr(limit, &empty_schema, planner_context)?);
-                (skip, fetch, vec![])
-            }
-        };
+        let limit_by_exprs = limit_by
+            .iter()
+            .map(|e| self.sql_to_expr_ref(e, &empty_schema, planner_context))
+            .collect::<Result<Vec<_>>>()?;
 
         if !limit_by_exprs.is_empty() {
             return not_impl_err!("LIMIT BY clause is not supported yet");
@@ -342,16 +352,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
     }
 
-    /// Wrap the logical plan in a `SelectInto`
-    fn select_into(
+    fn select_into_ref(
         &self,
         plan: LogicalPlan,
-        select_into: Option<SelectInto>,
+        select_into: Option<&SelectInto>,
     ) -> Result<LogicalPlan> {
         match select_into {
             Some(into) => Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
                 CreateMemoryTable {
-                    name: self.object_name_to_table_reference(into.name)?,
+                    name: self.object_name_to_table_reference(into.name.clone())?,
                     constraints: Constraints::default(),
                     input: Arc::new(plan),
                     if_not_exists: false,
@@ -472,18 +481,18 @@ fn combine_row_locks(
 }
 
 /// Returns the order by expressions from the query.
-fn to_order_by_exprs(order_by: Option<OrderBy>) -> Result<Vec<OrderByExpr>> {
+fn to_order_by_exprs(order_by: Option<&OrderBy>) -> Result<Cow<'_, [OrderByExpr]>> {
     to_order_by_exprs_with_select(order_by, None)
 }
 
 /// Returns the order by expressions from the query with the select expressions.
-pub(crate) fn to_order_by_exprs_with_select(
-    order_by: Option<OrderBy>,
+pub(crate) fn to_order_by_exprs_with_select<'a>(
+    order_by: Option<&'a OrderBy>,
     select_exprs: Option<&Vec<Expr>>,
-) -> Result<Vec<OrderByExpr>> {
+) -> Result<Cow<'a, [OrderByExpr]>> {
     let Some(OrderBy { kind, interpolate }) = order_by else {
         // If no order by, return an empty array.
-        return Ok(vec![]);
+        return Ok(Cow::Borrowed(&[]));
     };
     if let Some(_interpolate) = interpolate {
         return not_impl_err!("ORDER BY INTERPOLATE is not supported");
@@ -491,7 +500,7 @@ pub(crate) fn to_order_by_exprs_with_select(
     match kind {
         OrderByKind::All(order_by_options) => {
             let Some(exprs) = select_exprs else {
-                return Ok(vec![]);
+                return Ok(Cow::Borrowed(&[]));
             };
             let order_by_exprs = exprs
                 .iter()
@@ -502,7 +511,7 @@ pub(crate) fn to_order_by_exprs_with_select(
                             quote_style: None,
                             span: Span::empty(),
                         }),
-                        options: order_by_options,
+                        options: order_by_options.clone(),
                         with_fill: None,
                     }),
                     // TODO: Support other types of expressions
@@ -511,8 +520,8 @@ pub(crate) fn to_order_by_exprs_with_select(
                     ),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(order_by_exprs)
+            Ok(Cow::Owned(order_by_exprs))
         }
-        OrderByKind::Expressions(order_by_exprs) => Ok(order_by_exprs),
+        OrderByKind::Expressions(order_by_exprs) => Ok(Cow::Borrowed(order_by_exprs)),
     }
 }

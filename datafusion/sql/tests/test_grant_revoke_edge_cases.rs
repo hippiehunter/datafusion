@@ -37,7 +37,7 @@ fn test_grant_role_empty_list() {
         // Error should mention something about unexpected TO keyword or missing identifier
         assert!(
             error_msg.to_lowercase().contains("unexpected")
-            || error_msg.to_lowercase().contains("expected"),
+                || error_msg.to_lowercase().contains("expected"),
             "Error message should indicate parsing issue: {}",
             error_msg
         );
@@ -61,7 +61,7 @@ fn test_grant_role_empty_grantees() {
         println!("Error (expected): {}", error_msg);
         assert!(
             error_msg.to_lowercase().contains("unexpected")
-            || error_msg.to_lowercase().contains("expected"),
+                || error_msg.to_lowercase().contains("expected"),
             "Error message should indicate parsing issue: {}",
             error_msg
         );

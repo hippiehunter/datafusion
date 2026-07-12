@@ -42,7 +42,7 @@
 //! - Can contain spaces and special characters
 //! - Can be reserved words
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // E031-01: Delimited identifiers
@@ -407,13 +407,15 @@ fn e031_summary_all_subfeatures() {
     // This test verifies that all E031 subfeatures work together
 
     // Create table with various identifier styles
-    assert_plans!(r#"CREATE TABLE user_data_ (
+    assert_plans!(
+        r#"CREATE TABLE user_data_ (
         id INT,
         "User Name" VARCHAR(50),
         email_address VARCHAR(100),
         created_at_ TIMESTAMP,
         "Status" VARCHAR(20)
-    )"#);
+    )"#
+    );
 
     // Query using mixed identifier styles
     assert_plans!(

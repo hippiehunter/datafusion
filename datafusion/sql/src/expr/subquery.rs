@@ -26,7 +26,7 @@ use std::sync::Arc;
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn parse_exists_subquery(
         &self,
-        subquery: Query,
+        subquery: &Query,
         negated: bool,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
@@ -34,7 +34,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Push current schema onto stack to enable multi-level correlation
         let prev_stack_len =
             planner_context.push_outer_query_schema(input_schema.clone().into());
-        let sub_plan = self.query_to_plan(subquery, planner_context)?;
+        let sub_plan = self.query_to_plan_ref(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
@@ -50,8 +50,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn parse_in_subquery(
         &self,
-        expr: SQLExpr,
-        subquery: Query,
+        expr: &SQLExpr,
+        subquery: &Query,
         negated: bool,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
@@ -71,7 +71,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
 
-        let sub_plan = self.query_to_plan(subquery, planner_context)?;
+        let sub_plan = self.query_to_plan_ref(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
@@ -83,7 +83,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "Select only one column in the subquery",
         )?;
 
-        let expr_obj = self.sql_to_expr(expr, input_schema, planner_context)?;
+        let expr_obj = self.sql_to_expr_ref(expr, input_schema, planner_context)?;
 
         Ok(Expr::InSubquery(InSubquery::new(
             Box::new(expr_obj),
@@ -98,7 +98,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     pub(super) fn parse_scalar_subquery(
         &self,
-        subquery: Query,
+        subquery: &Query,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -115,7 +115,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
         }
-        let sub_plan = self.query_to_plan(subquery, planner_context)?;
+        let sub_plan = self.query_to_plan_ref(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
@@ -158,9 +158,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// Parse an ANY subquery expression like `x > ANY(SELECT ...)`
     pub(super) fn parse_any_subquery(
         &self,
-        expr: SQLExpr,
+        expr: &SQLExpr,
         op: Operator,
-        subquery: Query,
+        subquery: &Query,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -179,7 +179,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
 
-        let sub_plan = self.query_to_plan(subquery, planner_context)?;
+        let sub_plan = self.query_to_plan_ref(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
@@ -191,7 +191,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "Select only one column in the subquery",
         )?;
 
-        let expr_obj = self.sql_to_expr(expr, input_schema, planner_context)?;
+        let expr_obj = self.sql_to_expr_ref(expr, input_schema, planner_context)?;
 
         Ok(Expr::AnyExpr(AnyExpr::new(
             Box::new(expr_obj),
@@ -207,9 +207,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// Parse an ALL subquery expression like `x > ALL(SELECT ...)`
     pub(super) fn parse_all_subquery(
         &self,
-        expr: SQLExpr,
+        expr: &SQLExpr,
         op: Operator,
-        subquery: Query,
+        subquery: &Query,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -228,7 +228,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
 
-        let sub_plan = self.query_to_plan(subquery, planner_context)?;
+        let sub_plan = self.query_to_plan_ref(subquery, planner_context)?;
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
@@ -240,7 +240,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "Select only one column in the subquery",
         )?;
 
-        let expr_obj = self.sql_to_expr(expr, input_schema, planner_context)?;
+        let expr_obj = self.sql_to_expr_ref(expr, input_schema, planner_context)?;
 
         Ok(Expr::AllExpr(AllExpr::new(
             Box::new(expr_obj),

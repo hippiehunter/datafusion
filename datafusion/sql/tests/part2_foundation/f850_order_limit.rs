@@ -677,21 +677,13 @@ fn limit_03_limit_with_offset() {
 /// LIMIT: LIMIT 0 (fetch no rows)
 #[test]
 fn limit_04_limit_zero() {
-    assert_feature_supported!(
-        "SELECT a FROM t LIMIT 0",
-        "LIMIT",
-        "LIMIT 0"
-    );
+    assert_feature_supported!("SELECT a FROM t LIMIT 0", "LIMIT", "LIMIT 0");
 }
 
 /// LIMIT: LIMIT ALL
 #[test]
 fn limit_05_limit_all() {
-    assert_feature_supported!(
-        "SELECT a FROM t LIMIT ALL",
-        "LIMIT",
-        "LIMIT ALL"
-    );
+    assert_feature_supported!("SELECT a FROM t LIMIT ALL", "LIMIT", "LIMIT ALL");
 }
 
 /// LIMIT: LIMIT in subquery

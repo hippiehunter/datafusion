@@ -18,16 +18,16 @@
 use arrow::datatypes::{DataType, Field, Schema};
 
 use datafusion_common::{
-    assert_contains, Column, DFSchema, DFSchemaRef, DataFusionError, Result,
-    TableReference,
+    Column, DFSchema, DFSchemaRef, DataFusionError, Result, TableReference,
+    assert_contains,
 };
 use datafusion_expr::test::function_stub::{
     count_udaf, max_udaf, min_udaf, sum, sum_udaf,
 };
 use datafusion_expr::{
-    cast, col, lit, table_scan, wildcard, CreateMemoryTable, DdlStatement, EmptyRelation,
-    Expr, Extension, LogicalPlan, LogicalPlanBuilder, Union, UserDefinedLogicalNode,
-    UserDefinedLogicalNodeCore,
+    CreateMemoryTable, DdlStatement, EmptyRelation, Expr, Extension, LogicalPlan,
+    LogicalPlanBuilder, Union, UserDefinedLogicalNode, UserDefinedLogicalNodeCore, cast,
+    col, lit, table_scan, wildcard,
 };
 use datafusion_functions_aggregate::grouping::grouping_udaf;
 use datafusion_sql::planner::{ContextProvider, PlannerContext, SqlToRel};
@@ -36,7 +36,7 @@ use datafusion_sql::unparser::dialect::{
     DefaultDialect, Dialect as UnparserDialect, MySqlDialect as UnparserMySqlDialect,
     PostgreSqlDialect as UnparserPostgreSqlDialect, SqliteDialect,
 };
-use datafusion_sql::unparser::{expr_to_sql, plan_to_sql, Unparser};
+use datafusion_sql::unparser::{Unparser, expr_to_sql, plan_to_sql};
 use insta::assert_snapshot;
 use sqlparser::ast::Statement;
 use std::hash::Hash;
@@ -60,7 +60,7 @@ use datafusion_sql::unparser::extension_unparser::{
     UnparseToStatementResult, UnparseWithinStatementResult,
     UserDefinedLogicalNodeUnparser,
 };
-use sqlparser::dialect::{Dialect, PostgreSqlDialect, MySqlDialect};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 
 #[test]
@@ -2233,11 +2233,9 @@ fn test_unparse_optimized_multi_union() -> Result<()> {
     );
 
     let plan = LogicalPlan::Union(Union {
-        inputs: vec![project(
-            empty.clone(),
-            vec![lit(1).alias("x"), lit("a").alias("y")],
-        )?
-        .into()],
+        inputs: vec![
+            project(empty.clone(), vec![lit(1).alias("x"), lit("a").alias("y")])?.into(),
+        ],
         schema: dfschema.clone(),
     });
 

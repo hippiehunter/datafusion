@@ -38,7 +38,7 @@
 //!
 //! E151 and E152 are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_parses, assert_plans, assert_feature_supported, assert_parse_error};
+use crate::{assert_feature_supported, assert_parse_error, assert_parses, assert_plans};
 
 // ============================================================================
 // E151-01: COMMIT statement
@@ -47,41 +47,25 @@ use crate::{assert_parses, assert_plans, assert_feature_supported, assert_parse_
 /// E151-01: Basic COMMIT statement
 #[test]
 fn e151_01_commit_basic() {
-    assert_feature_supported!(
-        "COMMIT",
-        "E151-01",
-        "COMMIT statement"
-    );
+    assert_feature_supported!("COMMIT", "E151-01", "COMMIT statement");
 }
 
 /// E151-01: COMMIT WORK (optional WORK keyword)
 #[test]
 fn e151_01_commit_work() {
-    assert_feature_supported!(
-        "COMMIT WORK",
-        "E151-01",
-        "COMMIT WORK statement"
-    );
+    assert_feature_supported!("COMMIT WORK", "E151-01", "COMMIT WORK statement");
 }
 
 /// E151-01: COMMIT with explicit AND CHAIN
 #[test]
 fn e151_01_commit_and_chain() {
-    assert_feature_supported!(
-        "COMMIT AND CHAIN",
-        "E151-01",
-        "COMMIT AND CHAIN"
-    );
+    assert_feature_supported!("COMMIT AND CHAIN", "E151-01", "COMMIT AND CHAIN");
 }
 
 /// E151-01: COMMIT with explicit AND NO CHAIN
 #[test]
 fn e151_01_commit_no_chain() {
-    assert_feature_supported!(
-        "COMMIT AND NO CHAIN",
-        "E151-01",
-        "COMMIT AND NO CHAIN"
-    );
+    assert_feature_supported!("COMMIT AND NO CHAIN", "E151-01", "COMMIT AND NO CHAIN");
 }
 
 /// E151-01: COMMIT WORK AND CHAIN
@@ -101,31 +85,19 @@ fn e151_01_commit_work_and_chain() {
 /// E151-02: Basic ROLLBACK statement
 #[test]
 fn e151_02_rollback_basic() {
-    assert_feature_supported!(
-        "ROLLBACK",
-        "E151-02",
-        "ROLLBACK statement"
-    );
+    assert_feature_supported!("ROLLBACK", "E151-02", "ROLLBACK statement");
 }
 
 /// E151-02: ROLLBACK WORK (optional WORK keyword)
 #[test]
 fn e151_02_rollback_work() {
-    assert_feature_supported!(
-        "ROLLBACK WORK",
-        "E151-02",
-        "ROLLBACK WORK statement"
-    );
+    assert_feature_supported!("ROLLBACK WORK", "E151-02", "ROLLBACK WORK statement");
 }
 
 /// E151-02: ROLLBACK with explicit AND CHAIN
 #[test]
 fn e151_02_rollback_and_chain() {
-    assert_feature_supported!(
-        "ROLLBACK AND CHAIN",
-        "E151-02",
-        "ROLLBACK AND CHAIN"
-    );
+    assert_feature_supported!("ROLLBACK AND CHAIN", "E151-02", "ROLLBACK AND CHAIN");
 }
 
 /// E151-02: ROLLBACK with explicit AND NO CHAIN
@@ -223,41 +195,25 @@ fn e152_02_set_transaction_read_write_with_isolation() {
 /// T241: Basic START TRANSACTION statement
 #[test]
 fn t241_start_transaction_basic() {
-    assert_feature_supported!(
-        "START TRANSACTION",
-        "T241",
-        "START TRANSACTION statement"
-    );
+    assert_feature_supported!("START TRANSACTION", "T241", "START TRANSACTION statement");
 }
 
 /// T241: BEGIN (synonym for START TRANSACTION)
 #[test]
 fn t241_begin_transaction() {
-    assert_feature_supported!(
-        "BEGIN",
-        "T241",
-        "BEGIN statement"
-    );
+    assert_feature_supported!("BEGIN", "T241", "BEGIN statement");
 }
 
 /// T241: BEGIN TRANSACTION
 #[test]
 fn t241_begin_transaction_explicit() {
-    assert_feature_supported!(
-        "BEGIN TRANSACTION",
-        "T241",
-        "BEGIN TRANSACTION statement"
-    );
+    assert_feature_supported!("BEGIN TRANSACTION", "T241", "BEGIN TRANSACTION statement");
 }
 
 /// T241: BEGIN WORK
 #[test]
 fn t241_begin_work() {
-    assert_feature_supported!(
-        "BEGIN WORK",
-        "T241",
-        "BEGIN WORK statement"
-    );
+    assert_feature_supported!("BEGIN WORK", "T241", "BEGIN WORK statement");
 }
 
 /// T241: START TRANSACTION with READ ONLY
@@ -307,11 +263,7 @@ fn t241_start_transaction_multiple_options() {
 /// T271: SAVEPOINT statement
 #[test]
 fn t271_savepoint() {
-    assert_feature_supported!(
-        "SAVEPOINT sp1",
-        "T271",
-        "SAVEPOINT statement"
-    );
+    assert_feature_supported!("SAVEPOINT sp1", "T271", "SAVEPOINT statement");
 }
 
 /// T271: SAVEPOINT with quoted identifier
@@ -337,31 +289,19 @@ fn t271_rollback_to_savepoint() {
 /// T271: ROLLBACK TO (without SAVEPOINT keyword)
 #[test]
 fn t271_rollback_to() {
-    assert_feature_supported!(
-        "ROLLBACK TO sp1",
-        "T271",
-        "ROLLBACK TO"
-    );
+    assert_feature_supported!("ROLLBACK TO sp1", "T271", "ROLLBACK TO");
 }
 
 /// T271: RELEASE SAVEPOINT
 #[test]
 fn t271_release_savepoint() {
-    assert_feature_supported!(
-        "RELEASE SAVEPOINT sp1",
-        "T271",
-        "RELEASE SAVEPOINT"
-    );
+    assert_feature_supported!("RELEASE SAVEPOINT sp1", "T271", "RELEASE SAVEPOINT");
 }
 
 /// T271: RELEASE (without SAVEPOINT keyword)
 #[test]
 fn t271_release() {
-    assert_feature_supported!(
-        "RELEASE sp1",
-        "T271",
-        "RELEASE"
-    );
+    assert_feature_supported!("RELEASE sp1", "T271", "RELEASE");
 }
 
 // ============================================================================
@@ -469,31 +409,19 @@ fn set_session_multiple_options() {
 /// END statement (PostgreSQL-style)
 #[test]
 fn end_statement() {
-    assert_feature_supported!(
-        "END",
-        "E151",
-        "END statement"
-    );
+    assert_feature_supported!("END", "E151", "END statement");
 }
 
 /// END TRANSACTION
 #[test]
 fn end_transaction() {
-    assert_feature_supported!(
-        "END TRANSACTION",
-        "E151",
-        "END TRANSACTION statement"
-    );
+    assert_feature_supported!("END TRANSACTION", "E151", "END TRANSACTION statement");
 }
 
 /// END WORK
 #[test]
 fn end_work() {
-    assert_feature_supported!(
-        "END WORK",
-        "E151",
-        "END WORK statement"
-    );
+    assert_feature_supported!("END WORK", "E151", "END WORK statement");
 }
 
 // ============================================================================
@@ -503,41 +431,25 @@ fn end_work() {
 /// ABORT statement
 #[test]
 fn abort_statement() {
-    assert_feature_supported!(
-        "ABORT",
-        "E151",
-        "ABORT statement"
-    );
+    assert_feature_supported!("ABORT", "E151", "ABORT statement");
 }
 
 /// ABORT TRANSACTION
 #[test]
 fn abort_transaction() {
-    assert_feature_supported!(
-        "ABORT TRANSACTION",
-        "E151",
-        "ABORT TRANSACTION statement"
-    );
+    assert_feature_supported!("ABORT TRANSACTION", "E151", "ABORT TRANSACTION statement");
 }
 
 /// ABORT WORK
 #[test]
 fn abort_work() {
-    assert_feature_supported!(
-        "ABORT WORK",
-        "E151",
-        "ABORT WORK statement"
-    );
+    assert_feature_supported!("ABORT WORK", "E151", "ABORT WORK statement");
 }
 
 /// ABORT AND CHAIN (starts new transaction after abort)
 #[test]
 fn abort_and_chain() {
-    assert_feature_supported!(
-        "ABORT AND CHAIN",
-        "E151",
-        "ABORT AND CHAIN statement"
-    );
+    assert_feature_supported!("ABORT AND CHAIN", "E151", "ABORT AND CHAIN statement");
 }
 
 /// ABORT AND NO CHAIN (does not start new transaction)
@@ -685,7 +597,9 @@ fn abort_case_insensitivity() {
 #[test]
 fn transaction_block_insert() {
     assert_parses!("START TRANSACTION");
-    assert_parses!("INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'John', 'Doe', 30, 'CA', 50000, TIMESTAMP '2023-01-01 00:00:00')");
+    assert_parses!(
+        "INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'John', 'Doe', 30, 'CA', 50000, TIMESTAMP '2023-01-01 00:00:00')"
+    );
     assert_parses!("COMMIT");
 }
 
@@ -701,7 +615,9 @@ fn transaction_block_rollback() {
 #[test]
 fn transaction_block_savepoints() {
     assert_parses!("BEGIN");
-    assert_parses!("INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'Alice', 'Smith', 25, 'NY', 60000, TIMESTAMP '2023-01-01 00:00:00')");
+    assert_parses!(
+        "INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'Alice', 'Smith', 25, 'NY', 60000, TIMESTAMP '2023-01-01 00:00:00')"
+    );
     assert_parses!("SAVEPOINT sp1");
     assert_parses!("UPDATE person SET salary = 70000 WHERE id = 1");
     assert_parses!("ROLLBACK TO SAVEPOINT sp1");
@@ -713,7 +629,9 @@ fn transaction_block_savepoints() {
 fn nested_savepoints() {
     assert_parses!("BEGIN");
     assert_parses!("SAVEPOINT sp1");
-    assert_parses!("INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'Bob', 'Johnson', 35, 'TX', 55000, TIMESTAMP '2023-01-01 00:00:00')");
+    assert_parses!(
+        "INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'Bob', 'Johnson', 35, 'TX', 55000, TIMESTAMP '2023-01-01 00:00:00')"
+    );
     assert_parses!("SAVEPOINT sp2");
     assert_parses!("UPDATE person SET age = 36 WHERE id = 1");
     assert_parses!("ROLLBACK TO SAVEPOINT sp2");
@@ -737,41 +655,25 @@ fn transaction_isolation_levels_sequence() {
 /// COMMIT AND CHAIN creates new transaction
 #[test]
 fn t261_commit_and_chain() {
-    assert_feature_supported!(
-        "COMMIT AND CHAIN",
-        "T261",
-        "COMMIT AND CHAIN"
-    );
+    assert_feature_supported!("COMMIT AND CHAIN", "T261", "COMMIT AND CHAIN");
 }
 
 /// ROLLBACK AND CHAIN creates new transaction
 #[test]
 fn t261_rollback_and_chain() {
-    assert_feature_supported!(
-        "ROLLBACK AND CHAIN",
-        "T261",
-        "ROLLBACK AND CHAIN"
-    );
+    assert_feature_supported!("ROLLBACK AND CHAIN", "T261", "ROLLBACK AND CHAIN");
 }
 
 /// COMMIT AND NO CHAIN explicitly terminates
 #[test]
 fn t261_commit_no_chain() {
-    assert_feature_supported!(
-        "COMMIT AND NO CHAIN",
-        "T261",
-        "COMMIT AND NO CHAIN"
-    );
+    assert_feature_supported!("COMMIT AND NO CHAIN", "T261", "COMMIT AND NO CHAIN");
 }
 
 /// ROLLBACK AND NO CHAIN explicitly terminates
 #[test]
 fn t261_rollback_no_chain() {
-    assert_feature_supported!(
-        "ROLLBACK AND NO CHAIN",
-        "T261",
-        "ROLLBACK AND NO CHAIN"
-    );
+    assert_feature_supported!("ROLLBACK AND NO CHAIN", "T261", "ROLLBACK AND NO CHAIN");
 }
 
 // ============================================================================
@@ -790,7 +692,9 @@ fn read_only_transaction_select() {
 #[test]
 fn multiple_statements_in_transaction() {
     assert_parses!("BEGIN TRANSACTION");
-    assert_parses!("INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'Charlie', 'Brown', 40, 'FL', 65000, TIMESTAMP '2023-01-01 00:00:00')");
+    assert_parses!(
+        "INSERT INTO person (id, first_name, last_name, age, state, salary, birth_date) VALUES (1, 'Charlie', 'Brown', 40, 'FL', 65000, TIMESTAMP '2023-01-01 00:00:00')"
+    );
     assert_parses!("UPDATE orders SET total = total * 1.05 WHERE customer_id = 1");
     assert_parses!("DELETE FROM orders WHERE total < 10");
     assert_parses!("COMMIT");
@@ -844,7 +748,9 @@ fn e151_e152_summary_savepoints() {
 #[test]
 fn e151_e152_summary_all_features() {
     // Comprehensive transaction test combining all features
-    assert_plans!("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    assert_plans!(
+        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+    );
     assert_plans!("START TRANSACTION READ WRITE");
     assert_plans!("SAVEPOINT before_changes");
     assert_plans!("ROLLBACK TO SAVEPOINT before_changes");

@@ -379,13 +379,19 @@ impl WindowFrameBound {
     ) -> Result<Self> {
         Ok(match value {
             ast::WindowFrameBound::Preceding(Some(v)) => {
-                Self::Preceding(convert_frame_bound_to_scalar_value(*v, units)?)
+                Self::Preceding(convert_frame_bound_to_scalar_value(
+                    sqlparser::arena::AstBox::into_owned(v),
+                    units,
+                )?)
             }
             ast::WindowFrameBound::Preceding(None) => {
                 Self::Preceding(ScalarValue::UInt64(None))
             }
             ast::WindowFrameBound::Following(Some(v)) => {
-                Self::Following(convert_frame_bound_to_scalar_value(*v, units)?)
+                Self::Following(convert_frame_bound_to_scalar_value(
+                    sqlparser::arena::AstBox::into_owned(v),
+                    units,
+                )?)
             }
             ast::WindowFrameBound::Following(None) => {
                 Self::Following(ScalarValue::UInt64(None))
@@ -415,7 +421,7 @@ fn convert_frame_bound_to_scalar_value(
                 last_field: None,
                 fractional_seconds_precision: None,
             }) => {
-                let value = match *value {
+                let value = match sqlparser::arena::AstBox::into_owned(value) {
                     ast::Expr::Value(ValueWithSpan {
                         value: ast::Value::SingleQuotedString(item),
                         span: _,
@@ -442,7 +448,7 @@ fn convert_frame_bound_to_scalar_value(
                 leading_field,
                 ..
             }) => {
-                let result = match *value {
+                let result = match sqlparser::arena::AstBox::into_owned(value) {
                     ast::Expr::Value(ValueWithSpan {
                         value: ast::Value::SingleQuotedString(item),
                         span: _,

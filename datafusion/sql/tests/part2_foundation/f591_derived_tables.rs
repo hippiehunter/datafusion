@@ -628,11 +628,7 @@ fn f641_multiple_rows_insert() {
 /// T441: ABS function with positive number
 #[test]
 fn t441_abs_positive() {
-    assert_feature_supported!(
-        "SELECT ABS(5) FROM t",
-        "T441",
-        "ABS with positive number"
-    );
+    assert_feature_supported!("SELECT ABS(5) FROM t", "T441", "ABS with positive number");
 }
 
 /// T441: ABS function with negative number
@@ -648,21 +644,13 @@ fn t441_abs_negative() {
 /// T441: ABS function with column
 #[test]
 fn t441_abs_column() {
-    assert_feature_supported!(
-        "SELECT ABS(a) FROM t",
-        "T441",
-        "ABS with column"
-    );
+    assert_feature_supported!("SELECT ABS(a) FROM t", "T441", "ABS with column");
 }
 
 /// T441: ABS function with expression
 #[test]
 fn t441_abs_expression() {
-    assert_feature_supported!(
-        "SELECT ABS(a - b) FROM t",
-        "T441",
-        "ABS with expression"
-    );
+    assert_feature_supported!("SELECT ABS(a - b) FROM t", "T441", "ABS with expression");
 }
 
 /// T441: ABS function in WHERE clause
@@ -678,21 +666,13 @@ fn t441_abs_where() {
 /// T441: MOD function basic
 #[test]
 fn t441_mod_basic() {
-    assert_feature_supported!(
-        "SELECT MOD(10, 3) FROM t",
-        "T441",
-        "MOD function basic"
-    );
+    assert_feature_supported!("SELECT MOD(10, 3) FROM t", "T441", "MOD function basic");
 }
 
 /// T441: MOD function with columns
 #[test]
 fn t441_mod_columns() {
-    assert_feature_supported!(
-        "SELECT MOD(a, b) FROM t",
-        "T441",
-        "MOD with columns"
-    );
+    assert_feature_supported!("SELECT MOD(a, b) FROM t", "T441", "MOD with columns");
 }
 
 /// T441: MOD function with expressions
@@ -728,11 +708,7 @@ fn t441_abs_mod_combined() {
 /// T441: ABS with decimal
 #[test]
 fn t441_abs_decimal() {
-    assert_feature_supported!(
-        "SELECT ABS(-10.5) FROM t",
-        "T441",
-        "ABS with decimal"
-    );
+    assert_feature_supported!("SELECT ABS(-10.5) FROM t", "T441", "ABS with decimal");
 }
 
 /// T441: MOD in ORDER BY

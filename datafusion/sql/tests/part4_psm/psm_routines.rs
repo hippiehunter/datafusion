@@ -49,7 +49,7 @@
 //! PostgreSQL-style tests with standard variable names are included where applicable.
 
 use crate::{
-    assert_parses, assert_feature_supported, assert_postgres_parses,
+    assert_feature_supported, assert_parses, assert_postgres_parses,
     assert_psm_feature_supported, assert_psm_parses,
 };
 
@@ -76,9 +76,7 @@ fn p001_01_stored_module_basic() {
 #[test]
 fn p001_02_create_procedure_empty() {
     // Just test parsing - CREATE PROCEDURE planning not yet implemented
-    assert_psm_parses!(
-        "CREATE PROCEDURE simple_proc AS BEGIN SELECT 1; END"
-    );
+    assert_psm_parses!("CREATE PROCEDURE simple_proc AS BEGIN SELECT 1; END");
 }
 
 /// P001-02: Stored procedure with SQL body
@@ -130,18 +128,14 @@ fn p001_02_create_procedure_inout_param() {
 /// Note: DROP PROCEDURE parses but planning not yet implemented
 #[test]
 fn p001_02_drop_procedure() {
-    assert_psm_parses!(
-        "DROP PROCEDURE update_salaries"
-    );
+    assert_psm_parses!("DROP PROCEDURE update_salaries");
 }
 
 /// P001-02: DROP PROCEDURE IF EXISTS
 /// Note: DROP PROCEDURE IF EXISTS parses but planning not yet implemented
 #[test]
 fn p001_02_drop_procedure_if_exists() {
-    assert_psm_parses!(
-        "DROP PROCEDURE IF EXISTS update_salaries"
-    );
+    assert_psm_parses!("DROP PROCEDURE IF EXISTS update_salaries");
 }
 
 // ============================================================================
@@ -894,11 +888,7 @@ fn t321_03_function_invocation_column() {
 /// T321-04: Basic CALL statement
 #[test]
 fn t321_04_call_basic() {
-    assert_feature_supported!(
-        "CALL reset_salaries()",
-        "T321-04",
-        "CALL statement"
-    );
+    assert_feature_supported!("CALL reset_salaries()", "T321-04", "CALL statement");
 }
 
 /// T321-04: CALL with parameters
@@ -1196,12 +1186,16 @@ fn psm_summary_control_flow() {
 fn psm_summary_variables() {
     // Variable handling is now supported
     assert_parses!("CREATE PROCEDURE v() BEGIN DECLARE x INT; SET x = 1; END");
-    assert_parses!("CREATE PROCEDURE v() BEGIN DECLARE x INT; SELECT a INTO x FROM t; END");
+    assert_parses!(
+        "CREATE PROCEDURE v() BEGIN DECLARE x INT; SELECT a INTO x FROM t; END"
+    );
 }
 
 #[test]
 fn psm_summary_exception_handling() {
     // Exception handling is now supported
-    assert_parses!("CREATE PROCEDURE eh() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN END; END");
+    assert_parses!(
+        "CREATE PROCEDURE eh() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN END; END"
+    );
     assert_parses!("CREATE PROCEDURE eh() BEGIN SIGNAL SQLSTATE '45000'; END");
 }

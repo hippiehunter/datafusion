@@ -16,6 +16,7 @@
 // under the License.
 
 use datafusion_expr::expr::{AggregateFunctionParams, Unnest, WindowFunctionParams};
+use sqlparser::arena::AstBox as SQLBox;
 use sqlparser::ast::Value::SingleQuotedString;
 use sqlparser::ast::{
     self, Array, BinaryOperator, CaseWhen, DuplicateTreatment, Expr as AstExpr, Function,
@@ -25,28 +26,28 @@ use sqlparser::ast::{
 use std::sync::Arc;
 use std::vec;
 
-use super::dialect::IntervalStyle;
 use super::Unparser;
+use super::dialect::IntervalStyle;
 use arrow::array::{
+    ArrayRef, Date32Array, Date64Array, PrimitiveArray,
     types::{
         ArrowTemporalType, Time32MillisecondType, Time32SecondType,
         Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
         TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
     },
-    ArrayRef, Date32Array, Date64Array, PrimitiveArray,
 };
 use arrow::datatypes::{
-    DataType, Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type, DecimalType,
+    DataType, Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type, DecimalType,
 };
 use arrow::util::display::array_value_to_string;
 use datafusion_common::{
-    assert_eq_or_internal_err, assert_or_internal_err, internal_datafusion_err,
-    internal_err, not_impl_err, plan_err, Column, Result, ScalarValue,
+    Column, Result, ScalarValue, assert_eq_or_internal_err, assert_or_internal_err,
+    internal_datafusion_err, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::{
-    expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
     AllExpr, AnyExpr, Between, BinaryExpr, Case, Cast, Expr, GroupingSet, Like, Operator,
     TryCast,
+    expr::{Alias, Exists, InList, ScalarFunction, Sort, WindowFunction},
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::tokenizer::Span;
@@ -128,7 +129,7 @@ impl Unparser<'_> {
                         )
                     })?;
                     let op = self.op_to_sql(op)?;
-                    exprs.push(ast::Expr::Nested(Box::new(
+                    exprs.push(ast::Expr::Nested(SQLBox::new(
                         self.binary_op_to_sql(left, right, op),
                     )));
                 }
@@ -161,7 +162,7 @@ impl Unparser<'_> {
                     .map(|e| self.expr_to_sql_inner(e))
                     .collect::<Result<Vec<_>>>()?;
                 Ok(ast::Expr::InList {
-                    expr: Box::new(self.expr_to_sql_inner(expr)?),
+                    expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                     list: list_expr,
                     negated: *negated,
                 })
@@ -187,7 +188,7 @@ impl Unparser<'_> {
                 let sql_parser_expr = self.expr_to_sql_inner(expr)?;
                 let sql_low = self.expr_to_sql_inner(low)?;
                 let sql_high = self.expr_to_sql_inner(high)?;
-                Ok(ast::Expr::Nested(Box::new(self.between_op_to_sql(
+                Ok(ast::Expr::Nested(SQLBox::new(self.between_op_to_sql(
                     sql_parser_expr,
                     *negated,
                     sql_low,
@@ -213,14 +214,14 @@ impl Unparser<'_> {
 
                 let operand = match expr.as_ref() {
                     Some(e) => match self.expr_to_sql_inner(e) {
-                        Ok(sql_expr) => Some(Box::new(sql_expr)),
+                        Ok(sql_expr) => Some(SQLBox::new(sql_expr)),
                         Err(_) => None,
                     },
                     None => None,
                 };
                 let else_result = match else_expr.as_ref() {
                     Some(e) => match self.expr_to_sql_inner(e) {
-                        Ok(sql_expr) => Some(Box::new(sql_expr)),
+                        Ok(sql_expr) => Some(SQLBox::new(sql_expr)),
                         Err(_) => None,
                     },
                     None => None,
@@ -317,7 +318,7 @@ impl Unparser<'_> {
                     }),
                     filter: filter
                         .as_ref()
-                        .map(|f| self.expr_to_sql_inner(f).map(Box::new))
+                        .map(|f| self.expr_to_sql_inner(f).map(SQLBox::new))
                         .transpose()?,
                     null_treatment: None,
                     over,
@@ -335,8 +336,8 @@ impl Unparser<'_> {
                 case_insensitive: _,
             }) => Ok(ast::Expr::Like {
                 negated: *negated,
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
-                pattern: Box::new(self.expr_to_sql_inner(pattern)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
+                pattern: SQLBox::new(self.expr_to_sql_inner(pattern)?),
                 escape_char: escape_char.map(|c| SingleQuotedString(c.to_string())),
                 any: false,
             }),
@@ -350,8 +351,8 @@ impl Unparser<'_> {
                 if *case_insensitive {
                     Ok(ast::Expr::ILike {
                         negated: *negated,
-                        expr: Box::new(self.expr_to_sql_inner(expr)?),
-                        pattern: Box::new(self.expr_to_sql_inner(pattern)?),
+                        expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
+                        pattern: SQLBox::new(self.expr_to_sql_inner(pattern)?),
                         escape_char: escape_char
                             .map(|c| SingleQuotedString(c.to_string())),
                         any: false,
@@ -359,8 +360,8 @@ impl Unparser<'_> {
                 } else {
                     Ok(ast::Expr::Like {
                         negated: *negated,
-                        expr: Box::new(self.expr_to_sql_inner(expr)?),
-                        pattern: Box::new(self.expr_to_sql_inner(pattern)?),
+                        expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
+                        pattern: SQLBox::new(self.expr_to_sql_inner(pattern)?),
                         escape_char: escape_char
                             .map(|c| SingleQuotedString(c.to_string())),
                         any: false,
@@ -380,7 +381,7 @@ impl Unparser<'_> {
 
                 let args = self.function_args_to_sql(args)?;
                 let filter = match filter {
-                    Some(filter) => Some(Box::new(self.expr_to_sql_inner(filter)?)),
+                    Some(filter) => Some(SQLBox::new(self.expr_to_sql_inner(filter)?)),
                     None => None,
                 };
                 let within_group: Vec<ast::OrderByExpr> =
@@ -426,7 +427,7 @@ impl Unparser<'_> {
                 Ok(ast::Expr::Subquery(sub_query))
             }
             Expr::InSubquery(insubq) => {
-                let inexpr = Box::new(self.expr_to_sql_inner(insubq.expr.as_ref())?);
+                let inexpr = SQLBox::new(self.expr_to_sql_inner(insubq.expr.as_ref())?);
                 let sub_statement =
                     self.plan_to_sql(insubq.subquery.subquery.as_ref())?;
                 let sub_query = if let ast::Statement::Query(inner_query) = sub_statement
@@ -459,49 +460,49 @@ impl Unparser<'_> {
                 })
             }
             Expr::IsNull(expr) => Ok(ast::Expr::IsNull {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsNotNull(expr) => Ok(ast::Expr::IsNotNull {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsTrue(expr) => Ok(ast::Expr::IsTrue {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsNotTrue(expr) => Ok(ast::Expr::IsNotTrue {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsFalse(expr) => Ok(ast::Expr::IsFalse {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsNotFalse(expr) => Ok(ast::Expr::IsNotFalse {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsUnknown(expr) => Ok(ast::Expr::IsUnknown {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::IsNotUnknown(expr) => Ok(ast::Expr::IsNotUnknown {
-                expr: Box::new(self.expr_to_sql_inner(expr)?),
+                expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 suffix_token: AttachedToken::empty(),
             }),
             Expr::Not(expr) => {
                 let sql_parser_expr = self.expr_to_sql_inner(expr)?;
                 Ok(AstExpr::UnaryOp {
                     op: UnaryOperator::Not,
-                    expr: Box::new(sql_parser_expr),
+                    expr: SQLBox::new(sql_parser_expr),
                 })
             }
             Expr::Negative(expr) => {
                 let sql_parser_expr = self.expr_to_sql_inner(expr)?;
                 Ok(AstExpr::UnaryOp {
                     op: UnaryOperator::Minus,
-                    expr: Box::new(sql_parser_expr),
+                    expr: SQLBox::new(sql_parser_expr),
                 })
             }
             Expr::ScalarVariable(_, ids) => {
@@ -523,7 +524,7 @@ impl Unparser<'_> {
                 let inner_expr = self.expr_to_sql_inner(expr)?;
                 Ok(ast::Expr::Cast {
                     kind: ast::CastKind::TryCast,
-                    expr: Box::new(inner_expr),
+                    expr: SQLBox::new(inner_expr),
                     data_type: self.arrow_dtype_to_ast_dtype(data_type)?,
                     format: None,
                 })
@@ -590,19 +591,19 @@ impl Unparser<'_> {
     fn any_expr_to_sql(&self, any_expr: &AnyExpr) -> Result<ast::Expr> {
         use datafusion_expr::QuantifiedSource;
         let AnyExpr { expr, op, source } = any_expr;
-        let left = Box::new(self.expr_to_sql_inner(expr)?);
+        let left = SQLBox::new(self.expr_to_sql_inner(expr)?);
         let compare_op = self.op_to_ast_binary_op(op)?;
 
         let right = match source {
             QuantifiedSource::Subquery(subquery) => {
                 let sub_statement = self.plan_to_sql(subquery.subquery.as_ref())?;
                 if let ast::Statement::Query(query) = sub_statement {
-                    Box::new(ast::Expr::Subquery(query))
+                    SQLBox::new(ast::Expr::Subquery(query))
                 } else {
                     return internal_err!("Expected Query for subquery in AnyExpr");
                 }
             }
-            QuantifiedSource::Array(arr) => Box::new(self.expr_to_sql_inner(arr)?),
+            QuantifiedSource::Array(arr) => SQLBox::new(self.expr_to_sql_inner(arr)?),
         };
 
         Ok(ast::Expr::AnyOp {
@@ -616,19 +617,19 @@ impl Unparser<'_> {
     fn all_expr_to_sql(&self, all_expr: &AllExpr) -> Result<ast::Expr> {
         use datafusion_expr::QuantifiedSource;
         let AllExpr { expr, op, source } = all_expr;
-        let left = Box::new(self.expr_to_sql_inner(expr)?);
+        let left = SQLBox::new(self.expr_to_sql_inner(expr)?);
         let compare_op = self.op_to_ast_binary_op(op)?;
 
         let right = match source {
             QuantifiedSource::Subquery(subquery) => {
                 let sub_statement = self.plan_to_sql(subquery.subquery.as_ref())?;
                 if let ast::Statement::Query(query) = sub_statement {
-                    Box::new(ast::Expr::Subquery(query))
+                    SQLBox::new(ast::Expr::Subquery(query))
                 } else {
                     return internal_err!("Expected Query for subquery in AllExpr");
                 }
             }
-            QuantifiedSource::Array(arr) => Box::new(self.expr_to_sql_inner(arr)?),
+            QuantifiedSource::Array(arr) => SQLBox::new(self.expr_to_sql_inner(arr)?),
         };
 
         Ok(ast::Expr::AllOp {
@@ -723,7 +724,7 @@ impl Unparser<'_> {
         let array = self.expr_to_sql(&args[0])?;
         let index = self.expr_to_sql(&args[1])?;
         Ok(ast::Expr::CompoundFieldAccess {
-            root: Box::new(array),
+            root: SQLBox::new(array),
             access_chain: vec![ast::AccessExpr::Subscript(Subscript::Index { index })],
         })
     }
@@ -796,7 +797,7 @@ impl Unparser<'_> {
                 let root = self
                     .scalar_function_to_sql(struct_expr.func.name(), &struct_expr.args)?;
                 Ok(ast::Expr::CompoundFieldAccess {
-                    root: Box::new(root),
+                    root: SQLBox::new(root),
                     access_chain: vec![ast::AccessExpr::Dot(ast::Expr::Identifier(
                         field,
                     ))],
@@ -912,7 +913,7 @@ impl Unparser<'_> {
                     {
                         None
                     } else {
-                        Some(Box::new(val))
+                        Some(SQLBox::new(val))
                     }
                 }))
             }
@@ -926,7 +927,7 @@ impl Unparser<'_> {
                     {
                         None
                     } else {
-                        Some(Box::new(val))
+                        Some(SQLBox::new(val))
                     }
                 }))
             }
@@ -1002,9 +1003,9 @@ impl Unparser<'_> {
         op: BinaryOperator,
     ) -> ast::Expr {
         ast::Expr::BinaryOp {
-            left: Box::new(lhs),
+            left: SQLBox::new(lhs),
             op,
-            right: Box::new(rhs),
+            right: SQLBox::new(rhs),
         }
     }
 
@@ -1033,52 +1034,100 @@ impl Unparser<'_> {
                     matches!(left_op, BinaryOperator::Minus | BinaryOperator::Divide);
 
                 if inner_precedence == surrounding_precedence && not_associative {
-                    ast::Expr::Nested(Box::new(
-                        self.remove_unnecessary_nesting(*nested, LOWEST, LOWEST),
-                    ))
+                    ast::Expr::Nested(SQLBox::new(self.remove_unnecessary_nesting(
+                        SQLBox::into_owned(nested),
+                        LOWEST,
+                        LOWEST,
+                    )))
                 } else if inner_precedence >= surrounding_precedence {
-                    self.remove_unnecessary_nesting(*nested, left_op, right_op)
+                    self.remove_unnecessary_nesting(
+                        SQLBox::into_owned(nested),
+                        left_op,
+                        right_op,
+                    )
                 } else {
-                    ast::Expr::Nested(Box::new(
-                        self.remove_unnecessary_nesting(*nested, LOWEST, LOWEST),
-                    ))
+                    ast::Expr::Nested(SQLBox::new(self.remove_unnecessary_nesting(
+                        SQLBox::into_owned(nested),
+                        LOWEST,
+                        LOWEST,
+                    )))
                 }
             }
             ast::Expr::BinaryOp { left, op, right } => ast::Expr::BinaryOp {
-                left: Box::new(self.remove_unnecessary_nesting(*left, left_op, &op)),
-                right: Box::new(self.remove_unnecessary_nesting(*right, &op, right_op)),
+                left: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(left),
+                    left_op,
+                    &op,
+                )),
+                right: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(right),
+                    &op,
+                    right_op,
+                )),
                 op,
             },
             ast::Expr::IsTrue { expr, suffix_token } => ast::Expr::IsTrue {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsNotTrue { expr, suffix_token } => ast::Expr::IsNotTrue {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsFalse { expr, suffix_token } => ast::Expr::IsFalse {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsNotFalse { expr, suffix_token } => ast::Expr::IsNotFalse {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsNull { expr, suffix_token } => ast::Expr::IsNull {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsNotNull { expr, suffix_token } => ast::Expr::IsNotNull {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsUnknown { expr, suffix_token } => ast::Expr::IsUnknown {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             ast::Expr::IsNotUnknown { expr, suffix_token } => ast::Expr::IsNotUnknown {
-                expr: Box::new(self.remove_unnecessary_nesting(*expr, left_op, IS)),
+                expr: SQLBox::new(self.remove_unnecessary_nesting(
+                    SQLBox::into_owned(expr),
+                    left_op,
+                    IS,
+                )),
                 suffix_token,
             },
             _ => expr,
@@ -1106,11 +1155,11 @@ impl Unparser<'_> {
         high: ast::Expr,
     ) -> ast::Expr {
         ast::Expr::Between {
-            expr: Box::new(expr),
+            expr: SQLBox::new(expr),
             negated,
             symmetric: ast::BetweenSymmetric::None,
-            low: Box::new(low),
-            high: Box::new(high),
+            low: SQLBox::new(low),
+            high: SQLBox::new(high),
         }
     }
 
@@ -1262,7 +1311,7 @@ impl Unparser<'_> {
 
         Ok(ast::Expr::Cast {
             kind: ast::CastKind::Cast,
-            expr: Box::new(ast::Expr::value(SingleQuotedString(ts))),
+            expr: SQLBox::new(ast::Expr::value(SingleQuotedString(ts))),
             data_type: self.dialect.timestamp_cast_dtype(&time_unit, &None),
             format: None,
         })
@@ -1284,7 +1333,7 @@ impl Unparser<'_> {
             .to_string();
         Ok(ast::Expr::Cast {
             kind: ast::CastKind::Cast,
-            expr: Box::new(ast::Expr::value(SingleQuotedString(time))),
+            expr: SQLBox::new(ast::Expr::value(SingleQuotedString(time))),
             data_type: ast::DataType::Time(None, TimezoneInfo::None),
             format: None,
         })
@@ -1301,14 +1350,14 @@ impl Unparser<'_> {
                 }
                 _ => Ok(ast::Expr::Cast {
                     kind: ast::CastKind::Cast,
-                    expr: Box::new(inner_expr),
+                    expr: SQLBox::new(inner_expr),
                     data_type: self.arrow_dtype_to_ast_dtype(data_type)?,
                     format: None,
                 }),
             },
             _ => Ok(ast::Expr::Cast {
                 kind: ast::CastKind::Cast,
-                expr: Box::new(inner_expr),
+                expr: SQLBox::new(inner_expr),
                 data_type: self.arrow_dtype_to_ast_dtype(data_type)?,
                 format: None,
             }),
@@ -1447,7 +1496,7 @@ impl Unparser<'_> {
 
                 Ok(ast::Expr::Cast {
                     kind: ast::CastKind::Cast,
-                    expr: Box::new(ast::Expr::value(SingleQuotedString(
+                    expr: SQLBox::new(ast::Expr::value(SingleQuotedString(
                         date.to_string(),
                     ))),
                     data_type: ast::DataType::Date,
@@ -1470,7 +1519,7 @@ impl Unparser<'_> {
 
                 Ok(ast::Expr::Cast {
                     kind: ast::CastKind::Cast,
-                    expr: Box::new(ast::Expr::value(SingleQuotedString(
+                    expr: SQLBox::new(ast::Expr::value(SingleQuotedString(
                         datetime.to_string(),
                     ))),
                     data_type: self.ast_type_for_date64_in_cast(),
@@ -1578,7 +1627,7 @@ impl Unparser<'_> {
         // MONTH only
         if months != 0 && days == 0 && microseconds == 0 {
             let interval = Interval {
-                value: Box::new(ast::Expr::value(ast::Value::Number(
+                value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                     months.to_string(),
                     false,
                 ))),
@@ -1597,7 +1646,7 @@ impl Unparser<'_> {
         // DAY only
         if microseconds == 0 {
             let interval = Interval {
-                value: Box::new(ast::Expr::value(ast::Value::Number(
+                value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                     days.to_string(),
                     false,
                 ))),
@@ -1615,7 +1664,7 @@ impl Unparser<'_> {
 
         if microseconds % 1_000_000 != 0 {
             let interval = Interval {
-                value: Box::new(ast::Expr::value(ast::Value::Number(
+                value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                     microseconds.to_string(),
                     false,
                 ))),
@@ -1631,7 +1680,7 @@ impl Unparser<'_> {
 
         if secs % 60 != 0 {
             let interval = Interval {
-                value: Box::new(ast::Expr::value(ast::Value::Number(
+                value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                     secs.to_string(),
                     false,
                 ))),
@@ -1647,7 +1696,7 @@ impl Unparser<'_> {
 
         if mins % 60 != 0 {
             let interval = Interval {
-                value: Box::new(ast::Expr::value(ast::Value::Number(
+                value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                     mins.to_string(),
                     false,
                 ))),
@@ -1663,7 +1712,7 @@ impl Unparser<'_> {
 
         if hours % 24 != 0 {
             let interval = Interval {
-                value: Box::new(ast::Expr::value(ast::Value::Number(
+                value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                     hours.to_string(),
                     false,
                 ))),
@@ -1678,7 +1727,7 @@ impl Unparser<'_> {
         let days = hours / 24;
 
         let interval = Interval {
-            value: Box::new(ast::Expr::value(ast::Value::Number(
+            value: SQLBox::new(ast::Expr::value(ast::Value::Number(
                 days.to_string(),
                 false,
             ))),
@@ -1700,7 +1749,7 @@ impl Unparser<'_> {
                     );
                 };
                 let interval = Interval {
-                    value: Box::new(ast::Expr::value(SingleQuotedString(
+                    value: SQLBox::new(ast::Expr::value(SingleQuotedString(
                         result.to_uppercase(),
                     ))),
                     leading_field: None,
@@ -1714,7 +1763,7 @@ impl Unparser<'_> {
             IntervalStyle::SQLStandard => match v {
                 ScalarValue::IntervalYearMonth(Some(v)) => {
                     let interval = Interval {
-                        value: Box::new(ast::Expr::value(SingleQuotedString(
+                        value: SQLBox::new(ast::Expr::value(SingleQuotedString(
                             v.to_string(),
                         ))),
                         leading_field: Some(ast::DateTimeField::Month),
@@ -1735,9 +1784,9 @@ impl Unparser<'_> {
 
                     let millis = v.milliseconds % 1_000;
                     let interval = Interval {
-                        value: Box::new(ast::Expr::value(SingleQuotedString(format!(
-                            "{days} {hours}:{mins}:{secs}.{millis:3}"
-                        )))),
+                        value: SQLBox::new(ast::Expr::value(SingleQuotedString(
+                            format!("{days} {hours}:{mins}:{secs}.{millis:3}"),
+                        ))),
                         leading_field: Some(ast::DateTimeField::Day),
                         leading_precision: None,
                         last_field: Some(ast::DateTimeField::Second),
@@ -1748,7 +1797,7 @@ impl Unparser<'_> {
                 ScalarValue::IntervalMonthDayNano(Some(v)) => {
                     if v.months >= 0 && v.days == 0 && v.nanoseconds == 0 {
                         let interval = Interval {
-                            value: Box::new(ast::Expr::value(SingleQuotedString(
+                            value: SQLBox::new(ast::Expr::value(SingleQuotedString(
                                 v.months.to_string(),
                             ))),
                             leading_field: Some(ast::DateTimeField::Month),
@@ -1769,7 +1818,7 @@ impl Unparser<'_> {
                         let millis = (v.nanoseconds % 1_000_000_000) / 1_000_000;
 
                         let interval = Interval {
-                            value: Box::new(ast::Expr::value(SingleQuotedString(
+                            value: SQLBox::new(ast::Expr::value(SingleQuotedString(
                                 format!("{days} {hours}:{mins}:{secs}.{millis:03}"),
                             ))),
                             leading_field: Some(ast::DateTimeField::Day),
@@ -1951,12 +2000,12 @@ mod tests {
     use datafusion_common::{Spans, TableReference};
     use datafusion_expr::expr::WildcardOptions;
     use datafusion_expr::{
-        case, cast, col, cube, exists, grouping_set, interval_datetime_lit,
-        interval_year_month_lit, lit, not, not_exists, out_ref_col, placeholder, rollup,
-        table_scan, try_cast, when, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
-        ScalarUDFImpl, Signature, Volatility, WindowFrame, WindowFunctionDefinition,
+        ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+        Volatility, WindowFrame, WindowFunctionDefinition, case, cast, col, cube, exists,
+        grouping_set, interval_datetime_lit, interval_year_month_lit, lit, not,
+        not_exists, out_ref_col, placeholder, rollup, table_scan, try_cast, when,
     };
-    use datafusion_expr::{interval_month_day_nano_lit, ExprFunctionExt};
+    use datafusion_expr::{ExprFunctionExt, interval_month_day_nano_lit};
     use datafusion_functions_aggregate::count::count_udaf;
     use datafusion_functions_aggregate::expr_fn::sum;
     use sqlparser::ast::ExactNumberInfo;

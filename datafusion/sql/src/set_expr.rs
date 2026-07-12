@@ -29,10 +29,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         set_expr: SetExpr,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        self.set_expr_to_plan_ref(&set_expr, planner_context)
+    }
+
+    #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+    pub(super) fn set_expr_to_plan_ref(
+        &self,
+        set_expr: &SetExpr,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
         let set_expr_span = Span::try_from_sqlparser_span(set_expr.span());
         match set_expr {
-            SetExpr::Select(s) => self.select_to_plan(*s, None, planner_context),
-            SetExpr::Values(v) => self.sql_values_to_plan(v, planner_context),
+            SetExpr::Select(s) => {
+                self.select_to_plan_ref(s.as_ref(), None, planner_context)
+            }
+            SetExpr::Values(v) => self.sql_values_to_plan_ref(v, planner_context),
             SetExpr::SetOperation {
                 op,
                 left,
@@ -41,8 +52,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             } => {
                 let left_span = Span::try_from_sqlparser_span(left.span());
                 let right_span = Span::try_from_sqlparser_span(right.span());
-                let left_plan = self.set_expr_to_plan(*left, planner_context);
-                let right_plan = self.set_expr_to_plan(*right, planner_context);
+                let left_plan = self.set_expr_to_plan_ref(left.as_ref(), planner_context);
+                let right_plan =
+                    self.set_expr_to_plan_ref(right.as_ref(), planner_context);
                 let (left_plan, right_plan) = match (left_plan, right_plan) {
                     (Ok(left_plan), Ok(right_plan)) => (left_plan, right_plan),
                     (Err(left_err), Err(right_err)) => {
@@ -54,11 +66,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         return Err(err);
                     }
                 };
-                if !(set_quantifier == SetQuantifier::ByName
-                    || set_quantifier == SetQuantifier::AllByName)
+                if !(*set_quantifier == SetQuantifier::ByName
+                    || *set_quantifier == SetQuantifier::AllByName)
                 {
                     self.validate_set_expr_num_of_columns(
-                        op,
+                        op.clone(),
                         left_span,
                         right_span,
                         &left_plan,
@@ -66,20 +78,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         set_expr_span,
                     )?;
                 }
-                self.set_operation_to_plan(op, left_plan, right_plan, set_quantifier)
+                self.set_operation_to_plan(
+                    op.clone(),
+                    left_plan,
+                    right_plan,
+                    set_quantifier.clone(),
+                )
             }
-            SetExpr::Query(q) => self.query_to_plan(*q, planner_context),
+            SetExpr::Query(q) => self.query_to_plan_ref(q.as_ref(), planner_context),
             SetExpr::Insert(stmt) => {
                 // Handle INSERT statements within a query (e.g., from WITH clause)
-                self.sql_statement_to_plan_with_context(stmt, planner_context)
+                self.sql_statement_to_plan_with_context_ref(
+                    stmt.as_ref(),
+                    planner_context,
+                )
             }
             SetExpr::Update(stmt) => {
                 // Handle UPDATE statements within a query (e.g., from WITH clause)
-                self.sql_statement_to_plan_with_context(stmt, planner_context)
+                self.sql_statement_to_plan_with_context_ref(
+                    stmt.as_ref(),
+                    planner_context,
+                )
             }
             SetExpr::Delete(stmt) => {
                 // Handle DELETE statements within a query (e.g., from WITH clause)
-                self.sql_statement_to_plan_with_context(stmt, planner_context)
+                self.sql_statement_to_plan_with_context_ref(
+                    stmt.as_ref(),
+                    planner_context,
+                )
             }
             _ => not_impl_err!("Query {set_expr} not implemented yet"),
         }

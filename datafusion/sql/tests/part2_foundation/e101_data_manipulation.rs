@@ -36,7 +36,7 @@
 //!
 //! Tests that fail indicate gaps in DataFusion's SQL:2016 conformance.
 
-use crate::{assert_plans, assert_feature_supported};
+use crate::{assert_feature_supported, assert_plans};
 
 // ============================================================================
 // E101-01: INSERT statement
@@ -237,11 +237,7 @@ fn f222_insert_mixed_default() {
 /// E101-03: Basic UPDATE statement
 #[test]
 fn e101_03_update_basic() {
-    assert_feature_supported!(
-        "UPDATE t SET a = 10",
-        "E101-03",
-        "Basic UPDATE"
-    );
+    assert_feature_supported!("UPDATE t SET a = 10", "E101-03", "Basic UPDATE");
 }
 
 /// E101-03: UPDATE with WHERE clause
@@ -432,11 +428,7 @@ fn t641_update_tuple_where() {
 /// E101-04: DELETE without WHERE (delete all rows)
 #[test]
 fn e101_04_delete_all() {
-    assert_feature_supported!(
-        "DELETE FROM t",
-        "E101-04",
-        "DELETE all rows"
-    );
+    assert_feature_supported!("DELETE FROM t", "E101-04", "DELETE all rows");
 }
 
 /// E101-04: DELETE with WHERE clause
@@ -816,7 +808,9 @@ fn e101_summary_all_dml_operations() {
 
     // Test UPDATE variations
     assert_plans!("UPDATE t SET a = 10 WHERE b > 5");
-    assert_plans!("UPDATE person SET salary = salary * 1.1, age = age + 1 WHERE state = 'CA'");
+    assert_plans!(
+        "UPDATE person SET salary = salary * 1.1, age = age + 1 WHERE state = 'CA'"
+    );
 
     // Test DELETE variations
     assert_plans!("DELETE FROM t WHERE a > 10");
