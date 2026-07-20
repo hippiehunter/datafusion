@@ -174,6 +174,18 @@ fn test_non_prepare_statement_should_infer_types() {
 }
 
 #[test]
+fn test_typed_date_placeholder_uses_normal_parameter_planning() {
+    let sql = "PREPARE typed_date(DATE) AS SELECT DATE $1";
+    let plan = logical_plan(sql).unwrap();
+
+    assert_eq!(
+        plan.get_parameter_types().unwrap(),
+        HashMap::from([("$1".to_string(), Some(DataType::Date32))])
+    );
+    assert_contains!(plan.to_string(), "CAST($1 AS Date32)");
+}
+
+#[test]
 fn test_prepare_statement_to_plan_panic_is_param() {
     let sql = "PREPARE my_plan(INT) AS SELECT id, age  FROM person WHERE age is $1";
     let error = logical_plan(sql).expect_err("IS $1 should be rejected");

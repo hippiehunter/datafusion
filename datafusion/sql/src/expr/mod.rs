@@ -452,20 +452,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 value,
                 uses_odbc_syntax: _,
             }) => {
+                // `TypedString::value` is not necessarily a string literal. For
+                // example, PostgreSQL clients can produce `DATE $1`, which
+                // sqlparser represents as a typed string containing a
+                // placeholder. Plan the value through the same path as an
+                // ordinary `SQLExpr::Value` so placeholders retain their
+                // parameter field and unsupported values return an error rather
+                // than panicking in `into_string().unwrap()`.
+                let value_expr = self.parse_value(
+                    value.clone().into(),
+                    planner_context.prepare_param_data_types(),
+                    planner_context,
+                )?;
                 if Self::is_regclass_sql_type(&data_type) {
-                    return self.sql_regclass_cast_from_arg_expr(lit(value
-                        .clone()
-                        .into_string()
-                        .unwrap()));
+                    return self.sql_regclass_cast_from_arg_expr(value_expr);
                 }
 
-                self.finish_cast_expr(
-                    lit(value.clone().into_string().unwrap()),
-                    data_type,
-                    CastKind::Cast,
-                    None,
-                    schema,
-                )
+                self.finish_cast_expr(value_expr, data_type, CastKind::Cast, None, schema)
             }
 
             SQLExpr::IsNull { expr, .. } => Ok(Expr::IsNull(Box::new(
