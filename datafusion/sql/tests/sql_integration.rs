@@ -59,6 +59,12 @@ mod cases;
 mod common;
 
 #[test]
+fn postgres_bit_string_literal_plans_as_text() {
+    let plan = logical_plan("SELECT B'1010'").unwrap();
+    assert_contains!(format!("{plan:?}"), "Utf8(\"1010\")");
+}
+
+#[test]
 fn parse_decimals_1() {
     let sql = "SELECT 1";
     let options = parse_decimals_parser_options();

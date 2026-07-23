@@ -55,6 +55,25 @@ use sqlparser::ast::{
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
 
+const PROJECTION_SRF_TABLE_FUNCTIONS: &[&str] = &[
+    "generate_series",
+    "generate_subscripts",
+    "jsonb_each",
+    "jsonb_each_text",
+    "jsonb_object_keys",
+    "jsonb_array_elements",
+    "jsonb_array_elements_text",
+    "jsonb_path_query",
+    "regexp_matches",
+    "regexp_split_to_table",
+    "pg_get_sequence_data",
+    // `unnest` is intentionally excluded: DataFusion has native
+    // unnest-in-projection handling, which this rewrite must not shadow.
+    "pg_options_to_table",
+    "pg_partition_ancestors",
+    "pg_partition_tree",
+];
+
 /// Result of the `aggregate` function, containing the aggregate plan and
 /// rewritten expressions that reference the aggregate output columns.
 struct AggregatePlanResult {
@@ -1001,25 +1020,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         func: &sqlparser::ast::Function,
         alias: Option<Ident>,
     ) -> Option<(ObjectName, Vec<FunctionArg>, Ident)> {
-        const SRF_TABLE_FUNCTIONS: &[&str] = &[
-            "generate_series",
-            "jsonb_each",
-            "jsonb_each_text",
-            "jsonb_object_keys",
-            "jsonb_array_elements",
-            "jsonb_array_elements_text",
-            "jsonb_path_query",
-            "regexp_matches",
-            "regexp_split_to_table",
-            "pg_get_sequence_data",
-            // `unnest` is intentionally excluded: DataFusion has native
-            // unnest-in-projection handling, which this rewrite must not shadow.
-            "pg_options_to_table",
-            "pg_partition_tree",
-        ];
         let name = func.name.to_string().to_ascii_lowercase();
         let base = name.rsplit('.').next().unwrap_or(name.as_str());
-        if !SRF_TABLE_FUNCTIONS.contains(&base) {
+        if !PROJECTION_SRF_TABLE_FUNCTIONS.contains(&base) {
             return None;
         }
         let args = match &func.args {
@@ -1581,4 +1584,15 @@ fn has_unnest_expr_recursively(expr: &Expr) -> bool {
         }
     });
     has_unnest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PROJECTION_SRF_TABLE_FUNCTIONS;
+
+    #[test]
+    fn postgres_catalog_projection_set_returning_functions_are_recognized() {
+        assert!(PROJECTION_SRF_TABLE_FUNCTIONS.contains(&"generate_subscripts"));
+        assert!(PROJECTION_SRF_TABLE_FUNCTIONS.contains(&"pg_partition_ancestors"));
+    }
 }

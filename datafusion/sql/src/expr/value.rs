@@ -51,7 +51,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<Expr> {
         match value {
             Value::Number(n, _) => self.parse_sql_number(&n, false),
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(lit(s)),
+            Value::SingleQuotedString(s)
+            | Value::DoubleQuotedString(s)
+            | Value::SingleQuotedByteStringLiteral(s) => Ok(lit(s)),
             Value::Null => Ok(Expr::Literal(ScalarValue::Null, None)),
             Value::Boolean(n) => Ok(lit(n)),
             Value::Placeholder(param) => {
