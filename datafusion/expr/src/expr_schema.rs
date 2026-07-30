@@ -379,8 +379,9 @@ impl ExprSchemable for Expr {
             Expr::InSubquery(InSubquery { expr, .. }) => expr.nullable(input_schema),
             // ANY/ALL can be nullable due to SQL three-valued logic when
             // comparing with NULL values
-            Expr::AnyExpr(AnyExpr { expr, .. })
-            | Expr::AllExpr(AllExpr { expr, .. }) => expr.nullable(input_schema),
+            Expr::AnyExpr(AnyExpr { expr, .. }) | Expr::AllExpr(AllExpr { expr, .. }) => {
+                expr.nullable(input_schema)
+            }
             Expr::ScalarSubquery(subquery) => {
                 Ok(subquery.subquery.schema().field(0).is_nullable())
             }
@@ -729,7 +730,10 @@ impl ExprSchemable for Expr {
         if can_cast_types(&this_type, cast_to_type)
             || matches!(
                 (&this_type, cast_to_type),
-                (DataType::Utf8 | DataType::LargeUtf8, DataType::FixedSizeBinary(_))
+                (
+                    DataType::Utf8 | DataType::LargeUtf8,
+                    DataType::FixedSizeBinary(_)
+                )
             )
         {
             match self {

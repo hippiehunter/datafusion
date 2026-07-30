@@ -68,6 +68,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             Value::DollarQuotedString(s) => Ok(lit(s.value)),
             Value::EscapedStringLiteral(s) => Ok(lit(s)),
+            Value::AlternativeQuotedString(s) => Ok(lit(s.value)),
             _ => plan_err!("Unsupported Value '{value:?}'"),
         }
     }

@@ -150,6 +150,30 @@ fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
         .collect()
 }
 
+fn returning_clause_items(
+    returning: Option<&ast::ReturningClause>,
+) -> Result<Option<&[SelectItem]>> {
+    let Some(returning) = returning else {
+        return Ok(None);
+    };
+    if returning.bulk_collect || returning.into.is_some() {
+        return not_impl_err!("Oracle RETURNING INTO is not supported");
+    }
+    Ok(Some(&returning.expressions))
+}
+
+fn returning_clause_into_items(
+    returning: Option<ast::ReturningClause>,
+) -> Result<Option<Vec<SelectItem>>> {
+    let Some(returning) = returning else {
+        return Ok(None);
+    };
+    if returning.bulk_collect || returning.into.is_some() {
+        return not_impl_err!("Oracle RETURNING INTO is not supported");
+    }
+    Ok(Some(returning.expressions))
+}
+
 /// Internal columns Gantry injects into a DML target's source schema (`_rowid`
 /// surrogate key for PK-less tables, `ctid` physical row id). They are not
 /// user-visible and must be excluded from `RETURNING *` expansion, otherwise a
@@ -493,11 +517,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     table,
                     using.as_deref(),
                     selection.as_ref(),
-                    returning.as_deref(),
+                    returning_clause_items(returning.as_ref())?,
                     planner_context,
                 )
             }
             Statement::Update(update) => {
+                if update.error_logging.is_some() {
+                    return not_impl_err!("Oracle DML error logging is not supported");
+                }
                 let from_clauses = update.from.as_ref().map(|from| match from {
                     UpdateTableFromKind::AfterSet(from_clauses) => {
                         from_clauses.as_slice()
@@ -516,7 +543,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     &update.assignments,
                     from_clauses.and_then(|from| from.first()),
                     update.selection.as_ref(),
-                    update.returning.as_deref(),
+                    returning_clause_items(update.returning.as_ref())?,
                     planner_context,
                 )
             }
@@ -750,6 +777,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
             Statement::CreateView(view) => {
+                if view.oracle.is_some() {
+                    return not_impl_err!("Oracle CREATE VIEW options are not supported");
+                }
                 // put the statement back together temporarily to get the SQL
                 // string representation
                 let sql = Statement::CreateView(view.clone()).to_string();
@@ -1403,8 +1433,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 assignments,
                 has_table_keyword,
                 overriding,
+                error_logging,
                 ..
             }) => {
+                if error_logging.is_some() {
+                    return not_impl_err!("Oracle DML error logging is not supported");
+                }
                 let table_name = match table {
                     TableObject::TableName(table_name) => table_name,
                     TableObject::TableFunction(_) => {
@@ -1474,7 +1508,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         overwrite,
                         replace_into,
                         on_conflict,
-                        returning,
+                        returning_clause_into_items(returning)?,
                         planner_context,
                     )?
                 };
@@ -1488,6 +1522,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(plan)
             }
             Statement::Update(update) => {
+                if update.error_logging.is_some() {
+                    return not_impl_err!("Oracle DML error logging is not supported");
+                }
                 let from_clauses =
                     update.from.map(
                         |update_table_from_kind| match update_table_from_kind {
@@ -1507,7 +1544,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     &update.assignments,
                     update_from,
                     update.selection,
-                    update.returning,
+                    returning_clause_into_items(update.returning)?,
                     planner_context,
                 )
             }
@@ -1535,7 +1572,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
 
                 let table = self.get_delete_target(from)?;
-                self.delete_to_plan(table, using, selection, returning, planner_context)
+                self.delete_to_plan(
+                    table,
+                    using,
+                    selection,
+                    returning_clause_into_items(returning)?,
+                    planner_context,
+                )
             }
             Statement::Merge {
                 into,
@@ -1544,16 +1587,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 on,
                 clauses,
                 output,
+                error_logging,
                 ..
-            } => self.merge_to_plan(
-                into,
-                table,
-                source,
-                Box::new(SQLBox::into_owned(on)),
-                clauses,
-                output,
-                planner_context,
-            ),
+            } => {
+                if error_logging.is_some() {
+                    return not_impl_err!("Oracle DML error logging is not supported");
+                }
+                self.merge_to_plan(
+                    into,
+                    table,
+                    source,
+                    Box::new(SQLBox::into_owned(on)),
+                    clauses,
+                    output,
+                    planner_context,
+                )
+            }
 
             Statement::StartTransaction {
                 modes,
@@ -1637,11 +1686,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 chain,
                 end: _,
                 modifier,
+                oracle,
                 ..
             } => {
                 if let Some(modifier) = modifier {
                     return not_impl_err!("COMMIT {modifier} not supported");
                 };
+                if oracle.is_some() {
+                    return not_impl_err!("Oracle COMMIT options are not supported");
+                }
                 let statement = PlanStatement::TransactionEnd(TransactionEnd {
                     conclusion: TransactionConclusion::Commit,
                     chain,
@@ -1947,6 +2000,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )))
             }
             Statement::Truncate(truncate) => {
+                if truncate.oracle_storage.is_some() {
+                    return not_impl_err!(
+                        "Oracle TRUNCATE storage options are not supported"
+                    );
+                }
                 if truncate.table_names.is_empty() {
                     return plan_err!("TRUNCATE TABLE requires at least one table name");
                 }
@@ -3205,6 +3263,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
             let action = match clause.action {
                 ast::MergeAction::Insert(insert) => {
+                    let insert_predicate =
+                        insert.where_clause.map(&mut normalize_expr).transpose()?;
                     let kind = match insert.kind {
                         ast::MergeInsertKind::Values(values) => {
                             let mut rows = Vec::with_capacity(values.rows.len());
@@ -3227,11 +3287,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     MergeAction::Insert(MergeInsertExpr {
                         columns,
                         kind,
-                        insert_predicate: None,
+                        insert_predicate,
                     })
                 }
                 ast::MergeAction::Update {
                     assignments: update_assignments,
+                    where_clause,
+                    delete_where,
                 } => {
                     let mut assignments = Vec::with_capacity(update_assignments.len());
                     for assignment in update_assignments {
@@ -3243,8 +3305,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                     MergeAction::Update(MergeUpdateExpr {
                         assignments,
-                        update_predicate: None,
-                        delete_predicate: None,
+                        update_predicate: where_clause
+                            .map(&mut normalize_expr)
+                            .transpose()?,
+                        delete_predicate: delete_where
+                            .map(&mut normalize_expr)
+                            .transpose()?,
                     })
                 }
                 ast::MergeAction::Delete { .. } => MergeAction::Delete,
@@ -3625,6 +3691,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         insert: &Insert,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        if insert.error_logging.is_some() {
+            return not_impl_err!("Oracle DML error logging is not supported");
+        }
         let table_name = match &insert.table {
             TableObject::TableName(table_name) => table_name,
             TableObject::TableFunction(_) => {
@@ -3677,7 +3746,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 insert.overwrite,
                 insert.replace_into,
                 on_conflict,
-                insert.returning.as_deref(),
+                returning_clause_items(insert.returning.as_ref())?,
                 planner_context,
             )?
         } else {

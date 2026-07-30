@@ -39,11 +39,11 @@ pub use sqlparser::ast::{
 pub use sqlparser::ast::{
     AlterForeignDataWrapperOperation, AlterForeignDataWrapperStatement,
     AlterForeignTableOperation, AlterForeignTableStatement, AlterServerOperation,
-    AlterServerStatement, CreateForeignDataWrapperStatement, CreateForeignTableStatement,
-    CreateServerOption, CreateServerStatement, CreateUserMappingStatement,
-    DropForeignDataWrapperStatement, DropForeignTableStatement, DropServerStatement,
-    DropUserMappingStatement, ImportForeignSchemaLimitType, ImportForeignSchemaStatement,
-    AlterUserMappingStatement, UserMappingUser,
+    AlterServerStatement, AlterUserMappingStatement, CreateForeignDataWrapperStatement,
+    CreateForeignTableStatement, CreateServerOption, CreateServerStatement,
+    CreateUserMappingStatement, DropForeignDataWrapperStatement,
+    DropForeignTableStatement, DropServerStatement, DropUserMappingStatement,
+    ImportForeignSchemaLimitType, ImportForeignSchemaStatement, UserMappingUser,
 };
 use sqlparser::ast::{DataType as SqlDataType, Expr as SqlExpr, Ident, ObjectName};
 
@@ -265,7 +265,8 @@ impl DdlStatement {
             }
             DdlStatement::CreateView(CreateView { input, .. }) => vec![input],
             DdlStatement::CreateMaterializedView(CreateMaterializedView {
-                input, ..
+                input,
+                ..
             }) => vec![input],
             DdlStatement::DropMaterializedView(_) => vec![],
             DdlStatement::RefreshMaterializedView(_) => vec![],
@@ -446,11 +447,10 @@ impl DdlStatement {
                             "DropDomain: {name:?} if not exist:={if_exists} drop_behavior:={drop_behavior:?}"
                         )
                     }
-                    DdlStatement::DropSequence(DropSequence { name, if_exists, .. }) => {
-                        write!(
-                            f,
-                            "DropSequence: {name:?} if not exist:={if_exists}"
-                        )
+                    DdlStatement::DropSequence(DropSequence {
+                        name, if_exists, ..
+                    }) => {
+                        write!(f, "DropSequence: {name:?} if not exist:={if_exists}")
                     }
                     DdlStatement::CreateSequence(CreateSequence {
                         name,
@@ -468,34 +468,32 @@ impl DdlStatement {
                         if_exists,
                         ..
                     }) => {
-                        write!(
-                            f,
-                            "AlterSequence: {name:?} if_exists:={if_exists}"
-                        )
+                        write!(f, "AlterSequence: {name:?} if_exists:={if_exists}")
                     }
                     DdlStatement::CreateAssertion(CreateAssertion { name, .. }) => {
                         write!(f, "CreateAssertion: {name:?}")
                     }
                     DdlStatement::DropAssertion(DropAssertion { name, if_exists }) => {
-                        write!(
-                            f,
-                            "DropAssertion: {name:?} if_exists:={if_exists}"
-                        )
+                        write!(f, "DropAssertion: {name:?} if_exists:={if_exists}")
                     }
                     DdlStatement::CreateProcedure(CreateProcedure { name, .. }) => {
                         write!(f, "CreateProcedure: name {name:?}")
                     }
-                    DdlStatement::DropProcedure(DropProcedure { name, if_exists, .. }) => {
-                        write!(f, "DropProcedure: name {name:?} if not exist:={if_exists}")
+                    DdlStatement::DropProcedure(DropProcedure {
+                        name,
+                        if_exists,
+                        ..
+                    }) => {
+                        write!(
+                            f,
+                            "DropProcedure: name {name:?} if not exist:={if_exists}"
+                        )
                     }
                     DdlStatement::CreateRole(CreateRole {
                         name,
                         if_not_exists,
                     }) => {
-                        write!(
-                            f,
-                            "CreateRole: {name:?} if not exist:={if_not_exists}"
-                        )
+                        write!(f, "CreateRole: {name:?} if not exist:={if_not_exists}")
                     }
                     DdlStatement::DropRole(DropRole {
                         name,
@@ -936,10 +934,12 @@ pub struct RefreshMaterializedView {
 impl PartialOrd for RefreshMaterializedView {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => match self.concurrently.partial_cmp(&other.concurrently) {
-                Some(Ordering::Equal) => self.method.partial_cmp(&other.method),
-                cmp => cmp,
-            },
+            Some(Ordering::Equal) => {
+                match self.concurrently.partial_cmp(&other.concurrently) {
+                    Some(Ordering::Equal) => self.method.partial_cmp(&other.method),
+                    cmp => cmp,
+                }
+            }
             cmp => cmp,
         }
         .filter(|cmp| *cmp != Ordering::Equal || self == other)

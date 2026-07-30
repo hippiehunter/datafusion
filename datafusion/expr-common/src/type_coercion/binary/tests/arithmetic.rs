@@ -23,12 +23,12 @@ fn test_string_numeric_arithmetic_coercion() -> Result<()> {
     let coercer =
         BinaryTypeCoercer::new(&DataType::Float32, &Operator::Plus, &DataType::Utf8);
     let result_type = coercer.get_input_types()?;
-    assert_eq!(result_type, vec![DataType::Float32, DataType::Float32]);
+    assert_eq!(result_type, (DataType::Float32, DataType::Float32));
 
     let coercer =
         BinaryTypeCoercer::new(&DataType::Utf8, &Operator::Multiply, &DataType::Int32);
     let result_type = coercer.get_input_types()?;
-    assert_eq!(result_type, vec![DataType::Int32, DataType::Int32]);
+    assert_eq!(result_type, (DataType::Int32, DataType::Int32));
     Ok(())
 }
 

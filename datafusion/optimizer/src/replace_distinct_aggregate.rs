@@ -19,14 +19,14 @@
 
 use crate::optimizer::{ApplyOrder, ApplyOrder::BottomUp};
 use crate::{OptimizerConfig, OptimizerRule};
-use datafusion_common::tree_node::Transformed;
 use datafusion_common::Result;
+use datafusion_common::tree_node::Transformed;
+use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
 use datafusion_expr::expr_rewriter::normalize_cols;
 use datafusion_expr::utils::expand_wildcard;
-use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
 use datafusion_expr::{
-    Aggregate, Distinct, DistinctOn, Expr, Limit, LogicalPlan, LogicalPlanBuilder, WindowFrame,
-    WindowFunctionDefinition, col, lit,
+    Aggregate, Distinct, DistinctOn, Expr, Limit, LogicalPlan, LogicalPlanBuilder,
+    WindowFrame, WindowFunctionDefinition, col, lit,
 };
 
 /// Optimizer that replaces logical [[Distinct]] with a logical [[Aggregate]]
@@ -132,7 +132,8 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
 
                 let registry = config.function_registry().ok_or_else(|| {
                     datafusion_common::DataFusionError::Internal(
-                        "DISTINCT ON requires a function registry (for row_number UDWF)".to_string(),
+                        "DISTINCT ON requires a function registry (for row_number UDWF)"
+                            .to_string(),
                     )
                 })?;
                 let row_number_udwf = registry.udwf("row_number")?;
@@ -173,9 +174,7 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
 
                 let plan = if let Some(mut sort_expr) = sort_expr {
                     sort_expr.truncate(expr_cnt);
-                    LogicalPlanBuilder::from(plan)
-                        .sort(sort_expr)?
-                        .build()?
+                    LogicalPlanBuilder::from(plan).sort(sort_expr)?.build()?
                 } else {
                     plan
                 };

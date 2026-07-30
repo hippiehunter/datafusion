@@ -2358,17 +2358,15 @@ impl ScalarValue {
             ($ARRAY_TY:ident, $SCALAR_TY:ident) => {{
                 {
                     let array = scalars
-                        .map(|sv| {
-                            match sv {
-                                ScalarValue::$SCALAR_TY(v) => Ok(v),
-                                ScalarValue::Null => Ok(None),
-                                _ => _exec_err!(
-                                    "Inconsistent types in ScalarValue::iter_to_array. \
+                        .map(|sv| match sv {
+                            ScalarValue::$SCALAR_TY(v) => Ok(v),
+                            ScalarValue::Null => Ok(None),
+                            _ => _exec_err!(
+                                "Inconsistent types in ScalarValue::iter_to_array. \
                                     Expected {:?}, got {:?}",
-                                    data_type,
-                                    sv
-                                ),
-                            }
+                                data_type,
+                                sv
+                            ),
                         })
                         .collect::<Result<$ARRAY_TY>>()?;
                     Arc::new(array)
@@ -2380,17 +2378,15 @@ impl ScalarValue {
             ($ARRAY_TY:ident, $SCALAR_TY:ident, $TZ:expr) => {{
                 {
                     let array = scalars
-                        .map(|sv| {
-                            match sv {
-                                ScalarValue::$SCALAR_TY(v, _) => Ok(v),
-                                ScalarValue::Null => Ok(None),
-                                _ => _exec_err!(
-                                    "Inconsistent types in ScalarValue::iter_to_array. \
+                        .map(|sv| match sv {
+                            ScalarValue::$SCALAR_TY(v, _) => Ok(v),
+                            ScalarValue::Null => Ok(None),
+                            _ => _exec_err!(
+                                "Inconsistent types in ScalarValue::iter_to_array. \
                                     Expected {:?}, got {:?}",
-                                    data_type,
-                                    sv
-                                ),
-                            }
+                                data_type,
+                                sv
+                            ),
                         })
                         .collect::<Result<$ARRAY_TY>>()?;
                     Arc::new(array.with_timezone_opt($TZ.clone()))
@@ -2404,17 +2400,15 @@ impl ScalarValue {
             ($ARRAY_TY:ident, $SCALAR_TY:ident) => {{
                 {
                     let array = scalars
-                        .map(|sv| {
-                            match sv {
-                                ScalarValue::$SCALAR_TY(v) => Ok(v),
-                                ScalarValue::Null => Ok(None),
-                                _ => _exec_err!(
-                                    "Inconsistent types in ScalarValue::iter_to_array. \
+                        .map(|sv| match sv {
+                            ScalarValue::$SCALAR_TY(v) => Ok(v),
+                            ScalarValue::Null => Ok(None),
+                            _ => _exec_err!(
+                                "Inconsistent types in ScalarValue::iter_to_array. \
                                     Expected {:?}, got {:?}",
-                                    data_type,
-                                    sv
-                                ),
-                            }
+                                data_type,
+                                sv
+                            ),
                         })
                         .collect::<Result<$ARRAY_TY>>()?;
                     Arc::new(array)
@@ -2828,9 +2822,8 @@ impl ScalarValue {
                             value.clone()
                         }
                     });
-                    Self::iter_to_array(typed_values).unwrap_or_else(|_| {
-                        new_null_array(data_type, values.len())
-                    })
+                    Self::iter_to_array(typed_values)
+                        .unwrap_or_else(|_| new_null_array(data_type, values.len()))
                 }
             }
         };
@@ -8909,7 +8902,7 @@ mod tests {
             .unwrap(),
             ScalarValue::try_new_null(&DataType::Map(map_field_ref, false)).unwrap(),
             ScalarValue::try_new_null(&DataType::Union(
-                UnionFields::new(vec![42], vec![field_ref]),
+                UnionFields::try_new(vec![42], vec![field_ref]).unwrap(),
                 UnionMode::Dense,
             ))
             .unwrap(),
@@ -9012,13 +9005,14 @@ mod tests {
         }
 
         // Test union type
-        let union_fields = UnionFields::new(
+        let union_fields = UnionFields::try_new(
             vec![0, 1],
             vec![
                 Field::new("i32", DataType::Int32, false),
                 Field::new("f64", DataType::Float64, false),
             ],
-        );
+        )
+        .unwrap();
         let union_result = ScalarValue::new_default(&DataType::Union(
             union_fields.clone(),
             UnionMode::Sparse,

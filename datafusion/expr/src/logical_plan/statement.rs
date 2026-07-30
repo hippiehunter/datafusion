@@ -187,10 +187,26 @@ impl Statement {
                         write!(f, "Revoke: {privileges}")
                     }
                     Statement::GrantRole(GrantRole { roles, .. }) => {
-                        write!(f, "GrantRole: {}", roles.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "))
+                        write!(
+                            f,
+                            "GrantRole: {}",
+                            roles
+                                .iter()
+                                .map(|r| r.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                     Statement::RevokeRole(RevokeRole { roles, .. }) => {
-                        write!(f, "RevokeRole: {}", roles.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "))
+                        write!(
+                            f,
+                            "RevokeRole: {}",
+                            roles
+                                .iter()
+                                .map(|r| r.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                     Statement::Prepare(Prepare { name, fields, .. }) => {
                         write!(
@@ -218,7 +234,10 @@ impl Statement {
                     Statement::Deallocate(Deallocate { name }) => {
                         write!(f, "Deallocate: {name}")
                     }
-                    Statement::Call(Call { procedure_name, args }) => {
+                    Statement::Call(Call {
+                        procedure_name,
+                        args,
+                    }) => {
                         write!(
                             f,
                             "Call: {} args=[{}]",

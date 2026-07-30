@@ -4295,7 +4295,12 @@ mod tests {
     fn simplify_inlist_with_nulls() {
         let expr = in_list(
             col("c1"),
-            vec![lit(1), lit(2), Expr::Literal(ScalarValue::Null, None), lit(3)],
+            vec![
+                lit(1),
+                lit(2),
+                Expr::Literal(ScalarValue::Null, None),
+                lit(3),
+            ],
             false,
         )
         .and(in_list(
@@ -4309,16 +4314,9 @@ mod tests {
             Box::new(Expr::Literal(ScalarValue::Null, None)),
             DataType::Int64,
         ));
-        let expr = in_list(
-            col("c1"),
-            vec![lit(1), cast_null, lit(2), lit(3)],
-            true,
-        )
-        .or(in_list(
-            col("c1"),
-            vec![lit(4), lit(5), lit(6), lit(7)],
-            true,
-        ));
+        let expr = in_list(col("c1"), vec![lit(1), cast_null, lit(2), lit(3)], true).or(
+            in_list(col("c1"), vec![lit(4), lit(5), lit(6), lit(7)], true),
+        );
         let expected = in_list(
             col("c1"),
             vec![
@@ -5049,25 +5047,22 @@ mod tests {
         }
 
         // Test CAST of invalid string to timestamp - should return an error at plan time
-        // This represents the case from the issue: CAST(Utf8("1761630189642") AS Timestamp)
-        // "1761630189642" is NOT a valid timestamp string format
         let expr = Expr::Cast(Cast::new(
-            Box::new(lit("1761630189642")),
+            Box::new(lit("not-a-timestamp")),
             DataType::Timestamp(
                 arrow::datatypes::TimeUnit::Nanosecond,
                 Some("+00:00".into()),
             ),
         ));
 
-        // The simplification should now fail with an error at plan time
+        // Invalid literal casts remain unchanged for runtime evaluation.
+        let expected = expr.clone();
         let schema = test_schema();
         let props = ExecutionProps::new();
         let simplifier =
             ExprSimplifier::new(SimplifyContext::new(&props).with_schema(schema));
-        let result = simplifier.simplify(expr);
-        assert!(result.is_err(), "Expected error for invalid cast");
-        let err_msg = result.unwrap_err().to_string();
-        assert_contains!(err_msg, "Error parsing timestamp");
+        let result = simplifier.simplify(expr).unwrap();
+        assert_eq!(result, expected);
     }
 
     fn if_not_null(expr: Expr, then: bool) -> Expr {

@@ -73,7 +73,6 @@ pub enum DataFusionError {
     /// Error when SQL is syntactically incorrect.
     ///
     /// 2nd argument is for optional backtrace
-    
     SQL(Box<ParserError>, Option<String>),
     /// Error when a feature is not yet implemented.
     ///
@@ -341,7 +340,7 @@ impl Error for DataFusionError {
         match self {
             DataFusionError::ArrowError(e, _) => Some(e.as_ref()),
             DataFusionError::IoError(e) => Some(e),
-            
+
             DataFusionError::SQL(e, _) => Some(e.as_ref()),
             DataFusionError::NotImplemented(_) => None,
             DataFusionError::Internal(_) => None,
@@ -465,7 +464,7 @@ impl DataFusionError {
         match self {
             DataFusionError::ArrowError(_, _) => "Arrow error: ",
             DataFusionError::IoError(_) => "IO error: ",
-            
+
             DataFusionError::SQL(_, _) => "SQL error: ",
             DataFusionError::NotImplemented(_) => {
                 "This feature is not implemented: "
@@ -499,7 +498,7 @@ impl DataFusionError {
                 Cow::Owned(format!("{desc}{backtrace}"))
             }
             DataFusionError::IoError(ref desc) => Cow::Owned(desc.to_string()),
-            
+
             DataFusionError::SQL(ref desc, ref backtrace) => {
                 let backtrace: String =
                     backtrace.clone().unwrap_or_else(|| "".to_owned());

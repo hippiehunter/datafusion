@@ -302,10 +302,8 @@ fn t821_json_exists_filter() {
 /// T821: JSON_EXISTS with ON ERROR clause
 #[test]
 fn t821_json_exists_on_error() {
-    crate::assert_not_implemented!(
-        "SELECT * FROM json_data WHERE JSON_EXISTS(data, '$.key' FALSE ON ERROR)",
-        "T821",
-        "JSON_EXISTS with FALSE ON ERROR"
+    assert_plans!(
+        "SELECT * FROM json_data WHERE JSON_EXISTS(data, '$.key' FALSE ON ERROR)"
     );
 }
 

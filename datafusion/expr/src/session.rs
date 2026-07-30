@@ -87,8 +87,7 @@ pub trait SessionProvider: Debug + Send + Sync {
     /// change to the current transaction (rolled back on ROLLBACK).
     /// Returns the normalized value that was stored, or an error if the
     /// variable name/value is rejected.
-    fn set_session_var(&self, name: &str, value: &str, is_local: bool)
-        -> Result<String>;
+    fn set_session_var(&self, name: &str, value: &str, is_local: bool) -> Result<String>;
 
     /// Raw pointer to the session's execution runtime context, used by
     /// PL/pgSQL UDFs that need exception-block savepoint integration

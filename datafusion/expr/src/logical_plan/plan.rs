@@ -62,8 +62,8 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::{
     Column, Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
-    FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues,
-    Result, ScalarValue, Spans, TableReference, UnnestOptions, UsingColumns,
+    FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues, Result,
+    ScalarValue, Spans, TableReference, UnnestOptions, UsingColumns,
     aggregate_functional_dependencies, assert_eq_or_internal_err, assert_or_internal_err,
     internal_err, plan_err,
 };
@@ -485,7 +485,12 @@ impl JsonTable {
         let mut fields = Vec::new();
         for col in columns {
             match col {
-                JsonTableColumnDef::Path { name, data_type, exists, .. } => {
+                JsonTableColumnDef::Path {
+                    name,
+                    data_type,
+                    exists,
+                    ..
+                } => {
                     // EXISTS columns return INT (0 or 1)
                     let field_type = if *exists {
                         DataType::Int32
@@ -812,11 +817,8 @@ impl MatchRecognize {
         symbols: Vec<SymbolDef>,
     ) -> Result<Self> {
         // Build schema: input columns + measure columns
-        let mut field_vec: Vec<Arc<Field>> = input
-            .schema()
-            .iter()
-            .map(|(_, f)| Arc::clone(f))
-            .collect();
+        let mut field_vec: Vec<Arc<Field>> =
+            input.schema().iter().map(|(_, f)| Arc::clone(f)).collect();
 
         // Add measure fields
         for measure in &measures {
@@ -1243,7 +1245,9 @@ impl LogicalPlan {
             | LogicalPlan::Limit(Limit { input, .. })
             | LogicalPlan::Repartition(Repartition { input, .. })
             | LogicalPlan::Window(Window { input, .. })
-            | LogicalPlan::MatchRecognize(MatchRecognize { input, .. }) => input.head_output_expr(),
+            | LogicalPlan::MatchRecognize(MatchRecognize { input, .. }) => {
+                input.head_output_expr()
+            }
             LogicalPlan::Join(Join {
                 left,
                 right,
@@ -1584,15 +1588,11 @@ impl LogicalPlan {
                 let mut clauses = Vec::with_capacity(merge.clauses.len());
                 for clause in &merge.clauses {
                     let predicate = match clause.predicate {
-                        Some(_) => Some(
-                            expr_iter
-                                .next()
-                                .ok_or_else(|| {
-                                    DataFusionError::Internal(
-                                        "Merge clause predicate missing".to_string(),
-                                    )
-                                })?,
-                        ),
+                        Some(_) => Some(expr_iter.next().ok_or_else(|| {
+                            DataFusionError::Internal(
+                                "Merge clause predicate missing".to_string(),
+                            )
+                        })?),
                         None => None,
                     };
 
@@ -1604,11 +1604,13 @@ impl LogicalPlan {
                                     for row in values {
                                         let mut new_row = Vec::with_capacity(row.len());
                                         for _ in row {
-                                            let value = expr_iter.next().ok_or_else(|| {
-                                                DataFusionError::Internal(
-                                                    "Merge insert value missing".to_string(),
-                                                )
-                                            })?;
+                                            let value =
+                                                expr_iter.next().ok_or_else(|| {
+                                                    DataFusionError::Internal(
+                                                        "Merge insert value missing"
+                                                            .to_string(),
+                                                    )
+                                                })?;
                                             new_row.push(value);
                                         }
                                         rows.push(new_row);
@@ -1619,15 +1621,11 @@ impl LogicalPlan {
                             };
 
                             let insert_predicate = match insert.insert_predicate {
-                                Some(_) => Some(
-                                    expr_iter
-                                        .next()
-                                        .ok_or_else(|| {
-                                            DataFusionError::Internal(
-                                                "Merge insert predicate missing".to_string(),
-                                            )
-                                        })?,
-                                ),
+                                Some(_) => Some(expr_iter.next().ok_or_else(|| {
+                                    DataFusionError::Internal(
+                                        "Merge insert predicate missing".to_string(),
+                                    )
+                                })?),
                                 None => None,
                             };
 
@@ -1653,30 +1651,20 @@ impl LogicalPlan {
                             }
 
                             let update_predicate = match update.update_predicate {
-                                Some(_) => Some(
-                                    expr_iter
-                                        .next()
-                                        .ok_or_else(|| {
-                                            DataFusionError::Internal(
-                                                "Merge update predicate missing"
-                                                    .to_string(),
-                                            )
-                                        })?,
-                                ),
+                                Some(_) => Some(expr_iter.next().ok_or_else(|| {
+                                    DataFusionError::Internal(
+                                        "Merge update predicate missing".to_string(),
+                                    )
+                                })?),
                                 None => None,
                             };
 
                             let delete_predicate = match update.delete_predicate {
-                                Some(_) => Some(
-                                    expr_iter
-                                        .next()
-                                        .ok_or_else(|| {
-                                            DataFusionError::Internal(
-                                                "Merge delete predicate missing"
-                                                    .to_string(),
-                                            )
-                                        })?,
-                                ),
+                                Some(_) => Some(expr_iter.next().ok_or_else(|| {
+                                    DataFusionError::Internal(
+                                        "Merge delete predicate missing".to_string(),
+                                    )
+                                })?),
                                 None => None,
                             };
 
@@ -1886,7 +1874,12 @@ impl LogicalPlan {
                 SubqueryAlias::try_new(Arc::new(input), alias.clone())
                     .map(LogicalPlan::SubqueryAlias)
             }
-            LogicalPlan::Limit(Limit { skip, fetch, with_ties, .. }) => {
+            LogicalPlan::Limit(Limit {
+                skip,
+                fetch,
+                with_ties,
+                ..
+            }) => {
                 let old_expr_len = skip.iter().chain(fetch.iter()).count();
                 assert_eq_or_internal_err!(
                     old_expr_len,
@@ -2093,7 +2086,8 @@ impl LogicalPlan {
                 let mut expr_iter = expr.into_iter();
 
                 // Extract partition_by expressions
-                let partition_by = expr_iter.by_ref().take(self.partition_by_len()).collect();
+                let partition_by =
+                    expr_iter.by_ref().take(self.partition_by_len()).collect();
 
                 // Extract order_by expressions (wrapped in Sort)
                 let order_by: Vec<_> = order_by
@@ -2106,10 +2100,15 @@ impl LogicalPlan {
                         })
                     })
                     .collect::<Option<_>>()
-                    .ok_or_else(|| DataFusionError::Internal("Not enough order_by expressions".to_string()))?;
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "Not enough order_by expressions".to_string(),
+                        )
+                    })?;
 
                 // Extract measure expressions
-                let measures: Vec<MeasureExpr> = self.measures_iter()
+                let measures: Vec<MeasureExpr> = self
+                    .measures_iter()
                     .map(|m| {
                         expr_iter.next().map(|e| MeasureExpr {
                             expr: e,
@@ -2117,10 +2116,15 @@ impl LogicalPlan {
                         })
                     })
                     .collect::<Option<_>>()
-                    .ok_or_else(|| DataFusionError::Internal("Not enough measure expressions".to_string()))?;
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "Not enough measure expressions".to_string(),
+                        )
+                    })?;
 
                 // Extract symbol definitions
-                let symbols: Vec<SymbolDef> = self.symbol_defs_iter()
+                let symbols: Vec<SymbolDef> = self
+                    .symbol_defs_iter()
                     .map(|s| {
                         expr_iter.next().map(|e| SymbolDef {
                             symbol: s.symbol.clone(),
@@ -2128,7 +2132,11 @@ impl LogicalPlan {
                         })
                     })
                     .collect::<Option<_>>()
-                    .ok_or_else(|| DataFusionError::Internal("Not enough symbol definition expressions".to_string()))?;
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "Not enough symbol definition expressions".to_string(),
+                        )
+                    })?;
 
                 MatchRecognize::try_new(
                     Arc::new(input),
@@ -2144,13 +2152,15 @@ impl LogicalPlan {
                 .map(LogicalPlan::MatchRecognize)
             }
             LogicalPlan::JsonTable(JsonTable {
-                json_path,
-                columns,
-                ..
+                json_path, columns, ..
             }) => {
                 // JsonTable has one expression (json_expr) and no inputs
                 self.assert_no_inputs(inputs)?;
-                assert_eq!(expr.len(), 1, "JsonTable should have exactly one expression");
+                assert_eq!(
+                    expr.len(),
+                    1,
+                    "JsonTable should have exactly one expression"
+                );
                 let json_expr = expr.into_iter().next().unwrap();
                 JsonTable::try_new(json_expr, json_path.clone(), columns.clone())
                     .map(LogicalPlan::JsonTable)
@@ -2174,7 +2184,9 @@ impl LogicalPlan {
                 } else {
                     None
                 };
-                let new_columns = columns.iter().zip(expr.into_iter())
+                let new_columns = columns
+                    .iter()
+                    .zip(expr.into_iter())
                     .map(|(old_col, new_expr)| GraphColumn {
                         expr: new_expr,
                         alias: old_col.alias.clone(),
@@ -3139,7 +3151,10 @@ impl LogicalPlan {
                                 .map_or_else(|| "None".to_string(), |x| x.to_string()),
                         };
                         if limit.with_ties {
-                            write!(f, "Limit: skip={skip_str}, fetch={fetch_str}, with_ties=true")
+                            write!(
+                                f,
+                                "Limit: skip={skip_str}, fetch={fetch_str}, with_ties=true"
+                            )
                         } else {
                             write!(f, "Limit: skip={skip_str}, fetch={fetch_str}")
                         }
@@ -5360,12 +5375,17 @@ impl Unnest {
 
         // Add ordinality column if requested
         if options.with_ordinality {
-            let ordinality_field = Arc::new(Field::new("ordinality", DataType::Int64, false));
+            let ordinality_field =
+                Arc::new(Field::new("ordinality", DataType::Int64, false));
             fields.push((None, ordinality_field));
             // Track dependency for ordinality column
             // The ordinality column doesn't depend on any specific input column,
             // so we use index 0 as a placeholder or the first output column index
-            dependency_indices.push(if dependency_indices.is_empty() { 0 } else { dependency_indices[0] });
+            dependency_indices.push(if dependency_indices.is_empty() {
+                0
+            } else {
+                dependency_indices[0]
+            });
         }
 
         let metadata = input_schema.metadata().clone();

@@ -383,7 +383,10 @@ pub(crate) mod tests {
     impl TestConcatUDF {
         pub fn new() -> Self {
             Self {
-                signature: Signature::variadic(vec![DataType::Utf8], Volatility::Immutable),
+                signature: Signature::variadic(
+                    vec![DataType::Utf8],
+                    Volatility::Immutable,
+                ),
             }
         }
     }
@@ -431,7 +434,9 @@ pub(crate) mod tests {
             // Simple implementation: just return the first argument for testing
             // (actual concat behavior not needed for ordering tests)
             args.args.first().cloned().ok_or_else(|| {
-                datafusion_common::internal_datafusion_err!("concat requires at least one argument")
+                datafusion_common::internal_datafusion_err!(
+                    "concat requires at least one argument"
+                )
             })
         }
 

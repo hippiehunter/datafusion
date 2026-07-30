@@ -38,7 +38,6 @@ use datafusion_common::{
     plan_err,
 };
 
-
 use crate::expr::ExceptSelectItem;
 use indexmap::IndexSet;
 
@@ -411,8 +410,7 @@ pub fn expand_wildcard(
 ) -> Result<Vec<Expr>> {
     let mut columns_to_skip = exclude_using_columns(plan)?;
     let excluded_columns = if let Some(WildcardOptions {
-        except: opt_except,
-        ..
+        except: opt_except, ..
     }) = wildcard_options
     {
         get_excluded_columns(opt_except.as_ref(), schema, None)?
@@ -447,15 +445,10 @@ pub fn expand_qualified_wildcard(
         DFSchema::try_from_qualified_schema(qualifier.clone(), &qualified_schema)?
             .with_functional_dependencies(projected_func_dependencies)?;
     let excluded_columns = if let Some(WildcardOptions {
-        except: opt_except,
-        ..
+        except: opt_except, ..
     }) = wildcard_options
     {
-        get_excluded_columns(
-            opt_except.as_ref(),
-            schema,
-            Some(qualifier),
-        )?
+        get_excluded_columns(opt_except.as_ref(), schema, Some(qualifier))?
     } else {
         vec![]
     };

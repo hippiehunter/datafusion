@@ -113,6 +113,7 @@ pub use literal::{
 pub use logical_plan::*;
 pub use partition_evaluator::PartitionEvaluator;
 
+pub use session::{NoSession, SessionProvider, no_session};
 pub use sqlparser;
 pub use table_source::{TableProviderFilterPushDown, TableSource, TableType};
 pub use udaf::{
@@ -121,7 +122,6 @@ pub use udaf::{
     udaf_default_schema_name, udaf_default_window_function_display_name,
     udaf_default_window_function_schema_name,
 };
-pub use session::{NoSession, SessionProvider, no_session};
 pub use udf::{ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl};
 pub use udwf::{LimitEffect, ReversedUDWF, WindowUDF, WindowUDFImpl};
 pub use window_frame::{

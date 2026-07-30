@@ -2330,16 +2330,21 @@ fn json_path_predicate_coercion(
     })
 }
 
-fn pg_decimal_division_result_type(
-    lhs: &DataType,
-    rhs: &DataType,
-) -> Option<DataType> {
+fn pg_decimal_division_result_type(lhs: &DataType, rhs: &DataType) -> Option<DataType> {
     let (p1, s1) = decimal_precision_scale(lhs)?;
     let (_p2, s2) = decimal_precision_scale(rhs)?;
     let int_digits_1 = (p1 as i16 - s1 as i16).max(0);
     let int_digits_2 = (_p2 as i16 - s2 as i16).max(0);
-    let weight1 = if int_digits_1 > 0 { (int_digits_1 - 1) / 4 } else { -1_i16 };
-    let weight2 = if int_digits_2 > 0 { (int_digits_2 - 1) / 4 } else { -1_i16 };
+    let weight1 = if int_digits_1 > 0 {
+        (int_digits_1 - 1) / 4
+    } else {
+        -1_i16
+    };
+    let weight2 = if int_digits_2 > 0 {
+        (int_digits_2 - 1) / 4
+    } else {
+        -1_i16
+    };
     let qweight = weight1 - weight2;
     let mut scale = 16_i16 - (qweight + 1) * 4;
     scale = scale.max(s1 as i16).max(s2 as i16).max(0);

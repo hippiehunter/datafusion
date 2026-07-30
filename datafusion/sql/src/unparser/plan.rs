@@ -279,6 +279,7 @@ impl Unparser<'_> {
         let with_clause = ast::With {
             with_token: AttachedToken::empty(),
             recursive: true,
+            oracle_declarations: vec![],
             cte_tables: vec![cte],
             cycle: None,
             search: None,
@@ -315,6 +316,7 @@ impl Unparser<'_> {
             selection: None,
             group_by: ast::GroupByExpr::Expressions(vec![], vec![]),
             having: None,
+            qualify: None,
             named_window: vec![],
             connect_by: None,
             flavor: ast::SelectFlavor::Standard,
@@ -580,6 +582,18 @@ impl Unparser<'_> {
                         unproject_agg_exprs(filter.predicate.clone(), agg, None)?;
                     let filter_expr = self.expr_to_sql(&unprojected)?;
                     select.having(Some(filter_expr));
+                } else if let (Some(window), true) = (
+                    find_window_nodes_within_select(
+                        plan,
+                        None,
+                        select.already_projected(),
+                    ),
+                    self.dialect.supports_qualify(),
+                ) {
+                    let unprojected =
+                        unproject_window_exprs(filter.predicate.clone(), &window)?;
+                    let filter_expr = self.expr_to_sql(&unprojected)?;
+                    select.qualify(Some(filter_expr));
                 } else {
                     let filter_expr = self.expr_to_sql(&filter.predicate)?;
                     select.selection(Some(filter_expr));
@@ -1663,6 +1677,7 @@ impl Unparser<'_> {
                         chain: end.chain,
                         end: false,
                         modifier: None,
+                        oracle: None,
                         commit_token: AttachedToken::empty(),
                     })
                 }
@@ -1698,6 +1713,7 @@ impl Unparser<'_> {
                 purge: drop_sequence.purge,
                 temporary: drop_sequence.temporary,
                 table: drop_sequence.table.clone(),
+                oracle: None,
                 drop_token: AttachedToken::empty(),
             }),
             other => not_impl_err!("Unsupported DDL plan: {other:?}"),
@@ -1751,7 +1767,16 @@ impl Unparser<'_> {
                         })
                         .collect();
 
-                    ast::MergeAction::Insert(ast::MergeInsertExpr { columns, kind })
+                    let where_clause = insert
+                        .insert_predicate
+                        .as_ref()
+                        .map(|expr| self.expr_to_sql(expr))
+                        .transpose()?;
+                    ast::MergeAction::Insert(ast::MergeInsertExpr {
+                        columns,
+                        kind,
+                        where_clause,
+                    })
                 }
                 MergeAction::Update(update) => {
                     let mut assignments = Vec::with_capacity(update.assignments.len());
@@ -1761,7 +1786,21 @@ impl Unparser<'_> {
                             value: self.expr_to_sql(&assignment.value)?,
                         });
                     }
-                    ast::MergeAction::Update { assignments }
+                    let where_clause = update
+                        .update_predicate
+                        .as_ref()
+                        .map(|expr| self.expr_to_sql(expr))
+                        .transpose()?;
+                    let delete_where = update
+                        .delete_predicate
+                        .as_ref()
+                        .map(|expr| self.expr_to_sql(expr))
+                        .transpose()?;
+                    ast::MergeAction::Update {
+                        assignments,
+                        where_clause,
+                        delete_where,
+                    }
                 }
                 MergeAction::Delete => ast::MergeAction::Delete,
                 MergeAction::DoNothing => ast::MergeAction::DoNothing,
@@ -1781,6 +1820,7 @@ impl Unparser<'_> {
             on,
             clauses,
             output: None,
+            error_logging: None,
             merge_token: AttachedToken::empty(),
         })
     }

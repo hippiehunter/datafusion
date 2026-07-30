@@ -30,14 +30,15 @@ use common::MockContextProvider;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result, assert_contains};
 use datafusion_expr::{
-    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement, ScalarFunctionArgs,
-    ScalarUDF, ScalarUDFImpl, Signature, TableScanRowLockMode,
-    TableScanRowLockWaitPolicy, Volatility, col, logical_plan::LogicalPlan,
-    test::function_stub::sum_udaf,
+    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement,
+    MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy, Volatility, col,
+    logical_plan::LogicalPlan, test::function_stub::sum_udaf,
 };
 use datafusion_sql::{
     parser::DFParser,
     planner::{NullOrdering, ParserOptions, SqlToRel},
+    unparser::plan_to_sql,
 };
 
 use crate::common::MockSessionState;
@@ -53,7 +54,7 @@ use datafusion_functions_aggregate::{
 // or datafusion_functions_window are disabled as those crates were removed.
 use insta::{allow_duplicates, assert_snapshot};
 use rstest::rstest;
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{Dialect, MySqlDialect, OracleDialect, PostgreSqlDialect};
 
 mod cases;
 mod common;
@@ -638,6 +639,180 @@ fn plan_create_table_interval_day_to_second() {
         }
         other => panic!("Expected CreateMemoryTable plan, got {other:?}"),
     }
+}
+
+#[test]
+fn plan_oracle_data_types() {
+    let sql = "CREATE TABLE oracle_types (
+        n NCHAR(10),
+        v VARCHAR2(20),
+        nv NVARCHAR2(20),
+        c NCLOB,
+        r RAW(16),
+        lr LONG RAW,
+        f BFILE,
+        i INTERVAL YEAR(4) TO MONTH
+    )";
+    let plan = logical_plan_with_dialect(sql, &OracleDialect {}).unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+        input,
+        ..
+    })) = plan
+    else {
+        panic!("Expected CreateMemoryTable plan");
+    };
+
+    let actual = input
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.data_type().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            DataType::Utf8View,
+            DataType::Utf8View,
+            DataType::Utf8View,
+            DataType::Utf8View,
+            DataType::Binary,
+            DataType::Binary,
+            DataType::Binary,
+            DataType::Interval(IntervalUnit::MonthDayNano),
+        ]
+    );
+}
+
+#[test]
+fn plan_oracle_alternative_quoted_string() {
+    let plan =
+        logical_plan_with_dialect("SELECT q'[oracle text]'", &OracleDialect {}).unwrap();
+    assert_contains!(plan.to_string(), "Utf8(\"oracle text\")");
+}
+
+#[test]
+fn plan_oracle_qualify_and_unparse() {
+    let sql = "SELECT id, SUM(age) OVER (ORDER BY id) AS running_age
+        FROM person
+        QUALIFY running_age > 0";
+    let plan = logical_plan_with_dialect(sql, &OracleDialect {}).unwrap();
+    assert_contains!(plan.to_string(), "Filter:");
+
+    let statement = plan_to_sql(&plan).unwrap();
+    let sqlparser::ast::Statement::Query(query) = statement else {
+        panic!("Expected query statement");
+    };
+    let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
+        panic!("Expected SELECT query");
+    };
+    assert!(select.qualify.is_some());
+}
+
+#[test]
+fn reject_oracle_returning_into_during_planning() {
+    let sql = "UPDATE person SET age = age + 1 RETURNING age INTO :new_age";
+    let error = logical_plan_with_dialect(sql, &OracleDialect {}).unwrap_err();
+    assert_contains!(
+        error.strip_backtrace(),
+        "Oracle RETURNING INTO is not supported"
+    );
+}
+
+#[test]
+fn reject_oracle_with_plsql_declarations_during_planning() {
+    let sql = "WITH FUNCTION twice(n NUMBER) RETURN NUMBER IS
+        BEGIN RETURN n * 2; END;
+        SELECT twice(21) FROM dual";
+    let error = logical_plan_with_dialect(sql, &OracleDialect {}).unwrap_err();
+    assert_contains!(
+        error.strip_backtrace(),
+        "Oracle PL/SQL declarations in WITH are not supported"
+    );
+}
+
+#[test]
+fn reject_unsupported_oracle_statement_options_during_planning() {
+    let cases = [
+        (
+            "INSERT INTO person SELECT * FROM person \
+             LOG ERRORS REJECT LIMIT 5",
+            "Oracle DML error logging is not supported",
+        ),
+        (
+            "UPDATE person SET age = age + 1 \
+             LOG ERRORS ('raise') REJECT LIMIT UNLIMITED",
+            "Oracle DML error logging is not supported",
+        ),
+        (
+            "MERGE INTO person p
+             USING person s
+             ON (p.id = s.id)
+             WHEN MATCHED THEN UPDATE SET p.age = s.age
+             LOG ERRORS REJECT LIMIT UNLIMITED",
+            "Oracle DML error logging is not supported",
+        ),
+        (
+            "CREATE OR REPLACE FORCE VIEW active_people AS SELECT id FROM person",
+            "Oracle CREATE VIEW options are not supported",
+        ),
+        (
+            "COMMIT WRITE IMMEDIATE NOWAIT",
+            "Oracle COMMIT options are not supported",
+        ),
+        (
+            "TRUNCATE TABLE person DROP STORAGE",
+            "Oracle TRUNCATE storage options are not supported",
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let error = logical_plan_with_dialect(sql, &OracleDialect {}).unwrap_err();
+        assert_contains!(error.strip_backtrace(), expected);
+    }
+}
+
+#[test]
+fn preserve_oracle_merge_action_predicates() {
+    let sql = "MERGE INTO person p
+        USING person s
+        ON (p.id = s.id)
+        WHEN MATCHED THEN UPDATE SET p.age = s.age
+            WHERE s.age > 10
+            DELETE WHERE s.age < 0
+        WHEN NOT MATCHED THEN INSERT (id, age) VALUES (s.id, s.age)
+            WHERE s.age > 0";
+    let plan = logical_plan_with_dialect(sql, &OracleDialect {}).unwrap();
+    let LogicalPlan::Merge(merge) = &plan else {
+        panic!("Expected MERGE plan");
+    };
+    let LogicalMergeAction::Update(update) = &merge.clauses[0].action else {
+        panic!("Expected UPDATE action");
+    };
+    assert!(update.update_predicate.is_some());
+    assert!(update.delete_predicate.is_some());
+    let LogicalMergeAction::Insert(insert) = &merge.clauses[1].action else {
+        panic!("Expected INSERT action");
+    };
+    assert!(insert.insert_predicate.is_some());
+
+    let statement = plan_to_sql(&plan).unwrap();
+    let sqlparser::ast::Statement::Merge { clauses, .. } = statement else {
+        panic!("Expected MERGE statement");
+    };
+    let sqlparser::ast::MergeAction::Update {
+        where_clause,
+        delete_where,
+        ..
+    } = &clauses[0].action
+    else {
+        panic!("Expected UPDATE action");
+    };
+    assert!(where_clause.is_some());
+    assert!(delete_where.is_some());
+    let sqlparser::ast::MergeAction::Insert(insert) = &clauses[1].action else {
+        panic!("Expected INSERT action");
+    };
+    assert!(insert.where_clause.is_some());
 }
 
 #[test]

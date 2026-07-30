@@ -175,7 +175,7 @@ impl Column {
     }
 
     /// Deserialize a fully qualified name string into a column preserving column text case
-    
+
     pub fn from_qualified_name_ignore_case(flat_name: impl Into<String>) -> Self {
         let flat_name = flat_name.into();
         Self::from_idents(parse_identifiers_normalized(&flat_name, true)).unwrap_or_else(
@@ -382,7 +382,6 @@ impl From<(Option<&TableReference>, &FieldRef)> for Column {
         Self::new(relation.cloned(), field.name())
     }
 }
-
 
 impl std::str::FromStr for Column {
     type Err = std::convert::Infallible;

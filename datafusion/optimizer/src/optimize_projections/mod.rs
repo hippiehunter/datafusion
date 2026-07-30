@@ -1118,7 +1118,7 @@ mod tests {
             .build()?;
 
         let mark_expr =
-            Expr::Column(Column::new(Some("t2"), "mark")).alias("exists_mark_0");
+            Expr::Column(Column::new_unqualified("mark")).alias("exists_mark_0");
         let plan = LogicalPlanBuilder::from(join)
             .project(vec![col("t1.a"), mark_expr])?
             .build()?;

@@ -523,5 +523,8 @@ pub(crate) fn to_order_by_exprs_with_select<'a>(
             Ok(Cow::Owned(order_by_exprs))
         }
         OrderByKind::Expressions(order_by_exprs) => Ok(Cow::Borrowed(order_by_exprs)),
+        OrderByKind::Siblings(order_by_exprs) => {
+            not_impl_err!("Oracle ORDER SIBLINGS BY is not supported: {order_by_exprs:?}")
+        }
     }
 }

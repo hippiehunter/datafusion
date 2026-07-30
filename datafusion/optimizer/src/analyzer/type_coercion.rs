@@ -2266,13 +2266,13 @@ mod test {
             expr: None,
             when_then_expr: vec![
                 (Box::new(col("boolean")), Box::new(col("integer"))),
-                (Box::new(col("integer")), Box::new(col("float"))),
-                (Box::new(col("string")), Box::new(col("string"))),
+                (Box::new(col("boolean")), Box::new(col("float"))),
+                (Box::new(col("boolean")), Box::new(col("integer"))),
             ],
             else_expr: None,
         };
         let case_when_common_type = DataType::Boolean;
-        let then_else_common_type = Utf8;
+        let then_else_common_type = DataType::Float32;
         let expected = cast_helper(
             case.clone(),
             &case_when_common_type,
@@ -2283,16 +2283,16 @@ mod test {
         assert_eq!(expected, actual);
 
         let case = Case {
-            expr: Some(Box::new(col("string"))),
+            expr: Some(Box::new(col("integer"))),
             when_then_expr: vec![
                 (Box::new(col("float")), Box::new(col("integer"))),
                 (Box::new(col("integer")), Box::new(col("float"))),
-                (Box::new(col("string")), Box::new(col("string"))),
+                (Box::new(col("float")), Box::new(col("integer"))),
             ],
-            else_expr: Some(Box::new(col("string"))),
+            else_expr: Some(Box::new(col("float"))),
         };
-        let case_when_common_type = Utf8;
-        let then_else_common_type = Utf8;
+        let case_when_common_type = DataType::Float32;
+        let then_else_common_type = DataType::Float32;
         let expected = cast_helper(
             case.clone(),
             &case_when_common_type,
@@ -2329,7 +2329,7 @@ mod test {
         let err = coerce_case_expression(case, &schema).unwrap_err();
         assert_snapshot!(
             err.strip_backtrace(),
-            @"Error during planning: Failed to coerce then (Date32, Float32, Binary) and else (Timestamp(ns)) to common types in CASE WHEN expression"
+            @"Error during planning: Failed to coerce case (Utf8) and when (Float32, Utf8, Utf8) to common types in CASE WHEN expression"
         );
 
         Ok(())

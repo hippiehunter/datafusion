@@ -33,6 +33,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         with: &With,
         planner_context: &mut PlannerContext,
     ) -> Result<()> {
+        if !with.oracle_declarations.is_empty() {
+            return not_impl_err!("Oracle PL/SQL declarations in WITH are not supported");
+        }
         let is_recursive = with.recursive;
         // Process CTEs from top to bottom
         for cte in &with.cte_tables {

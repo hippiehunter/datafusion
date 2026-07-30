@@ -42,9 +42,9 @@ use arrow::datatypes::{DataType, FieldRef, Schema};
 use datafusion_common::config::{ConfigEntry, ConfigOptions};
 use datafusion_common::{Result, ScalarValue, internal_err};
 use datafusion_expr::interval_arithmetic::Interval;
+use datafusion_expr::session::SessionProvider;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
-use datafusion_expr::session::SessionProvider;
 use datafusion_expr::{
     ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, Volatility,
     expr_vec_fmt,

@@ -813,9 +813,10 @@ impl EquivalenceProperties {
                             return false;
                         }
                         // Check if requirements are satisfied:
-                        normal_reqs.iter().zip(ordering).all(|(req, existing)| {
-                            existing.satisfy(req, &self.schema)
-                        })
+                        normal_reqs
+                            .iter()
+                            .zip(ordering)
+                            .all(|(req, existing)| existing.satisfy(req, &self.schema))
                     })
             }
             Constraint::Unique { columns, .. } => {

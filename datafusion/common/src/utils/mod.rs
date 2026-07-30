@@ -879,7 +879,7 @@ pub fn get_available_parallelism() -> usize {
 /// let args = vec![ScalarValue::Int32(Some(10))];
 /// let err = my_function(&args).unwrap_err();
 /// assert_eq!(
-///     err.to_string(),
+///     err.strip_backtrace(),
 ///     "Execution error: my_function function requires 2 arguments, got 1"
 /// );
 /// // Calling the function with 2 arguments works great

@@ -41,8 +41,7 @@ use datafusion_common::{
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 
 pub use sqlparser::ast::{
-    ExceptSelectItem, Ident, IlikeSelectItem, RenameSelectItem,
-    ReplaceSelectElement,
+    ExceptSelectItem, Ident, IlikeSelectItem, RenameSelectItem, ReplaceSelectElement,
 };
 
 // Moved in 51.0.0 to datafusion_common
@@ -3699,7 +3698,10 @@ mod test {
 
         assert_eq!("attr.attgenerated", expr.schema_name().to_string());
         assert_eq!(
-            (Some(TableReference::bare("attr")), "attgenerated".to_string()),
+            (
+                Some(TableReference::bare("attr")),
+                "attgenerated".to_string()
+            ),
             expr.qualified_name()
         );
 

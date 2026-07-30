@@ -142,6 +142,7 @@ pub struct SelectBuilder {
     selection: Option<ast::Expr>,
     group_by: Option<ast::GroupByExpr>,
     having: Option<ast::Expr>,
+    qualify: Option<ast::Expr>,
     named_window: Vec<ast::NamedWindowDefinition>,
     flavor: Option<SelectFlavor>,
 }
@@ -245,6 +246,10 @@ impl SelectBuilder {
         self.having = value;
         self
     }
+    pub fn qualify(&mut self, value: Option<ast::Expr>) -> &mut Self {
+        self.qualify = value;
+        self
+    }
     pub fn named_window(&mut self, value: Vec<ast::NamedWindowDefinition>) -> &mut Self {
         self.named_window = value;
         self
@@ -269,6 +274,7 @@ impl SelectBuilder {
                 }
             },
             having: self.having.clone().map(SQLBox::new),
+            qualify: self.qualify.clone().map(SQLBox::new),
             named_window: self.named_window.clone(),
             connect_by: None,
             select_token: AttachedToken::empty(),
@@ -288,6 +294,7 @@ impl SelectBuilder {
             selection: Default::default(),
             group_by: Some(ast::GroupByExpr::Expressions(Vec::new(), Vec::new())),
             having: Default::default(),
+            qualify: Default::default(),
             named_window: Default::default(),
             flavor: Some(SelectFlavor::Standard),
         }

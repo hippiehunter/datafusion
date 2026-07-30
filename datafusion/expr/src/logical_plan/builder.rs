@@ -283,7 +283,10 @@ impl LogicalPlanBuilder {
                     && !can_cast_types(&data_type, field_type)
                     && !matches!(
                         (&data_type, field_type),
-                        (DataType::Utf8 | DataType::LargeUtf8, DataType::FixedSizeBinary(_))
+                        (
+                            DataType::Utf8 | DataType::LargeUtf8,
+                            DataType::FixedSizeBinary(_)
+                        )
                     )
                 {
                     return exec_err!(
@@ -1619,10 +1622,7 @@ pub fn unique_field_aliases(fields: &Fields) -> Vec<Option<String>> {
 }
 
 fn mark_field(_schema: &DFSchema) -> (Option<TableReference>, Arc<Field>) {
-    (
-        None,
-        Arc::new(Field::new("mark", DataType::Boolean, false)),
-    )
+    (None, Arc::new(Field::new("mark", DataType::Boolean, false)))
 }
 
 /// Creates a schema for a join operation.

@@ -205,6 +205,11 @@ impl<'a> FunctionArgs<'a> {
                         "Calling {name}: JSON unique keys not supported in function arguments: {uk}"
                     );
                 }
+                FunctionArgumentClause::OracleJsonPassing(passing) => {
+                    return not_impl_err!(
+                        "Calling {name}: Oracle JSON PASSING not supported in function arguments: {passing:?}"
+                    );
+                }
             }
         }
 

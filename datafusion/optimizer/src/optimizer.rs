@@ -127,7 +127,10 @@ pub struct OptimizerContext {
 impl Debug for OptimizerContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OptimizerContext")
-            .field("query_execution_start_time", &self.query_execution_start_time)
+            .field(
+                "query_execution_start_time",
+                &self.query_execution_start_time,
+            )
             .field("options", &self.options)
             .field("has_function_registry", &self.function_registry.is_some())
             .finish()
@@ -216,7 +219,9 @@ impl OptimizerConfig for OptimizerContext {
     }
 
     fn function_registry(&self) -> Option<&dyn FunctionRegistry> {
-        self.function_registry.as_ref().map(|r| r.as_ref() as &dyn FunctionRegistry)
+        self.function_registry
+            .as_ref()
+            .map(|r| r.as_ref() as &dyn FunctionRegistry)
     }
 }
 

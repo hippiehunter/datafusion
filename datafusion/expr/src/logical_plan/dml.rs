@@ -393,7 +393,10 @@ pub struct OnConflict {
 
 impl OnConflict {
     /// Creates a new ON CONFLICT clause.
-    pub fn new(conflict_target: Option<ConflictTarget>, action: OnConflictAction) -> Self {
+    pub fn new(
+        conflict_target: Option<ConflictTarget>,
+        action: OnConflictAction,
+    ) -> Self {
         Self {
             conflict_target,
             action,
@@ -549,7 +552,8 @@ impl Eq for CopyFrom {}
 impl PartialOrd for CopyFrom {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.table_name.partial_cmp(&other.table_name) {
-            Some(Ordering::Equal) => match self.source_url.partial_cmp(&other.source_url) {
+            Some(Ordering::Equal) => match self.source_url.partial_cmp(&other.source_url)
+            {
                 Some(Ordering::Equal) => self.columns.partial_cmp(&other.columns),
                 cmp => cmp,
             },

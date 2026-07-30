@@ -274,10 +274,7 @@ pub struct PsmBlock {
 
 impl PsmBlock {
     /// Creates a new block with statements and computed region info.
-    pub fn new(
-        label: Option<Ident>,
-        statements: Vec<PsmStatement>,
-    ) -> Self {
+    pub fn new(label: Option<Ident>, statements: Vec<PsmStatement>) -> Self {
         let mut info = RegionInfo::default();
         for stmt in &statements {
             info.merge(&stmt.info);

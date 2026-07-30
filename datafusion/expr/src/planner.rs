@@ -90,13 +90,13 @@ pub trait ContextProvider {
     }
 
     /// Return [`RelationPlanner`] extensions for planning table factors
-    
+
     fn get_relation_planners(&self) -> &[Arc<dyn RelationPlanner>] {
         &[]
     }
 
     /// Return [`TypePlanner`] extensions for planning data types
-    
+
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
         None
     }
@@ -377,7 +377,6 @@ pub struct PlannedRelation {
     /// Optional table alias for the relation
     pub alias: Option<TableAlias>,
 }
-
 
 impl PlannedRelation {
     /// Create a new `PlannedRelation` with the given plan and alias

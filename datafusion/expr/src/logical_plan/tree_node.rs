@@ -38,11 +38,13 @@
 //! * [`LogicalPlan::expressions`]: Return a copy of the plan's expressions
 
 use crate::{
-    Aggregate, Analyze, CreateMaterializedView, CreateMemoryTable, CreateView, DdlStatement,
-    Distinct, DistinctOn, DmlStatement, Execute, Explain, Expr, Extension, Filter, Join, Limit,
-    LogicalPlan, MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Prepare,
-    Projection, RecursiveQuery, Repartition, Sort, Statement, Subquery, SubqueryAlias,
-    TableScan, Union, Unnest, UserDefinedLogicalNode, Values, Window, dml::{CopyFrom, CopyTo},
+    Aggregate, Analyze, CreateMaterializedView, CreateMemoryTable, CreateView,
+    DdlStatement, Distinct, DistinctOn, DmlStatement, Execute, Explain, Expr, Extension,
+    Filter, Join, Limit, LogicalPlan, MatchRecognize, Merge, MergeAction,
+    MergeInsertKind, Partitioning, Prepare, Projection, RecursiveQuery, Repartition,
+    Sort, Statement, Subquery, SubqueryAlias, TableScan, Union, Unnest,
+    UserDefinedLogicalNode, Values, Window,
+    dml::{CopyFrom, CopyTo},
     logical_plan::plan::{GraphTable, JsonTable},
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
@@ -148,9 +150,19 @@ impl TreeNode for LogicalPlan {
                     null_equality,
                 })
             }),
-            LogicalPlan::Limit(Limit { skip, fetch, with_ties, input }) => input
-                .map_elements(f)?
-                .update_data(|input| LogicalPlan::Limit(Limit { skip, fetch, with_ties, input })),
+            LogicalPlan::Limit(Limit {
+                skip,
+                fetch,
+                with_ties,
+                input,
+            }) => input.map_elements(f)?.update_data(|input| {
+                LogicalPlan::Limit(Limit {
+                    skip,
+                    fetch,
+                    with_ties,
+                    input,
+                })
+            }),
             LogicalPlan::Subquery(Subquery {
                 subquery,
                 outer_ref_columns,
@@ -255,8 +267,9 @@ impl TreeNode for LogicalPlan {
                 on,
                 clauses,
                 output_schema,
-            }) => (target, source).map_elements(f)?.update_data(
-                |(target, source)| {
+            }) => (target, source)
+                .map_elements(f)?
+                .update_data(|(target, source)| {
                     LogicalPlan::Merge(Merge {
                         target_table,
                         target,
@@ -265,8 +278,7 @@ impl TreeNode for LogicalPlan {
                         clauses,
                         output_schema,
                     })
-                },
-            ),
+                }),
             LogicalPlan::CopyFrom(CopyFrom {
                 table_name,
                 source_url,
@@ -650,7 +662,11 @@ impl LogicalPlan {
                 f(json_expr)?;
                 Ok(TreeNodeRecursion::Continue)
             }
-            LogicalPlan::GraphTable(GraphTable { where_clause, columns, .. }) => {
+            LogicalPlan::GraphTable(GraphTable {
+                where_clause,
+                columns,
+                ..
+            }) => {
                 // Apply to the where clause if present
                 if let Some(where_expr) = where_clause {
                     f(where_expr)?;
@@ -831,11 +847,19 @@ impl LogicalPlan {
                         schema,
                     }))
                 }),
-            LogicalPlan::Limit(Limit { skip, fetch, with_ties, input }) => {
-                (skip, fetch).map_elements(f)?.update_data(|(skip, fetch)| {
-                    LogicalPlan::Limit(Limit { skip, fetch, with_ties, input })
+            LogicalPlan::Limit(Limit {
+                skip,
+                fetch,
+                with_ties,
+                input,
+            }) => (skip, fetch).map_elements(f)?.update_data(|(skip, fetch)| {
+                LogicalPlan::Limit(Limit {
+                    skip,
+                    fetch,
+                    with_ties,
+                    input,
                 })
-            }
+            }),
             LogicalPlan::Statement(stmt) => match stmt {
                 Statement::Execute(e) => {
                     e.parameters.map_elements(f)?.update_data(|parameters| {
@@ -852,30 +876,30 @@ impl LogicalPlan {
                     Arc::unwrap_or_clone(Arc::clone(&merge.target)),
                     Arc::unwrap_or_clone(Arc::clone(&merge.source)),
                 ];
-                let plan = LogicalPlan::Merge(merge)
-                    .with_new_exprs(exprs.data, inputs)?;
+                let plan =
+                    LogicalPlan::Merge(merge).with_new_exprs(exprs.data, inputs)?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }
             LogicalPlan::MatchRecognize(mr) => {
                 let exprs = LogicalPlan::MatchRecognize(mr.clone()).expressions();
                 let exprs = exprs.map_elements(f)?;
                 let inputs = vec![Arc::unwrap_or_clone(Arc::clone(&mr.input))];
-                let plan = LogicalPlan::MatchRecognize(mr)
-                    .with_new_exprs(exprs.data, inputs)?;
+                let plan =
+                    LogicalPlan::MatchRecognize(mr).with_new_exprs(exprs.data, inputs)?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }
             LogicalPlan::JsonTable(jt) => {
                 let exprs = LogicalPlan::JsonTable(jt.clone()).expressions();
                 let exprs = exprs.map_elements(f)?;
-                let plan = LogicalPlan::JsonTable(jt)
-                    .with_new_exprs(exprs.data, vec![])?;
+                let plan =
+                    LogicalPlan::JsonTable(jt).with_new_exprs(exprs.data, vec![])?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }
             LogicalPlan::GraphTable(gt) => {
                 let exprs = LogicalPlan::GraphTable(gt.clone()).expressions();
                 let exprs = exprs.map_elements(f)?;
-                let plan = LogicalPlan::GraphTable(gt)
-                    .with_new_exprs(exprs.data, vec![])?;
+                let plan =
+                    LogicalPlan::GraphTable(gt).with_new_exprs(exprs.data, vec![])?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }
             // plans without expressions

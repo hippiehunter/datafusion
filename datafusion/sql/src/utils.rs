@@ -359,6 +359,7 @@ pub(crate) fn normalize_ident(id: Ident) -> String {
 pub(crate) fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::SingleQuotedString(s) => Some(s.to_string()),
+        Value::AlternativeQuotedString(s) => Some(s.value.clone()),
         Value::DollarQuotedString(s) => Some(s.to_string()),
         Value::Number(_, _) | Value::Boolean(_) => Some(value.to_string()),
         Value::UnicodeStringLiteral(s) => Some(s.to_string()),
@@ -368,7 +369,8 @@ pub(crate) fn value_to_string(value: &Value) -> Option<String> {
         | Value::SingleQuotedByteStringLiteral(_)
         | Value::HexStringLiteral(_)
         | Value::Null
-        | Value::Placeholder(_) => None,
+        | Value::Placeholder(_)
+        | Value::PlSqlInquiryDirective(_) => None,
     }
 }
 

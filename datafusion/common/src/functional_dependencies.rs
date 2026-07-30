@@ -153,10 +153,12 @@ impl Constraints {
                         let new_indices =
                             update_elements_with_matching_indices(columns, proj_indices);
                         // Only keep the constraint if all columns are preserved:
-                        (new_indices.len() == columns.len()).then_some(Constraint::Unique {
-                            columns: new_indices,
-                            nulls_distinct: *nulls_distinct,
-                        })
+                        (new_indices.len() == columns.len()).then_some(
+                            Constraint::Unique {
+                                columns: new_indices,
+                                nulls_distinct: *nulls_distinct,
+                            },
+                        )
                     }
                     Constraint::ForeignKey { .. } => {
                         // Foreign keys cannot be projected as they use column names,
@@ -297,16 +299,20 @@ impl FunctionalDependencies {
                     // All the field indices are associated with the whole table
                     // since we are dealing with table level constraints:
                     let dependency = match constraint {
-                        Constraint::PrimaryKey(indices) => Some(FunctionalDependence::new(
-                            indices.to_vec(),
-                            (0..n_field).collect::<Vec<_>>(),
-                            false,
-                        )),
-                        Constraint::Unique { columns, .. } => Some(FunctionalDependence::new(
-                            columns.to_vec(),
-                            (0..n_field).collect::<Vec<_>>(),
-                            true,
-                        )),
+                        Constraint::PrimaryKey(indices) => {
+                            Some(FunctionalDependence::new(
+                                indices.to_vec(),
+                                (0..n_field).collect::<Vec<_>>(),
+                                false,
+                            ))
+                        }
+                        Constraint::Unique { columns, .. } => {
+                            Some(FunctionalDependence::new(
+                                columns.to_vec(),
+                                (0..n_field).collect::<Vec<_>>(),
+                                true,
+                            ))
+                        }
                         // Foreign keys don't create functional dependencies
                         // as they reference another table
                         Constraint::ForeignKey { .. } => None,

@@ -831,7 +831,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::Int4Unsigned(_) => Ok(DataType::UInt32),
             SQLDataType::Varchar(length)
             | SQLDataType::CharacterVarying(length)
-            | SQLDataType::CharVarying(length) => {
+            | SQLDataType::CharVarying(length)
+            | SQLDataType::Varchar2(length)
+            | SQLDataType::Nvarchar2(length) => {
                 match (length, self.options.support_varchar_with_length) {
                     (Some(_), false) => plan_err!(
                         "does not support Varchar with length, \
@@ -862,8 +864,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 )
             }
             SQLDataType::Char(_)
+            | SQLDataType::Nchar(_)
             | SQLDataType::Character(_)
             | SQLDataType::Text
+            | SQLDataType::Nclob(_)
             | SQLDataType::String(_) => {
                 if self.options.map_string_types_to_utf8view {
                     Ok(DataType::Utf8View)
@@ -874,9 +878,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             SQLDataType::Timestamp(precision, tz_info)
                 if precision.is_none() || [0, 3, 6, 9].contains(&precision.unwrap()) =>
             {
-                let tz = if matches!(tz_info, TimezoneInfo::Tz)
-                    || matches!(tz_info, TimezoneInfo::WithTimeZone)
-                {
+                let tz = if matches!(
+                    tz_info,
+                    TimezoneInfo::Tz
+                        | TimezoneInfo::WithTimeZone
+                        | TimezoneInfo::WithLocalTimeZone
+                ) {
                     // Timestamp With Time Zone
                     // INPUT : [SQLDataType]   TimestampTz + [Config] Time Zone
                     // OUTPUT: [ArrowDataType] Timestamp<TimeUnit, Some(Time Zone)>
@@ -911,7 +918,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     TimezoneInfo::None | TimezoneInfo::WithoutTimeZone => {
                         Ok(DataType::Time64(time_unit))
                     }
-                    TimezoneInfo::WithTimeZone | TimezoneInfo::Tz => {
+                    TimezoneInfo::WithTimeZone
+                    | TimezoneInfo::WithLocalTimeZone
+                    | TimezoneInfo::Tz => {
                         if self.options.map_string_types_to_utf8view {
                             Ok(DataType::Utf8View)
                         } else {
@@ -932,7 +941,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 };
                 make_decimal_type(precision, scale.map(|s| s as u64))
             }
-            SQLDataType::Bytea => Ok(DataType::Binary),
+            SQLDataType::Bytea
+            | SQLDataType::Raw(_)
+            | SQLDataType::LongRaw
+            | SQLDataType::Bfile => Ok(DataType::Binary),
             SQLDataType::Interval { fields, precision: _ } => {
                 // Map SQL interval field types to Arrow interval types
                 // MonthDayNano is the most flexible and can represent all SQL interval types
@@ -950,6 +962,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                         Ok(DataType::Interval(IntervalUnit::MonthDayNano))
                     }
                 }
+            }
+            SQLDataType::OracleInterval { .. } => {
+                Ok(DataType::Interval(IntervalUnit::MonthDayNano))
             }
             SQLDataType::Struct(fields, _) => {
                 let fields = fields

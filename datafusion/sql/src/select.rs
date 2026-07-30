@@ -269,8 +269,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         };
 
         // Optionally the QUALIFY expression.
-        // Note: qualify was removed from sqlparser Select struct (non-PG syntax)
-        let qualify_expr_opt = None::<SQLExpr>
+        let qualify_expr_opt = select
+            .qualify
+            .as_deref()
             .map::<Result<Expr>, _>(|qualify_expr| {
                 let qualify_expr = self.sql_expr_to_logical_expr(
                     qualify_expr,
@@ -954,6 +955,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             selection: select.selection.take(),
             group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
             having: None,
+            qualify: None,
             named_window: Vec::new(),
             connect_by: None,
             flavor: SelectFlavor::Standard,

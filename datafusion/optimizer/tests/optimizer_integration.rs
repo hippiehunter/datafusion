@@ -521,9 +521,7 @@ fn test_sql(sql: &str) -> Result<LogicalPlan> {
         .with_udaf(sum_udaf())
         .with_udaf(count_udaf())
         .with_udaf(avg_udaf())
-        .with_expr_planners(vec![
-            Arc::new(AggregateFunctionPlanner),
-        ])
+        .with_expr_planners(vec![Arc::new(AggregateFunctionPlanner)])
         .with_schema(
             "test",
             Schema::new_with_metadata(

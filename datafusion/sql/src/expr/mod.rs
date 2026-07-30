@@ -1590,6 +1590,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         Subscript::Wildcard => {
                             not_impl_err!("Wildcard subscript [*] not supported")
                         }
+                        Subscript::IndexList { indexes } => {
+                            not_impl_err!(
+                                "Oracle multi-index subscript not supported: {indexes:?}"
+                            )
+                        }
                     }
                 }
                 AccessExpr::Dot(expr) => match expr {
