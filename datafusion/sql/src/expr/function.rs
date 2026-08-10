@@ -23,9 +23,12 @@ use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::{
-    Expr, ExprSchemable, LogicalPlanBuilder, SortExpr, Subquery, WindowFrame,
+    Expr, ExprSchemable, LogicalPlanBuilder, Operator, SortExpr, Subquery, WindowFrame,
     WindowFunctionDefinition, expr,
-    expr::{NullTreatment, ScalarFunction, Unnest, WildcardOptions, WindowFunction},
+    expr::{
+        BinaryExpr, Case, NullTreatment, ScalarFunction, Unnest, WildcardOptions,
+        WindowFunction,
+    },
     planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
 };
 use sqlparser::ast::{
@@ -245,6 +248,41 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        if let Some(arguments) = function
+            .oracle_decode_arguments()
+            .map_err(|error| plan_datafusion_err!("{error}"))?
+        {
+            let expression = self.sql_expr_to_logical_expr(
+                arguments.expression,
+                schema,
+                planner_context,
+            )?;
+            let when_then_expr = arguments
+                .pairs
+                .into_iter()
+                .map(|(search, result)| {
+                    let search =
+                        self.sql_expr_to_logical_expr(search, schema, planner_context)?;
+                    let result =
+                        self.sql_expr_to_logical_expr(result, schema, planner_context)?;
+                    let condition = Expr::BinaryExpr(BinaryExpr::new(
+                        Box::new(expression.clone()),
+                        Operator::IsNotDistinctFrom,
+                        Box::new(search),
+                    ));
+                    Ok((Box::new(condition), Box::new(result)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let else_expr = arguments
+                .default
+                .map(|default| {
+                    self.sql_expr_to_logical_expr(default, schema, planner_context)
+                        .map(Box::new)
+                })
+                .transpose()?;
+            return Ok(Expr::Case(Case::new(None, when_then_expr, else_expr)));
+        }
+
         // Handle ARRAY subquery constructor (SQL:2016 S095)
         // Transform ARRAY(SELECT ...) into (SELECT ARRAY_AGG(...) FROM ...)
         let name = if function.name.0.len() > 1 {

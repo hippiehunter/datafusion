@@ -781,6 +781,24 @@ fn common_create_view_shape_plans_under_oracle_dialect() {
 }
 
 #[test]
+fn oracle_decode_lowers_from_typed_arguments_without_changing_postgres_decode() {
+    let oracle = logical_plan_with_dialect(
+        "SELECT DECODE(id, 1, 'one', NULL, 'null-id', 'other') FROM person",
+        &OracleDialect {},
+    )
+    .expect("Oracle DECODE should lower before scalar-function lookup");
+    let plan = format!("{oracle:?}");
+    assert_contains!(plan, "IsNotDistinctFrom");
+
+    let postgres = logical_plan_with_dialect(
+        "SELECT DECODE(id, 1, 'one', 'other') FROM person",
+        &PostgreSqlDialect {},
+    )
+    .expect_err("PostgreSQL must not acquire Oracle DECODE semantics");
+    assert!(!postgres.to_string().contains("IsNotDistinctFrom"));
+}
+
+#[test]
 fn preserve_oracle_merge_action_predicates() {
     let sql = "MERGE INTO person p
         USING person s
