@@ -102,6 +102,17 @@ fn pgq001_create_property_graph_with_properties() {
     );
 }
 
+/// PGQ001: Explicit all-column property exposure remains a typed plan mode.
+#[test]
+fn pgq001_create_property_graph_with_all_columns() {
+    assert_plans!(
+        "CREATE PROPERTY GRAPH social_network
+         VERTEX TABLES (
+           Person LABEL User PROPERTIES ARE ALL COLUMNS
+         )"
+    );
+}
+
 /// PGQ001: CREATE PROPERTY GRAPH with full vertex definition
 #[test]
 fn pgq001_create_property_graph_full_vertex() {

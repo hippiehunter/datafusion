@@ -88,6 +88,7 @@ pub use ddl::{
     GraphEdgeTableDefinition,
     GraphKeyClause,
     GraphPropertiesClause,
+    GraphPropertyDefinition,
     GraphVertexTableDefinition,
     ImportForeignSchemaLimitType,
     ImportForeignSchemaStatement,

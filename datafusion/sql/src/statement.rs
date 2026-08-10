@@ -59,14 +59,14 @@ use datafusion_expr::{
     DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation,
     Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter, Grant, GrantRole,
     GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause,
-    GraphVertexTableDefinition, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
-    MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
-    MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare, RefreshMaterializedView,
-    ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint,
-    SetTransaction, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
-    TransactionAccessMode, TransactionConclusion, TransactionEnd,
-    TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
-    Volatility, WriteOp, cast, col,
+    GraphPropertyDefinition, GraphVertexTableDefinition, JoinType, LogicalPlan,
+    LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause,
+    MergeInsertExpr, MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType,
+    Prepare, RefreshMaterializedView, ReleaseSavepoint, ResetVariable, Revoke,
+    RevokeRole, RollbackToSavepoint, Savepoint, SetTransaction, SetVariable, SortExpr,
+    Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode,
+    TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
+    TruncateTable, UseDatabase, Vacuum, Volatility, WriteOp, cast, col,
 };
 use sqlparser::ast::{
     self, AstBox as SQLBox, BeginTransactionKind, IndexColumn, IndexType,
@@ -74,6 +74,7 @@ use sqlparser::ast::{
     OrderByExpr, OrderByOptions, OverridingKind, Set, ShowStatementIn,
     ShowStatementOptions, TableObject, UpdateTableFromKind, ValueWithSpan,
 };
+
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
     CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr, ForeignKeyColumnOrPeriod,
@@ -82,6 +83,34 @@ use sqlparser::ast::{
     TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
+
+fn normalize_graph_properties(
+    properties: ast::GraphPropertiesClause,
+) -> Result<GraphPropertiesClause> {
+    match properties {
+        ast::GraphPropertiesClause::AllColumns { except } => {
+            Ok(GraphPropertiesClause::AllColumns {
+                except: except.into_iter().map(normalize_ident).collect(),
+            })
+        }
+        ast::GraphPropertiesClause::Named(properties) => properties
+            .into_iter()
+            .map(|property| {
+                let ast::Expr::Identifier(column) = property.expression else {
+                    return not_impl_err!(
+                        "Property graph expression properties are not supported by DataFusion"
+                    );
+                };
+                Ok(GraphPropertyDefinition {
+                    column: normalize_ident(column),
+                    alias: property.alias.map(normalize_ident),
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(GraphPropertiesClause::Named),
+        ast::GraphPropertiesClause::NoProperties => Ok(GraphPropertiesClause::NoProperties),
+    }
+}
 
 fn ident_to_string(ident: &Ident) -> String {
     normalize_ident(ident.to_owned())
@@ -2200,13 +2229,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     .collect(),
                             }),
                             label: vt.label.map(|l| normalize_ident(l)),
-                            properties: vt.properties.map(|p| GraphPropertiesClause {
-                                columns: p
-                                    .columns
-                                    .into_iter()
-                                    .map(|c| normalize_ident(c))
-                                    .collect(),
-                            }),
+                            properties: vt
+                                .properties
+                                .map(normalize_graph_properties)
+                                .transpose()?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -2228,6 +2254,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 references: self.object_name_to_table_reference(
                                     et.source.references,
                                 )?,
+                                referenced_columns: et.source.referenced_columns.map(
+                                    |columns| {
+                                        columns.into_iter().map(normalize_ident).collect()
+                                    },
+                                ),
                             },
                             destination: GraphEdgeEndpoint {
                                 key: et.destination.key.map(|k| GraphKeyClause {
@@ -2240,17 +2271,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 references: self.object_name_to_table_reference(
                                     et.destination.references,
                                 )?,
+                                referenced_columns: et
+                                    .destination
+                                    .referenced_columns
+                                    .map(|columns| {
+                                        columns.into_iter().map(normalize_ident).collect()
+                                    }),
                             },
-                            // Edge table key is optional and not part of sqlparser's GraphEdgeTableDefinition
-                            key: None,
-                            label: et.label.map(|l| normalize_ident(l)),
-                            properties: et.properties.map(|p| GraphPropertiesClause {
-                                columns: p
+                            key: et.key.map(|key| GraphKeyClause {
+                                columns: key
                                     .columns
                                     .into_iter()
-                                    .map(|c| normalize_ident(c))
+                                    .map(normalize_ident)
                                     .collect(),
                             }),
+                            label: et.label.map(|l| normalize_ident(l)),
+                            properties: et
+                                .properties
+                                .map(normalize_graph_properties)
+                                .transpose()?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;

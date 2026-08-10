@@ -1464,12 +1464,24 @@ pub struct GraphKeyClause {
     pub columns: Vec<String>,
 }
 
-/// A properties clause in a property graph vertex or edge table definition.
-/// Example: `PROPERTIES (name, age)`
+/// One property backed by a column in a property graph element table.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct GraphPropertiesClause {
-    /// The columns exposed as properties
-    pub columns: Vec<String>,
+pub struct GraphPropertyDefinition {
+    /// Underlying table column.
+    pub column: String,
+    /// Optional exposed property name.
+    pub alias: Option<String>,
+}
+
+/// Typed property exposure mode for a graph element table.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub enum GraphPropertiesClause {
+    /// Expose every column except the explicitly named columns.
+    AllColumns { except: Vec<String> },
+    /// Expose only the listed column/property mappings.
+    Named(Vec<GraphPropertyDefinition>),
+    /// Expose no properties.
+    NoProperties,
 }
 
 /// An endpoint definition for an edge in a property graph.
@@ -1480,6 +1492,8 @@ pub struct GraphEdgeEndpoint {
     pub key: Option<GraphKeyClause>,
     /// The vertex table this endpoint references
     pub references: TableReference,
+    /// Optional referenced vertex-key columns.
+    pub referenced_columns: Option<Vec<String>>,
 }
 
 /// A vertex table definition in CREATE PROPERTY GRAPH.
