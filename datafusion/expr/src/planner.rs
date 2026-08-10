@@ -46,6 +46,21 @@ pub trait ContextProvider {
     /// Returns a table by reference, if it exists
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
 
+    /// Resolve an unquoted SQL column identifier against a provider-owned
+    /// schema when its physical field spelling is not the dialect's canonical
+    /// spelling.
+    ///
+    /// The default preserves DataFusion's exact identifier semantics. Catalog
+    /// providers can opt in for narrowly scoped virtual schemas whose field
+    /// names are fixed by another database surface.
+    fn resolve_unquoted_column_name(
+        &self,
+        _identifier: &Ident,
+        _schema: &DFSchema,
+    ) -> Option<String> {
+        None
+    }
+
     /// Return the type of a file based on its extension (e.g. `.parquet`)
     ///
     /// This is used to plan `COPY` statements

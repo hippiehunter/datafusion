@@ -57,7 +57,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // interpret names with '.' as if they were
             // compound identifiers, but this is not a compound
             // identifier. (e.g. it is "foo.bar" not foo.bar)
-            let normalize_ident = self.ident_normalizer.normalize(id.clone());
+            let mut normalize_ident = self.ident_normalizer.normalize(id.clone());
 
             // Check for qualified field with unqualified name
             if let Ok((qualifier, _)) =
@@ -73,6 +73,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     column.spans_mut().add_span(span);
                 }
                 return Ok(Expr::Column(column));
+            }
+
+            if let Some(provider_name) = self
+                .context_provider
+                .resolve_unquoted_column_name(id, schema)
+            {
+                normalize_ident = provider_name;
+                if let Ok((qualifier, _)) =
+                    schema.qualified_field_with_unqualified_name(normalize_ident.as_str())
+                {
+                    let mut column = Column::new(
+                        qualifier.filter(|q| q.table() != UNNAMED_TABLE).cloned(),
+                        normalize_ident,
+                    );
+                    if self.options.collect_spans
+                        && let Some(span) = Span::try_from_sqlparser_span(id_span)
+                    {
+                        column.spans_mut().add_span(span);
+                    }
+                    return Ok(Expr::Column(column));
+                }
             }
 
             // Check the outer query schema stack (supports multi-level correlation)
@@ -174,12 +195,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 })?;
             Ok(Expr::ScalarVariable(field, var_names))
         } else {
-            let ids = ids
+            let provider_column_name = ids.last().and_then(|identifier| {
+                self.context_provider
+                    .resolve_unquoted_column_name(identifier, schema)
+            });
+            let mut ids = ids
                 .iter()
                 .cloned()
                 .map(|id| self.ident_normalizer.normalize(id))
                 .collect::<Vec<_>>();
 
+            let needs_provider_name = search_dfschema(&ids, schema).is_none();
+            if needs_provider_name
+                && let Some(last) = ids.last_mut()
+                && let Some(provider_name) = provider_column_name
+            {
+                *last = provider_name;
+            }
             let search_result = search_dfschema(&ids, schema);
             match search_result {
                 // Found matching field with spare identifier(s) for nested field(s) in structure
