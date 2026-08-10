@@ -772,6 +772,15 @@ fn reject_unsupported_oracle_statement_options_during_planning() {
 }
 
 #[test]
+fn common_create_view_shape_plans_under_oracle_dialect() {
+    logical_plan_with_dialect(
+        "CREATE VIEW active_people AS SELECT id FROM person",
+        &OracleDialect {},
+    )
+    .expect("common CREATE VIEW should not be rejected as an Oracle option");
+}
+
+#[test]
 fn preserve_oracle_merge_action_predicates() {
     let sql = "MERGE INTO person p
         USING person s

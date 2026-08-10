@@ -806,7 +806,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
             Statement::CreateView(view) => {
-                if view.oracle.is_some() {
+                if view
+                    .oracle
+                    .as_ref()
+                    .is_some_and(|oracle| !oracle.is_empty())
+                {
                     return not_impl_err!("Oracle CREATE VIEW options are not supported");
                 }
                 // put the statement back together temporarily to get the SQL
