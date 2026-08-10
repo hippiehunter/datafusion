@@ -289,7 +289,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             function.name.to_string()
         } else {
             match function.name.0[0].as_ident() {
-                Some(ident) => crate::utils::normalize_ident(ident.clone()),
+                Some(ident) => self.ident_normalizer.normalize(ident.clone()),
                 None => function.name.to_string(),
             }
         };
@@ -362,7 +362,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             object_name.to_string()
         } else {
             match object_name.0[0].as_ident() {
-                Some(ident) => crate::utils::normalize_ident(ident.clone()),
+                Some(ident) => self.ident_normalizer.normalize(ident.clone()),
                 None => {
                     return plan_err!(
                         "Expected an identifier in function name, but found {:?}",

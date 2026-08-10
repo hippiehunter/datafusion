@@ -255,6 +255,28 @@ fn parse_ident_normalization_5() {
 }
 
 #[test]
+fn oracle_function_name_keeps_the_parser_owned_fold() {
+    let state = MockSessionState::default().with_scalar_function(Arc::new(make_udf(
+        "STORED_ROUTINE",
+        vec![],
+        DataType::Utf8,
+    )));
+    let context = MockContextProvider { state };
+    let planner = SqlToRel::new_with_options(
+        &context,
+        ident_normalization_parser_options_no_ident_normalization(),
+    );
+    let mut ast =
+        DFParser::parse_sql_with_dialect("SELECT stored_routine()", &OracleDialect {})
+            .expect("Oracle SQL should parse");
+    let plan = planner
+        .statement_to_plan(ast.pop_front().expect("one statement"))
+        .expect("the Oracle-folded UDF name should resolve");
+
+    assert_contains!(plan.to_string(), "STORED_ROUTINE()");
+}
+
+#[test]
 fn parse_ident_normalization_6() {
     // With PG dialect, unquoted identifiers are always lowercased by the parser,
     // so UPPERCASE_test becomes uppercase_test and Id becomes id.
