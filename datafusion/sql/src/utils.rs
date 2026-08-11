@@ -370,6 +370,8 @@ pub(crate) fn value_to_string(value: &Value) -> Option<String> {
         | Value::HexStringLiteral(_)
         | Value::Null
         | Value::Placeholder(_)
+        | Value::OracleBinaryFloat(_)
+        | Value::OracleBinaryDouble(_)
         | Value::PlSqlInquiryDirective(_) => None,
     }
 }
