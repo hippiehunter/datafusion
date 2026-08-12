@@ -111,6 +111,8 @@ pub enum TableScanRowLockWaitPolicy {
     Nowait,
     /// Skip rows with conflicting locks.
     SkipLocked,
+    /// Wait for at most the specified whole number of seconds.
+    Wait(u64),
 }
 
 impl Display for TableScanRowLockWaitPolicy {
@@ -119,6 +121,7 @@ impl Display for TableScanRowLockWaitPolicy {
             Self::Block => Ok(()),
             Self::Nowait => f.write_str("NOWAIT"),
             Self::SkipLocked => f.write_str("SKIP LOCKED"),
+            Self::Wait(seconds) => write!(f, "WAIT {seconds}"),
         }
     }
 }

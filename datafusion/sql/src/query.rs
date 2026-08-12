@@ -386,6 +386,7 @@ fn table_scan_row_lock(lock: &LockClause) -> TableScanRowLock {
         None => TableScanRowLockWaitPolicy::Block,
         Some(NonBlock::Nowait) => TableScanRowLockWaitPolicy::Nowait,
         Some(NonBlock::SkipLocked) => TableScanRowLockWaitPolicy::SkipLocked,
+        Some(NonBlock::Wait(seconds)) => TableScanRowLockWaitPolicy::Wait(seconds),
     };
     TableScanRowLock { mode, wait_policy }
 }
