@@ -117,9 +117,13 @@ fn try_cast_numeric_literal(
         | DataType::Int32
         | DataType::Int64 => 1_i128,
         DataType::Timestamp(_, _) => 1_i128,
-        DataType::Decimal32(_, scale) => 10_i128.pow(*scale as u32),
-        DataType::Decimal64(_, scale) => 10_i128.pow(*scale as u32),
-        DataType::Decimal128(_, scale) => 10_i128.pow(*scale as u32),
+        // A negative scale cannot express the literal's units in the target
+        // type's unscaled representation; keep the cast rather than unwrap.
+        DataType::Decimal32(_, scale)
+        | DataType::Decimal64(_, scale)
+        | DataType::Decimal128(_, scale) => {
+            10_i128.checked_pow(u32::try_from(*scale).ok()?)?
+        }
         _ => return None,
     };
     let (target_min, target_max) = match target_type {
@@ -170,7 +174,7 @@ fn try_cast_numeric_literal(
         ScalarValue::TimestampNanosecond(Some(v), _) => (*v as i128).checked_mul(mul),
         ScalarValue::Decimal32(Some(v), _, scale) => {
             let v = *v as i128;
-            let lit_scale_mul = 10_i128.pow(*scale as u32);
+            let lit_scale_mul = 10_i128.checked_pow(u32::try_from(*scale).ok()?)?;
             if mul >= lit_scale_mul {
                 // Example:
                 // lit is decimal(123,3,2)
@@ -190,7 +194,7 @@ fn try_cast_numeric_literal(
         }
         ScalarValue::Decimal64(Some(v), _, scale) => {
             let v = *v as i128;
-            let lit_scale_mul = 10_i128.pow(*scale as u32);
+            let lit_scale_mul = 10_i128.checked_pow(u32::try_from(*scale).ok()?)?;
             if mul >= lit_scale_mul {
                 // Example:
                 // lit is decimal(123,3,2)
@@ -209,7 +213,7 @@ fn try_cast_numeric_literal(
             }
         }
         ScalarValue::Decimal128(Some(v), _, scale) => {
-            let lit_scale_mul = 10_i128.pow(*scale as u32);
+            let lit_scale_mul = 10_i128.checked_pow(u32::try_from(*scale).ok()?)?;
             if mul >= lit_scale_mul {
                 // Example:
                 // lit is decimal(123,3,2)
