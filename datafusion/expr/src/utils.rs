@@ -352,25 +352,29 @@ fn get_excluded_columns(
 }
 
 /// Returns all `Expr`s in the schema, except the `Column`s in the `columns_to_skip`
+/// Field metadata marking a column as a system column: still addressable by
+/// name, but never produced by a wildcard. PostgreSQL treats `ctid`,
+/// `tableoid` and its other system columns this way.
+pub const SYSTEM_COLUMN_METADATA_KEY: &str = "datafusion.system_column";
+
+fn is_system_column(field: &Field) -> bool {
+    field
+        .metadata()
+        .get(SYSTEM_COLUMN_METADATA_KEY)
+        .is_some_and(|value| value == "true")
+}
+
 fn get_exprs_except_skipped(
     schema: &DFSchema,
     columns_to_skip: &HashSet<Column>,
 ) -> Vec<Expr> {
-    if columns_to_skip.is_empty() {
-        schema.iter().map(Expr::from).collect::<Vec<Expr>>()
-    } else {
-        schema
-            .columns()
-            .iter()
-            .filter_map(|c| {
-                if !columns_to_skip.contains(c) {
-                    Some(Expr::Column(c.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<Expr>>()
-    }
+    schema
+        .iter()
+        .filter(|(_, field)| !is_system_column(field.as_ref()))
+        .map(Column::from)
+        .filter(|column| !columns_to_skip.contains(column))
+        .map(Expr::Column)
+        .collect::<Vec<Expr>>()
 }
 
 /// For each column specified in the USING JOIN condition, the JOIN plan outputs it twice
