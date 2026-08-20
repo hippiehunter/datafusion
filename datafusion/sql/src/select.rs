@@ -1289,6 +1289,36 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .collect::<Vec<_>>();
         self.validate_schema_satisfies_exprs(input.schema(), &exprs)?;
 
+        // A scalar subquery is named after the column its body projects, the
+        // same as PostgreSQL names it, but that name alone collides with an
+        // equally named column of the enclosing query — `SELECT d.name,
+        // (SELECT e.name FROM e WHERE ...) FROM d` puts an unqualified `name`
+        // beside `d.name`, which DFSchema rejects as ambiguous. Pin the
+        // qualifier of the column it is named after onto the projection here,
+        // where the body is final: derived on demand instead, it would move
+        // under any rule that rewrites the body, and an optimizer rule may not
+        // change the schema of the plan it rewrites.
+        let expr = expr
+            .into_iter()
+            .map(|item| match item {
+                SelectExpr::Expression(Expr::ScalarSubquery(subquery)) => {
+                    let (relation, field) = subquery.subquery.schema().qualified_field(0);
+                    match relation.cloned() {
+                        Some(relation) => {
+                            let name = field.name().clone();
+                            SelectExpr::Expression(
+                                Expr::ScalarSubquery(subquery).alias_qualified(Some(relation), name),
+                            )
+                        }
+                        // Nothing to pin: the body's column has no qualifier of
+                        // its own to lend.
+                        None => SelectExpr::Expression(Expr::ScalarSubquery(subquery)),
+                    }
+                }
+                other => other,
+            })
+            .collect::<Vec<_>>();
+
         LogicalPlanBuilder::from(input).project(expr)?.build()
     }
 

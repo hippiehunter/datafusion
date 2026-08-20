@@ -1426,14 +1426,6 @@ impl Expr {
             Expr::Cast(Cast { expr, .. }) | Expr::TryCast(TryCast { expr, .. }) => {
                 expr.qualified_name()
             }
-            // A scalar subquery is named after the column it projects, the same
-            // as PostgreSQL names it. Carrying that column's qualifier as well
-            // keeps the name usable beside an identically named outer column,
-            // which an unqualified field of the same name would make ambiguous.
-            Expr::ScalarSubquery(subquery) => {
-                let (relation, field) = subquery.subquery.schema().qualified_field(0);
-                (relation.cloned(), field.name().clone())
-            }
             _ => (None, self.schema_name().to_string()),
         }
     }
