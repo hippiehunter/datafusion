@@ -772,6 +772,16 @@ fn on_conflict_multiple_assignments() {
     );
 }
 
+/// ON CONFLICT DO UPDATE with a tuple assignment
+#[test]
+fn on_conflict_tuple_assignment() {
+    assert_feature_supported!(
+        "INSERT INTO t (a, b, c) VALUES (1, 2, 3) ON CONFLICT (a) DO UPDATE SET (b, c) = (EXCLUDED.b, EXCLUDED.c)",
+        "E101-01+",
+        "INSERT with ON CONFLICT tuple assignment"
+    );
+}
+
 /// ON CONFLICT with multi-row INSERT
 #[test]
 fn on_conflict_multi_row() {

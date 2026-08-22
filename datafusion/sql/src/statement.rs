@@ -4062,24 +4062,56 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // Plan the assignments
                 let mut assignments = Vec::with_capacity(do_update.assignments.len());
                 for assignment in &do_update.assignments {
-                    let value = self.sql_to_expr_ref(
-                        &assignment.value,
-                        &combined_schema,
-                        planner_context,
-                    )?;
-                    // Normalize column references
-                    let mut using_columns = HashSet::new();
-                    expr_to_columns(&value, &mut using_columns)?;
-                    let value = normalize_col_with_schemas_and_ambiguity_check(
-                        value,
-                        &[&[&combined_schema]],
-                        &[using_columns.into()],
-                    )?;
+                    let scalar_assignments = match &assignment.target {
+                        AssignmentTarget::ColumnName(_) => {
+                            vec![(assignment.target.clone(), &assignment.value)]
+                        }
+                        AssignmentTarget::Tuple(targets) => {
+                            let mut value = &assignment.value;
+                            while let SQLExpr::Nested(inner) = value {
+                                value = inner;
+                            }
+                            let SQLExpr::Tuple(values) = value else {
+                                return plan_err!(
+                                    "Expected tuple value for tuple assignment, got: {:?}",
+                                    assignment.value
+                                );
+                            };
+                            if targets.len() != values.len() {
+                                return plan_err!(
+                                    "Tuple assignment mismatch: {} columns but {} values",
+                                    targets.len(),
+                                    values.len()
+                                );
+                            }
+                            targets
+                                .iter()
+                                .cloned()
+                                .zip(values)
+                                .map(|(target, value)| {
+                                    (AssignmentTarget::ColumnName(target), value)
+                                })
+                                .collect()
+                        }
+                    };
 
-                    assignments.push(ConflictAssignment {
-                        target: assignment.target.clone(),
-                        value,
-                    });
+                    for (target, sql_value) in scalar_assignments {
+                        let value = self.sql_to_expr_ref(
+                            sql_value,
+                            &combined_schema,
+                            planner_context,
+                        )?;
+                        // Normalize column references
+                        let mut using_columns = HashSet::new();
+                        expr_to_columns(&value, &mut using_columns)?;
+                        let value = normalize_col_with_schemas_and_ambiguity_check(
+                            value,
+                            &[&[&combined_schema]],
+                            &[using_columns.into()],
+                        )?;
+
+                        assignments.push(ConflictAssignment { target, value });
+                    }
                 }
 
                 // Plan the optional WHERE clause
