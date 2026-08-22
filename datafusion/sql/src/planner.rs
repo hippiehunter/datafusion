@@ -1257,7 +1257,9 @@ fn extract_identity_metadata(
     options: &[ColumnOptionDef],
     data_type: &SQLDataType,
 ) -> HashMap<String, String> {
-    use sqlparser::ast::{GeneratedAs, IdentityPropertyFormatKind, IdentityPropertyKind};
+    use sqlparser::ast::{
+        GeneratedAs, GeneratedExpressionMode, IdentityPropertyFormatKind, IdentityPropertyKind,
+    };
 
     let mut meta = HashMap::new();
 
@@ -1325,6 +1327,22 @@ fn extract_identity_metadata(
                 ..
             } => {
                 meta.insert("generated_stored_expr".to_string(), expr.to_string());
+                return meta;
+            }
+            ColumnOption::Generated {
+                generation_expr: Some(expr),
+                generation_expr_mode: Some(GeneratedExpressionMode::Stored),
+                ..
+            } => {
+                meta.insert("generated_stored_expr".to_string(), expr.to_string());
+                return meta;
+            }
+            ColumnOption::Generated {
+                generation_expr: Some(expr),
+                generation_expr_mode: Some(GeneratedExpressionMode::Virtual),
+                ..
+            } => {
+                meta.insert("generated_virtual_expr".to_string(), expr.to_string());
                 return meta;
             }
             _ => {}
