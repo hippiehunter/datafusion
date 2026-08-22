@@ -2097,6 +2097,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     Some(ast::ArgMode::In) | None => ParameterMode::In,
                                     Some(ast::ArgMode::Out) => ParameterMode::Out,
                                     Some(ast::ArgMode::InOut) => ParameterMode::InOut,
+                                    Some(ast::ArgMode::Variadic) => {
+                                        ParameterMode::Variadic
+                                    }
                                 };
                                 // Convert data type using the field helper
                                 let field =

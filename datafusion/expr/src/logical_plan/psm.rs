@@ -828,7 +828,7 @@ impl Display for PsmResignal {
 // Procedure Parameters
 // ============================================================================
 
-/// Parameter mode for procedures (IN, OUT, INOUT).
+/// Parameter mode for routine parameters (IN, OUT, INOUT, VARIADIC).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
 pub enum ParameterMode {
     /// Input parameter (default).
@@ -837,6 +837,8 @@ pub enum ParameterMode {
     Out,
     /// Input/output parameter.
     InOut,
+    /// Variadic input parameter.
+    Variadic,
 }
 
 impl Display for ParameterMode {
@@ -845,6 +847,7 @@ impl Display for ParameterMode {
             ParameterMode::In => write!(f, "IN"),
             ParameterMode::Out => write!(f, "OUT"),
             ParameterMode::InOut => write!(f, "INOUT"),
+            ParameterMode::Variadic => write!(f, "VARIADIC"),
         }
     }
 }
