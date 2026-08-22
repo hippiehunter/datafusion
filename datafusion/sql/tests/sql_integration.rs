@@ -66,6 +66,34 @@ fn postgres_bit_string_literal_plans_as_text() {
 }
 
 #[test]
+fn on_conflict_tuple_assignment_is_planned_as_scalar_assignments() {
+    let plan = logical_plan(
+        "INSERT INTO person (id, first_name, last_name) VALUES (1, 'A', 'B') \
+         ON CONFLICT (id) DO UPDATE SET \
+         (first_name, last_name) = (EXCLUDED.first_name, EXCLUDED.last_name)",
+    )
+    .unwrap();
+    let LogicalPlan::Dml(dml) = plan else {
+        panic!("expected DML plan");
+    };
+    let datafusion_expr::WriteOp::Insert(datafusion_expr::InsertOp::WithConflictClause(
+        conflict,
+    )) = &dml.op
+    else {
+        panic!("expected INSERT with ON CONFLICT");
+    };
+    let datafusion_expr::OnConflictAction::DoUpdate(update) = &conflict.action else {
+        panic!("expected DO UPDATE");
+    };
+
+    assert_eq!(update.assignments.len(), 2);
+    assert!(update.assignments.iter().all(|assignment| matches!(
+        assignment.target,
+        sqlparser::ast::AssignmentTarget::ColumnName(_)
+    )));
+}
+
+#[test]
 fn parse_decimals_1() {
     let sql = "SELECT 1";
     let options = parse_decimals_parser_options();
