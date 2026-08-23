@@ -964,6 +964,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             SQLExpr::Collate { expr, .. } => {
                 self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)
             }
+            // `x IS [NOT] [form] NORMALIZED` is the predicate form of
+            // `is_normalized(x, form)`; NFC is the default form.
+            SQLExpr::IsNormalized {
+                expr,
+                form,
+                negated,
+            } => {
+                let arg =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let form = form
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "NFC".to_string());
+                let fun = self
+                    .context_provider
+                    .get_function_meta("is_normalized")
+                    .ok_or_else(|| {
+                        internal_datafusion_err!("Unable to find expected 'is_normalized' function")
+                    })?;
+                let call =
+                    Expr::ScalarFunction(ScalarFunction::new_udf(fun, vec![arg, lit(form)]));
+                Ok(if *negated {
+                    Expr::Not(Box::new(call))
+                } else {
+                    call
+                })
+            }
             _ => not_impl_err!("Unsupported ast node in sqltorel: {sql:?}"),
         }
     }

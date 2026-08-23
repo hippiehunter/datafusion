@@ -19,6 +19,7 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
+    DataFusionError,
     Column, DFSchema, Dependency, Diagnostic, Result, Span, Spans,
     internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
@@ -32,6 +33,7 @@ use datafusion_expr::{
     planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
 };
 use sqlparser::ast::{
+    Value,
     AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
     FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
     FunctionArguments, ObjectName, OrderByExpr, Spanned, WindowType,
@@ -458,6 +460,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // User-defined function (UDF) should have precedence
         if let Some(fm) = self.context_provider.get_function_meta(&name) {
+            let normal_form_args = unicode_normal_form_args(&name, args);
+            let args = normal_form_args.as_deref().unwrap_or(args);
             let (args, arg_names) =
                 self.function_args_to_expr_with_names(args, schema, planner_context)?;
 
@@ -1026,11 +1030,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
                 // Extract the string value from the literal to use as the key name
                 let key_name = match value {
-                    sqlparser::ast::Value::SingleQuotedString(s) => Some(s.clone()),
-                    sqlparser::ast::Value::DoubleQuotedString(s) => Some(s.clone()),
+                    Value::SingleQuotedString(s) => Some(s.clone()),
+                    Value::DoubleQuotedString(s) => Some(s.clone()),
                     _ => None,
                 };
                 Ok((value_expr, key_name))
+            }
+            // PostgreSQL `VARIADIC expr`: the array is spread over the
+            // function's variadic parameter. The planner cannot spread it
+            // here (the array may be a column), so the argument is wrapped in
+            // the marker function the server registers under this name and
+            // resolves per callee before execution.
+            FunctionArg::Variadic(FunctionArgExpr::Expr(arg)) => {
+                let expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
+                let marker = self
+                    .context_provider
+                    .get_function_meta(VARIADIC_MARKER_FUNCTION)
+                    .ok_or_else(|| {
+                        DataFusionError::Plan(
+                            "VARIADIC function arguments are not supported by this session"
+                                .to_string(),
+                        )
+                    })?;
+                Ok((
+                    Expr::ScalarFunction(ScalarFunction::new_udf(marker, vec![expr])),
+                    None,
+                ))
             }
             _ => not_impl_err!("Unsupported qualified wildcard argument: {sql:?}"),
         }
@@ -1230,4 +1255,33 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
     }
+}
+
+/// Name of the marker scalar function a `VARIADIC expr` argument is wrapped
+/// in. The context provider registers it; the server rewrites each call site
+/// according to the callee's variadic parameter before execution.
+pub const VARIADIC_MARKER_FUNCTION: &str = "__dbl_variadic";
+
+/// PostgreSQL spells the Unicode normal form of `normalize(text, NFC)` as a
+/// bare keyword. The parser hands it over as an identifier; lower it to the
+/// string literal the function takes.
+fn unicode_normal_form_args(name: &str, args: &[FunctionArg]) -> Option<Vec<FunctionArg>> {
+    if !name.eq_ignore_ascii_case("normalize") || args.len() != 2 {
+        return None;
+    }
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Identifier(ident))) = &args[1]
+    else {
+        return None;
+    };
+    let form = ident.value.to_ascii_uppercase();
+    if ident.quote_style.is_some()
+        || !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD")
+    {
+        return None;
+    }
+    let mut lowered = args.to_vec();
+    lowered[1] = FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Value(
+        Value::SingleQuotedString(form).with_empty_span(),
+    )));
+    Some(lowered)
 }

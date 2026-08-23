@@ -24,6 +24,7 @@ use arrow::datatypes::{
 };
 use bigdecimal::num_bigint::BigInt;
 use bigdecimal::{BigDecimal, Signed, ToPrimitive};
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     DFSchema, DataFusionError, Result, ScalarValue, internal_datafusion_err,
     not_impl_err, plan_err,
@@ -38,6 +39,7 @@ use sqlparser::ast::{
 };
 use sqlparser::parser::ParserError::ParserError;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::cmp::Ordering;
 use std::ops::Neg;
 use std::str::FromStr;
@@ -51,9 +53,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<Expr> {
         match value {
             Value::Number(n, _) => self.parse_sql_number(&n, false),
-            Value::SingleQuotedString(s)
-            | Value::DoubleQuotedString(s)
-            | Value::SingleQuotedByteStringLiteral(s) => Ok(lit(s)),
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(lit(s)),
+            // PostgreSQL `B'0101'` is a bit string: its execution carrier is
+            // the digit text, and the `bit` identity rides the literal's field
+            // metadata the way declared column types do.
+            Value::SingleQuotedByteStringLiteral(s) => {
+                if let Some(bad) = s.chars().find(|c| !matches!(c, '0' | '1')) {
+                    return plan_err!(
+                        "invalid input syntax for type bit: \"{s}\": \"{bad}\" is not a valid binary digit"
+                    );
+                }
+                Ok(Expr::Literal(
+                    ScalarValue::Utf8(Some(s)),
+                    Some(FieldMetadata::from(HashMap::from([(
+                        "pg_type".to_string(),
+                        "bit".to_string(),
+                    )]))),
+                ))
+            }
             Value::Null => Ok(Expr::Literal(ScalarValue::Null, None)),
             Value::Boolean(n) => Ok(lit(n)),
             Value::Placeholder(param) => {
@@ -67,7 +84,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
             Value::DollarQuotedString(s) => Ok(lit(s.value)),
-            Value::EscapedStringLiteral(s) => Ok(lit(s)),
+            Value::EscapedStringLiteral(s) | Value::UnicodeStringLiteral(s) => Ok(lit(s)),
             Value::AlternativeQuotedString(s) => Ok(lit(s.value)),
             _ => plan_err!("Unsupported Value '{value:?}'"),
         }
