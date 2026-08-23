@@ -478,6 +478,23 @@ fn convert_frame_bound_to_scalar_value(
                     return exec_err!("INTERVAL expression cannot be {e:?}");
                 }
             },
+            // An explicitly typed numeric offset such as `2::int8` or
+            // `CAST(2 AS smallint)`. The width annotation is dropped here; the
+            // offset carries its value string and type_coercion re-coerces it
+            // to the ORDER BY key's type.
+            ast::Expr::Cast { expr, .. } => match sqlparser::arena::AstBox::into_owned(expr) {
+                ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::Number(item, _),
+                    span: _,
+                }) => item,
+                ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(item),
+                    span: _,
+                }) => item,
+                e => {
+                    return exec_err!("frame offset cast expression cannot be {e:?}");
+                }
+            },
             _ => plan_err!(
                 "Invalid window frame: frame offsets for RANGE must be either a numeric value, a string value or an interval"
             )?,
