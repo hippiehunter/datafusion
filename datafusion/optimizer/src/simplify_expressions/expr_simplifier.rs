@@ -615,8 +615,11 @@ impl<'a> ConstEvaluator<'a> {
     fn volatility_ok(volatility: Volatility) -> bool {
         match volatility {
             Volatility::Immutable => true,
-            // Values for functions such as now() are taken from ExecutionProps
-            Volatility::Stable => true,
+            // Generic UDF invocation has no contract requiring it to derive
+            // stable values from `ExecutionProps`. Stable functions that can
+            // be evaluated during planning do so through their UDF-specific
+            // `simplify` implementation, which receives the execution props.
+            Volatility::Stable => false,
             Volatility::Volatile => false,
         }
     }
@@ -5004,6 +5007,16 @@ mod tests {
                     .and((rand.clone().eq(lit(0))).or(rand.clone().eq(lit(0))))
             );
         }
+    }
+
+    #[test]
+    fn stable_udf_is_not_generically_constant_folded() {
+        let fun = Arc::new(ScalarUDF::new_from_impl(VolatileUdf {
+            signature: Signature::exact(vec![], Volatility::Stable),
+        }));
+        let stable = Expr::ScalarFunction(ScalarFunction::new_udf(fun, vec![]));
+
+        assert_eq!(simplify(stable.clone()), stable);
     }
 
     #[test]

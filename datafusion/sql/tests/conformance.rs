@@ -2930,6 +2930,18 @@ mod tests {
     }
 
     #[test]
+    fn test_postgres_parenthesized_relation_wildcard() {
+        let ordinary = logical_plan_postgres("SELECT t.* FROM t").unwrap();
+        let parenthesized = logical_plan_postgres("SELECT (t).* FROM t").unwrap();
+        assert_eq!(parenthesized.schema(), ordinary.schema());
+    }
+
+    #[test]
+    fn test_postgres_prefix_absolute_value_operator() {
+        assert!(logical_plan_postgres("SELECT @ (-3.5::double precision)").is_ok());
+    }
+
+    #[test]
     fn test_logical_plan_with_joins() {
         assert!(logical_plan("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a").is_ok());
         assert!(logical_plan("SELECT * FROM t1 LEFT JOIN t2 ON t1.a = t2.a").is_ok());

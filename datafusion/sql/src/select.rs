@@ -90,6 +90,26 @@ struct AggregatePlanResult {
 }
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
+    fn relation_name_from_wildcard_expr(expr: &SQLExpr) -> Option<ObjectName> {
+        match expr {
+            SQLExpr::Nested(inner) => Self::relation_name_from_wildcard_expr(inner),
+            SQLExpr::Identifier(ident) => Some(ObjectName::from(vec![ident.clone()])),
+            SQLExpr::CompoundIdentifier(idents) => Some(ObjectName::from(idents.clone())),
+            _ => None,
+        }
+    }
+
+    fn wildcard_expr_names_relation(&self, expr: &SQLExpr, plan: &LogicalPlan) -> bool {
+        Self::relation_name_from_wildcard_expr(expr)
+            .and_then(|name| self.object_name_to_table_reference(name).ok())
+            .is_some_and(|qualifier| {
+                !plan
+                    .schema()
+                    .fields_indices_with_qualified(&qualifier)
+                    .is_empty()
+            })
+    }
+
     /// Generate a logic plan from an SQL select
     pub(super) fn select_to_plan(
         &self,
@@ -1129,6 +1149,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 SelectItemQualifiedWildcardKind::Expr(row_expr),
                 options,
             ) = expr
+                && !self.wildcard_expr_names_relation(row_expr, plan)
             {
                 match self.row_wildcard_to_exprs(row_expr, options, plan, planner_context)
                 {
@@ -1223,16 +1244,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Self::check_wildcard_options(&options)?;
                 let object_name = match object_name {
                     SelectItemQualifiedWildcardKind::ObjectName(object_name) => {
+                        object_name.clone()
+                    }
+                    SelectItemQualifiedWildcardKind::Expr(expr) => {
+                        let Some(object_name) =
+                            Self::relation_name_from_wildcard_expr(expr)
+                        else {
+                            return not_impl_err!(
+                                "Qualified wildcard over expression {expr} is not supported"
+                            );
+                        };
                         object_name
                     }
-                    SelectItemQualifiedWildcardKind::Expr(_) => {
-                        return plan_err!(
-                            "Qualified wildcard with expression not supported"
-                        );
-                    }
                 };
-                let qualifier =
-                    self.object_name_to_table_reference(object_name.clone())?;
+                let qualifier = self.object_name_to_table_reference(object_name)?;
                 let planned_options = self.plan_wildcard_options(
                     plan,
                     empty_from,
@@ -1345,7 +1370,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         Some(relation) => {
                             let name = field.name().clone();
                             SelectExpr::Expression(
-                                Expr::ScalarSubquery(subquery).alias_qualified(Some(relation), name),
+                                Expr::ScalarSubquery(subquery)
+                                    .alias_qualified(Some(relation), name),
                             )
                         }
                         // Nothing to pin: the body's column has no qualifier of

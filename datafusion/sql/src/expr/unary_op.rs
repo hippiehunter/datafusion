@@ -129,6 +129,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )
                 }
             }
+            UnaryOperator::PGAbs => {
+                let operand =
+                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                if let Some(func) = self.context_provider.get_function_meta("abs") {
+                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        func,
+                        vec![operand],
+                    )))
+                } else {
+                    not_impl_err!(
+                        "Absolute-value operator (@) requires 'abs' function to be registered"
+                    )
+                }
+            }
             _ => not_impl_err!("Unsupported SQL unary operator {op:?}"),
         }
     }
