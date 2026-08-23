@@ -137,15 +137,68 @@ fn insert_target_alias_hides_the_relation_name() {
 
 #[test]
 fn update_set_default_resolves_the_declared_column_default() {
-    let plan = logical_plan("UPDATE person SET age = DEFAULT").unwrap();
+    let plan = logical_plan("UPDATE column_defaults SET age = DEFAULT").unwrap();
     assert_contains!(format!("{plan}"), "Int32(42) AS age");
 }
 
 #[test]
 fn update_set_default_without_a_declared_default_writes_null() {
-    let plan = logical_plan("UPDATE person SET salary = DEFAULT").unwrap();
-    assert_contains!(format!("{plan}"), "AS salary");
+    let plan = logical_plan("UPDATE column_defaults SET tag = DEFAULT").unwrap();
+    assert_contains!(format!("{plan}"), "AS tag");
     assert_contains!(format!("{plan}"), "NULL");
+}
+
+#[test]
+fn merge_insert_partial_column_list_fills_the_target_row() {
+    let plan = logical_plan(
+        "MERGE INTO column_defaults c USING orders o ON c.id = o.customer_id \
+         WHEN NOT MATCHED THEN INSERT (id) VALUES (o.customer_id)",
+    )
+    .unwrap();
+    let row = merge_insert_row(&plan);
+    assert_eq!(row.len(), 3);
+    assert_contains!(format!("{}", row[2]), "Int32(42)");
+}
+
+#[test]
+fn merge_insert_default_values_takes_every_column_from_its_default() {
+    let plan = logical_plan(
+        "MERGE INTO column_defaults c USING orders o ON c.id = o.customer_id \
+         WHEN NOT MATCHED THEN INSERT DEFAULT VALUES",
+    )
+    .unwrap();
+    let row = merge_insert_row(&plan);
+    assert_eq!(row.len(), 3);
+    assert_contains!(format!("{}", row[2]), "Int32(42)");
+}
+
+#[test]
+fn merge_insert_rejects_a_column_named_twice() {
+    let error = logical_plan(
+        "MERGE INTO column_defaults c USING orders o ON c.id = o.customer_id \
+         WHEN NOT MATCHED THEN INSERT (id, id) VALUES (o.customer_id, o.customer_id)",
+    )
+    .unwrap_err();
+    assert_contains!(error.to_string(), "specified more than once");
+}
+
+fn merge_insert_row(plan: &LogicalPlan) -> Vec<datafusion_expr::Expr> {
+    let LogicalPlan::Merge(merge) = plan else {
+        panic!("expected MERGE plan");
+    };
+    let [clause] = merge.clauses.as_slice() else {
+        panic!("expected exactly one WHEN clause");
+    };
+    let datafusion_expr::MergeAction::Insert(insert) = &clause.action else {
+        panic!("expected an INSERT action");
+    };
+    let datafusion_expr::MergeInsertKind::Values(rows) = &insert.kind else {
+        panic!("expected a VALUES insert");
+    };
+    let [row] = rows.as_slice() else {
+        panic!("expected exactly one value row");
+    };
+    row.clone()
 }
 
 #[test]

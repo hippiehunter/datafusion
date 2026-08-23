@@ -31,7 +31,7 @@ use crate::planner::{
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
 
-use arrow::datatypes::{DataType, Field, FieldRef, Fields};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -3301,6 +3301,69 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Restate one MERGE `INSERT` value row in the target row's own column
+    /// order, filling every column the statement does not name from its
+    /// declared default (NULL when it has none) — the resolution an omitted
+    /// INSERT value takes. `named_columns` empty means the row was written
+    /// positionally over the whole target row.
+    fn merge_insert_row_in_table_order(
+        &self,
+        target_schema: &Schema,
+        named_columns: &[String],
+        values: Vec<Expr>,
+        table_source: &dyn datafusion_expr::TableSource,
+    ) -> Result<Vec<Expr>> {
+        if named_columns.is_empty() {
+            if values.is_empty() || values.len() == target_schema.fields().len() {
+                // A positional row already covers the target, and an empty row
+                // is DEFAULT VALUES; both fall through to the fill below.
+            } else {
+                return plan_err!(
+                    "MERGE INSERT has {} values but target table has {} columns",
+                    values.len(),
+                    target_schema.fields().len()
+                );
+            }
+            if !values.is_empty() {
+                return Ok(values);
+            }
+        } else if named_columns.len() != values.len() {
+            return plan_err!(
+                "MERGE INSERT has {} target columns but {} values",
+                named_columns.len(),
+                values.len()
+            );
+        }
+
+        let mut positions: HashMap<&str, usize> = HashMap::with_capacity(named_columns.len());
+        for (index, column) in named_columns.iter().enumerate() {
+            if target_schema.index_of(column).is_err() {
+                return plan_err!(
+                    "MERGE INSERT column \"{column}\" does not exist in the target table"
+                );
+            }
+            if positions.insert(column.as_str(), index).is_some() {
+                return plan_err!(
+                    "MERGE INSERT column \"{column}\" is specified more than once"
+                );
+            }
+        }
+
+        let mut row = Vec::with_capacity(target_schema.fields().len());
+        for field in target_schema.fields() {
+            let expr = match positions.get(field.name().as_str()) {
+                Some(index) => values[*index].clone(),
+                None => table_source
+                    .get_column_default(field.name())
+                    .cloned()
+                    .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
+                    .cast_to(field.data_type(), &DFSchema::empty())?,
+            };
+            row.push(expr);
+        }
+        Ok(row)
+    }
+
     fn merge_to_plan(
         &self,
         _into: bool,
@@ -3360,8 +3423,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let table_ref = self.object_name_to_table_reference(table_name)?;
         let table_source = self.context_provider.get_table_source(table_ref.clone())?;
+        let target_schema = table_source.schema();
         let mut target_plan =
-            LogicalPlanBuilder::scan(table_ref.clone(), table_source, None)?.build()?;
+            LogicalPlanBuilder::scan(table_ref.clone(), Arc::clone(&table_source), None)?
+                .build()?;
         if let Some(alias) = table_alias {
             target_plan = self.apply_table_alias(target_plan, alias)?;
         }
@@ -3404,7 +3469,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 ast::MergeAction::Insert(insert) => {
                     let insert_predicate =
                         insert.where_clause.map(&mut normalize_expr).transpose()?;
+                    let named_columns = insert
+                        .columns
+                        .iter()
+                        .map(|ident| self.ident_normalizer.normalize(ident.clone()))
+                        .collect::<Vec<_>>();
                     let kind = match insert.kind {
+                        // DEFAULT VALUES is the whole row taken from defaults:
+                        // an empty explicit row that the expansion below fills.
+                        ast::MergeInsertKind::DefaultValues => {
+                            MergeInsertKind::Values(vec![self.merge_insert_row_in_table_order(
+                                &target_schema,
+                                &named_columns,
+                                Vec::new(),
+                                table_source.as_ref(),
+                            )?])
+                        }
                         ast::MergeInsertKind::Values(values) => {
                             let mut rows = Vec::with_capacity(values.rows.len());
                             for row in values.rows {
@@ -3412,21 +3492,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 for value in row {
                                     expr_row.push(normalize_expr(value)?);
                                 }
-                                rows.push(expr_row);
+                                rows.push(self.merge_insert_row_in_table_order(
+                                    &target_schema,
+                                    &named_columns,
+                                    expr_row,
+                                    table_source.as_ref(),
+                                )?);
                             }
                             MergeInsertKind::Values(rows)
                         }
                         ast::MergeInsertKind::Row => MergeInsertKind::Row,
-                        ast::MergeInsertKind::DefaultValues => {
-                            return not_impl_err!(
-                                "MERGE ... WHEN NOT MATCHED THEN INSERT DEFAULT VALUES is not supported"
-                            );
-                        }
                     };
-                    let columns = insert
-                        .columns
-                        .into_iter()
-                        .map(|ident| ObjectName::from(vec![ident]))
+                    // The column list the expansion produced is the target
+                    // row's own, in table order.
+                    let columns = target_schema
+                        .fields()
+                        .iter()
+                        .map(|field| ObjectName::from(vec![Ident::new(field.name())]))
                         .collect();
                     MergeAction::Insert(MergeInsertExpr {
                         columns,

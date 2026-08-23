@@ -111,6 +111,15 @@ impl ContextProvider for MockContextProvider {
                 Field::new("j3_id", DataType::Int32, false),
                 Field::new("j3_string", DataType::Utf8, false),
             ])),
+            // A table whose columns carry declared defaults, for the planner
+            // paths that resolve DEFAULT against the catalog. Kept separate
+            // from `person` so those defaults do not rewrite every INSERT
+            // snapshot that table appears in.
+            "column_defaults" => Ok(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("tag", DataType::Utf8, true),
+                Field::new("age", DataType::Int32, true),
+            ])),
             "test_decimal" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int32, false),
                 Field::new("price", DataType::Decimal128(10, 2), false),
@@ -291,7 +300,7 @@ impl ContextProvider for MockContextProvider {
 /// tables whose tests need one.
 fn column_defaults(table: &str) -> HashMap<String, Expr> {
     match table {
-        "person" => HashMap::from([(
+        "column_defaults" => HashMap::from([(
             "age".to_string(),
             Expr::Literal(ScalarValue::Int32(Some(42)), None),
         )]),
