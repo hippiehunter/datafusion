@@ -63,6 +63,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 }
 
-fn is_default_identifier(ident: &Ident) -> bool {
+/// `DEFAULT` in a value slot is the bare keyword, which the grammar carries as
+/// an unquoted identifier. Quoting it makes it an ordinary column reference.
+pub(crate) fn is_default_identifier(ident: &Ident) -> bool {
     ident.quote_style.is_none() && ident.value.eq_ignore_ascii_case("default")
 }

@@ -24,9 +24,9 @@ use std::{sync::Arc, vec};
 use arrow::datatypes::*;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{GetExt, Result, TableReference, plan_err};
+use datafusion_common::{GetExt, Result, ScalarValue, TableReference, plan_err};
 use datafusion_expr::planner::{ExprPlanner, TypePlanner};
-use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::ContextProvider;
 
 // Note: make_array from datafusion_functions_nested was removed
@@ -223,7 +223,9 @@ impl ContextProvider for MockContextProvider {
         };
 
         match schema {
-            Ok(t) => Ok(Arc::new(EmptyTable::new(Arc::new(t)))),
+            Ok(t) => Ok(Arc::new(
+                EmptyTable::new(Arc::new(t)).with_column_defaults(column_defaults(name.table())),
+            )),
             Err(e) => Err(e),
         }
     }
@@ -285,13 +287,34 @@ impl ContextProvider for MockContextProvider {
     }
 }
 
+/// Declared column defaults the planner resolves `DEFAULT` against, for the
+/// tables whose tests need one.
+fn column_defaults(table: &str) -> HashMap<String, Expr> {
+    match table {
+        "person" => HashMap::from([(
+            "age".to_string(),
+            Expr::Literal(ScalarValue::Int32(Some(42)), None),
+        )]),
+        _ => HashMap::new(),
+    }
+}
+
 struct EmptyTable {
     table_schema: SchemaRef,
+    column_defaults: HashMap<String, Expr>,
 }
 
 impl EmptyTable {
     fn new(table_schema: SchemaRef) -> Self {
-        Self { table_schema }
+        Self {
+            table_schema,
+            column_defaults: HashMap::new(),
+        }
+    }
+
+    fn with_column_defaults(mut self, column_defaults: HashMap<String, Expr>) -> Self {
+        self.column_defaults = column_defaults;
+        self
     }
 }
 
@@ -302,5 +325,9 @@ impl TableSource for EmptyTable {
 
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.table_schema)
+    }
+
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.column_defaults.get(column)
     }
 }

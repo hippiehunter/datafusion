@@ -94,6 +94,61 @@ fn on_conflict_tuple_assignment_is_planned_as_scalar_assignments() {
 }
 
 #[test]
+fn insert_target_alias_scopes_the_conflict_update() {
+    let plan = logical_plan(
+        "INSERT INTO person AS p (id, first_name, last_name) VALUES (1, 'A', 'B') \
+         ON CONFLICT (id) DO UPDATE SET first_name = p.first_name",
+    )
+    .unwrap();
+    let LogicalPlan::Dml(dml) = plan else {
+        panic!("expected DML plan");
+    };
+    let datafusion_expr::WriteOp::Insert(datafusion_expr::InsertOp::WithConflictClause(
+        conflict,
+    )) = &dml.op
+    else {
+        panic!("expected INSERT with ON CONFLICT");
+    };
+    let datafusion_expr::OnConflictAction::DoUpdate(update) = &conflict.action else {
+        panic!("expected DO UPDATE");
+    };
+    let [assignment] = update.assignments.as_slice() else {
+        panic!("expected exactly one assignment");
+    };
+    let datafusion_expr::Expr::Column(column) = &assignment.value else {
+        panic!("expected the assignment to read a column");
+    };
+    assert_eq!(
+        column.relation.as_ref().map(|relation| relation.table()),
+        Some("p")
+    );
+    assert_eq!(column.name, "first_name");
+}
+
+#[test]
+fn insert_target_alias_hides_the_relation_name() {
+    let error = logical_plan(
+        "INSERT INTO person AS p (id, first_name, last_name) VALUES (1, 'A', 'B') \
+         ON CONFLICT (id) DO UPDATE SET first_name = person.first_name",
+    )
+    .unwrap_err();
+    assert_contains!(error.to_string(), "person.first_name");
+}
+
+#[test]
+fn update_set_default_resolves_the_declared_column_default() {
+    let plan = logical_plan("UPDATE person SET age = DEFAULT").unwrap();
+    assert_contains!(format!("{plan}"), "Int32(42) AS age");
+}
+
+#[test]
+fn update_set_default_without_a_declared_default_writes_null() {
+    let plan = logical_plan("UPDATE person SET salary = DEFAULT").unwrap();
+    assert_contains!(format!("{plan}"), "AS salary");
+    assert_contains!(format!("{plan}"), "NULL");
+}
+
+#[test]
 fn parse_decimals_1() {
     let sql = "SELECT 1";
     let options = parse_decimals_parser_options();

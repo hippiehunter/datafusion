@@ -29,6 +29,7 @@ use crate::planner::{
     ContextProvider, PlannerContext, SqlToRel, object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
+use crate::values::is_default_identifier;
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use datafusion_common::error::_plan_err;
@@ -1564,11 +1565,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if ignore {
                     plan_err!("Insert-ignore clause not supported")?;
                 }
-                if let Some(table_alias) = table_alias {
-                    plan_err!(
-                        "Inserts with a table alias not supported: {table_alias:?}"
-                    )?
-                };
                 if let Some(priority) = priority {
                     plan_err!(
                         "Inserts with a `PRIORITY` clause not supported: {priority:?}"
@@ -1595,6 +1591,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         overwrite,
                         replace_into,
                         on_conflict,
+                        table_alias.as_ref(),
                         planner_context,
                     )?
                 } else {
@@ -1607,6 +1604,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         replace_into,
                         on_conflict,
                         returning_clause_into_items(returning)?,
+                        table_alias.as_ref(),
                         planner_context,
                     )?
                 };
@@ -3841,6 +3839,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     return Ok(expr.alias(field.name()));
                 }
                 let expr = match assign_map.remove(field.name()) {
+                    // `SET col = DEFAULT` writes the column's declared default,
+                    // or NULL when it has none — the same resolution an
+                    // omitted INSERT value takes.
+                    Some(new_value)
+                        if matches!(
+                            new_value.as_ref(),
+                            SQLExpr::Identifier(ident) if is_default_identifier(ident)
+                        ) =>
+                    {
+                        table_source
+                            .get_column_default(field.name())
+                            .cloned()
+                            .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
+                            .cast_to(field.data_type(), &DFSchema::empty())?
+                    }
                     Some(new_value) => {
                         let mut expr = self.sql_to_expr_ref(
                             new_value.as_ref(),
@@ -4000,11 +4013,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if insert.ignore {
             return plan_err!("Insert-ignore clause not supported");
         }
-        if let Some(table_alias) = &insert.table_alias {
-            return plan_err!(
-                "Inserts with a table alias not supported: {table_alias:?}"
-            );
-        }
         if let Some(priority) = &insert.priority {
             return plan_err!(
                 "Inserts with a `PRIORITY` clause not supported: {priority:?}"
@@ -4029,6 +4037,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 insert.replace_into,
                 on_conflict,
                 returning_clause_items(insert.returning.as_ref())?,
+                insert.table_alias.as_ref(),
                 planner_context,
             )?
         } else {
@@ -4038,6 +4047,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 insert.overwrite,
                 insert.replace_into,
                 on_conflict.cloned(),
+                insert.table_alias.as_ref(),
                 planner_context,
             )?
         };
@@ -4059,6 +4069,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         replace_into: bool,
         on_conflict: Option<SqlOnConflict>,
         returning: Option<Vec<SelectItem>>,
+        table_alias: Option<&Ident>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         self.insert_to_plan_ref(
@@ -4070,6 +4081,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             replace_into,
             on_conflict.as_ref(),
             returning.as_deref(),
+            table_alias,
             outer_planner_context,
         )
     }
@@ -4085,6 +4097,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         replace_into: bool,
         on_conflict: Option<&SqlOnConflict>,
         returning: Option<&[SelectItem]>,
+        table_alias: Option<&Ident>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Do a table lookup to verify the table exists
@@ -4268,6 +4281,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let planned_conflict = self.plan_on_conflict(
                     conflict,
                     &table_name,
+                    table_alias,
                     &table_schema,
                     outer_planner_context,
                 )?;
@@ -4323,6 +4337,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         conflict: &SqlOnConflict,
         table_name: &TableReference,
+        table_alias: Option<&Ident>,
         table_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<OnConflict> {
@@ -4334,9 +4349,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // The EXCLUDED table has the same columns as the target table and represents
                 // the row that would have been inserted.
 
-                // Qualify the table schema with the table name (just the table part, not full path)
-                // This allows expressions like `t.column` to resolve correctly
-                let table_ref = TableReference::bare(table_name.table());
+                // Qualify the target row with the name the conflict clause
+                // sees it under. `INSERT INTO t AS alias` renames the target
+                // for the whole statement, so `alias.column` resolves and
+                // `t.column` deliberately does not.
+                let table_ref = match table_alias {
+                    Some(alias) => TableReference::bare(
+                        self.ident_normalizer.normalize(alias.clone()),
+                    ),
+                    None => TableReference::bare(table_name.table()),
+                };
                 let qualified_table_schema = DFSchema::try_from_qualified_schema(
                     table_ref,
                     &table_schema.as_arrow().clone(),
@@ -4452,6 +4474,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn insert_default_values_to_plan(
         &self,
         table_name: ObjectName,
@@ -4459,6 +4482,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         overwrite: bool,
         replace_into: bool,
         on_conflict: Option<SqlOnConflict>,
+        table_alias: Option<&Ident>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Do a table lookup to verify the table exists
@@ -4523,6 +4547,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             replace_into,
             on_conflict,
             None,
+            table_alias,
             planner_context,
         )
     }
