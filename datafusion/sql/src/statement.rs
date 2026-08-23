@@ -217,6 +217,28 @@ fn is_gantry_hidden_dml_column(name: &str) -> bool {
     GANTRY_HIDDEN_DML_COLUMNS.contains(&name)
 }
 
+/// Restate every column qualified by `from` under `to`, leaving the rest alone.
+fn rename_column_qualifier(expr: Expr, from: &TableReference, to: &str) -> Result<Expr> {
+    if from.table() == to {
+        return Ok(expr);
+    }
+    expr.transform(|expr| match expr {
+        Expr::Column(column)
+            if column
+                .relation
+                .as_ref()
+                .is_some_and(|relation| relation.resolved_eq(from)) =>
+        {
+            Ok(Transformed::yes(Expr::Column(Column::new(
+                Some(TableReference::bare(to)),
+                column.name,
+            ))))
+        }
+        other => Ok(Transformed::no(other)),
+    })
+    .map(|transformed| transformed.data)
+}
+
 fn returning_columns_to_output_schema(
     target_schema: &DFSchema,
     returning_cols: &[String],
@@ -1680,6 +1702,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 into,
                 table,
                 source,
+                source_joins,
                 on,
                 clauses,
                 output,
@@ -1693,6 +1716,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     into,
                     table,
                     source,
+                    source_joins,
                     Box::new(SQLBox::into_owned(on)),
                     clauses,
                     output,
@@ -3375,11 +3399,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok(row)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn merge_to_plan(
         &self,
         _into: bool,
         table: TableFactor,
         source: TableFactor,
+        source_joins: Vec<ast::Join>,
         on: Box<ast::Expr>,
         clauses: Vec<ast::MergeClause>,
         output: Option<ast::OutputClause>,
@@ -3442,10 +3468,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             target_plan = self.apply_table_alias(target_plan, alias)?;
         }
 
+        // `USING a JOIN b ON ...` makes the whole join the source relation, so
+        // dropping the joins would let rows the join excludes reach the WHEN
+        // clauses and be written.
         let source_plan = self.plan_table_with_joins(
             TableWithJoins {
                 relation: source,
-                joins: vec![],
+                joins: source_joins,
             },
             planner_context,
         )?;
@@ -4468,7 +4497,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     None => TableReference::bare(table_name.table()),
                 };
                 let qualified_table_schema = DFSchema::try_from_qualified_schema(
-                    table_ref,
+                    table_ref.clone(),
                     &table_schema.as_arrow().clone(),
                 )?;
 
@@ -4558,6 +4587,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 } else {
                     None
                 };
+
+                // The alias named the target row while the clause was being
+                // read; downstream consumers know the row by the relation it
+                // belongs to, so restate the planned references under that name.
+                let assignments = assignments
+                    .into_iter()
+                    .map(|assignment| {
+                        Ok(ConflictAssignment {
+                            target: assignment.target,
+                            value: rename_column_qualifier(
+                                assignment.value,
+                                &table_ref,
+                                table_name.table(),
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let selection = selection
+                    .map(|selection| {
+                        rename_column_qualifier(selection, &table_ref, table_name.table())
+                    })
+                    .transpose()?;
 
                 OnConflictAction::DoUpdate(DoUpdateAction::new(assignments, selection))
             }

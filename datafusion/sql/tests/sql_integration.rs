@@ -94,7 +94,7 @@ fn on_conflict_tuple_assignment_is_planned_as_scalar_assignments() {
 }
 
 #[test]
-fn insert_target_alias_scopes_the_conflict_update() {
+fn insert_target_alias_names_the_target_row_in_the_conflict_update() {
     let plan = logical_plan(
         "INSERT INTO person AS p (id, first_name, last_name) VALUES (1, 'A', 'B') \
          ON CONFLICT (id) DO UPDATE SET first_name = p.first_name",
@@ -118,9 +118,11 @@ fn insert_target_alias_scopes_the_conflict_update() {
     let datafusion_expr::Expr::Column(column) = &assignment.value else {
         panic!("expected the assignment to read a column");
     };
+    // The alias named the row while the clause was read; the planned reference
+    // belongs to the relation.
     assert_eq!(
         column.relation.as_ref().map(|relation| relation.table()),
-        Some("p")
+        Some("person")
     );
     assert_eq!(column.name, "first_name");
 }
@@ -203,6 +205,19 @@ fn insert_values_does_not_impose_the_target_width_on_a_nested_values() {
     )
     .unwrap();
     assert_contains!(format!("{plan}"), "Dml: op=[Insert Into] table=[person]");
+}
+
+#[test]
+fn merge_source_join_reaches_the_plan() {
+    let plan = logical_plan(
+        "MERGE INTO column_defaults c USING orders o INNER JOIN person p ON o.customer_id = p.id \
+         ON c.id = o.order_id WHEN MATCHED THEN UPDATE SET tag = p.first_name",
+    )
+    .unwrap();
+    let LogicalPlan::Merge(merge) = &plan else {
+        panic!("expected MERGE plan");
+    };
+    assert_contains!(format!("{}", merge.source.display_indent()), "Inner Join");
 }
 
 #[test]
