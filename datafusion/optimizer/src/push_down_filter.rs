@@ -823,10 +823,39 @@ impl OptimizerRule for PushDownFilter {
                 insert_below(LogicalPlan::Repartition(repartition), new_filter)
             }
             LogicalPlan::Distinct(distinct) => {
-                let new_filter =
-                    Filter::try_new(filter.predicate, Arc::clone(distinct.input()))
-                        .map(LogicalPlan::Filter)?;
-                insert_below(LogicalPlan::Distinct(distinct), new_filter)
+                // A volatile predicate must stay above the distinct: pushing
+                // it below changes how many times it is evaluated (once per
+                // input row instead of once per distinct row).
+                let (push_predicates, keep_predicates): (Vec<_>, Vec<_>) =
+                    split_conjunction_owned(filter.predicate)
+                        .into_iter()
+                        .partition(|expr| !expr.is_volatile());
+                match conjunction(push_predicates) {
+                    Some(predicate) => {
+                        let new_filter =
+                            Filter::try_new(predicate, Arc::clone(distinct.input()))
+                                .map(LogicalPlan::Filter)?;
+                        insert_below(LogicalPlan::Distinct(distinct), new_filter)?
+                            .map_data(|new_plan| {
+                                if let Some(predicate) = conjunction(keep_predicates) {
+                                    make_filter(predicate, Arc::new(new_plan))
+                                } else {
+                                    Ok(new_plan)
+                                }
+                            })
+                    }
+                    None => {
+                        let Some(predicate) = conjunction(keep_predicates) else {
+                            return internal_err!(
+                                "push_down_filter: filter over Distinct lost its predicate"
+                            );
+                        };
+                        Ok(Transformed::no(LogicalPlan::Filter(Filter::try_new(
+                            predicate,
+                            Arc::new(LogicalPlan::Distinct(distinct)),
+                        )?)))
+                    }
+                }
             }
             LogicalPlan::Sort(sort) => {
                 let new_filter =
@@ -989,7 +1018,13 @@ impl OptimizerRule for PushDownFilter {
                 let mut push_predicates = vec![];
                 for expr in predicates {
                     let cols = expr.column_refs();
-                    if cols.iter().all(|c| group_expr_columns.contains(c)) {
+                    // A volatile predicate must stay above the aggregate:
+                    // pushing it below changes how many times it is
+                    // evaluated (once per input row instead of once per
+                    // group).
+                    if !expr.is_volatile()
+                        && cols.iter().all(|c| group_expr_columns.contains(c))
+                    {
                         push_predicates.push(expr);
                     } else {
                         keep_predicates.push(expr);
