@@ -3312,47 +3312,58 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         named_columns: &[String],
         values: Vec<Expr>,
         table_source: &dyn datafusion_expr::TableSource,
+        value_schema: &DFSchema,
     ) -> Result<Vec<Expr>> {
-        if named_columns.is_empty() {
-            if values.is_empty() || values.len() == target_schema.fields().len() {
-                // A positional row already covers the target, and an empty row
-                // is DEFAULT VALUES; both fall through to the fill below.
-            } else {
+        let positions: HashMap<&str, usize> = if named_columns.is_empty() {
+            if !values.is_empty() && values.len() != target_schema.fields().len() {
                 return plan_err!(
                     "MERGE INSERT has {} values but target table has {} columns",
                     values.len(),
                     target_schema.fields().len()
                 );
             }
-            if !values.is_empty() {
-                return Ok(values);
-            }
-        } else if named_columns.len() != values.len() {
-            return plan_err!(
-                "MERGE INSERT has {} target columns but {} values",
-                named_columns.len(),
-                values.len()
-            );
-        }
-
-        let mut positions: HashMap<&str, usize> = HashMap::with_capacity(named_columns.len());
-        for (index, column) in named_columns.iter().enumerate() {
-            if target_schema.index_of(column).is_err() {
+            // A positional row covers the target in its own order; an empty row
+            // is DEFAULT VALUES and every column comes from its default.
+            target_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index < values.len())
+                .map(|(index, field)| (field.name().as_str(), index))
+                .collect()
+        } else {
+            if named_columns.len() != values.len() {
                 return plan_err!(
-                    "MERGE INSERT column \"{column}\" does not exist in the target table"
+                    "MERGE INSERT has {} target columns but {} values",
+                    named_columns.len(),
+                    values.len()
                 );
             }
-            if positions.insert(column.as_str(), index).is_some() {
-                return plan_err!(
-                    "MERGE INSERT column \"{column}\" is specified more than once"
-                );
+            let mut positions = HashMap::with_capacity(named_columns.len());
+            for (index, column) in named_columns.iter().enumerate() {
+                if target_schema.index_of(column).is_err() {
+                    return plan_err!(
+                        "MERGE INSERT column \"{column}\" does not exist in the target table"
+                    );
+                }
+                if positions.insert(column.as_str(), index).is_some() {
+                    return plan_err!(
+                        "MERGE INSERT column \"{column}\" is specified more than once"
+                    );
+                }
             }
-        }
+            positions
+        };
 
         let mut row = Vec::with_capacity(target_schema.fields().len());
         for field in target_schema.fields() {
+            // Every value lands in the column's declared type, so an untyped
+            // literal such as NULL reaches the writer as that column's value
+            // rather than as an unresolved null.
             let expr = match positions.get(field.name().as_str()) {
-                Some(index) => values[*index].clone(),
+                Some(index) => values[*index]
+                    .clone()
+                    .cast_to(field.data_type(), value_schema)?,
                 None => table_source
                     .get_column_default(field.name())
                     .cloned()
@@ -3445,21 +3456,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             &JoinType::Inner,
         )?;
 
-        let mut normalize_expr = |sql_expr: SQLExpr| -> Result<Expr> {
-            let expr = self.sql_to_expr(sql_expr, &join_schema, planner_context)?;
+        // A clause sees only the rows that exist for its match kind: a NOT
+        // MATCHED [BY TARGET] clause has no target row, and a NOT MATCHED BY
+        // SOURCE clause has no source row. Resolving their expressions against
+        // the whole join would make a name the two sides share ambiguous, and
+        // would let a clause read a row that is not there.
+        let mut normalize_expr_in = |sql_expr: SQLExpr, schema: &DFSchema| -> Result<Expr> {
+            let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
             let mut using_columns = HashSet::new();
             expr_to_columns(&expr, &mut using_columns)?;
             normalize_col_with_schemas_and_ambiguity_check(
                 expr,
-                &[&[&join_schema]],
+                &[&[schema]],
                 &[using_columns.into()],
             )
         };
 
-        let on_expr = normalize_expr(*on)?;
+        let on_expr = normalize_expr_in(*on, &join_schema)?;
 
         let mut merge_clauses = Vec::with_capacity(clauses.len());
         for clause in clauses {
+            let clause_schema = match clause.clause_kind {
+                ast::MergeClauseKind::NotMatched
+                | ast::MergeClauseKind::NotMatchedByTarget => source_plan.schema().as_ref(),
+                ast::MergeClauseKind::NotMatchedBySource => target_plan.schema().as_ref(),
+                ast::MergeClauseKind::Matched => &join_schema,
+            };
+            let mut normalize_expr =
+                |sql_expr: SQLExpr| -> Result<Expr> { normalize_expr_in(sql_expr, clause_schema) };
             let predicate = match clause.predicate {
                 Some(predicate) => Some(normalize_expr(predicate)?),
                 None => None,
@@ -3483,6 +3507,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 &named_columns,
                                 Vec::new(),
                                 table_source.as_ref(),
+                                clause_schema,
                             )?])
                         }
                         ast::MergeInsertKind::Values(values) => {
@@ -3497,6 +3522,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     &named_columns,
                                     expr_row,
                                     table_source.as_ref(),
+                                    clause_schema,
                                 )?);
                             }
                             MergeInsertKind::Values(rows)

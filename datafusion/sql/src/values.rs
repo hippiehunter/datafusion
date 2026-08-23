@@ -30,6 +30,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<LogicalPlan> {
         let empty_schema = Arc::new(DFSchema::empty());
         let defaults = planner_context.take_values_defaults();
+        // The INSERT target schema describes this list and nothing below it: a
+        // scalar subquery in a value slot may hold a VALUES of its own, whose
+        // width has nothing to do with the target row's.
+        let target_schema = planner_context.set_table_schema(None);
         let values = values
             .rows
             .iter()
@@ -54,7 +58,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let schema = planner_context.table_schema().unwrap_or(empty_schema);
+        let schema = target_schema.unwrap_or(empty_schema);
         if schema.fields().is_empty() {
             LogicalPlanBuilder::values(values)?.build()
         } else {

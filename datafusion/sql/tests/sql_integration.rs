@@ -173,6 +173,39 @@ fn merge_insert_default_values_takes_every_column_from_its_default() {
 }
 
 #[test]
+fn merge_not_matched_clause_resolves_names_against_the_source() {
+    let plan = logical_plan(
+        "MERGE INTO column_defaults c USING orders o ON c.id = o.order_id \
+         WHEN NOT MATCHED THEN INSERT (id, age) VALUES (order_id, qty)",
+    )
+    .unwrap();
+    let row = merge_insert_row(&plan);
+    assert_contains!(format!("{}", row[0]), "o.order_id");
+    assert_contains!(format!("{}", row[2]), "o.qty");
+}
+
+#[test]
+fn merge_insert_casts_values_to_the_target_column_type() {
+    let plan = logical_plan(
+        "MERGE INTO column_defaults c USING orders o ON c.id = o.order_id \
+         WHEN NOT MATCHED THEN INSERT (id, tag) VALUES (order_id, NULL)",
+    )
+    .unwrap();
+    let row = merge_insert_row(&plan);
+    assert_contains!(format!("{}", row[1]), "Utf8");
+}
+
+#[test]
+fn insert_values_does_not_impose_the_target_width_on_a_nested_values() {
+    let plan = logical_plan(
+        "INSERT INTO person (id, first_name, last_name) \
+         VALUES ((SELECT i FROM (VALUES (1)) AS f(i)), 'A', 'B')",
+    )
+    .unwrap();
+    assert_contains!(format!("{plan}"), "Dml: op=[Insert Into] table=[person]");
+}
+
+#[test]
 fn merge_insert_rejects_a_column_named_twice() {
     let error = logical_plan(
         "MERGE INTO column_defaults c USING orders o ON c.id = o.customer_id \
