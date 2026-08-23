@@ -78,10 +78,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 expr,
                 options: OrderByOptions { asc, nulls_first },
                 with_fill,
+                using,
             } = order_by_expr;
 
             if let Some(with_fill) = with_fill {
                 return not_impl_err!("ORDER BY WITH FILL is not supported: {with_fill}");
+            }
+            if let Some(using) = using {
+                return not_impl_err!("ORDER BY ... USING {using} is not supported");
             }
 
             let expr = match expr {

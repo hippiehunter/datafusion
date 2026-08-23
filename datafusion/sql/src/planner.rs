@@ -1090,6 +1090,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             | SQLDataType::MacAddr
             | SQLDataType::MacAddr8
             | SQLDataType::SetOf(_)
+            | SQLDataType::TypeOf(_)
             => {
                 not_impl_err!("Unsupported SQL type {sql_type}")
             }

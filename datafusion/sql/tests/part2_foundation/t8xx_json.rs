@@ -540,10 +540,8 @@ fn t825_error_on_empty() {
 /// T825: DEFAULT value with expression ON EMPTY
 #[test]
 fn t825_default_expression_on_empty() {
-    crate::assert_not_implemented!(
-        "SELECT JSON_VALUE(data, '$.count' DEFAULT '0' ON EMPTY RETURNING INT) FROM json_data",
-        "T825",
-        "DEFAULT with expression ON EMPTY"
+    crate::assert_parses!(
+        "SELECT JSON_VALUE(data, '$.count' DEFAULT '0' ON EMPTY RETURNING INT) FROM json_data"
     );
 }
 

@@ -842,6 +842,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 vec![sqlparser::ast::TableAliasColumnDef {
                     name: col.clone(),
                     data_type: None,
+                    collation: None,
                 }],
             );
             lateral_joins.push(Join {

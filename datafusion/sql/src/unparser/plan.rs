@@ -248,6 +248,7 @@ impl Unparser<'_> {
             .map(|f| TableAliasColumnDef {
                 name: self.new_ident_quoted_if_needs(f.name().to_string()),
                 data_type: None,
+                collation: None,
             })
             .collect();
 
@@ -1420,6 +1421,7 @@ impl Unparser<'_> {
             JoinType::Inner => match &constraint {
                 ast::JoinConstraint::On(_)
                 | ast::JoinConstraint::Using(_)
+                | ast::JoinConstraint::UsingWithAlias { .. }
                 | ast::JoinConstraint::Natural => ast::JoinOperator::Inner(constraint),
                 ast::JoinConstraint::None => {
                     // Inner joins with no conditions or filters are not valid SQL in most systems,
@@ -1560,6 +1562,7 @@ impl Unparser<'_> {
             .map(|ident| TableAliasColumnDef {
                 name: ident,
                 data_type: None,
+                collation: None,
             })
             .collect();
         ast::TableAlias {
@@ -1620,6 +1623,7 @@ impl Unparser<'_> {
                 roles: grant_role.roles.clone(),
                 grantees: grant_role.grantees.clone(),
                 with_admin_option: grant_role.with_admin_option,
+                role_options: vec![],
                 granted_by: grant_role.granted_by.clone(),
                 grant_token: AttachedToken::empty(),
             }),
@@ -1629,6 +1633,7 @@ impl Unparser<'_> {
                 granted_by: revoke_role.granted_by.clone(),
                 cascade: revoke_role.cascade.clone(),
                 admin_option_for: revoke_role.admin_option_for,
+                option_for: None,
                 revoke_token: AttachedToken::empty(),
             }),
             PlanStatement::TransactionStart(start) => {
@@ -1713,6 +1718,8 @@ impl Unparser<'_> {
                 purge: drop_sequence.purge,
                 temporary: drop_sequence.temporary,
                 table: drop_sequence.table.clone(),
+                concurrently: false,
+                force: false,
                 oracle: None,
                 drop_token: AttachedToken::empty(),
             }),
@@ -1776,6 +1783,7 @@ impl Unparser<'_> {
                         columns,
                         kind,
                         where_clause,
+                        overriding: None,
                     })
                 }
                 MergeAction::Update(update) => {
@@ -1817,6 +1825,7 @@ impl Unparser<'_> {
             into: true,
             table,
             source,
+            source_joins: vec![],
             on,
             clauses,
             output: None,

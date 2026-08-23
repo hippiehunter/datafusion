@@ -22,8 +22,8 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use arrow::datatypes::Field;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, Diagnostic, Result, Span, Spans, TableReference, UnnestOptions,
-    not_impl_err, plan_err,
+    Column, DFSchema, Diagnostic, Result, ScalarValue, Span, Spans, TableReference,
+    UnnestOptions, not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::planner::{
@@ -38,7 +38,9 @@ use datafusion_expr::{
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, expr::Unnest};
 use sqlparser::ast::{
     AstBox as SQLBox, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, Spanned, TableAliasColumnDef, TableFactor,
+    Ident, JsonOnBehavior, Spanned, SqlJsonTable, SqlJsonTableColumn,
+    SqlJsonTableExistsColumn, SqlJsonTableNestedColumn, SqlJsonTableRegularColumn,
+    TableAliasColumnDef, TableFactor,
 };
 
 mod join;
@@ -434,6 +436,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     table_alias.columns.push(TableAliasColumnDef {
                         name: table_alias.name.clone(),
                         data_type: None,
+                        collation: None,
                     });
                 }
                 (logical_plan, alias)
@@ -754,6 +757,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         table_alias.columns.push(TableAliasColumnDef {
                             name: table_alias.name.clone(),
                             data_type: None,
+                            collation: None,
                         });
                     }
                 }
@@ -1124,6 +1128,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )?;
                 (plan, alias)
             }
+            TableFactor::SqlJsonTable(json_table) => {
+                let alias = json_table.alias.clone();
+                let plan = self.plan_sql_json_table(json_table, planner_context)?;
+                (plan, alias)
+            }
             TableFactor::GraphTable {
                 graph_name,
                 match_clause,
@@ -1379,8 +1388,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         handling: sqlparser::ast::JsonTableColumnErrorHandling,
     ) -> Result<JsonTableErrorHandling> {
-        use datafusion_common::ScalarValue;
-
         match handling {
             sqlparser::ast::JsonTableColumnErrorHandling::Null => {
                 Ok(JsonTableErrorHandling::Null)
@@ -1388,30 +1395,211 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             sqlparser::ast::JsonTableColumnErrorHandling::Error => {
                 Ok(JsonTableErrorHandling::Error)
             }
-            sqlparser::ast::JsonTableColumnErrorHandling::Default(value) => {
-                // Convert the default value to a ScalarValue
-                let scalar = match value {
-                    sqlparser::ast::Value::Number(n, _) => {
-                        // Try parsing as different numeric types
-                        if let Ok(i) = n.parse::<i64>() {
-                            ScalarValue::Int64(Some(i))
-                        } else if let Ok(f) = n.parse::<f64>() {
-                            ScalarValue::Float64(Some(f))
-                        } else {
-                            return plan_err!("Invalid numeric value in DEFAULT clause");
-                        }
-                    }
-                    sqlparser::ast::Value::SingleQuotedString(s)
-                    | sqlparser::ast::Value::DoubleQuotedString(s) => {
-                        ScalarValue::Utf8(Some(s))
-                    }
-                    sqlparser::ast::Value::Boolean(b) => ScalarValue::Boolean(Some(b)),
-                    sqlparser::ast::Value::Null => ScalarValue::Null,
-                    _ => {
-                        return plan_err!("Unsupported default value type in JSON_TABLE");
-                    }
-                };
-                Ok(JsonTableErrorHandling::Default(scalar))
+            sqlparser::ast::JsonTableColumnErrorHandling::Default(value) => Ok(
+                JsonTableErrorHandling::Default(Self::json_table_default_scalar(value)?),
+            ),
+        }
+    }
+
+    /// The literal of a JSON_TABLE `DEFAULT <value> ON EMPTY/ERROR` clause.
+    fn json_table_default_scalar(value: sqlparser::ast::Value) -> Result<ScalarValue> {
+        match value {
+            sqlparser::ast::Value::Number(n, _) => {
+                if let Ok(i) = n.parse::<i64>() {
+                    Ok(ScalarValue::Int64(Some(i)))
+                } else if let Ok(f) = n.parse::<f64>() {
+                    Ok(ScalarValue::Float64(Some(f)))
+                } else {
+                    plan_err!("Invalid numeric value in DEFAULT clause")
+                }
+            }
+            sqlparser::ast::Value::SingleQuotedString(s)
+            | sqlparser::ast::Value::DoubleQuotedString(s) => Ok(ScalarValue::Utf8(Some(s))),
+            sqlparser::ast::Value::Boolean(b) => Ok(ScalarValue::Boolean(Some(b))),
+            sqlparser::ast::Value::Null => Ok(ScalarValue::Null),
+            _ => plan_err!("Unsupported default value type in JSON_TABLE"),
+        }
+    }
+
+    /// Plan the PostgreSQL spelling of `JSON_TABLE` onto the same logical
+    /// plan node as the generic `JSON_TABLE` table factor.
+    fn plan_sql_json_table(
+        &self,
+        json_table: SqlJsonTable,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        let SqlJsonTable {
+            context_item,
+            path,
+            path_name,
+            passing,
+            columns,
+            on_error,
+            alias: _,
+        } = json_table;
+        if let Some(path_name) = path_name {
+            return not_impl_err!("JSON_TABLE path name AS {path_name} is not supported");
+        }
+        if !passing.is_empty() {
+            return not_impl_err!("JSON_TABLE PASSING clause is not supported");
+        }
+        if let Some(on_error) = on_error {
+            return not_impl_err!(
+                "JSON_TABLE table-level {on_error} ON ERROR is not supported"
+            );
+        }
+        let json_path = match path {
+            SQLExpr::Value(value) => Self::json_table_path_string(value.value)?,
+            other => return plan_err!("JSON_TABLE path must be a string literal, got {other}"),
+        };
+        let empty_schema = DFSchema::empty();
+        let df_json_expr =
+            self.sql_expr_to_logical_expr(context_item, &empty_schema, planner_context)?;
+        let df_columns = self.convert_sql_json_table_columns(columns)?;
+        Ok(LogicalPlan::JsonTable(JsonTable::try_new(
+            df_json_expr,
+            json_path,
+            df_columns,
+        )?))
+    }
+
+    fn json_table_path_string(value: sqlparser::ast::Value) -> Result<String> {
+        match value {
+            sqlparser::ast::Value::SingleQuotedString(s)
+            | sqlparser::ast::Value::DoubleQuotedString(s) => Ok(s),
+            other => plan_err!("JSON_TABLE path must be a string literal, got {other}"),
+        }
+    }
+
+    /// A column without `PATH` reads the member named after the column.
+    fn sql_json_table_column_path(
+        name: &Ident,
+        path: Option<sqlparser::ast::Value>,
+    ) -> Result<String> {
+        match path {
+            Some(value) => Self::json_table_path_string(value),
+            None => Ok(format!("$.{}", name.value)),
+        }
+    }
+
+    fn convert_sql_json_table_columns(
+        &self,
+        columns: Vec<SqlJsonTableColumn>,
+    ) -> Result<Vec<JsonTableColumnDef>> {
+        columns
+            .into_iter()
+            .map(|column| self.convert_sql_json_table_column(column))
+            .collect()
+    }
+
+    fn convert_sql_json_table_column(
+        &self,
+        column: SqlJsonTableColumn,
+    ) -> Result<JsonTableColumnDef> {
+        match column {
+            SqlJsonTableColumn::ForOrdinality(ident) => {
+                Ok(JsonTableColumnDef::Ordinality { name: ident.value })
+            }
+            SqlJsonTableColumn::Regular(SqlJsonTableRegularColumn {
+                name,
+                data_type,
+                format,
+                path,
+                wrapper,
+                quotes,
+                on_empty,
+                on_error,
+            }) => {
+                if let Some(format) = format {
+                    return not_impl_err!(
+                        "JSON_TABLE column {name} {format} is not supported"
+                    );
+                }
+                if let Some(wrapper) = wrapper {
+                    return not_impl_err!(
+                        "JSON_TABLE column {name} {wrapper} is not supported"
+                    );
+                }
+                if let Some(quotes) = quotes {
+                    return not_impl_err!(
+                        "JSON_TABLE column {name} {quotes} is not supported"
+                    );
+                }
+                let path = Self::sql_json_table_column_path(&name, path)?;
+                let field = self.convert_data_type_to_field(&data_type)?;
+                Ok(JsonTableColumnDef::Path {
+                    name: name.value,
+                    data_type: field.data_type().clone(),
+                    path,
+                    exists: false,
+                    on_empty: on_empty
+                        .map(Self::convert_sql_json_behavior)
+                        .transpose()?,
+                    on_error: on_error
+                        .map(Self::convert_sql_json_behavior)
+                        .transpose()?,
+                })
+            }
+            SqlJsonTableColumn::Exists(SqlJsonTableExistsColumn {
+                name,
+                data_type,
+                path,
+                on_error,
+            }) => {
+                let path = Self::sql_json_table_column_path(&name, path)?;
+                let field = self.convert_data_type_to_field(&data_type)?;
+                Ok(JsonTableColumnDef::Path {
+                    name: name.value,
+                    data_type: field.data_type().clone(),
+                    path,
+                    exists: true,
+                    on_empty: None,
+                    on_error: on_error
+                        .map(Self::convert_sql_json_behavior)
+                        .transpose()?,
+                })
+            }
+            SqlJsonTableColumn::Nested(SqlJsonTableNestedColumn {
+                path,
+                path_name,
+                columns,
+            }) => {
+                if let Some(path_name) = path_name {
+                    return not_impl_err!(
+                        "JSON_TABLE nested path name AS {path_name} is not supported"
+                    );
+                }
+                Ok(JsonTableColumnDef::Nested {
+                    path: Self::json_table_path_string(path)?,
+                    columns: self.convert_sql_json_table_columns(columns)?,
+                })
+            }
+        }
+    }
+
+    /// The behaviors a JSON_TABLE column clause can carry into the plan node:
+    /// `NULL`, `ERROR`, a literal `DEFAULT`, and the boolean outcomes of an
+    /// `EXISTS` column.
+    fn convert_sql_json_behavior(behavior: JsonOnBehavior) -> Result<JsonTableErrorHandling> {
+        match behavior {
+            JsonOnBehavior::Null | JsonOnBehavior::Unknown => Ok(JsonTableErrorHandling::Null),
+            JsonOnBehavior::Error => Ok(JsonTableErrorHandling::Error),
+            JsonOnBehavior::True => Ok(JsonTableErrorHandling::Default(
+                ScalarValue::Boolean(Some(true)),
+            )),
+            JsonOnBehavior::False => Ok(JsonTableErrorHandling::Default(
+                ScalarValue::Boolean(Some(false)),
+            )),
+            JsonOnBehavior::Default(expr) => match expr.as_ref() {
+                SQLExpr::Value(value) => Ok(JsonTableErrorHandling::Default(
+                    Self::json_table_default_scalar(value.value.clone())?,
+                )),
+                other => not_impl_err!(
+                    "JSON_TABLE DEFAULT {other} must be a literal"
+                ),
+            },
+            JsonOnBehavior::EmptyArray | JsonOnBehavior::EmptyObject => {
+                not_impl_err!("JSON_TABLE {behavior} ON EMPTY/ERROR is not supported")
             }
         }
     }

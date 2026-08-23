@@ -860,6 +860,7 @@ impl Unparser<'_> {
                 nulls_first,
             },
             with_fill: None,
+            using: None,
         })
     }
 

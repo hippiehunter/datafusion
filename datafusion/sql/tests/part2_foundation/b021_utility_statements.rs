@@ -689,7 +689,7 @@ fn b021_vacuum_full() {
 /// VACUUM: VACUUM ANALYZE
 #[test]
 fn b021_vacuum_analyze() {
-    crate::assert_not_implemented!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
+    assert_feature_supported!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
 }
 
 // ============================================================================

@@ -514,6 +514,7 @@ pub(crate) fn to_order_by_exprs_with_select<'a>(
                         }),
                         options: order_by_options.clone(),
                         with_fill: None,
+                        using: None,
                     }),
                     // TODO: Support other types of expressions
                     _ => not_impl_err!(

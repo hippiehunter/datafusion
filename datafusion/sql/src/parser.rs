@@ -1126,6 +1126,7 @@ impl<'a> DFParser<'a> {
             expr,
             options: OrderByOptions { asc, nulls_first },
             with_fill: None,
+            using: None,
         })
     }
 
@@ -1771,6 +1772,7 @@ mod tests {
                     }),
                     options: OrderByOptions { asc, nulls_first },
                     with_fill: None,
+                    using: None,
                 }]],
                 if_not_exists: false,
                 or_replace: false,
@@ -1806,6 +1808,7 @@ mod tests {
                         nulls_first: None,
                     },
                     with_fill: None,
+                    using: None,
                 },
                 OrderByExpr {
                     expr: Identifier(Ident {
@@ -1818,6 +1821,7 @@ mod tests {
                         nulls_first: Some(true),
                     },
                     with_fill: None,
+                    using: None,
                 },
             ]],
             if_not_exists: false,
@@ -1860,6 +1864,7 @@ mod tests {
                     nulls_first: None,
                 },
                 with_fill: None,
+                using: None,
             }]],
             if_not_exists: false,
             or_replace: false,
@@ -1910,6 +1915,7 @@ mod tests {
                     nulls_first: None,
                 },
                 with_fill: None,
+                using: None,
             }]],
             if_not_exists: true,
             or_replace: false,
@@ -1978,6 +1984,7 @@ mod tests {
                     nulls_first: None,
                 },
                 with_fill: None,
+                using: None,
             }]],
             if_not_exists: false,
             or_replace: true,

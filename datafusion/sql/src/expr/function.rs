@@ -198,6 +198,21 @@ impl<'a> FunctionArgs<'a> {
                     // JSON ON ERROR clause is accepted but ignored for now
                     // SQL:2016 T8xx JSON support
                 }
+                FunctionArgumentClause::JsonPassing(_) => {
+                    return not_impl_err!(
+                        "Calling {name}: PASSING not supported in function arguments"
+                    );
+                }
+                FunctionArgumentClause::JsonQuotes(quotes) => {
+                    return not_impl_err!(
+                        "Calling {name}: QUOTES clause not supported in function arguments: {quotes}"
+                    );
+                }
+                FunctionArgumentClause::JsonFormat(format) => {
+                    return not_impl_err!(
+                        "Calling {name}: FORMAT clause not supported in function arguments: {format}"
+                    );
+                }
                 FunctionArgumentClause::JsonQueryWrapper(jw) => {
                     return not_impl_err!(
                         "Calling {name}: JSON query wrapper not supported in function arguments: {jw}"

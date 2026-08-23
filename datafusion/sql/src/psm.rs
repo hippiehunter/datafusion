@@ -31,8 +31,8 @@ use datafusion_expr::logical_plan::psm::{
     PsmWhile, RegionInfo,
 };
 use sqlparser::ast::{
-    self, ConditionalStatements, DeclareAssignment, Ident, ReturnStatementValue,
-    Statement,
+    self, AtomicBlock, ConditionalStatements, DeclareAssignment, Ident,
+    ReturnStatementValue, Statement,
 };
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
@@ -51,7 +51,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // Delegate to existing BEGIN/END handler
                 self.plan_psm_block(begin_end, planner_context)
             }
-            ConditionalStatements::Sequence { statements } => {
+            ConditionalStatements::Sequence { statements }
+            | ConditionalStatements::BeginAtomic(AtomicBlock { statements }) => {
                 // Plan sequence of statements as a block
                 let mut planned_statements = Vec::new();
                 let mut info = RegionInfo::default();

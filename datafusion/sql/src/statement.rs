@@ -77,7 +77,7 @@ use sqlparser::ast::{
 
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
-    CreateTableOptions, Delete, DescribeAlias, Expr as SQLExpr, ForeignKeyColumnOrPeriod,
+    CreateTableOptions, CreateTableWithData, Delete, DescribeAlias, Expr as SQLExpr, ForeignKeyColumnOrPeriod,
     FromTable, Ident, Insert, ObjectName, ObjectType, Query, SchemaName, SelectItem,
     SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
     TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
@@ -366,6 +366,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                                 nulls_first: None,
                             },
                             with_fill: None,
+                            using: None,
                         },
                         operator_class: None,
                     };
@@ -378,6 +379,8 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         index_options: unique_constraint.index_options.clone(),
                         characteristics: unique_constraint.characteristics,
                         nulls_distinct: unique_constraint.nulls_distinct.clone(),
+                        period_without_overlaps: unique_constraint.period_without_overlaps.clone(),
+                        index_details: unique_constraint.index_details.clone(),
                     }));
                 }
                 ast::ColumnOption::PrimaryKey(pk_constraint) => {
@@ -389,6 +392,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                                 nulls_first: None,
                             },
                             with_fill: None,
+                            using: None,
                         },
                         operator_class: None,
                     };
@@ -399,6 +403,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         columns: vec![column_expr],
                         index_options: pk_constraint.index_options.clone(),
                         characteristics: pk_constraint.characteristics,
+                        index_details: pk_constraint.index_details.clone(),
                         period_without_overlaps: None,
                     }));
                 }
@@ -415,6 +420,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         on_update: fk_constraint.on_update.clone(),
                         match_kind: fk_constraint.match_kind.clone(),
                         characteristics: fk_constraint.characteristics,
+                        on_delete_columns: fk_constraint.on_delete_columns.clone(),
                     }));
                 }
                 ast::ColumnOption::Check(check_constraint) => {
@@ -422,6 +428,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         name: name.clone(),
                         expr: check_constraint.expr.clone(),
                         enforced: check_constraint.enforced,
+                        no_inherit: check_constraint.no_inherit,
                     }));
                 }
                 // Other options are not constraint related.
@@ -437,7 +444,13 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                 | ast::ColumnOption::Identity(_)
                 | ast::ColumnOption::Srid(_)
                 | ast::ColumnOption::Collation(_)
-                | ast::ColumnOption::Invisible => {}
+                | ast::ColumnOption::Invisible
+                | ast::ColumnOption::NotNullNoInherit
+                | ast::ColumnOption::NoInherit
+                | ast::ColumnOption::Storage(_)
+                | ast::ColumnOption::Compression(_)
+                | ast::ColumnOption::ConstraintAttribute(_)
+                | ast::ColumnOption::GenericOptions(_) => {}
             }
         }
     }
@@ -649,10 +662,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 table_options,
                 dynamic,
                 version,
+                unlogged,
+                column_aliases,
+                like_elements,
+                execute,
+                with_data,
                 ..
             }) => {
                 if external {
                     return not_impl_err!("External tables not supported")?;
+                }
+                if unlogged {
+                    return not_impl_err!("UNLOGGED tables are not supported");
+                }
+                if !column_aliases.is_empty() {
+                    return not_impl_err!(
+                        "CREATE TABLE ... AS with a column name list is not supported"
+                    );
+                }
+                if !like_elements.is_empty() {
+                    return not_impl_err!("LIKE not supported");
+                }
+                if execute.is_some() {
+                    return not_impl_err!("CREATE TABLE ... AS EXECUTE is not supported");
+                }
+                if with_data == Some(CreateTableWithData::WithNoData) {
+                    return not_impl_err!("CREATE TABLE ... AS ... WITH NO DATA is not supported");
                 }
                 if global.is_some() {
                     return not_impl_err!("Global tables not supported")?;
@@ -813,6 +848,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 {
                     return not_impl_err!("Oracle CREATE VIEW options are not supported");
                 }
+                if let Some(check_option) = &view.check_option {
+                    return not_impl_err!("CREATE VIEW ... {check_option} is not supported");
+                }
                 // put the statement back together temporarily to get the SQL
                 // string representation
                 let sql = Statement::CreateView(view.clone()).to_string();
@@ -872,21 +910,40 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 name,
                 concurrently,
                 method,
-            } => Ok(LogicalPlan::Ddl(DdlStatement::RefreshMaterializedView(
+                with_data,
+            } => {
+                if with_data == Some(false) {
+                    return not_impl_err!(
+                        "REFRESH MATERIALIZED VIEW ... WITH NO DATA is not supported"
+                    );
+                }
+                Ok(LogicalPlan::Ddl(DdlStatement::RefreshMaterializedView(
                 RefreshMaterializedView {
                     name: self.object_name_to_table_reference(name)?,
                     concurrently,
                     method,
                     schema: DFSchemaRef::new(DFSchema::empty()),
                 },
-            ))),
-            Statement::AlterMaterializedView { name, operation } => Ok(LogicalPlan::Ddl(
+            )))
+            }
+            Statement::AlterMaterializedView {
+                name,
+                operation,
+                if_exists,
+            } => {
+                if if_exists {
+                    return not_impl_err!(
+                        "ALTER MATERIALIZED VIEW IF EXISTS is not supported"
+                    );
+                }
+                Ok(LogicalPlan::Ddl(
                 DdlStatement::AlterMaterializedView(AlterMaterializedView {
                     name: self.object_name_to_table_reference(name)?,
                     operation,
                     schema: DFSchemaRef::new(DFSchema::empty()),
                 }),
-            )),
+            ))
+            }
             Statement::AlterTable(mut alter_table) => {
                 let mut operations = Vec::with_capacity(alter_table.operations.len());
                 for operation in alter_table.operations {
@@ -1669,7 +1726,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let isolation_level: ast::TransactionIsolationLevel = modes
                     .iter()
                     .filter_map(|m: &TransactionMode| match m {
-                        TransactionMode::AccessMode(_) => None,
+                        TransactionMode::AccessMode(_) | TransactionMode::Deferrable(_) => None,
                         TransactionMode::IsolationLevel(level) => Some(level),
                     })
                     .next_back()
@@ -1679,7 +1736,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .iter()
                     .filter_map(|m: &TransactionMode| match m {
                         TransactionMode::AccessMode(mode) => Some(mode),
-                        TransactionMode::IsolationLevel(_) => None,
+                        TransactionMode::IsolationLevel(_) | TransactionMode::Deferrable(_) => None,
                     })
                     .next_back()
                     .copied()
@@ -1912,6 +1969,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 return not_impl_err!(
                                     "AS RETURN function syntax is not supported"
                                 )?;
+                            }
+                            ast::CreateFunctionBody::AsObjectFileLinkSymbol { .. } => {
+                                return not_impl_err!(
+                                    "AS 'obj_file', 'link_symbol' function bodies are not supported"
+                                );
+                            }
+                            ast::CreateFunctionBody::BeginAtomic(_) => {
+                                return not_impl_err!(
+                                    "BEGIN ATOMIC function bodies are not supported"
+                                );
+                            }
+                            ast::CreateFunctionBody::Multiple(_) => {
+                                return plan_err!(
+                                    "duplicate function body specifications"
+                                );
                             }
                         },
                         &planner_context.psm_schema(),
@@ -2174,6 +2246,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                             "Qualified wildcard in CALL is not supported"
                                         );
                                     }
+                                    ast::FunctionArgExpr::Query(_) => {
+                                        return not_impl_err!(
+                                            "Subquery argument in CALL is not supported"
+                                        );
+                                    }
                                 },
                                 ast::FunctionArg::ExprNamed { arg, .. } => match arg {
                                     ast::FunctionArgExpr::Expr(e) => e.clone(),
@@ -2193,6 +2270,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     ast::FunctionArgExpr::QualifiedWildcard(_) => {
                                         return not_impl_err!(
                                             "Qualified wildcard in CALL is not supported"
+                                        );
+                                    }
+                                    ast::FunctionArgExpr::Query(_) => {
+                                        return not_impl_err!(
+                                            "Subquery argument in CALL is not supported"
                                         );
                                     }
                                 },
@@ -2816,6 +2898,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 TableConstraint::Period { .. } => {
                     _plan_err!("PERIOD constraints are not currently supported")
                 }
+                TableConstraint::NotNull(not_null) => {
+                    _plan_err!(
+                        "Table-level NOT NULL constraints are not currently supported: {not_null}"
+                    )
+                }
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Constraints::new_unverified(constraints))
@@ -3324,6 +3411,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             MergeInsertKind::Values(rows)
                         }
                         ast::MergeInsertKind::Row => MergeInsertKind::Row,
+                        ast::MergeInsertKind::DefaultValues => {
+                            return not_impl_err!(
+                                "MERGE ... WHEN NOT MATCHED THEN INSERT DEFAULT VALUES is not supported"
+                            );
+                        }
                     };
                     let columns = insert
                         .columns
@@ -3440,6 +3532,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Process each assignment
         for assign in assignments {
             match &assign.target {
+                AssignmentTarget::Indirection(target) => {
+                    return not_impl_err!(
+                        "Assignment to a subscripted or field target is not supported: {target}"
+                    );
+                }
                 AssignmentTarget::ColumnName(cols) => {
                     // Single column assignment
                     let col_name = extract_column_name(cols)?;
@@ -4066,6 +4163,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let mut assignments = Vec::with_capacity(do_update.assignments.len());
                 for assignment in &do_update.assignments {
                     let scalar_assignments = match &assignment.target {
+                        AssignmentTarget::Indirection(target) => {
+                            return not_impl_err!(
+                                "Assignment to a subscripted or field target is not supported: {target}"
+                            );
+                        }
                         AssignmentTarget::ColumnName(_) => {
                             vec![(assignment.target.clone(), &assignment.value)]
                         }
@@ -4139,14 +4241,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        let conflict_target = conflict.conflict_target.as_ref().map(|ct| match ct {
-            ast::ConflictTarget::Columns(idents) => ConflictTarget::Columns(
+        let conflict_target = match conflict.conflict_target.as_ref() {
+            None => None,
+            Some(ast::ConflictTarget::Columns(idents)) => Some(ConflictTarget::Columns(
                 idents.iter().map(|ident| ident.value.clone()).collect(),
-            ),
-            ast::ConflictTarget::OnConstraint(name) => {
-                ConflictTarget::OnConstraint(name.to_string())
+            )),
+            Some(ast::ConflictTarget::OnConstraint(name)) => {
+                Some(ConflictTarget::OnConstraint(name.to_string()))
             }
-        });
+            Some(ast::ConflictTarget::Inference(inference)) => {
+                return not_impl_err!(
+                    "ON CONFLICT with an index inference clause is not supported: {inference}"
+                );
+            }
+        };
 
         Ok(OnConflict::new(conflict_target, action))
     }

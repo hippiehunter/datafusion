@@ -79,6 +79,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         unsigned_number: &str,
         negative: bool,
     ) -> Result<Expr> {
+        // PostgreSQL allows `_` digit separators and the `0x`/`0o`/`0b`
+        // integer prefixes; both are stripped here so the literal text parses.
+        let unsigned_number: Cow<str> = if unsigned_number.contains('_') {
+            Cow::Owned(unsigned_number.replace('_', ""))
+        } else {
+            Cow::Borrowed(unsigned_number)
+        };
+        let unsigned_number: &str = &unsigned_number;
+        if let Some((radix, digits)) = radix_integer_literal(unsigned_number) {
+            let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
+                DataFusionError::from(ParserError(format!(
+                    "Cannot parse {unsigned_number} as an integer"
+                )))
+            })?;
+            let value = if negative { -magnitude } else { magnitude };
+            return Ok(if let Ok(n) = i32::try_from(value) {
+                lit(n)
+            } else if let Ok(n) = i64::try_from(value) {
+                lit(n)
+            } else if let Ok(n) = u64::try_from(value) {
+                lit(n)
+            } else {
+                Expr::Literal(ScalarValue::Decimal128(Some(value), 38, 0), None)
+            });
+        }
+
         let signed_number: Cow<str> = if negative {
             Cow::Owned(format!("-{unsigned_number}"))
         } else {
@@ -805,4 +831,17 @@ mod tests {
         );
         assert_eq!(normalize_iso8601_interval_literal("2 days"), None);
     }
+}
+
+/// Split a PostgreSQL non-decimal integer literal (`0x1F`, `0o17`, `0b101`)
+/// into its radix and digit text.
+fn radix_integer_literal(text: &str) -> Option<(u32, &str)> {
+    let (prefix, digits) = text.split_at_checked(2)?;
+    let radix = match prefix {
+        "0x" | "0X" => 16,
+        "0o" | "0O" => 8,
+        "0b" | "0B" => 2,
+        _ => return None,
+    };
+    (!digits.is_empty()).then_some((radix, digits))
 }

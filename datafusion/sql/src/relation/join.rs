@@ -139,6 +139,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .join_on(right, join_type, Some(expr))?
                     .build()
             }
+            JoinConstraint::UsingWithAlias { alias, .. } => {
+                not_impl_err!("JOIN ... USING (...) AS {alias} is not supported")
+            }
             JoinConstraint::Using(object_names) => {
                 let keys = object_names
                     .iter()
