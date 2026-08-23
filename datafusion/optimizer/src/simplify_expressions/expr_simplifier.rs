@@ -654,6 +654,23 @@ impl<'a> ConstEvaluator<'a> {
             {
                 false
             }
+            // POSIX regular-expression matching and SIMILAR TO run on the
+            // execution engine's own regex engine, not the built-in Arrow
+            // kernel; leave them for that lowering instead of const-folding
+            // them here (the Arrow kernel rejects back references and
+            // lookaround the engine supports).
+            Expr::BinaryExpr(bin)
+                if matches!(
+                    bin.op,
+                    Operator::RegexMatch
+                        | Operator::RegexNotMatch
+                        | Operator::RegexIMatch
+                        | Operator::RegexNotIMatch
+                ) =>
+            {
+                false
+            }
+            Expr::SimilarTo { .. } => false,
             Expr::Literal(_, _)
             | Expr::Alias(..)
             | Expr::Unnest(_)
@@ -670,7 +687,6 @@ impl<'a> ConstEvaluator<'a> {
             | Expr::Negative(_)
             | Expr::Between { .. }
             | Expr::Like { .. }
-            | Expr::SimilarTo { .. }
             | Expr::Case(_)
             | Expr::Cast { .. }
             | Expr::TryCast { .. }
