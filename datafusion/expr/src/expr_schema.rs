@@ -727,14 +727,11 @@ impl ExprSchemable for Expr {
         // like all of the binary expressions below. Perhaps Expr should track the
         // type of the expression?
 
+        // A value the target type's own input function reads (see
+        // `value_reads_into`) is cast nominally; the dialect's analysis
+        // replaces the cast with that read.
         if can_cast_types(&this_type, cast_to_type)
-            || matches!(
-                (&this_type, cast_to_type),
-                (
-                    DataType::Utf8 | DataType::LargeUtf8,
-                    DataType::FixedSizeBinary(_)
-                )
-            )
+            || crate::logical_plan::builder::value_reads_into(&this_type, cast_to_type)
         {
             match self {
                 Expr::ScalarSubquery(subquery) => {

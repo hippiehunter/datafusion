@@ -24,8 +24,8 @@ use datafusion_expr::planner::{
 use sqlparser::ast::{
     AccessExpr, AstBox as SQLBox, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
-    ExprWithAlias as SQLExprWithAlias, JsonPathElem, StructField, Subscript,
-    TrimWhereField, TypedString, Value, ValueWithSpan,
+    ExprWithAlias as SQLExprWithAlias, JsonPathElem, QuantifiedPredicateKind,
+    StructField, Subscript, TrimWhereField, TypedString, Value, ValueWithSpan,
 };
 
 use datafusion_common::{
@@ -633,7 +633,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 expr,
                 pattern,
                 escape_char,
-                any,
+                quantifier,
             } => self.sql_like_to_expr(
                 *negated,
                 expr.as_ref(),
@@ -642,7 +642,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 schema,
                 planner_context,
                 false,
-                *any,
+                quantifier.as_ref(),
             ),
 
             SQLExpr::ILike {
@@ -650,7 +650,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 expr,
                 pattern,
                 escape_char,
-                any,
+                quantifier,
             } => self.sql_like_to_expr(
                 *negated,
                 expr.as_ref(),
@@ -659,7 +659,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 schema,
                 planner_context,
                 true,
-                *any,
+                quantifier.as_ref(),
             ),
 
             SQLExpr::SimilarTo {
@@ -919,7 +919,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 match right.as_ref() {
                     SQLExpr::Subquery(subquery) => self.parse_any_subquery(
                         left.as_ref(),
-                        op,
+                        &compare_op,
                         subquery.as_ref(),
                         schema,
                         planner_context,
@@ -970,7 +970,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 match right.as_ref() {
                     SQLExpr::Subquery(subquery) => self.parse_all_subquery(
                         left.as_ref(),
-                        op,
+                        &compare_op,
                         subquery.as_ref(),
                         schema,
                         planner_context,
@@ -1145,23 +1145,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         not_impl_err!("Struct not supported by ExprPlanner: {create_struct_args:?}")
     }
 
+    /// A parenthesized list of expressions, `(a, b + 1, 'c')`, is a row
+    /// constructor: it plans exactly as `ROW(a, b + 1, 'c')` does.
     fn parse_tuple(
         &self,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
         values: &[SQLExpr],
     ) -> Result<Expr> {
-        match values.first() {
-            Some(SQLExpr::Identifier(_))
-            | Some(SQLExpr::Value(_))
-            | Some(SQLExpr::CompoundIdentifier(_)) => {
-                self.parse_struct(schema, planner_context, values, &[])
-            }
-            None => not_impl_err!("Empty tuple not supported yet"),
-            _ => {
-                not_impl_err!("Only identifiers and literals are supported in tuples")
-            }
-        }
+        self.parse_struct(schema, planner_context, values, &[])
     }
 
     fn sql_position_to_expr(
@@ -1234,10 +1226,35 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
         case_insensitive: bool,
-        any: bool,
+        quantifier: Option<&QuantifiedPredicateKind>,
     ) -> Result<Expr> {
-        if any {
-            return not_impl_err!("ANY in LIKE expression");
+        if let Some(quantifier) = quantifier {
+            // `x LIKE ANY (patterns)` is the pattern operator quantified over
+            // an array, exactly as `x = ANY (values)` is.
+            if escape_char.is_some() {
+                return not_impl_err!("ESCAPE with a quantified LIKE pattern");
+            }
+            let op = match (negated, case_insensitive) {
+                (false, false) => Operator::LikeMatch,
+                (false, true) => Operator::ILikeMatch,
+                (true, false) => Operator::NotLikeMatch,
+                (true, true) => Operator::NotILikeMatch,
+            };
+            let value = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+            let patterns =
+                self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
+            return Ok(match quantifier {
+                QuantifiedPredicateKind::Any => Expr::AnyExpr(AnyExpr::new(
+                    Box::new(value),
+                    op,
+                    QuantifiedSource::Array(Box::new(patterns)),
+                )),
+                QuantifiedPredicateKind::All => Expr::AllExpr(AllExpr::new(
+                    Box::new(value),
+                    op,
+                    QuantifiedSource::Array(Box::new(patterns)),
+                )),
+            });
         }
         let pattern = self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
         let escape_char = match escape_char {

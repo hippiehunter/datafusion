@@ -5315,7 +5315,7 @@ impl Unnest {
                                 ));
                                 Ok(get_unnested_columns(
                                     &r.output_column.name,
-                                    original_field.data_type(),
+                                    original_field,
                                     r.depth,
                                 )?
                                 .into_iter()
@@ -5326,7 +5326,7 @@ impl Unnest {
                         if transformed_columns.is_empty() {
                             transformed_columns = get_unnested_columns(
                                 &column_to_unnest.name,
-                                original_field.data_type(),
+                                original_field,
                                 1,
                             )?;
                             match original_field.data_type() {
@@ -5417,22 +5417,47 @@ impl Unnest {
 // - Struct(field1, field2) returns ["a.field1","a.field2"]
 // For list data type, an argument depth is used to specify
 // the recursion level
+/// Field metadata key under which a dialect records an array column's
+/// declared dimension count; unnesting consumes dimensions.
+const ARRAY_DIMENSIONS_METADATA: &str = "pg_array_dims";
+
 fn get_unnested_columns(
     col_name: &String,
-    data_type: &DataType,
+    field: &Field,
     depth: usize,
 ) -> Result<Vec<(Column, Arc<Field>)>> {
     let mut qualified_columns = Vec::with_capacity(1);
+    let data_type = field.data_type();
 
     match data_type {
         DataType::List(_) | DataType::FixedSizeList(_, _) | DataType::LargeList(_) => {
             let data_type = get_unnested_list_datatype_recursive(data_type, depth)?;
-            let new_field = Arc::new(Field::new(
-                col_name, data_type,
-                // Unnesting may produce NULLs even if the list is not null.
-                // For example: unnest([1], []) -> 1, null
-                true,
-            ));
+            // The element keeps the list field's type metadata: what names
+            // the list's element type names the unnested value's type. A
+            // declared array dimension count drops by the unnested depth.
+            let mut metadata = field.metadata().clone();
+            if let Some(dimensions) = metadata
+                .get(ARRAY_DIMENSIONS_METADATA)
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                if dimensions > depth {
+                    metadata.insert(
+                        ARRAY_DIMENSIONS_METADATA.to_string(),
+                        (dimensions - depth).to_string(),
+                    );
+                } else {
+                    metadata.remove(ARRAY_DIMENSIONS_METADATA);
+                }
+            }
+            let new_field = Arc::new(
+                Field::new(
+                    col_name, data_type,
+                    // Unnesting may produce NULLs even if the list is not null.
+                    // For example: unnest([1], []) -> 1, null
+                    true,
+                )
+                .with_metadata(metadata),
+            );
             let column = Column::from_name(col_name);
             // let column = Column::from((None, &new_field));
             qualified_columns.push((column, new_field));

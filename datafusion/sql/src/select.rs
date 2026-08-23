@@ -1125,12 +1125,49 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut error_builder = DataFusionErrorBuilder::new();
 
         for expr in projection {
+            if let SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::Expr(row_expr),
+                options,
+            ) = expr
+            {
+                match self.row_wildcard_to_exprs(row_expr, options, plan, planner_context)
+                {
+                    Ok(exprs) => prepared_select_exprs
+                        .extend(exprs.into_iter().map(SelectExpr::Expression)),
+                    Err(err) => error_builder.add_error(err),
+                }
+                continue;
+            }
             match self.sql_select_to_rex_ref(expr, plan, empty_from, planner_context) {
                 Ok(expr) => prepared_select_exprs.push(expr),
                 Err(err) => error_builder.add_error(err),
             }
         }
         error_builder.error_or(prepared_select_exprs)
+    }
+
+    /// `(expr).*` selects every field of a row-valued expression as its own
+    /// projection entry, named after the field.
+    fn row_wildcard_to_exprs(
+        &self,
+        row_expr: &SQLExpr,
+        options: &WildcardAdditionalOptions,
+        plan: &LogicalPlan,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Vec<Expr>> {
+        Self::check_wildcard_options(options)?;
+        let expr = self.sql_to_expr_ref(row_expr, plan.schema(), planner_context)?;
+        let expr = normalize_col_with_schemas_and_ambiguity_check(
+            expr,
+            &[&[plan.schema()]],
+            &plan.using_columns()?,
+        )?;
+        for planner in self.context_provider.get_expr_planners() {
+            if let Some(fields) = planner.plan_row_wildcard(&expr, plan.schema())? {
+                return Ok(fields);
+            }
+        }
+        plan_err!("Qualified wildcard with expression not supported: {row_expr}")
     }
 
     fn sql_select_to_rex_ref(

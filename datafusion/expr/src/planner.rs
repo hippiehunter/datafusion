@@ -294,6 +294,32 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plans an assignment through a subscript or field path of a column:
+    /// `UPDATE ... SET col[i] = v`, `SET col.f = v`, `INSERT (col[lo:hi])
+    /// VALUES (v)`. The result is the column's whole new value.
+    ///
+    /// Returns the original target if not possible
+    fn plan_assignment_target(
+        &self,
+        target: RawAssignmentTarget,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawAssignmentTarget>> {
+        Ok(PlannerResult::Original(target))
+    }
+
+    /// Plans `(expr).*`: the fields of a row-valued expression as separate
+    /// projection entries.
+    ///
+    /// Returns `None` when the expression is not a row value this planner
+    /// understands.
+    fn plan_row_wildcard(
+        &self,
+        _expr: &Expr,
+        _schema: &DFSchema,
+    ) -> Result<Option<Vec<Expr>>> {
+        Ok(None)
+    }
+
     /// Plans aggregate functions, such as `COUNT(<expr>)`
     ///
     /// Returns original expression arguments if not possible
@@ -334,6 +360,34 @@ pub struct RawBinaryExpr {
 pub struct RawFieldAccessExpr {
     pub field_access: GetFieldAccess,
     pub expr: Expr,
+}
+
+/// One step of an assignment target's path below its column: `col[i]`,
+/// `col[lo:hi]`, `col.field`.
+#[derive(Debug, Clone)]
+pub enum AssignmentStep {
+    Index(Expr),
+    Slice {
+        lower: Option<Expr>,
+        upper: Option<Expr>,
+    },
+    Field(String),
+}
+
+/// An assignment through a subscript or field path to plan
+///
+/// This structure is used by [`ExprPlanner`] to plan `SET col[i] = v`-style
+/// assignments, whose result is the column's whole new value.
+#[derive(Debug, Clone)]
+pub struct RawAssignmentTarget {
+    /// The column's value before this assignment: the stored column, a NULL
+    /// of the column's type for an INSERT, or the result of an earlier
+    /// assignment to the same column in the same statement.
+    pub base: Expr,
+    /// The target column, with its declared type and metadata.
+    pub column: FieldRef,
+    pub path: Vec<AssignmentStep>,
+    pub value: Expr,
 }
 
 /// A cast expression to plan

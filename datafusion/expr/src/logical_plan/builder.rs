@@ -130,6 +130,25 @@ pub struct LogicalPlanBuilder {
     options: LogicalPlanBuilderOptions,
 }
 
+/// Whether a value of `data_type` is accepted by a column of `field_type`
+/// without an Arrow cast, because the column type's own input function
+/// reads it: text into a fixed-size-binary carrier (or an array of them),
+/// which Arrow cannot cast into, and a record (struct) into a text column,
+/// where the record's text form is written. The dialect's analysis decides
+/// how such a value is written.
+pub fn value_reads_into(data_type: &DataType, field_type: &DataType) -> bool {
+    let mut leaf = field_type;
+    while let DataType::List(inner) | DataType::LargeList(inner) | DataType::FixedSizeList(inner, _) =
+        leaf
+    {
+        leaf = inner.data_type();
+    }
+    let text_source = matches!(data_type, DataType::Utf8 | DataType::LargeUtf8);
+    let text_target = matches!(field_type, DataType::Utf8 | DataType::LargeUtf8);
+    (text_source && matches!(leaf, DataType::FixedSizeBinary(_)))
+        || (matches!(data_type, DataType::Struct(_)) && text_target)
+}
+
 impl LogicalPlanBuilder {
     /// Create a builder from an existing plan
     pub fn new(plan: LogicalPlan) -> Self {
@@ -281,13 +300,7 @@ impl LogicalPlanBuilder {
 
                 if !data_type.equals_datatype(field_type)
                     && !can_cast_types(&data_type, field_type)
-                    && !matches!(
-                        (&data_type, field_type),
-                        (
-                            DataType::Utf8 | DataType::LargeUtf8,
-                            DataType::FixedSizeBinary(_)
-                        )
-                    )
+                    && !value_reads_into(&data_type, field_type)
                 {
                     return exec_err!(
                         "type mismatch and can't cast to got {} and {}",

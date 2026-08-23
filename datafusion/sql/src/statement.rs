@@ -30,7 +30,7 @@ use crate::planner::{
 };
 use crate::utils::normalize_ident;
 
-use arrow::datatypes::{Field, FieldRef, Fields};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -48,6 +48,7 @@ use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_che
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
+use datafusion_expr::planner::{AssignmentStep, PlannerResult, RawAssignmentTarget};
 use datafusion_expr::utils::{expr_to_columns, exprlist_to_fields};
 use datafusion_expr::{
     AlterMaterializedView, AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion,
@@ -76,10 +77,11 @@ use sqlparser::ast::{
 };
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ColumnDef, CreateIndex, CreateTable,
+    AccessExpr, Assignment, AssignmentTarget, ColumnDef, ColumnTarget, CreateIndex,
+    CreateTable,
     CreateTableOptions, CreateTableWithData, Delete, DescribeAlias, Expr as SQLExpr, ForeignKeyColumnOrPeriod,
     FromTable, Ident, Insert, ObjectName, ObjectType, Query, SchemaName, SelectItem,
-    SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement,
+    SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement, Subscript,
     TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
@@ -343,6 +345,10 @@ fn get_schema_name(schema_name: &SchemaName) -> String {
             ident_to_string(auth)
         ),
     }
+}
+
+fn multiple_assignments_err<T>(column: &str) -> Result<T> {
+    plan_err!("multiple assignments to same column \"{column}\"")
 }
 
 /// Construct `TableConstraint`(s) for the given columns by iterating over
@@ -1508,6 +1514,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Statement::Insert(Insert {
                 into,
                 columns,
+                column_targets,
                 overwrite,
                 source,
                 partitioned,
@@ -1594,6 +1601,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.insert_to_plan(
                         table_name,
                         columns,
+                        column_targets,
                         Box::new(SQLBox::into_owned(source.unwrap())),
                         overwrite,
                         replace_into,
@@ -3471,6 +3479,70 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         )))
     }
 
+    /// Plan one assignment through a subscript or field path below a column.
+    /// `base` is the column's value before the assignment; the result is its
+    /// whole value after it.
+    fn plan_assignment_target(
+        &self,
+        base: Expr,
+        column: FieldRef,
+        path: &[AccessExpr],
+        value: Expr,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let mut steps = Vec::with_capacity(path.len());
+        for access in path {
+            steps.push(match access {
+                AccessExpr::Subscript(Subscript::Index { index }) => {
+                    AssignmentStep::Index(self.sql_to_expr_ref(
+                        index,
+                        schema,
+                        planner_context,
+                    )?)
+                }
+                AccessExpr::Subscript(Subscript::Slice {
+                    lower_bound,
+                    upper_bound,
+                    stride: None,
+                }) => AssignmentStep::Slice {
+                    lower: lower_bound
+                        .as_ref()
+                        .map(|bound| self.sql_to_expr_ref(bound, schema, planner_context))
+                        .transpose()?,
+                    upper: upper_bound
+                        .as_ref()
+                        .map(|bound| self.sql_to_expr_ref(bound, schema, planner_context))
+                        .transpose()?,
+                },
+                AccessExpr::Dot(SQLExpr::Identifier(ident)) => {
+                    AssignmentStep::Field(self.ident_normalizer.normalize(ident.clone()))
+                }
+                other => {
+                    return not_impl_err!(
+                        "Assignment target path element is not supported: {other}"
+                    );
+                }
+            });
+        }
+        let mut target = RawAssignmentTarget {
+            base,
+            column,
+            path: steps,
+            value,
+        };
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_assignment_target(target, schema)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(original) => target = original,
+            }
+        }
+        not_impl_err!(
+            "Assignment to a subscripted or field target is not supported: {}",
+            target.column.name()
+        )
+    }
+
     fn update_to_plan(
         &self,
         table: TableWithJoins,
@@ -3529,24 +3601,72 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Ok(ident.value.clone())
         };
 
+        // Assignments through a subscript or field path, per column in
+        // statement order. A column takes either one whole-value assignment
+        // or any number of path assignments, which apply in order.
+        let mut path_assign_map: HashMap<String, Vec<(Vec<AccessExpr>, &SQLExpr)>> =
+            HashMap::new();
+
+        // A dotted target names the column first: `SET fn.first = ..` writes
+        // field `first` of column `fn`, as PostgreSQL reads it. A leading
+        // name that is not a column (a table alias) is a qualifier instead.
+        let split_column_target = |name: &ObjectName| -> Result<(String, Vec<AccessExpr>)> {
+            let idents = name
+                .0
+                .iter()
+                .map(|part| {
+                    part.as_ident().cloned().ok_or_else(|| {
+                        plan_datafusion_err!("Assignment target must be a column name")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let Some(first) = idents.first() else {
+                return plan_err!("Empty column id");
+            };
+            let first_name = self.ident_normalizer.normalize(first.clone());
+            if idents.len() > 1 && table_schema.field_with_unqualified_name(&first_name).is_ok() {
+                let fields = idents[1..]
+                    .iter()
+                    .map(|ident| AccessExpr::Dot(SQLExpr::Identifier(ident.clone())))
+                    .collect();
+                return Ok((first_name, fields));
+            }
+            Ok((extract_column_name(name)?, Vec::new()))
+        };
+
         // Process each assignment
         for assign in assignments {
             match &assign.target {
                 AssignmentTarget::Indirection(target) => {
-                    return not_impl_err!(
-                        "Assignment to a subscripted or field target is not supported: {target}"
-                    );
-                }
-                AssignmentTarget::ColumnName(cols) => {
-                    // Single column assignment
-                    let col_name = extract_column_name(cols)?;
-                    // Validate that the assignment target column exists
+                    let (col_name, mut path) = split_column_target(&target.column)?;
                     table_schema.field_with_unqualified_name(&col_name)?;
                     if assign_map.contains_key(&col_name) {
-                        return plan_err!(
-                            "Column '{}' assigned more than once",
-                            col_name
-                        );
+                        return multiple_assignments_err(&col_name);
+                    }
+                    path.extend(target.indirection.iter().cloned());
+                    path_assign_map
+                        .entry(col_name)
+                        .or_default()
+                        .push((path, &assign.value));
+                }
+                AssignmentTarget::ColumnName(cols) => {
+                    let (col_name, path) = split_column_target(cols)?;
+                    // Validate that the assignment target column exists
+                    table_schema.field_with_unqualified_name(&col_name)?;
+                    if !path.is_empty() {
+                        if assign_map.contains_key(&col_name) {
+                            return multiple_assignments_err(&col_name);
+                        }
+                        path_assign_map
+                            .entry(col_name)
+                            .or_default()
+                            .push((path, &assign.value));
+                        continue;
+                    }
+                    if assign_map.contains_key(&col_name)
+                        || path_assign_map.contains_key(&col_name)
+                    {
+                        return multiple_assignments_err(&col_name);
                     }
                     assign_map.insert(col_name, Cow::Borrowed(&assign.value));
                 }
@@ -3645,8 +3765,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                     // Add each column-value pair
                     for (col, val) in columns.into_iter().zip(values.into_iter()) {
-                        if assign_map.contains_key(&col) {
-                            return plan_err!("Column '{}' assigned more than once", col);
+                        if assign_map.contains_key(&col) || path_assign_map.contains_key(&col)
+                        {
+                            return multiple_assignments_err(&col);
                         }
                         assign_map.insert(col, val);
                     }
@@ -3688,12 +3809,39 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut projected_exprs = table_schema
             .iter()
             .map(|(qualifier, field)| {
+                let stored_column = || {
+                    // If the target table has an alias, use it to qualify the column name
+                    if let Some(alias) = &table_alias {
+                        Expr::Column(Column::new(
+                            Some(self.ident_normalizer.normalize(alias.name.clone())),
+                            field.name(),
+                        ))
+                    } else {
+                        Expr::Column(Column::from((qualifier, field)))
+                    }
+                };
+                if let Some(path_assignments) = path_assign_map.remove(field.name()) {
+                    let mut base = stored_column();
+                    for (path, value) in path_assignments {
+                        let value = self.sql_to_expr_ref(
+                            value,
+                            source.schema(),
+                            &mut planner_context,
+                        )?;
+                        base = self.plan_assignment_target(
+                            base,
+                            Arc::clone(field),
+                            &path,
+                            value,
+                            source.schema(),
+                            &mut planner_context,
+                        )?;
+                    }
+                    let expr = base.cast_to(field.data_type(), source.schema())?;
+                    return Ok(expr.alias(field.name()));
+                }
                 let expr = match assign_map.remove(field.name()) {
                     Some(new_value) => {
-                        let new_value = crate::values::maybe_rewrite_pg_array_literal_ref(
-                            new_value.as_ref(),
-                            Some(field.data_type()),
-                        );
                         let mut expr = self.sql_to_expr_ref(
                             new_value.as_ref(),
                             source.schema(),
@@ -3709,17 +3857,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         // Cast to target column type, if necessary
                         expr.cast_to(field.data_type(), source.schema())?
                     }
-                    None => {
-                        // If the target table has an alias, use it to qualify the column name
-                        if let Some(alias) = &table_alias {
-                            Expr::Column(Column::new(
-                                Some(self.ident_normalizer.normalize(alias.name.clone())),
-                                field.name(),
-                            ))
-                        } else {
-                            Expr::Column(Column::from((qualifier, field)))
-                        }
-                    }
+                    None => stored_column(),
                 };
                 Ok(expr.alias(field.name()))
             })
@@ -3885,6 +4023,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             self.insert_to_plan_ref(
                 table_name,
                 &insert.columns,
+                insert.column_targets.as_deref(),
                 source.as_ref(),
                 insert.overwrite,
                 insert.replace_into,
@@ -3914,6 +4053,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         table_name: ObjectName,
         columns: Vec<Ident>,
+        column_targets: Option<Vec<ColumnTarget>>,
         source: Box<Query>,
         overwrite: bool,
         replace_into: bool,
@@ -3924,6 +4064,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         self.insert_to_plan_ref(
             &table_name,
             &columns,
+            column_targets.as_deref(),
             source.as_ref(),
             overwrite,
             replace_into,
@@ -3938,6 +4079,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         table_name: &ObjectName,
         columns: &[Ident],
+        column_targets: Option<&[ColumnTarget]>,
         source: &Query,
         overwrite: bool,
         replace_into: bool,
@@ -3962,38 +4104,68 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .map(|c| self.ident_normalizer.normalize(c.clone()))
             .collect();
 
-        let (fields, value_indices) = if columns.is_empty() {
-            // Empty means we're inserting into all columns of the table
-            (
-                table_schema.fields().clone(),
-                (0..table_schema.fields().len())
-                    .map(Some)
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            let mut value_indices = vec![None; table_schema.fields().len()];
-            let fields = columns
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(i, c)| {
-                    let c = self.ident_normalizer.normalize(c);
-                    let column_index = table_schema
-                        .index_of_column_by_name(None, &c)
-                        .ok_or_else(|| unqualified_field_not_found(&c, &table_schema))?;
-
-                    if value_indices[column_index].is_some() {
-                        return schema_err!(SchemaError::DuplicateUnqualifiedField {
-                            name: c,
-                        });
-                    } else {
-                        value_indices[column_index] = Some(i);
-                    }
-                    Ok(Arc::clone(table_schema.field(column_index)))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            (Fields::from(fields), value_indices)
-        };
+        // Per target table column, the source columns feeding it, each with
+        // the subscript/field path below the column it writes (`a[2]`,
+        // `fn.first`); a whole-column target has an empty path.
+        let empty_path: &[AccessExpr] = &[];
+        let (fields, value_sources): (Fields, Vec<Vec<(usize, &[AccessExpr])>>) =
+            if columns.is_empty() {
+                // Empty means we're inserting into all columns of the table
+                (
+                    table_schema.fields().clone(),
+                    (0..table_schema.fields().len())
+                        .map(|i| vec![(i, empty_path)])
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                let mut value_sources: Vec<Vec<(usize, &[AccessExpr])>> =
+                    vec![Vec::new(); table_schema.fields().len()];
+                let fields = columns
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let c = self.ident_normalizer.normalize(c);
+                        let column_index = table_schema
+                            .index_of_column_by_name(None, &c)
+                            .ok_or_else(|| unqualified_field_not_found(&c, &table_schema))?;
+                        let path = column_targets
+                            .and_then(|targets| targets.get(i))
+                            .map(|target| target.indirection.as_slice())
+                            .unwrap_or(empty_path);
+                        let sources = &mut value_sources[column_index];
+                        // A column may be written through several paths, but
+                        // only once as a whole.
+                        if path.is_empty() && !sources.is_empty()
+                            || sources.iter().any(|(_, p)| p.is_empty())
+                        {
+                            return schema_err!(SchemaError::DuplicateUnqualifiedField {
+                                name: c,
+                            });
+                        }
+                        sources.push((i, path));
+                        let field = table_schema.field(column_index);
+                        // A value written through an element subscript has
+                        // the element's type; a slice or a field path takes
+                        // the column's own carrier.
+                        Ok(match path {
+                            [AccessExpr::Subscript(Subscript::Index { .. })] => {
+                                match field.data_type() {
+                                    DataType::List(item)
+                                    | DataType::LargeList(item)
+                                    | DataType::FixedSizeList(item, _) => Arc::new(
+                                        Field::new(field.name(), item.data_type().clone(), true)
+                                            .with_metadata(field.metadata().clone()),
+                                    ),
+                                    _ => Arc::clone(field),
+                                }
+                            }
+                            _ => Arc::clone(field),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                (Fields::from(fields), value_sources)
+            };
 
         // infer types for Values clause... other types should be resolvable the regular way
         let mut prepare_param_data_types = BTreeMap::new();
@@ -4042,18 +4214,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             plan_err!("Column count doesn't match insert query!")?;
         }
 
-        let exprs = value_indices
+        let exprs = value_sources
             .into_iter()
             .enumerate()
-            .map(|(i, value_index)| {
+            .map(|(i, sources)| {
                 let target_field = table_schema.field(i);
-                let expr = match value_index {
-                    Some(v) => {
-                        Expr::Column(Column::from(source.schema().qualified_field(v)))
+                let expr = match sources.as_slice() {
+                    [(v, path)] if path.is_empty() => {
+                        Expr::Column(Column::from(source.schema().qualified_field(*v)))
                             .cast_to(target_field.data_type(), source.schema())?
                     }
                     // The value is not specified. Fill in the default value for the column.
-                    None => table_source
+                    [] => table_source
                         .get_column_default(target_field.name())
                         .cloned()
                         .unwrap_or_else(|| {
@@ -4061,6 +4233,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             Expr::Literal(ScalarValue::Null, None)
                         })
                         .cast_to(target_field.data_type(), &DFSchema::empty())?,
+                    // Written through paths: each applies to the result of the
+                    // previous one, starting from a NULL of the column's type.
+                    paths => {
+                        let mut base = Expr::Literal(ScalarValue::Null, None)
+                            .cast_to(target_field.data_type(), &DFSchema::empty())?;
+                        for (v, path) in paths {
+                            let value = Expr::Column(Column::from(
+                                source.schema().qualified_field(*v),
+                            ));
+                            base = self.plan_assignment_target(
+                                base,
+                                Arc::clone(target_field),
+                                path,
+                                value,
+                                source.schema(),
+                                &mut planner_context,
+                            )?;
+                        }
+                        base.cast_to(target_field.data_type(), source.schema())?
+                    }
                 };
                 Ok(expr.alias(target_field.name()))
             })
@@ -4325,6 +4517,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         self.insert_to_plan(
             object_name,
             columns,
+            None,
             source,
             overwrite,
             replace_into,

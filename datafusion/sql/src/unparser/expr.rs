@@ -339,7 +339,7 @@ impl Unparser<'_> {
                 expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                 pattern: SQLBox::new(self.expr_to_sql_inner(pattern)?),
                 escape_char: escape_char.map(|c| SingleQuotedString(c.to_string())),
-                any: false,
+                quantifier: None,
             }),
             Expr::Like(Like {
                 negated,
@@ -355,7 +355,7 @@ impl Unparser<'_> {
                         pattern: SQLBox::new(self.expr_to_sql_inner(pattern)?),
                         escape_char: escape_char
                             .map(|c| SingleQuotedString(c.to_string())),
-                        any: false,
+                        quantifier: None,
                     })
                 } else {
                     Ok(ast::Expr::Like {
@@ -364,7 +364,7 @@ impl Unparser<'_> {
                         pattern: SQLBox::new(self.expr_to_sql_inner(pattern)?),
                         escape_char: escape_char
                             .map(|c| SingleQuotedString(c.to_string())),
-                        any: false,
+                        quantifier: None,
                     })
                 }
             }
