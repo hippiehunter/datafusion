@@ -740,6 +740,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )
             }
 
+            SQLExpr::SubstringSimilar {
+                expr,
+                pattern,
+                escape,
+            } => {
+                let value =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let pattern =
+                    self.sql_expr_to_logical_expr(pattern.as_ref(), schema, planner_context)?;
+                let escape =
+                    self.sql_expr_to_logical_expr(escape.as_ref(), schema, planner_context)?;
+                self.similar_to_call("__dbl_substring_similar", vec![value, pattern, escape])
+            }
+
             SQLExpr::Trim {
                 expr,
                 trim_where,
@@ -1219,29 +1233,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        let value = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
         let pattern = self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
-        let pattern_type = pattern.get_type(schema)?;
-        if pattern_type != DataType::Utf8 && pattern_type != DataType::Null {
-            return plan_err!("Invalid pattern in SIMILAR TO expression");
-        }
-        let escape_char = match escape_char {
-            Some(Value::SingleQuotedString(char)) if char.len() == 1 => {
-                Some(char.chars().next().unwrap())
-            }
-            Some(value) => {
-                return plan_err!(
-                    "Invalid escape character in SIMILAR TO expression. Expected a single character wrapped with single quotes, got {value}"
-                );
-            }
-            None => None,
-        };
-        Ok(Expr::SimilarTo(Like::new(
-            negated,
-            Box::new(self.sql_expr_to_logical_expr(expr, schema, planner_context)?),
-            Box::new(pattern),
-            escape_char,
-            false,
-        )))
+        let escape = similar_escape_expr(escape_char)?;
+        let matched = self.similar_to_call("__dbl_similar_to", vec![value, pattern, escape])?;
+        Ok(if negated {
+            Expr::Not(Box::new(matched))
+        } else {
+            matched
+        })
+    }
+
+    fn similar_to_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
+        let func = self.context_provider.get_function_meta(name).ok_or_else(|| {
+            internal_datafusion_err!("Unable to find expected '{name}' function")
+        })?;
+        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(func, args)))
     }
 
     fn sql_trim_to_expr(
@@ -1879,4 +1886,20 @@ mod tests {
             "keyword OVERLAPS fell back to tuple parser: {err_text}"
         );
     }
+}
+
+/// The escape argument of a SIMILAR TO / SUBSTRING SIMILAR call as a text
+/// expression: the default `\\` when no ESCAPE clause is present, the empty
+/// string when `ESCAPE ''` disables escaping, and NULL when the clause is NULL.
+fn similar_escape_expr(escape_char: Option<&Value>) -> Result<Expr> {
+    Ok(match escape_char {
+        None => lit("\\"),
+        Some(Value::SingleQuotedString(text)) => lit(text.clone()),
+        Some(Value::Null) => Expr::Literal(ScalarValue::Utf8(None), None),
+        Some(other) => {
+            return plan_err!(
+                "Invalid escape character in SIMILAR TO expression, got {other}"
+            );
+        }
+    })
 }

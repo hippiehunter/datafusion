@@ -16,9 +16,10 @@
 // under the License.
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use arrow::datatypes::DataType;
 use datafusion_common::{DFSchema, Result, ScalarValue};
 use datafusion_common::{not_impl_err, plan_err};
-use datafusion_expr::{Expr, planner::PlannerResult};
+use datafusion_expr::{Expr, ExprSchemable, planner::PlannerResult};
 
 use sqlparser::ast::{AstBox as SQLBox, Expr as SQLExpr};
 
@@ -48,6 +49,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     schema,
                     planner_context,
                 )?;
+                // `SUBSTRING(text FROM pattern FOR escape)`: when the FROM
+                // operand is itself text it is a SIMILAR pattern and FOR is the
+                // escape, not a numeric start/length pair.
+                if matches!(
+                    from_logic.get_type(schema),
+                    Ok(DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
+                ) {
+                    let func = self
+                        .context_provider
+                        .get_function_meta("__dbl_substring_similar")
+                        .ok_or_else(|| {
+                            datafusion_common::internal_datafusion_err!(
+                                "Unable to find expected '__dbl_substring_similar' function"
+                            )
+                        })?;
+                    return Ok(Expr::ScalarFunction(
+                        datafusion_expr::expr::ScalarFunction::new_udf(
+                            func,
+                            vec![arg, from_logic, for_logic],
+                        ),
+                    ));
+                }
                 vec![arg, from_logic, for_logic]
             }
             (Some(from_expr), None) => {
