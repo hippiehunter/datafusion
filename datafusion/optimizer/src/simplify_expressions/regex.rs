@@ -64,6 +64,16 @@ pub fn simplify_regex_expr(
             return Ok(new_expr);
         }
 
+        // A backslash escape is where `regex_syntax` and the execution
+        // engine's POSIX regex engine disagree: `\x7f` is a two-digit hex
+        // escape here but a full-width hex escape there (`\x7fffffff` is one
+        // code point, and an out-of-range one the POSIX engine rejects).
+        // Rewriting such a pattern to `LIKE` would silently substitute the
+        // wrong semantics, so leave any escaped pattern for that engine.
+        if pattern.contains('\\') {
+            return Ok(Expr::BinaryExpr(BinaryExpr { left, op, right }));
+        }
+
         match regex_syntax::Parser::new().parse(pattern) {
             Ok(hir) => {
                 let kind = hir.kind();
