@@ -824,6 +824,20 @@ fn coerce_window_frame(
     let mut window_frame = window_frame;
     let target_type = match window_frame.units {
         WindowFrameUnits::Range => {
+            let is_offset = |bound: &WindowFrameBound| {
+                matches!(
+                    bound,
+                    WindowFrameBound::Preceding(v) | WindowFrameBound::Following(v)
+                        if !v.is_null()
+                )
+            };
+            if (is_offset(&window_frame.start_bound) || is_offset(&window_frame.end_bound))
+                && expressions.len() != 1
+            {
+                return plan_err!(
+                    "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column"
+                );
+            }
             let current_types = expressions
                 .first()
                 .map(|s| s.expr.get_type(schema))
