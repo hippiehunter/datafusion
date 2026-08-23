@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{BinaryExpr, Expr, Like, Operator, lit};
 use regex_syntax::hir::{Capture, Hir, HirKind, Literal, Look};
 
@@ -77,12 +77,11 @@ pub fn simplify_regex_expr(
                     return Ok(expr);
                 }
             }
-            Err(e) => {
-                // error out early since the execution may fail anyways
-                return Err(DataFusionError::Context(
-                    "Invalid regex".to_owned(),
-                    Box::new(DataFusionError::External(Box::new(e))),
-                ));
+            Err(_) => {
+                // A pattern `regex_syntax` cannot parse — a back reference or
+                // lookaround — is one the execution engine's own POSIX regex
+                // engine still handles; leave the expression untouched rather
+                // than failing the whole statement here.
             }
         }
     }
