@@ -2024,24 +2024,17 @@ fn temporal_coercion_strict_timezone(
 fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
     use arrow::datatypes::IntervalUnit::*;
-    use arrow::datatypes::TimeUnit::*;
 
     match (lhs_type, rhs_type) {
         (Interval(_) | Duration(_), Interval(_) | Duration(_)) => {
             Some(Interval(MonthDayNano))
         }
         (Date64, Date32) | (Date32, Date64) => Some(Date64),
-        (Timestamp(_, None), Date64) | (Date64, Timestamp(_, None)) => {
-            Some(Timestamp(Nanosecond, None))
-        }
-        (Timestamp(_, _tz), Date64) | (Date64, Timestamp(_, _tz)) => {
-            Some(Timestamp(Nanosecond, None))
-        }
-        (Timestamp(_, None), Date32) | (Date32, Timestamp(_, None)) => {
-            Some(Timestamp(Nanosecond, None))
-        }
-        (Timestamp(_, _tz), Date32) | (Date32, Timestamp(_, _tz)) => {
-            Some(Timestamp(Nanosecond, None))
+        // A date meets a timestamp in the timestamp's own unit and zone: a
+        // nanosecond target would shrink the range to 1677..2262 and make
+        // every microsecond timestamp outside it overflow.
+        (Timestamp(unit, tz), Date64 | Date32) | (Date64 | Date32, Timestamp(unit, tz)) => {
+            Some(Timestamp(*unit, tz.clone()))
         }
         _ => None,
     }
@@ -2087,6 +2080,7 @@ fn time_interval_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<Da
 
 fn timeunit_coercion(lhs_unit: &TimeUnit, rhs_unit: &TimeUnit) -> TimeUnit {
     use arrow::datatypes::TimeUnit::*;
+
     match (lhs_unit, rhs_unit) {
         (Second, Millisecond) => Second,
         (Second, Microsecond) => Second,

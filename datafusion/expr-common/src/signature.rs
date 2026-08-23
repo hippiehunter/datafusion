@@ -24,7 +24,7 @@ use crate::type_coercion::aggregates::NUMERICS;
 use arrow::datatypes::{DataType, Decimal128Type, DecimalType, IntervalUnit, TimeUnit};
 use datafusion_common::types::{LogicalType, LogicalTypeRef, NativeType};
 use datafusion_common::utils::ListCoercion;
-use datafusion_common::{Result, internal_err, plan_err};
+use datafusion_common::{Result, ScalarValue, internal_err, plan_err};
 use indexmap::IndexSet;
 use itertools::Itertools;
 
@@ -1092,6 +1092,12 @@ pub struct Signature {
     ///
     /// Defaults to `None`, meaning only positional arguments are supported.
     pub parameter_names: Option<Vec<String>>,
+    /// Optional default values, one slot per named parameter.
+    ///
+    /// A call that names some parameters but leaves an earlier one unnamed
+    /// takes the default for the gap; a parameter without a default must be
+    /// supplied. Only meaningful together with `parameter_names`.
+    pub parameter_defaults: Option<Vec<Option<ScalarValue>>>,
 }
 
 impl Signature {
@@ -1101,6 +1107,7 @@ impl Signature {
             type_signature,
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
     /// An arbitrary number of arguments with the same type, from those listed in `common_types`.
@@ -1109,6 +1116,7 @@ impl Signature {
             type_signature: TypeSignature::Variadic(common_types),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
     /// User-defined coercion rules for the function.
@@ -1117,6 +1125,7 @@ impl Signature {
             type_signature: TypeSignature::UserDefined,
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1126,6 +1135,7 @@ impl Signature {
             type_signature: TypeSignature::Numeric(arg_count),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1135,6 +1145,7 @@ impl Signature {
             type_signature: TypeSignature::String(arg_count),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1144,6 +1155,7 @@ impl Signature {
             type_signature: TypeSignature::VariadicAny,
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
     /// A fixed number of arguments of the same type, from those listed in `valid_types`.
@@ -1156,6 +1168,7 @@ impl Signature {
             type_signature: TypeSignature::Uniform(arg_count, valid_types),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
     /// Exactly matches the types in `exact_types`, in order.
@@ -1164,6 +1177,7 @@ impl Signature {
             type_signature: TypeSignature::Exact(exact_types),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1173,6 +1187,7 @@ impl Signature {
             type_signature: TypeSignature::Coercible(target_types),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1182,6 +1197,7 @@ impl Signature {
             type_signature: TypeSignature::Comparable(arg_count),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1190,6 +1206,7 @@ impl Signature {
             type_signature: TypeSignature::Nullary,
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1199,6 +1216,7 @@ impl Signature {
             type_signature: TypeSignature::Any(arg_count),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1208,6 +1226,7 @@ impl Signature {
             type_signature: TypeSignature::OneOf(type_signatures),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1225,6 +1244,7 @@ impl Signature {
             ),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1242,6 +1262,7 @@ impl Signature {
             ),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1260,6 +1281,7 @@ impl Signature {
             ),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1285,6 +1307,7 @@ impl Signature {
             ]),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1302,6 +1325,7 @@ impl Signature {
             ),
             volatility,
             parameter_names: None,
+            parameter_defaults: None,
         }
     }
 
@@ -1330,6 +1354,30 @@ impl Signature {
         // Validate that the number of names matches the signature
         self.validate_parameter_names(&names)?;
         self.parameter_names = Some(names);
+        Ok(self)
+    }
+
+    /// Attach default values for the named parameters, one slot per name.
+    pub fn with_parameter_defaults(
+        mut self,
+        defaults: Vec<Option<ScalarValue>>,
+    ) -> Result<Self> {
+        match &self.parameter_names {
+            Some(names) if names.len() == defaults.len() => {}
+            Some(names) => {
+                return plan_err!(
+                    "Parameter defaults count ({}) does not match parameter names count ({})",
+                    defaults.len(),
+                    names.len()
+                );
+            }
+            None => {
+                return plan_err!(
+                    "Parameter defaults require parameter names to be set first"
+                );
+            }
+        }
+        self.parameter_defaults = Some(defaults);
         Ok(self)
     }
 

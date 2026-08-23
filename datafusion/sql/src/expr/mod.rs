@@ -401,7 +401,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             SQLExpr::Array(arr) => self.sql_array_literal(&arr.elem, schema),
-            SQLExpr::Interval(interval) => self.sql_interval_to_expr(false, interval),
+            SQLExpr::Interval(interval) => {
+                self.sql_interval_to_expr(false, interval, schema, planner_context)
+            }
             SQLExpr::Identifier(id) => {
                 self.sql_identifier_to_expr(id, schema, planner_context)
             }
@@ -850,26 +852,60 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             SQLExpr::AtTimeZone {
                 timestamp,
                 time_zone,
-            } => Ok(Expr::Cast(Cast::new(
-                Box::new(self.sql_expr_to_logical_expr_internal(
+            } => {
+                let timestamp = self.sql_expr_to_logical_expr_internal(
                     timestamp.as_ref(),
                     schema,
                     planner_context,
-                )?),
-                match time_zone.as_ref() {
-                    SQLExpr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(s),
-                        span: _,
-                    }) => {
-                        DataType::Timestamp(TimeUnit::Nanosecond, Some(s.as_str().into()))
-                    }
-                    other => {
-                        return not_impl_err!(
-                            "Unsupported ast node in sqltorel: {other:?}"
-                        );
-                    }
-                },
-            ))),
+                )?;
+                // `x AT TIME ZONE z` is `timezone(z, x)` when the catalog
+                // provides that function; otherwise a cast to a zoned
+                // timestamp type.
+                if let Some(timezone) = self.context_provider.get_function_meta("timezone")
+                {
+                    let zone = self.sql_expr_to_logical_expr_internal(
+                        time_zone.as_ref(),
+                        schema,
+                        planner_context,
+                    )?;
+                    return Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        timezone,
+                        vec![zone, timestamp],
+                    )));
+                }
+                Ok(Expr::Cast(Cast::new(
+                    Box::new(timestamp),
+                    match time_zone.as_ref() {
+                        SQLExpr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(s),
+                            span: _,
+                        }) => DataType::Timestamp(
+                            TimeUnit::Nanosecond,
+                            Some(s.as_str().into()),
+                        ),
+                        other => {
+                            return not_impl_err!(
+                                "Unsupported ast node in sqltorel: {other:?}"
+                            );
+                        }
+                    },
+                )))
+            }
+            SQLExpr::AtLocal { timestamp } => {
+                let timestamp = self.sql_expr_to_logical_expr_internal(
+                    timestamp.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
+                let Some(timezone) = self.context_provider.get_function_meta("timezone")
+                else {
+                    return not_impl_err!("AT LOCAL requires a timezone() function");
+                };
+                Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                    timezone,
+                    vec![timestamp],
+                )))
+            }
             SQLExpr::AnyOp {
                 left,
                 compare_op,

@@ -30,7 +30,7 @@ use datafusion_common::{
     not_impl_err, plan_err,
 };
 use datafusion_expr::expr::{BinaryExpr, Placeholder};
-use datafusion_expr::planner::PlannerResult;
+use datafusion_expr::planner::{PlannerResult, RawIntervalExpr};
 use datafusion_expr::{Expr, Operator, lit};
 use log::debug;
 use sqlparser::ast::{
@@ -249,8 +249,84 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     /// Convert a SQL interval expression to a DataFusion logical plan
     /// expression
-    #[expect(clippy::only_used_in_recursion)]
     pub(super) fn sql_interval_to_expr(
+        &self,
+        negative: bool,
+        interval: &Interval,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        if let Some(planned) =
+            self.plan_interval_with_planners(negative, interval, schema, planner_context)?
+        {
+            return Ok(planned);
+        }
+        self.sql_interval_to_expr_builtin(negative, interval)
+    }
+
+    /// Offer the interval to the registered expression planners. The value
+    /// is handed over as a text literal when it is one, so a planner can
+    /// parse it under its own grammar, and as a planned expression
+    /// otherwise.
+    fn plan_interval_with_planners(
+        &self,
+        negative: bool,
+        interval: &Interval,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Option<Expr>> {
+        let planners = self.context_provider.get_expr_planners();
+        if planners.is_empty() {
+            return Ok(None);
+        }
+        let (value, negative) = match interval.value.as_ref() {
+            SQLExpr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+                span: _,
+            }) => (lit(s.clone()), negative),
+            SQLExpr::Value(ValueWithSpan {
+                value: Value::Number(n, _),
+                span: _,
+            }) => (lit(n.clone()), negative),
+            SQLExpr::UnaryOp {
+                op: UnaryOperator::Minus,
+                expr,
+            } => match expr.as_ref() {
+                SQLExpr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+                    span: _,
+                }) => (lit(s.clone()), !negative),
+                SQLExpr::Value(ValueWithSpan {
+                    value: Value::Number(n, _),
+                    span: _,
+                }) => (lit(n.clone()), !negative),
+                _ => return Ok(None),
+            },
+            SQLExpr::BinaryOp { .. } => return Ok(None),
+            other => (
+                self.sql_expr_to_logical_expr(other.clone(), schema, planner_context)?,
+                negative,
+            ),
+        };
+        let mut raw = RawIntervalExpr {
+            value,
+            leading_field: interval.leading_field.clone(),
+            last_field: interval.last_field.clone(),
+            leading_precision: interval.leading_precision,
+            fractional_seconds_precision: interval.fractional_seconds_precision,
+            negative,
+        };
+        for planner in planners {
+            match planner.plan_interval(raw, schema)? {
+                PlannerResult::Planned(expr) => return Ok(Some(expr)),
+                PlannerResult::Original(original) => raw = original,
+            }
+        }
+        Ok(None)
+    }
+
+    #[expect(clippy::only_used_in_recursion)]
+    fn sql_interval_to_expr_builtin(
         &self,
         negative: bool,
         interval: &Interval,

@@ -496,6 +496,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if let Some(param_names) = &fm.signature().parameter_names {
                     datafusion_expr::arguments::resolve_function_arguments(
                         param_names,
+                        fm.signature().parameter_defaults.as_deref(),
                         args,
                         arg_names,
                     )?
@@ -613,6 +614,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     if let Some(param_names) = &signature.parameter_names {
                         datafusion_expr::arguments::resolve_function_arguments(
                             param_names,
+                            signature.parameter_defaults.as_deref(),
                             args,
                             arg_names,
                         )?
@@ -787,6 +789,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     if let Some(param_names) = &fm.signature().parameter_names {
                         datafusion_expr::arguments::resolve_function_arguments(
                             param_names,
+                            fm.signature().parameter_defaults.as_deref(),
                             args,
                             arg_names,
                         )?

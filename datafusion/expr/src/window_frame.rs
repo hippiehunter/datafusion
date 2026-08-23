@@ -463,6 +463,21 @@ fn convert_frame_bound_to_scalar_value(
                     result
                 }
             }
+            // `'1 year'::interval` / `CAST('1 year' AS INTERVAL)` spell the
+            // same offset as `INTERVAL '1 year'`.
+            ast::Expr::Cast {
+                expr,
+                data_type: ast::DataType::Interval { .. },
+                ..
+            } => match sqlparser::arena::AstBox::into_owned(expr) {
+                ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(item),
+                    span: _,
+                }) => item,
+                e => {
+                    return exec_err!("INTERVAL expression cannot be {e:?}");
+                }
+            },
             _ => plan_err!(
                 "Invalid window frame: frame offsets for RANGE must be either a numeric value, a string value or an interval"
             )?,

@@ -18,7 +18,7 @@
 //! Argument resolution logic for named function parameters
 
 use crate::Expr;
-use datafusion_common::{Result, plan_err};
+use datafusion_common::{Result, ScalarValue, plan_err};
 use std::collections::HashMap;
 
 /// Resolves function arguments, handling named and positional notation.
@@ -49,6 +49,7 @@ use std::collections::HashMap;
 /// ```
 pub fn resolve_function_arguments(
     param_names: &[String],
+    param_defaults: Option<&[Option<ScalarValue>]>,
     args: Vec<Expr>,
     arg_names: Vec<Option<String>>,
 ) -> Result<Vec<Expr>> {
@@ -67,7 +68,7 @@ pub fn resolve_function_arguments(
 
     validate_argument_order(&arg_names)?;
 
-    reorder_named_arguments(param_names, args, arg_names)
+    reorder_named_arguments(param_names, param_defaults, args, arg_names)
 }
 
 /// Validates that positional arguments come before named arguments
@@ -92,6 +93,7 @@ fn validate_argument_order(arg_names: &[Option<String>]) -> Result<()> {
 /// Reorders arguments based on named parameters to match signature order
 fn reorder_named_arguments(
     param_names: &[String],
+    param_defaults: Option<&[Option<ScalarValue>]>,
     args: Vec<Expr>,
     arg_names: Vec<Option<String>>,
 ) -> Result<Vec<Expr>> {
@@ -142,14 +144,30 @@ fn reorder_named_arguments(
     }
 
     // Only require parameters up to the number of arguments provided (supports optional parameters)
-    let required_count = args_len;
-    for i in 0..required_count {
-        if result[i].is_none() {
-            return plan_err!("Missing required parameter '{}'", param_names[i]);
+    // Every parameter up to the last one supplied must have a value: the
+    // call supplied it, or the function declares a default for it.
+    let last_supplied = result
+        .iter()
+        .rposition(|slot| slot.is_some())
+        .map_or(0, |index| index + 1);
+    let required_count = last_supplied.max(args_len);
+    for (i, slot) in result.iter_mut().enumerate().take(required_count) {
+        if slot.is_none() {
+            let default = param_defaults
+                .and_then(|defaults| defaults.get(i))
+                .and_then(|default| default.as_ref());
+            match default {
+                Some(value) => *slot = Some(Expr::Literal(value.clone(), None)),
+                None => {
+                    return plan_err!(
+                        "Missing required parameter '{}'",
+                        param_names[i]
+                    );
+                }
+            }
         }
     }
 
-    // Return only the assigned parameters (handles optional trailing parameters)
     Ok(result.into_iter().take(required_count).flatten().collect())
 }
 
@@ -166,7 +184,7 @@ mod tests {
         let arg_names = vec![None, None];
 
         let result =
-            resolve_function_arguments(&param_names, args.clone(), arg_names).unwrap();
+            resolve_function_arguments(&param_names, None, args.clone(), arg_names).unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -177,7 +195,7 @@ mod tests {
         let args = vec![lit(1), lit("hello")];
         let arg_names = vec![Some("a".to_string()), Some("b".to_string())];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names).unwrap();
+        let result = resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -193,7 +211,7 @@ mod tests {
             Some("b".to_string()),
         ];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names).unwrap();
+        let result = resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
 
         // Should be reordered to [a, b, c] = [1, "hello", 3.0]
         assert_eq!(result.len(), 3);
@@ -210,7 +228,7 @@ mod tests {
         let args = vec![lit(1), lit(3.0), lit("hello")];
         let arg_names = vec![None, Some("c".to_string()), Some("b".to_string())];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names).unwrap();
+        let result = resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
 
         // Should be reordered to [a, b, c] = [1, "hello", 3.0]
         assert_eq!(result.len(), 3);
@@ -227,7 +245,7 @@ mod tests {
         let args = vec![lit(1), lit("hello")];
         let arg_names = vec![Some("a".to_string()), None];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names);
+        let result = resolve_function_arguments(&param_names, None, args, arg_names);
         assert!(result.is_err());
         assert!(
             result
@@ -245,7 +263,7 @@ mod tests {
         let args = vec![lit(1), lit("hello")];
         let arg_names = vec![Some("x".to_string()), Some("b".to_string())];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names);
+        let result = resolve_function_arguments(&param_names, None, args, arg_names);
         assert!(result.is_err());
         assert!(
             result
@@ -263,7 +281,7 @@ mod tests {
         let args = vec![lit(1), lit(2)];
         let arg_names = vec![Some("a".to_string()), Some("a".to_string())];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names);
+        let result = resolve_function_arguments(&param_names, None, args, arg_names);
         assert!(result.is_err());
         assert!(
             result
@@ -281,7 +299,7 @@ mod tests {
         let args = vec![lit(1), lit(3.0)];
         let arg_names = vec![Some("a".to_string()), Some("c".to_string())];
 
-        let result = resolve_function_arguments(&param_names, args, arg_names);
+        let result = resolve_function_arguments(&param_names, None, args, arg_names);
         assert!(result.is_err());
         assert!(
             result

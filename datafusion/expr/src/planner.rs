@@ -259,6 +259,17 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plan an `INTERVAL` literal or expression, such as
+    /// `INTERVAL '1 2:03' DAY TO SECOND(2)`; returns the original
+    /// expression if not possible.
+    fn plan_interval(
+        &self,
+        expr: RawIntervalExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawIntervalExpr>> {
+        Ok(PlannerResult::Original(expr))
+    }
+
     /// Plans compound identifier such as `db.schema.table` for non-empty nested names
     ///
     /// # Note:
@@ -336,6 +347,22 @@ pub struct RawCastExpr {
     pub data_type: DataType,
     pub sql_data_type: sqlparser::ast::DataType,
     pub format: Option<sqlparser::ast::CastFormat>,
+}
+
+/// An `INTERVAL` expression to plan: the value (a text or numeric literal,
+/// or any expression), the SQL field qualifier and precisions, and whether
+/// the literal was negated.
+///
+/// This structure is used by [`ExprPlanner`] to plan intervals with
+/// custom semantics.
+#[derive(Debug, Clone)]
+pub struct RawIntervalExpr {
+    pub value: Expr,
+    pub leading_field: Option<sqlparser::ast::DateTimeField>,
+    pub last_field: Option<sqlparser::ast::DateTimeField>,
+    pub leading_precision: Option<u64>,
+    pub fractional_seconds_precision: Option<u64>,
+    pub negative: bool,
 }
 
 /// A Dictionary literal expression `{ key: value, ...}`
