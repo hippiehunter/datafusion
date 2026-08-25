@@ -476,7 +476,7 @@ fn t824_json_query_array_wildcard() {
 /// T824: JSON_QUERY with WITHOUT ARRAY WRAPPER
 #[test]
 fn t824_json_query_without_wrapper() {
-    crate::assert_not_implemented!(
+    assert_feature_supported!(
         "SELECT JSON_QUERY(data, '$.items' WITHOUT ARRAY WRAPPER) FROM json_data",
         "T824",
         "JSON_QUERY WITHOUT ARRAY WRAPPER"
@@ -486,7 +486,7 @@ fn t824_json_query_without_wrapper() {
 /// T824: JSON_QUERY with WITH ARRAY WRAPPER
 #[test]
 fn t824_json_query_with_wrapper() {
-    crate::assert_not_implemented!(
+    assert_feature_supported!(
         "SELECT JSON_QUERY(data, '$.name' WITH ARRAY WRAPPER) FROM json_data",
         "T824",
         "JSON_QUERY WITH ARRAY WRAPPER"

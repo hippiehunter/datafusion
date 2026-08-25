@@ -30,8 +30,8 @@ use regex::Regex;
 use sqlparser::tokenizer::Span;
 use sqlparser::{
     ast::{
-        self, AstBox as SQLBox, BinaryOperator, Function, Ident, ObjectName,
-        TimezoneInfo, WindowFrameBound,
+        self, helpers::attached_token::AttachedToken, AstBox as SQLBox, BinaryOperator, Function,
+        Ident, ObjectName, TimezoneInfo, WindowFrameBound,
     },
     keywords::ALL_KEYWORDS,
 };
@@ -354,6 +354,7 @@ impl PostgreSqlDialect {
                 duplicate_treatment: None,
                 args,
                 clauses: vec![],
+                close_paren_token: AttachedToken::empty(),
             }),
             filter: None,
             null_treatment: None,

@@ -49,6 +49,7 @@ mod function;
 mod grouping_set;
 mod identifier;
 mod order_by;
+mod sql_json;
 mod subquery;
 mod substring;
 mod unary_op;
@@ -549,22 +550,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     planner_context,
                 )?;
 
-                // Build function name based on predicate type
-                let func_name = if let Some(pred_type) = json_predicate_type {
-                    match pred_type {
-                        sqlparser::ast::JsonPredicateType::Array => "is_json_array",
-                        sqlparser::ast::JsonPredicateType::Object => {
-                            if unique_keys.is_some() {
-                                "is_json_object_with_unique_keys"
-                            } else {
-                                "is_json_object"
-                            }
-                        }
-                        sqlparser::ast::JsonPredicateType::Scalar => "is_json_scalar",
-                        sqlparser::ast::JsonPredicateType::Value => "is_json_value",
-                    }
+                // The predicate type and the uniqueness constraint are
+                // independent, so each combination names its own function.
+                let base = match json_predicate_type {
+                    Some(sqlparser::ast::JsonPredicateType::Array) => "is_json_array",
+                    Some(sqlparser::ast::JsonPredicateType::Object) => "is_json_object",
+                    Some(sqlparser::ast::JsonPredicateType::Scalar) => "is_json_scalar",
+                    Some(sqlparser::ast::JsonPredicateType::Value) => "is_json_value",
+                    None => "is_json",
+                };
+                let unique = matches!(
+                    unique_keys,
+                    Some(
+                        sqlparser::ast::JsonPredicateUniqueKeyConstraint::WithUniqueKeys
+                    )
+                );
+                let owned_name;
+                let func_name = if unique {
+                    owned_name = format!("{base}_with_unique_keys");
+                    owned_name.as_str()
                 } else {
-                    "is_json"
+                    base
                 };
 
                 // Try to get the function from the context provider
@@ -584,6 +590,121 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     Ok(Expr::Not(Box::new(is_json_expr)))
                 } else {
                     Ok(is_json_expr)
+                }
+            }
+
+            // The SQL/XML expression forms plan as calls to the XML functions
+            // the context provider registers, the way the IS JSON predicate
+            // above resolves its own.
+            SQLExpr::XmlParse {
+                document_or_content,
+                expr,
+                ..
+            } => {
+                let name = match document_or_content {
+                    sqlparser::ast::XmlDocumentOrContent::Document => "xmlparse_document",
+                    sqlparser::ast::XmlDocumentOrContent::Content => "xmlparse_content",
+                };
+                let value =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                self.xml_function_call(name, vec![value])
+            }
+
+            SQLExpr::XmlSerialize { expr, as_type, .. } => {
+                let value =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let serialized = self.xml_function_call("xmlserialize", vec![value])?;
+                self.finish_cast_expr(serialized, as_type, CastKind::Cast, None, schema)
+            }
+
+            SQLExpr::XmlRoot {
+                xml,
+                version,
+                standalone,
+            } => {
+                let document =
+                    self.sql_expr_to_logical_expr(xml.as_ref(), schema, planner_context)?;
+                let version = match version.as_ref() {
+                    sqlparser::ast::XmlRootVersion::Version(value) => {
+                        self.sql_expr_to_logical_expr(value, schema, planner_context)?
+                    }
+                    sqlparser::ast::XmlRootVersion::NoValue => lit(ScalarValue::Utf8(None)),
+                };
+                let standalone = match standalone {
+                    Some(sqlparser::ast::XmlRootStandalone::Yes) => lit("yes"),
+                    Some(sqlparser::ast::XmlRootStandalone::No) => lit("no"),
+                    _ => lit(ScalarValue::Utf8(None)),
+                };
+                self.xml_function_call("xmlroot", vec![document, version, standalone])
+            }
+
+            SQLExpr::XmlPi { name, content } => {
+                let mut args = vec![lit(name.value.clone())];
+                if let Some(content) = content {
+                    args.push(self.sql_expr_to_logical_expr(
+                        content.as_ref(),
+                        schema,
+                        planner_context,
+                    )?);
+                }
+                self.xml_function_call("xmlpi", args)
+            }
+
+            SQLExpr::XmlElement {
+                name,
+                attributes,
+                content,
+            } => {
+                let mut attribute_args = Vec::new();
+                for attribute in attributes.iter().flatten() {
+                    attribute_args.push(lit(Self::xml_name_of(
+                        attribute.alias.as_ref(),
+                        &attribute.value,
+                    )));
+                    attribute_args.push(self.sql_expr_to_logical_expr(
+                        &attribute.value,
+                        schema,
+                        planner_context,
+                    )?);
+                }
+                let mut args = vec![
+                    lit(Self::xml_element_name(name)),
+                    self.xml_function_call("xmlattributes", attribute_args)?,
+                ];
+                for item in content {
+                    args.push(self.sql_expr_to_logical_expr(
+                        item,
+                        schema,
+                        planner_context,
+                    )?);
+                }
+                self.xml_function_call("xmlelement", args)
+            }
+
+            SQLExpr::XmlForest { elements } => {
+                let mut args = Vec::with_capacity(elements.len() * 2);
+                for element in elements {
+                    args.push(lit(Self::xml_name_of(
+                        element.alias.as_ref(),
+                        &element.expr,
+                    )));
+                    args.push(self.sql_expr_to_logical_expr(
+                        &element.expr,
+                        schema,
+                        planner_context,
+                    )?);
+                }
+                self.xml_function_call("xmlforest", args)
+            }
+
+            SQLExpr::IsDocument { expr, negated } => {
+                let value =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let predicate = self.xml_function_call("xml_is_document", vec![value])?;
+                if *negated {
+                    Ok(Expr::Not(Box::new(predicate)))
+                } else {
+                    Ok(predicate)
                 }
             }
 
@@ -620,6 +741,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 expr,
                 list,
                 negated,
+                ..
             } => self.sql_in_list_to_expr(
                 expr.as_ref(),
                 list,
@@ -1407,6 +1529,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let expr = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
         self.finish_cast_expr(expr, data_type, cast_kind.clone(), format.cloned(), schema)
+    }
+
+    /// Build a call to one of the SQL/XML functions the context provider
+    /// registers. The XML expression forms have no logical-plan node of their
+    /// own, so each is planned as the function that implements it.
+    fn xml_function_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
+        let Some(func) = self.context_provider.get_function_meta(name) else {
+            return not_impl_err!("SQL/XML requires the '{name}' function to be registered");
+        };
+        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(func, args)))
+    }
+
+    /// The name an `XMLELEMENT` gives its element, which is written as an
+    /// identifier rather than as a string.
+    fn xml_element_name(name: &SQLExpr) -> String {
+        match name {
+            SQLExpr::Identifier(ident) => ident.value.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The name an `XMLATTRIBUTES` entry or an `XMLFOREST` element takes: its
+    /// alias when written, else the expression's own spelling.
+    fn xml_name_of(alias: Option<&sqlparser::ast::Ident>, value: &SQLExpr) -> String {
+        match alias {
+            Some(alias) => alias.value.clone(),
+            None => value.to_string(),
+        }
     }
 
     fn finish_cast_expr(

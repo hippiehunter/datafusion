@@ -1102,9 +1102,11 @@ fn plan_create_table_with_storage_parameter_expression_error() {
     "INSERT INTO person (id, first_name, last_name) VALUES ($1, $2, $3, $4)",
     "Error during planning: Placeholder $4 refers to a non existent column"
 )]
-#[case::placeholder_type_unresolved(
+// PostgreSQL spells a placeholder `$` plus decimal digits; a `$` followed by
+// a name is a syntax error at the `$` itself.
+#[case::named_placeholder(
     "INSERT INTO person (id, first_name, last_name) VALUES ($id, $first_name, $last_name)",
-    "Error during planning: Can't parse placeholder: $id"
+    "SQL error: ParserError(\"Expected: a value, found: $ at Line: 1, Column: 56\")"
 )]
 #[test]
 fn test_insert_schema_errors(#[case] sql: &str, #[case] error: &str) {

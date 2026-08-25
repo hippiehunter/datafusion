@@ -131,6 +131,7 @@ impl<'a> FunctionArgs<'a> {
             duplicate_treatment,
             args,
             clauses,
+            ..
         } = args;
 
         let distinct = match duplicate_treatment {
@@ -340,6 +341,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                 }
             }
+        }
+
+        // The SQL/JSON forms carry their behaviour in clauses rather than in
+        // ordinary arguments, so they are resolved before the generic binder
+        // sees the call.
+        if let Some(planned) =
+            self.plan_sql_json_function(&name, function, schema, planner_context)?
+        {
+            return Ok(planned);
         }
 
         let function_args = FunctionArgs::try_new(function)?;
@@ -1135,6 +1145,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        let array_agg_fn = self
+            .context_provider
+            .get_aggregate_meta("array_agg")
+            .ok_or_else(|| internal_datafusion_err!("ARRAY_AGG function not found"))?;
+        self.plan_scalar_subquery_aggregate(
+            query,
+            array_agg_fn,
+            Vec::new(),
+            schema,
+            planner_context,
+        )
+    }
+
+    /// Aggregate a one-column subquery into a single scalar value, which is
+    /// how `ARRAY(SELECT ...)` and `JSON_ARRAY(SELECT ...)` are defined.
+    ///
+    /// `extra_args` follow the aggregated column in the aggregate's argument
+    /// list, for aggregates that take options after their value.
+    pub(super) fn plan_scalar_subquery_aggregate(
+        &self,
+        query: &sqlparser::ast::Query,
+        aggregate: std::sync::Arc<datafusion_expr::AggregateUDF>,
+        extra_args: Vec<Expr>,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
         use crate::query::to_order_by_exprs_with_select;
 
         // Extract ORDER BY from the original query if present
@@ -1161,16 +1197,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Validate that the subquery returns exactly one column
         if sub_plan.schema().fields().len() != 1 {
             return plan_err!(
-                "ARRAY subquery must return exactly one column, but got {}",
+                "aggregated subquery must return exactly one column, but got {}",
                 sub_plan.schema().fields().len()
             );
         }
-
-        // Get array_agg function
-        let array_agg_fn = self
-            .context_provider
-            .get_aggregate_meta("array_agg")
-            .ok_or_else(|| internal_datafusion_err!("ARRAY_AGG function not found"))?;
 
         // Convert ORDER BY to sort expressions if present. ORDER BY resolves
         // against the subquery's projected output schema, so capture it before
@@ -1221,20 +1251,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Expr::Column(Column::new(qualifier.cloned(), field.name()))
         };
 
-        // Create ARRAY_AGG aggregate expression
-        let array_agg_expr = expr::AggregateFunction::new_udf(
-            array_agg_fn,
-            vec![agg_arg],
+        let mut aggregate_args = vec![agg_arg];
+        aggregate_args.extend(extra_args);
+        let aggregate_expr = expr::AggregateFunction::new_udf(
+            aggregate,
+            aggregate_args,
             false, // not distinct
             None,  // no filter
             order_by_sort_exprs,
             None, // no null treatment
         );
 
-        // Build the new subquery: SELECT ARRAY_AGG(col) FROM (original_query)
+        // Build the new subquery: SELECT <agg>(col) FROM (original_query)
         let group_expr: Vec<Expr> = vec![];
         let aggregate_plan = LogicalPlanBuilder::from(sub_plan)
-            .aggregate(group_expr, vec![Expr::AggregateFunction(array_agg_expr)])?
+            .aggregate(group_expr, vec![Expr::AggregateFunction(aggregate_expr)])?
             .build()?;
 
         // Return as a scalar subquery

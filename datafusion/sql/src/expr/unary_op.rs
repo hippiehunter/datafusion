@@ -143,6 +143,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )
                 }
             }
+            UnaryOperator::DoubleAt => {
+                // PostgreSQL geometric centre prefix operator: @@ geometry
+                let operand =
+                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                if let Some(func) = self.context_provider.get_function_meta("center") {
+                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        func,
+                        vec![operand],
+                    )))
+                } else {
+                    not_impl_err!(
+                        "Centre operator (@@) requires 'center' function to be registered"
+                    )
+                }
+            }
             _ => not_impl_err!("Unsupported SQL unary operator {op:?}"),
         }
     }

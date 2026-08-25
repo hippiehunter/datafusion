@@ -169,6 +169,75 @@ fn extract_pattern_symbols_recursive(
 }
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
+    /// Plan the arguments of a table function.
+    ///
+    /// A set-returning function takes the same named parameters as the scalar
+    /// function of that name, so `srf(a, b, opt => v)` resolves against that
+    /// signature before the arguments reach the table-function provider.
+    fn plan_table_function_args(
+        &self,
+        function_name: &str,
+        args: impl IntoIterator<Item = FunctionArg>,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Vec<Expr>> {
+        let mut arg_names: Vec<Option<String>> = Vec::new();
+        let mut planned: Vec<Expr> = Vec::new();
+        for arg in args {
+            arg_names.push(match &arg {
+                FunctionArg::Named { name, .. } => Some(name.value.clone()),
+                FunctionArg::ExprNamed {
+                    name: SQLExpr::Identifier(name),
+                    ..
+                } => Some(name.value.clone()),
+                _ => None,
+            });
+            let expr = match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Variadic(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Named {
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                }
+                | FunctionArg::ExprNamed {
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                } => self.sql_expr_to_logical_expr(expr, schema, planner_context)?,
+                other => {
+                    return plan_err!("Unsupported function argument: {other:?}");
+                }
+            };
+            // A bare column argument can only refer to the enclosing (lateral)
+            // query, so carry its real field so the table function receives a
+            // correctly typed outer reference.
+            planned.push(match expr {
+                Expr::Column(col) => match schema.qualified_field_from_column(&col) {
+                    Ok((_, field)) => Expr::OuterReferenceColumn(Arc::clone(field), col),
+                    Err(_) => Expr::Column(col),
+                },
+                other => other,
+            });
+        }
+        if !arg_names.iter().any(Option::is_some) {
+            return Ok(planned);
+        }
+        let signature = self
+            .context_provider
+            .get_function_meta(function_name)
+            .map(|func| func.signature().clone());
+        match signature.as_ref().and_then(|s| s.parameter_names.as_ref()) {
+            Some(param_names) => datafusion_expr::arguments::resolve_function_arguments(
+                param_names,
+                signature
+                    .as_ref()
+                    .and_then(|s| s.parameter_defaults.as_deref()),
+                planned,
+                arg_names,
+            ),
+            None => plan_err!("Function '{function_name}' does not support named arguments"),
+        }
+    }
+
     /// Creates an augmented schema for MATCH_RECOGNIZE that includes pattern variables
     /// as valid table qualifiers.
     ///
@@ -449,36 +518,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .outer_query_schema()
                     .cloned()
                     .unwrap_or_else(DFSchema::empty);
-                let func_args = args
-                    .iter()
-                    .map(|arg| match arg {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                        | FunctionArg::Variadic(FunctionArgExpr::Expr(expr))
-                        | FunctionArg::Named {
-                            arg: FunctionArgExpr::Expr(expr),
-                            ..
-                        } => {
-                            let expr = self.sql_expr_to_logical_expr(
-                                expr,
-                                &schema,
-                                planner_context,
-                            )?;
-                            Ok(match expr {
-                                Expr::Column(col) => {
-                                    match schema.qualified_field_from_column(&col) {
-                                        Ok((_, field)) => Expr::OuterReferenceColumn(
-                                            Arc::clone(field),
-                                            col,
-                                        ),
-                                        Err(_) => Expr::Column(col),
-                                    }
-                                }
-                                other => other,
-                            })
-                        }
-                        _ => plan_err!("Unsupported function argument: {arg:?}"),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let func_args = self.plan_table_function_args(
+                    tbl_func_ref.table(),
+                    args.iter().cloned(),
+                    &schema,
+                    planner_context,
+                )?;
                 let provider = self
                     .context_provider
                     .get_table_function_source(tbl_func_ref.table(), func_args)?;
@@ -777,40 +822,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .outer_query_schema()
                     .cloned()
                     .unwrap_or_else(DFSchema::empty);
-                let func_args = args
-                    .into_iter()
-                    .map(|arg| match arg {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                        | FunctionArg::Variadic(FunctionArgExpr::Expr(expr))
-                        | FunctionArg::Named {
-                            arg: FunctionArgExpr::Expr(expr),
-                            ..
-                        } => {
-                            let expr = self.sql_expr_to_logical_expr(
-                                expr,
-                                &schema,
-                                planner_context,
-                            )?;
-                            // A bare column argument can only refer to the
-                            // enclosing (lateral) query, so carry its real
-                            // field so the table function receives a correctly
-                            // typed outer reference.
-                            Ok(match expr {
-                                Expr::Column(col) => {
-                                    match schema.qualified_field_from_column(&col) {
-                                        Ok((_, field)) => Expr::OuterReferenceColumn(
-                                            Arc::clone(field),
-                                            col,
-                                        ),
-                                        Err(_) => Expr::Column(col),
-                                    }
-                                }
-                                other => other,
-                            })
-                        }
-                        _ => plan_err!("Unsupported function argument: {arg:?}"),
-                    })
-                    .collect::<Result<Vec<Expr>>>()?;
+                let func_args = self.plan_table_function_args(
+                    tbl_func_ref.table(),
+                    args,
+                    &schema,
+                    planner_context,
+                )?;
                 let provider = self
                     .context_provider
                     .get_table_function_source(tbl_func_ref.table(), func_args)?;
@@ -1414,7 +1431,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
             sqlparser::ast::Value::SingleQuotedString(s)
-            | sqlparser::ast::Value::DoubleQuotedString(s) => Ok(ScalarValue::Utf8(Some(s))),
+            | sqlparser::ast::Value::DoubleQuotedString(s) => {
+                Ok(ScalarValue::Utf8(Some(s)))
+            }
             sqlparser::ast::Value::Boolean(b) => Ok(ScalarValue::Boolean(Some(b))),
             sqlparser::ast::Value::Null => Ok(ScalarValue::Null),
             _ => plan_err!("Unsupported default value type in JSON_TABLE"),
@@ -1450,7 +1469,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
         let json_path = match path {
             SQLExpr::Value(value) => Self::json_table_path_string(value.value)?,
-            other => return plan_err!("JSON_TABLE path must be a string literal, got {other}"),
+            other => {
+                return plan_err!("JSON_TABLE path must be a string literal, got {other}");
+            }
         };
         let empty_schema = DFSchema::empty();
         let df_json_expr =
@@ -1580,9 +1601,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// The behaviors a JSON_TABLE column clause can carry into the plan node:
     /// `NULL`, `ERROR`, a literal `DEFAULT`, and the boolean outcomes of an
     /// `EXISTS` column.
-    fn convert_sql_json_behavior(behavior: JsonOnBehavior) -> Result<JsonTableErrorHandling> {
+    fn convert_sql_json_behavior(
+        behavior: JsonOnBehavior,
+    ) -> Result<JsonTableErrorHandling> {
         match behavior {
-            JsonOnBehavior::Null | JsonOnBehavior::Unknown => Ok(JsonTableErrorHandling::Null),
+            JsonOnBehavior::Null | JsonOnBehavior::Unknown => {
+                Ok(JsonTableErrorHandling::Null)
+            }
             JsonOnBehavior::Error => Ok(JsonTableErrorHandling::Error),
             JsonOnBehavior::True => Ok(JsonTableErrorHandling::Default(
                 ScalarValue::Boolean(Some(true)),
@@ -1594,9 +1619,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 SQLExpr::Value(value) => Ok(JsonTableErrorHandling::Default(
                     Self::json_table_default_scalar(value.value.clone())?,
                 )),
-                other => not_impl_err!(
-                    "JSON_TABLE DEFAULT {other} must be a literal"
-                ),
+                other => not_impl_err!("JSON_TABLE DEFAULT {other} must be a literal"),
             },
             JsonOnBehavior::EmptyArray | JsonOnBehavior::EmptyObject => {
                 not_impl_err!("JSON_TABLE {behavior} ON EMPTY/ERROR is not supported")

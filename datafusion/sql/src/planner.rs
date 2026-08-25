@@ -242,6 +242,18 @@ impl IdentNormalizer {
     }
 }
 
+/// What the `DEFAULT` keyword resolves to in one slot of an INSERT's values
+/// list.
+#[derive(Debug, Clone)]
+pub enum ValuesDefault {
+    /// The written column's declared default, or NULL when it has none.
+    Column(Option<Expr>),
+    /// The slot writes below a column — an array element, a field of a
+    /// composite — which has no default of its own. Carries the message for
+    /// the part that was written.
+    Refused(&'static str),
+}
+
 /// Struct to store the states used by the Planner. The Planner will leverage the states
 /// to resolve CTEs, Views, subqueries and PREPARE statements. The states include
 /// Common Table Expression (CTE) provided with WITH clause and
@@ -274,7 +286,7 @@ pub struct PlannerContext {
     /// The query schema defined by the table
     create_table_schema: Option<DFSchemaRef>,
     /// Default expressions for VALUES planning (e.g. INSERT ... VALUES DEFAULT)
-    values_defaults: Option<Vec<Option<Expr>>>,
+    values_defaults: Option<Vec<ValuesDefault>>,
     /// Schema for PSM (Persistent Stored Modules) variables and parameters.
     /// Used to resolve variable references in procedure/function bodies.
     psm_schema: Option<DFSchemaRef>,
@@ -373,14 +385,14 @@ impl PlannerContext {
     /// Sets default expressions for VALUES planning, returning the previous value if any.
     pub fn set_values_defaults(
         &mut self,
-        mut defaults: Option<Vec<Option<Expr>>>,
-    ) -> Option<Vec<Option<Expr>>> {
+        mut defaults: Option<Vec<ValuesDefault>>,
+    ) -> Option<Vec<ValuesDefault>> {
         std::mem::swap(&mut self.values_defaults, &mut defaults);
         defaults
     }
 
     /// Consume defaults for VALUES planning (one-shot).
-    pub fn take_values_defaults(&mut self) -> Option<Vec<Option<Expr>>> {
+    pub fn take_values_defaults(&mut self) -> Option<Vec<ValuesDefault>> {
         self.values_defaults.take()
     }
 

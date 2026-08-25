@@ -1209,6 +1209,14 @@ stub_typed_udf!(
 stub_scalar_udf!(JsonQuery, "json_query");
 stub_scalar_udf!(JsonValue, "json_value");
 stub_scalar_udf!(JsonObject, "json_object");
+// The SQL/JSON constructors carry their behaviour in clauses (`ABSENT ON
+// NULL`, `RETURNING`, `WITH WRAPPER`) rather than in ordinary arguments, so
+// the planner lowers them to these calls with the clauses spelled out as
+// arguments instead of to the bare `JSON_OBJECT` / `JSON_ARRAY` names.
+stub_scalar_udf!(JsonObjectConstructor, "json_object_constructor");
+stub_scalar_udf!(JsonArrayConstructor, "json_array_constructor");
+stub_scalar_udf!(JsonScalarConstructor, "json_scalar_constructor");
+stub_scalar_udf!(JsonbBuildObject, "jsonb_build_object");
 
 // IS JSON predicates - all return Boolean
 stub_typed_udf!(
@@ -1700,6 +1708,10 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "json_query" => Some(json_query_udf()),
             "json_value" => Some(json_value_udf()),
             "json_object" => Some(json_object_udf()),
+            "json_object_constructor" => Some(json_object_constructor_udf()),
+            "json_array_constructor" => Some(json_array_constructor_udf()),
+            "json_scalar_constructor" => Some(json_scalar_constructor_udf()),
+            "jsonb_build_object" => Some(jsonb_build_object_udf()),
 
             // IS JSON predicates
             "is_json" => Some(is_json_udf()),

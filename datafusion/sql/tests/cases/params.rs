@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan;
+use crate::{logical_plan, logical_plan_with_dialect};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{
     ParamValues, ScalarValue, assert_contains,
@@ -24,6 +24,7 @@ use datafusion_common::{
 use datafusion_expr::{LogicalPlan, Prepare, Statement};
 use insta::assert_snapshot;
 use itertools::Itertools as _;
+use sqlparser::dialect::MsSqlDialect;
 use std::collections::HashMap;
 
 pub struct ParameterTest<'a> {
@@ -97,14 +98,27 @@ fn generate_prepare_stmt_and_data_types(sql: &str) -> (LogicalPlan, String) {
 
 #[test]
 fn test_prepare_statement_to_plan_panic_param_format() {
-    // param is not number following the $ sign
-    // panic due to error returned from the parser
+    // A named placeholder is not one of the parameters PREPARE declared.
     let sql = "PREPARE my_plan(INT) AS SELECT id, age  FROM person WHERE age = $foo";
+
+    assert_snapshot!(
+        logical_plan_with_dialect(sql, &MsSqlDialect {})
+            .unwrap_err()
+            .strip_backtrace(),
+        @r###"
+        Error during planning: Unknown placeholder: $foo
+        "###
+    );
+}
+
+#[test]
+fn postgres_rejects_a_named_placeholder() {
+    let sql = "SELECT id from person where id = $foo";
 
     assert_snapshot!(
         logical_plan(sql).unwrap_err().strip_backtrace(),
         @r###"
-        Error during planning: Unknown placeholder: $foo
+        SQL error: ParserError("Expected: a value, found: $ at Line: 1, Column: 34")
         "###
     );
 }
@@ -1052,10 +1066,12 @@ fn test_prepare_statement_unknown_list_param() {
     );
 }
 
+// Named placeholders need a dialect that spells one. PostgreSQL does not:
+// there a placeholder is `$` plus decimal digits and nothing else.
 #[test]
 fn test_prepare_statement_unknown_hash_param() {
     let sql = "SELECT id from person where id = $bar";
-    let plan = logical_plan(sql).unwrap();
+    let plan = logical_plan_with_dialect(sql, &MsSqlDialect {}).unwrap();
     let param_values = ParamValues::Map(HashMap::new());
     let err = plan.replace_params_with_values(&param_values).unwrap_err();
     assert_contains!(
@@ -1067,7 +1083,7 @@ fn test_prepare_statement_unknown_hash_param() {
 #[test]
 fn test_prepare_statement_bad_list_idx() {
     let sql = "SELECT id from person where id = $foo";
-    let plan = logical_plan(sql).unwrap();
+    let plan = logical_plan_with_dialect(sql, &MsSqlDialect {}).unwrap();
     let param_values = ParamValues::List(vec![]);
 
     let err = plan.replace_params_with_values(&param_values).unwrap_err();

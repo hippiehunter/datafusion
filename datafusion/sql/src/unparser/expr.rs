@@ -165,6 +165,7 @@ impl Unparser<'_> {
                     expr: SQLBox::new(self.expr_to_sql_inner(expr)?),
                     list: list_expr,
                     negated: *negated,
+                    close_paren_token: AttachedToken::empty(),
                 })
             }
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
@@ -315,6 +316,7 @@ impl Unparser<'_> {
                             .then_some(DuplicateTreatment::Distinct),
                         args,
                         clauses: vec![],
+                        close_paren_token: AttachedToken::empty(),
                     }),
                     filter: filter
                         .as_ref()
@@ -404,6 +406,7 @@ impl Unparser<'_> {
                             .then_some(DuplicateTreatment::Distinct),
                         args,
                         clauses: vec![],
+                        close_paren_token: AttachedToken::empty(),
                     }),
                     filter,
                     null_treatment: None,
@@ -683,6 +686,7 @@ impl Unparser<'_> {
                 duplicate_treatment: None,
                 args,
                 clauses: vec![],
+                close_paren_token: AttachedToken::empty(),
             }),
             filter: None,
             null_treatment: None,
@@ -750,6 +754,7 @@ impl Unparser<'_> {
                 duplicate_treatment: None,
                 args: struct_args,
                 clauses: vec![],
+                close_paren_token: AttachedToken::empty(),
             }),
             filter: None,
             null_treatment: None,
@@ -828,6 +833,7 @@ impl Unparser<'_> {
                     ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(values_expr)),
                 ],
                 clauses: vec![],
+                close_paren_token: AttachedToken::empty(),
             }),
             filter: None,
             null_treatment: None,
@@ -1875,6 +1881,7 @@ impl Unparser<'_> {
                 duplicate_treatment: None,
                 args,
                 clauses: vec![],
+                close_paren_token: AttachedToken::empty(),
             }),
             filter: None,
             null_treatment: None,

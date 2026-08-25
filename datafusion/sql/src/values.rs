@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::{DFSchema, Result, ScalarValue};
+use crate::planner::{ContextProvider, PlannerContext, SqlToRel, ValuesDefault};
+use datafusion_common::{DFSchema, Result, ScalarValue, not_impl_err};
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder};
 use sqlparser::ast::{Expr as SQLExpr, Ident, Values as SQLValues};
 
@@ -43,14 +43,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .map(|(idx, v)| {
                         if let (Some(defaults), SQLExpr::Identifier(ident)) =
                             (defaults.as_ref(), v)
+                            && is_default_identifier(ident)
                         {
-                            if is_default_identifier(ident) {
-                                let default_expr = defaults
-                                    .get(idx)
-                                    .and_then(|expr| expr.clone())
-                                    .unwrap_or(Expr::Literal(ScalarValue::Null, None));
-                                return Ok(default_expr);
-                            }
+                            return match defaults.get(idx) {
+                                Some(ValuesDefault::Refused(message)) => not_impl_err!("{message}"),
+                                Some(ValuesDefault::Column(Some(default))) => Ok(default.clone()),
+                                _ => Ok(Expr::Literal(ScalarValue::Null, None)),
+                            };
                         }
                         self.sql_to_expr_ref(v, &empty_schema, planner_context)
                     })

@@ -294,6 +294,15 @@ impl LogicalPlanBuilder {
         for j in 0..n_cols {
             let field_type = schema.field(j).data_type();
             let field_nullable = schema.field(j).is_nullable();
+            if matches!(field_type, DataType::Null) {
+                // A slot the target schema leaves untyped: a value written
+                // below a column — a field of a composite — is typed by the
+                // dialect's type registry rather than by this schema, so it
+                // takes the type of the values written into it.
+                let (data_type, metadata) = Self::infer_value_column(&values, j, schema)?;
+                fields.push_with_metadata(data_type, true, metadata);
+                continue;
+            }
             for row in values.iter() {
                 let value = &row[j];
                 let data_type = value.get_type(schema)?;
@@ -321,50 +330,56 @@ impl LogicalPlanBuilder {
         let mut fields = ValuesFields::new();
 
         for j in 0..n_cols {
-            let mut common_type: Option<DataType> = None;
-            let mut common_metadata: Option<FieldMetadata> = None;
-            for (i, row) in values.iter().enumerate() {
-                let value = &row[j];
-                let metadata = value.metadata(&schema)?;
-                if let Some(ref cm) = common_metadata {
-                    if &metadata != cm {
-                        return plan_err!(
-                            "Inconsistent metadata across values list at row {i} column {j}. Was {:?} but found {:?}",
-                            cm,
-                            metadata
-                        );
-                    }
-                } else {
-                    common_metadata = Some(metadata.clone());
-                }
-                let data_type = value.get_type(&schema)?;
-                if data_type == DataType::Null {
-                    continue;
-                }
-
-                if let Some(prev_type) = common_type {
-                    // get common type of each column values.
-                    let data_types = vec![prev_type.clone(), data_type.clone()];
-                    let Some(new_type) = type_union_resolution(&data_types) else {
-                        return plan_err!(
-                            "Inconsistent data type across values list at row {i} column {j}. Was {prev_type} but found {data_type}"
-                        );
-                    };
-                    common_type = Some(new_type);
-                } else {
-                    common_type = Some(data_type);
-                }
-            }
-            // assuming common_type was not set, and no error, therefore the type should be NULL
-            // since the code loop skips NULL
-            fields.push_with_metadata(
-                common_type.unwrap_or(DataType::Null),
-                true,
-                common_metadata,
-            );
+            let (data_type, metadata) = Self::infer_value_column(&values, j, &schema)?;
+            fields.push_with_metadata(data_type, true, metadata);
         }
 
         Self::infer_inner(values, fields, &schema)
+    }
+
+    /// The type and metadata column `j` of a values list carries: the common
+    /// type of the values written into it, or NULL when every row writes NULL.
+    fn infer_value_column(
+        values: &[Vec<Expr>],
+        j: usize,
+        schema: &DFSchema,
+    ) -> Result<(DataType, Option<FieldMetadata>)> {
+        let mut common_type: Option<DataType> = None;
+        let mut common_metadata: Option<FieldMetadata> = None;
+        for (i, row) in values.iter().enumerate() {
+            let value = &row[j];
+            let metadata = value.metadata(schema)?;
+            if let Some(ref cm) = common_metadata {
+                if &metadata != cm {
+                    return plan_err!(
+                        "Inconsistent metadata across values list at row {i} column {j}. Was {:?} but found {:?}",
+                        cm,
+                        metadata
+                    );
+                }
+            } else {
+                common_metadata = Some(metadata.clone());
+            }
+            let data_type = value.get_type(schema)?;
+            if data_type == DataType::Null {
+                continue;
+            }
+
+            if let Some(prev_type) = common_type {
+                // get common type of each column values.
+                let data_types = vec![prev_type.clone(), data_type.clone()];
+                let Some(new_type) = type_union_resolution(&data_types) else {
+                    return plan_err!(
+                        "Inconsistent data type across values list at row {i} column {j}. Was {prev_type} but found {data_type}"
+                    );
+                };
+                common_type = Some(new_type);
+            } else {
+                common_type = Some(data_type);
+            }
+        }
+        // A column whose values are all NULL has no type of its own.
+        Ok((common_type.unwrap_or(DataType::Null), common_metadata))
     }
 
     fn infer_inner(

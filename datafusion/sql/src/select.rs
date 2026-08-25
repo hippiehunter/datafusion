@@ -788,17 +788,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     fn select_requires_owned_rewrite(select: &Select) -> bool {
         let has_projection_srf = select.projection.iter().any(|item| match item {
-            SelectItem::UnnamedExpr(SQLExpr::Function(function)) => {
-                Self::projection_srf_parts(function, None).is_some()
+            SelectItem::UnnamedExpr(expr) => Self::expr_contains_projection_srf(expr),
+            SelectItem::ExprWithAlias { expr, .. } => {
+                Self::expr_contains_projection_srf(expr)
             }
-            SelectItem::ExprWithAlias {
-                expr: SQLExpr::Function(function),
-                alias,
-            } => Self::projection_srf_parts(function, Some(alias.clone())).is_some(),
             _ => false,
         });
 
         has_projection_srf || Self::is_projection_tvf_star(select)
+    }
+
+    /// Whether a select-list expression contains a set-returning call, at its
+    /// top level or nested inside a surrounding expression.
+    fn expr_contains_projection_srf(expr: &SQLExpr) -> bool {
+        if let SQLExpr::Function(function) = expr
+            && Self::projection_srf_parts(function, None).is_some()
+        {
+            return true;
+        }
+        let mut expr = expr.clone();
+        Self::projection_expr_children(&mut expr)
+            .into_iter()
+            .any(|child| Self::expr_contains_projection_srf(child))
     }
 
     fn is_projection_tvf_star(select: &Select) -> bool {
@@ -838,51 +849,178 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// array_upper(t.c,1))`) resolve against the outer relations via the lateral
     /// planning path.
     fn rewrite_projection_srfs_to_lateral(select: &mut Select) {
-        if select.from.is_empty() {
-            return;
-        }
         let mut lateral_joins: Vec<Join> = Vec::new();
         for item in &mut select.projection {
-            let parts = match item {
-                SelectItem::UnnamedExpr(SQLExpr::Function(f)) => {
-                    Self::projection_srf_parts(f, None)
+            match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    // A bare call with no FROM is the shorthand the relation
+                    // planner expands on its own; anything else is hoisted.
+                    if select.from.is_empty() && matches!(expr, SQLExpr::Function(_)) {
+                        continue;
+                    }
+                    let parts = match expr {
+                        SQLExpr::Function(function) => {
+                            Self::projection_srf_parts(function, None)
+                        }
+                        _ => None,
+                    };
+                    match parts {
+                        Some((name, args, col)) => {
+                            let reference =
+                                Self::push_srf_join(&mut lateral_joins, name, args, col.clone());
+                            *item = SelectItem::ExprWithAlias {
+                                expr: reference,
+                                alias: col,
+                            };
+                        }
+                        None => Self::hoist_nested_srfs(expr, &mut lateral_joins),
+                    }
                 }
-                SelectItem::ExprWithAlias {
-                    expr: SQLExpr::Function(f),
-                    alias,
-                } => Self::projection_srf_parts(f, Some(alias.clone())),
-                _ => None,
-            };
-            let Some((func_name, func_args, col)) = parts else {
-                continue;
-            };
-            let srf_alias = Ident::new(format!("__srf_{}", lateral_joins.len()));
-            let table_alias = TableAlias::new(
-                srf_alias.clone(),
-                vec![sqlparser::ast::TableAliasColumnDef {
-                    name: col.clone(),
-                    data_type: None,
-                    collation: None,
-                }],
-            );
-            lateral_joins.push(Join {
-                relation: TableFactor::Function {
-                    lateral: true,
-                    name: func_name,
-                    args: func_args,
-                    alias: Some(table_alias),
-                },
-                global: false,
-                join_operator: JoinOperator::CrossJoin(JoinConstraint::None),
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    if select.from.is_empty() && matches!(expr, SQLExpr::Function(_)) {
+                        continue;
+                    }
+                    let parts = match expr {
+                        SQLExpr::Function(function) => {
+                            Self::projection_srf_parts(function, Some(alias.clone()))
+                        }
+                        _ => None,
+                    };
+                    match parts {
+                        Some((name, args, col)) => {
+                            *expr =
+                                Self::push_srf_join(&mut lateral_joins, name, args, col.clone());
+                        }
+                        None => Self::hoist_nested_srfs(expr, &mut lateral_joins),
+                    }
+                }
+                _ => {}
+            }
+        }
+        if lateral_joins.is_empty() {
+            return;
+        }
+        // A hoisted call needs something to join against, so a query written
+        // without a FROM clause gets the one-row relation it implies.
+        if select.from.is_empty() {
+            select.from.push(TableWithJoins {
+                relation: Self::one_row_relation(),
+                joins: Vec::new(),
             });
-            let col_ref = SQLExpr::CompoundIdentifier(vec![srf_alias, col.clone()]);
-            *item = SelectItem::ExprWithAlias {
-                expr: col_ref,
-                alias: col,
-            };
         }
         if let Some(last) = select.from.last_mut() {
             last.joins.extend(lateral_joins);
+        }
+    }
+
+    /// Record one hoisted set-returning call and return the column reference
+    /// that replaces it.
+    fn push_srf_join(
+        lateral_joins: &mut Vec<Join>,
+        name: ObjectName,
+        args: Vec<FunctionArg>,
+        col: Ident,
+    ) -> SQLExpr {
+        let srf_alias = Ident::new(format!("__srf_{}", lateral_joins.len()));
+        let table_alias = TableAlias::new(
+            srf_alias.clone(),
+            vec![sqlparser::ast::TableAliasColumnDef {
+                name: col.clone(),
+                data_type: None,
+                collation: None,
+            }],
+        );
+        lateral_joins.push(Join {
+            relation: TableFactor::Function {
+                lateral: true,
+                name,
+                args,
+                alias: Some(table_alias),
+            },
+            global: false,
+            join_operator: JoinOperator::CrossJoin(JoinConstraint::None),
+        });
+        SQLExpr::CompoundIdentifier(vec![srf_alias, col])
+    }
+
+    /// PostgreSQL applies the expression around a set-returning call to each
+    /// row the call returns, so a call nested inside a larger select-list
+    /// expression (`srf(x)::text`, `srf(x) || 'y'`) is hoisted the same way a
+    /// bare one is and the expression keeps the column reference in its place.
+    fn hoist_nested_srfs(expr: &mut SQLExpr, lateral_joins: &mut Vec<Join>) {
+        if let SQLExpr::Function(function) = expr
+            && let Some((name, args, col)) = Self::projection_srf_parts(function, None)
+        {
+            *expr = Self::push_srf_join(lateral_joins, name, args, col);
+            return;
+        }
+        for child in Self::projection_expr_children(expr) {
+            Self::hoist_nested_srfs(child, lateral_joins);
+        }
+    }
+
+    /// The sub-expressions a select-list expression can wrap a call in.
+    fn projection_expr_children(expr: &mut SQLExpr) -> Vec<&mut SQLExpr> {
+        match expr {
+            SQLExpr::Cast { expr, .. }
+            | SQLExpr::Nested(expr)
+            | SQLExpr::UnaryOp { expr, .. }
+            | SQLExpr::IsNull { expr, .. }
+            | SQLExpr::IsNotNull { expr, .. }
+            | SQLExpr::Collate { expr, .. } => vec![expr.as_mut()],
+            SQLExpr::BinaryOp { left, right, .. } => vec![left.as_mut(), right.as_mut()],
+            SQLExpr::Function(function) => match &mut function.args {
+                FunctionArguments::List(list) => list
+                    .args
+                    .iter_mut()
+                    .filter_map(|arg| match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))
+                        | FunctionArg::Named {
+                            arg: FunctionArgExpr::Expr(inner),
+                            ..
+                        } => Some(inner),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// `(SELECT 1) AS __srf_base`: the one-row relation a hoisted lateral join
+    /// needs when the query was written without a FROM clause.
+    fn one_row_relation() -> TableFactor {
+        let inner = Select {
+            select_token: AttachedToken::empty(),
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: vec![SelectItem::UnnamedExpr(SQLExpr::Value(
+                sqlparser::ast::Value::Number("1".to_string(), false).into(),
+            ))],
+            into: None,
+            from: Vec::new(),
+            selection: None,
+            group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
+            having: None,
+            qualify: None,
+            named_window: Vec::new(),
+            connect_by: None,
+            flavor: SelectFlavor::Standard,
+        };
+        TableFactor::Derived {
+            lateral: false,
+            subquery: SQLBox::new(SQLQuery {
+                with: None,
+                body: SQLBox::new(SetExpr::Select(SQLBox::new(inner))),
+                order_by: None,
+                limit_clause: None,
+                fetch: None,
+                locks: Vec::new(),
+                for_clause: None,
+            }),
+            alias: Some(TableAlias::new(Ident::new("__srf_base"), Vec::new())),
         }
     }
 

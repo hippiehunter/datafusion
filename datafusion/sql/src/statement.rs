@@ -26,7 +26,7 @@ use crate::parser::{
     ExplainStatement, LexOrdering, ResetStatement, Statement as DFStatement,
 };
 use crate::planner::{
-    ContextProvider, PlannerContext, SqlToRel, object_name_to_qualifier,
+    ContextProvider, PlannerContext, SqlToRel, ValuesDefault, object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
@@ -4295,10 +4295,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         }
                         sources.push((i, path));
                         let field = table_schema.field(column_index);
-                        // A value written through an element subscript has
-                        // the element's type; a slice or a field path takes
-                        // the column's own carrier.
+                        // A value written through an element subscript has the
+                        // element's type, and one written through a slice the
+                        // column's own. A value written into a field of a
+                        // composite has the field's type, which the dialect's
+                        // type registry holds rather than this schema, so the
+                        // slot is left untyped for the value to type.
                         Ok(match path {
+                            [] | [AccessExpr::Subscript(Subscript::Slice { .. })] => {
+                                Arc::clone(field)
+                            }
                             [AccessExpr::Subscript(Subscript::Index { .. })] => {
                                 match field.data_type() {
                                     DataType::List(item)
@@ -4310,7 +4316,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     _ => Arc::clone(field),
                                 }
                             }
-                            _ => Arc::clone(field),
+                            _ => Arc::new(Field::new(field.name(), DataType::Null, true)),
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -4349,14 +4355,38 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut planner_context = outer_planner_context
             .clone()
             .with_prepare_param_data_types(prepare_param_data_types);
+        // A source row is a row of the inserted relation, not of the target
+        // table: several of its fields may write parts of one column, so they
+        // are named by position, the way a values list names its columns.
+        let source_fields = Fields::from(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(i, field)| {
+                    Arc::new(field.as_ref().clone().with_name(format!("column{}", i + 1)))
+                })
+                .collect::<Vec<_>>(),
+        );
         planner_context.set_table_schema(Some(DFSchemaRef::new(
-            DFSchema::from_unqualified_fields(fields.clone(), Default::default())?,
+            DFSchema::from_unqualified_fields(source_fields, Default::default())?,
         )));
         if matches!(source.body.as_ref(), SetExpr::Values(_)) {
-            let defaults = fields
-                .iter()
-                .map(|field| table_source.get_column_default(field.name()).cloned())
-                .collect::<Vec<_>>();
+            let mut defaults = vec![ValuesDefault::Column(None); fields.len()];
+            for (column_index, sources) in value_sources.iter().enumerate() {
+                for (slot, path) in sources {
+                    defaults[*slot] = match path.last() {
+                        None => ValuesDefault::Column(
+                            table_source
+                                .get_column_default(table_schema.field(column_index).name())
+                                .cloned(),
+                        ),
+                        Some(AccessExpr::Subscript(_)) => {
+                            ValuesDefault::Refused("cannot set an array element to DEFAULT")
+                        }
+                        Some(_) => ValuesDefault::Refused("cannot set a subfield to DEFAULT"),
+                    };
+                }
+            }
             planner_context.set_values_defaults(Some(defaults));
         }
         let source = self.query_to_plan_ref(source, &mut planner_context)?;

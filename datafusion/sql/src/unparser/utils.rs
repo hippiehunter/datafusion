@@ -32,6 +32,7 @@ use datafusion_expr::{
 };
 
 use indexmap::IndexSet;
+use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{self, AstBox as SQLBox};
 use sqlparser::tokenizer::Span;
 
@@ -467,6 +468,7 @@ pub(crate) fn date_part_to_sql(
                             ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(column)),
                         ],
                         clauses: vec![],
+                        close_paren_token: AttachedToken::empty(),
                     }),
                     filter: None,
                     null_treatment: None,
