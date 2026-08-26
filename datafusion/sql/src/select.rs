@@ -1304,7 +1304,65 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Err(err) => error_builder.add_error(err),
             }
         }
-        error_builder.error_or(prepared_select_exprs)
+        let mut prepared_select_exprs = error_builder.error_or(prepared_select_exprs)?;
+        self.label_unaliased_function_calls(projection, &mut prepared_select_exprs);
+        Ok(prepared_select_exprs)
+    }
+
+    /// PostgreSQL names an unaliased function call after the function:
+    /// `SELECT nextval('s')` is a column `nextval`, and an enclosing query can
+    /// refer to it by that name. The label is applied when it is unique within
+    /// the projection; two `count(...)` calls keep their distinct display
+    /// names so the projection schema stays unambiguous.
+    fn label_unaliased_function_calls(
+        &self,
+        projection: &[SelectItem],
+        prepared: &mut [SelectExpr],
+    ) {
+        if projection.len() != prepared.len() {
+            return;
+        }
+        let labels: Vec<Option<String>> = projection
+            .iter()
+            .map(|item| match item {
+                SelectItem::UnnamedExpr(SQLExpr::Function(function))
+                    if function.over.is_none() =>
+                {
+                    function
+                        .name
+                        .0
+                        .last()
+                        .and_then(|part| part.as_ident())
+                        .map(|ident| self.ident_normalizer.normalize(ident.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if labels.iter().all(Option::is_none) {
+            return;
+        }
+        let mut occurrences: IndexMap<String, usize> = IndexMap::new();
+        for (label, item) in labels.iter().zip(prepared.iter()) {
+            let name = match (label, item) {
+                (Some(label), _) => label.clone(),
+                (None, SelectExpr::Expression(expr)) => expr.schema_name().to_string(),
+                (None, _) => continue,
+            };
+            *occurrences.entry(name).or_insert(0) += 1;
+        }
+        for (label, item) in labels.into_iter().zip(prepared.iter_mut()) {
+            let Some(label) = label else {
+                continue;
+            };
+            if occurrences.get(&label).copied() != Some(1) {
+                continue;
+            }
+            if let SelectExpr::Expression(expr) = item
+                && expr.schema_name().to_string() != label
+            {
+                *expr = expr.clone().alias(label);
+            }
+        }
     }
 
     /// `(expr).*` selects every field of a row-valued expression as its own
