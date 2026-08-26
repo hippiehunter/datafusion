@@ -1217,6 +1217,11 @@ stub_scalar_udf!(JsonObjectConstructor, "json_object_constructor");
 stub_scalar_udf!(JsonArrayConstructor, "json_array_constructor");
 stub_scalar_udf!(JsonScalarConstructor, "json_scalar_constructor");
 stub_scalar_udf!(JsonbBuildObject, "jsonb_build_object");
+// The member text an aggregate's argument contributes depends on its declared
+// type, which only a scalar function sees. The JSON aggregates render each
+// argument through these before the accumulator concatenates the fragments.
+stub_scalar_udf!(JsonMemberKey, "json_member_key");
+stub_scalar_udf!(JsonMemberValue, "json_member_value");
 
 // IS JSON predicates - all return Boolean
 stub_typed_udf!(
@@ -1712,6 +1717,8 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "json_array_constructor" => Some(json_array_constructor_udf()),
             "json_scalar_constructor" => Some(json_scalar_constructor_udf()),
             "jsonb_build_object" => Some(jsonb_build_object_udf()),
+            "json_member_key" => Some(json_member_key_udf()),
+            "json_member_value" => Some(json_member_value_udf()),
 
             // IS JSON predicates
             "is_json" => Some(is_json_udf()),

@@ -1153,6 +1153,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             query,
             array_agg_fn,
             Vec::new(),
+            None,
             schema,
             planner_context,
         )
@@ -1163,11 +1164,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ///
     /// `extra_args` follow the aggregated column in the aggregate's argument
     /// list, for aggregates that take options after their value.
+    ///
+    /// `value_wrapper` names a scalar function the projected column passes
+    /// through first, which is how an aggregate whose members are
+    /// type-dependent text gets its arguments rendered before they reach the
+    /// accumulator.
     pub(super) fn plan_scalar_subquery_aggregate(
         &self,
         query: &sqlparser::ast::Query,
         aggregate: std::sync::Arc<datafusion_expr::AggregateUDF>,
         extra_args: Vec<Expr>,
+        value_wrapper: Option<&str>,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -1251,6 +1258,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Expr::Column(Column::new(qualifier.cloned(), field.name()))
         };
 
+        let agg_arg = match value_wrapper {
+            Some(name) => {
+                let Some(func) = self.context_provider.get_function_meta(name) else {
+                    return not_impl_err!("the '{name}' function is not registered");
+                };
+                Expr::ScalarFunction(ScalarFunction::new_udf(func, vec![agg_arg]))
+            }
+            None => agg_arg,
+        };
         let mut aggregate_args = vec![agg_arg];
         aggregate_args.extend(extra_args);
         let aggregate_expr = expr::AggregateFunction::new_udf(

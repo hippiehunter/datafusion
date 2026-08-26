@@ -348,18 +348,21 @@ impl LogicalPlanBuilder {
         let mut common_metadata: Option<FieldMetadata> = None;
         for (i, row) in values.iter().enumerate() {
             let value = &row[j];
+            // A column's metadata is what every value written into it agrees
+            // on. A row that declares more than another does not conflict with
+            // it; the column simply does not carry the extra fact.
             let metadata = value.metadata(schema)?;
-            if let Some(ref cm) = common_metadata {
-                if &metadata != cm {
-                    return plan_err!(
-                        "Inconsistent metadata across values list at row {i} column {j}. Was {:?} but found {:?}",
-                        cm,
-                        metadata
-                    );
-                }
-            } else {
-                common_metadata = Some(metadata.clone());
-            }
+            common_metadata = Some(match common_metadata {
+                Some(common) => FieldMetadata::new(
+                    common
+                        .inner()
+                        .iter()
+                        .filter(|(key, value)| metadata.inner().get(*key) == Some(*value))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+                None => metadata.clone(),
+            });
             let data_type = value.get_type(schema)?;
             if data_type == DataType::Null {
                 continue;

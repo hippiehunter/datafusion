@@ -1133,8 +1133,46 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             SQLExpr::JsonAccess { value, path } => {
                 self.plan_json_access(value.as_ref(), &path.path, schema, planner_context)
             }
-            SQLExpr::Collate { expr, .. } => {
-                self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)
+            // A COLLATE clause names the collation an expression derives, which
+            // a dialect resolves against its catalog. When the context provider
+            // registers the conventional resolver the clause is preserved as a
+            // call to it; otherwise the collation carries no meaning here and
+            // the operand stands alone.
+            SQLExpr::Collate { expr, collation } => {
+                let operand =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                match self.context_provider.get_function_meta("pg_collate") {
+                    Some(func) => {
+                        let name = collation
+                            .0
+                            .last()
+                            .and_then(|part| part.as_ident())
+                            .map(|ident| {
+                                if ident.quote_style.is_some() {
+                                    ident.value.clone()
+                                } else {
+                                    ident.value.to_lowercase()
+                                }
+                            })
+                            .unwrap_or_else(|| collation.to_string());
+                        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                            func,
+                            vec![operand, lit(name)],
+                        )))
+                    }
+                    None => Ok(operand),
+                }
+            }
+            SQLExpr::CollationFor(expr) => {
+                let operand =
+                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                match self.context_provider.get_function_meta("pg_collation_for") {
+                    Some(func) => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                        func,
+                        vec![operand],
+                    ))),
+                    None => not_impl_err!("COLLATION FOR is not supported"),
+                }
             }
             // `x IS [NOT] [form] NORMALIZED` is the predicate form of
             // `is_normalized(x, form)`; NFC is the default form.

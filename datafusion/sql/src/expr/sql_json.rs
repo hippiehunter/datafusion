@@ -509,6 +509,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             query.as_ref(),
             aggregate,
             vec![lit(absent_on_null)],
+            Some("json_member_value"),
             schema,
             planner_context,
         )
