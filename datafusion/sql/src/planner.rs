@@ -547,27 +547,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 .with_name(self.ident_normalizer.normalize(column.name))
                 .with_nullable(!not_nullable);
 
-            let mut identity_meta =
-                extract_identity_metadata(&column.options, &column.data_type);
-            // A column's COLLATE clause names a catalog object rather than
-            // shaping the carrier, so it rides the field as metadata the way
-            // the other declared-type facts do.
-            if let Some(collation) = column.options.iter().find_map(|option| {
-                match &option.option {
-                    ColumnOption::Collation(name) => name.0.last(),
-                    _ => None,
-                }
-                .and_then(|part| part.as_ident())
-            }) {
-                identity_meta.insert(
-                    "pg_collation".to_string(),
-                    if collation.quote_style.is_some() {
-                        collation.value.clone()
-                    } else {
-                        collation.value.to_lowercase()
-                    },
-                );
-            }
+            let identity_meta = extract_identity_metadata(&column.options, &column.data_type);
             if !identity_meta.is_empty() {
                 let mut metadata = field.metadata().clone();
                 metadata.extend(identity_meta);
