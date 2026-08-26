@@ -186,7 +186,7 @@ fn object_name_to_string(object_name: &ObjectName) -> String {
 }
 
 fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
-    items
+    let names: Vec<String> = items
         .iter()
         .map(|item| match item {
             SelectItem::UnnamedExpr(expr) => match expr {
@@ -202,7 +202,13 @@ fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
             }
             SelectItem::ExprWithAlias { alias, .. } => ident_to_string(alias),
         })
-        .collect()
+        .collect();
+    // `*` stands for the whole row, over which every other item is then
+    // computed by name; naming a column beside it would list it twice.
+    if names.iter().any(|name| name == "*") {
+        return vec!["*".to_string()];
+    }
+    names
 }
 
 fn returning_clause_items(
@@ -440,6 +446,38 @@ fn lift_subquery_returning_exprs(
 fn project_with_lifted_exprs(source: LogicalPlan, lifted: Vec<Expr>) -> Result<LogicalPlan> {
     if lifted.is_empty() {
         return Ok(source);
+    }
+    // The lifted expressions read the projected row by name. Folding them
+    // into that projection keeps the DML input one projection over its
+    // relation, the shape the mutation lowering reads assignments from.
+    if let LogicalPlan::Projection(projection) = source {
+        let outputs: HashMap<String, Expr> = projection
+            .expr
+            .iter()
+            .map(|expr| {
+                let inner = match expr {
+                    Expr::Alias(alias) => alias.expr.as_ref().clone(),
+                    other => other.clone(),
+                };
+                (expr.schema_name().to_string(), inner)
+            })
+            .collect();
+        let mut exprs = projection.expr.clone();
+        for expr in lifted {
+            let folded = expr
+                .transform_up(|node| {
+                    if let Expr::Column(column) = &node
+                        && column.relation.is_none()
+                        && let Some(inner) = outputs.get(&column.name)
+                    {
+                        return Ok(Transformed::yes(inner.clone()));
+                    }
+                    Ok(Transformed::no(node))
+                })?
+                .data;
+            exprs.push(folded);
+        }
+        return project(Arc::unwrap_or_clone(projection.input), exprs);
     }
     let mut exprs: Vec<Expr> = source
         .schema()
@@ -3462,14 +3500,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let target_alias = table_alias
                     .as_ref()
                     .map(|alias| self.ident_normalizer.normalize(alias.name.clone()));
+                // The row is read under the relation it was scanned as; a
+                // USING table may carry a column of the same name.
                 let mut projected_exprs = table_schema
+                    .fields()
                     .iter()
-                    .map(|(qualifier, field)| {
+                    .map(|field| {
                         let column = match &target_alias {
                             Some(alias) => {
                                 Expr::Column(Column::new(Some(alias.clone()), field.name()))
                             }
-                            None => Expr::Column(Column::from((qualifier, field))),
+                            None => Expr::Column(Column::new(
+                                Some(table_ref.clone()),
+                                field.name(),
+                            )),
                         };
                         column.alias(field.name())
                     })
