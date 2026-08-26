@@ -129,4 +129,19 @@ pub trait TableSource: Sync + Send {
     fn get_column_default(&self, _column: &str) -> Option<&Expr> {
         None
     }
+
+    /// The unique indexes an `ON CONFLICT` inference clause may resolve to.
+    fn unique_index_arbiters(&self) -> &[UniqueIndexArbiter] {
+        &[]
+    }
+}
+
+/// A unique index as an `ON CONFLICT` inference clause sees it: its key
+/// elements planned as expressions over the table's own, unqualified
+/// columns, and the predicate of a partial index planned the same way.
+#[derive(Debug, Clone)]
+pub struct UniqueIndexArbiter {
+    pub name: String,
+    pub key_exprs: Vec<Expr>,
+    pub predicate: Option<Expr>,
 }

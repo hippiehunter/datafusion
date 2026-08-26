@@ -35,13 +35,9 @@ pub enum ConflictTarget {
     Columns(Vec<String>),
     /// Named constraint: `ON CONFLICT ON CONSTRAINT constraint_name`
     OnConstraint(String),
-    /// Index inference: `ON CONFLICT (lower(col), other_col) WHERE predicate`.
-    /// The elements are the index expressions as written (a bare column is
-    /// an identifier expression); the predicate selects a partial index.
-    Inference {
-        elements: Vec<sqlparser::ast::Expr>,
-        predicate: Option<sqlparser::ast::Expr>,
-    },
+    /// The unique index an inference clause — `ON CONFLICT (lower(col))
+    /// WHERE predicate` — resolved to, named as the table source names it.
+    Index(String),
 }
 
 use crate::{Expr, LogicalPlan, TableSource};
@@ -442,21 +438,8 @@ impl Display for OnConflict {
                 ConflictTarget::OnConstraint(name) => {
                     write!(f, " ON CONSTRAINT {}", name)?;
                 }
-                ConflictTarget::Inference {
-                    elements,
-                    predicate,
-                } => {
-                    write!(f, " (")?;
-                    for (i, element) in elements.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", element)?;
-                    }
-                    write!(f, ")")?;
-                    if let Some(predicate) = predicate {
-                        write!(f, " WHERE {}", predicate)?;
-                    }
+                ConflictTarget::Index(name) => {
+                    write!(f, " ON INDEX {}", name)?;
                 }
             }
         }

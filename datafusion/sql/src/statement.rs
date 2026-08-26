@@ -35,7 +35,9 @@ use crate::values::is_default_identifier;
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_expr::expr::{Exists, InSubquery};
+use datafusion_expr::{Subquery, TableSource};
 use datafusion_common::{
     Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, MatchType,
     NullsDistinct, ReferentialAction, Result, ScalarValue, SchemaError, SchemaReference,
@@ -3581,7 +3583,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         target_schema: &Schema,
         named_columns: &[String],
         values: Vec<Expr>,
-        table_source: &dyn datafusion_expr::TableSource,
+        table_source: &dyn TableSource,
         value_schema: &DFSchema,
     ) -> Result<Vec<Expr>> {
         let positions: HashMap<&str, usize> = if named_columns.is_empty() {
@@ -4751,7 +4753,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(expr.alias(target_field.name()))
             })
             .collect::<Result<Vec<Expr>>>()?;
-        let source = project(source, exprs)?;
+        let mut source = project(source, exprs)?;
 
         let insert_op = match (overwrite, replace_into, on_conflict) {
             (false, false, None) => InsertOp::Append,
@@ -4759,13 +4761,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             (false, true, None) => InsertOp::Replace,
             (false, false, Some(conflict)) => {
                 // Convert sqlparser's OnConflict to DataFusion's OnConflict
-                let planned_conflict = self.plan_on_conflict(
+                let (planned_conflict, widened_source) = self.plan_on_conflict(
                     conflict,
                     &table_name,
                     table_alias,
+                    &table_source,
                     &table_schema,
+                    source,
                     outer_planner_context,
                 )?;
+                source = widened_source;
                 InsertOp::WithConflictClause(planned_conflict)
             }
             (true, _, Some(_)) => {
@@ -4814,14 +4819,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// For DO UPDATE SET expressions, we need to plan them in a context that includes
     /// both the target table columns and the EXCLUDED pseudo-table (which contains
     /// the values that would have been inserted).
+    /// Plan an `ON CONFLICT` clause against the INSERT `source`. A DO UPDATE
+    /// sub-select is computed on the source, which comes back widened by one
+    /// column per sub-select.
+    #[allow(clippy::too_many_arguments)]
     fn plan_on_conflict(
         &self,
         conflict: &SqlOnConflict,
         table_name: &TableReference,
         table_alias: Option<&Ident>,
+        table_source: &Arc<dyn TableSource>,
         table_schema: &DFSchema,
+        source: LogicalPlan,
         planner_context: &mut PlannerContext,
-    ) -> Result<OnConflict> {
+    ) -> Result<(OnConflict, LogicalPlan)> {
+        let mut source = source;
         // Plan the action
         let action = match &conflict.action {
             SqlOnConflictAction::DoNothing => OnConflictAction::DoNothing,
@@ -4942,6 +4954,44 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     None
                 };
 
+                // A sub-select is computed on the INSERT source and read back
+                // as a column of EXCLUDED.
+                let excluded_ref = TableReference::bare("excluded");
+                let mut hoisted = Vec::new();
+                let assignments = assignments
+                    .into_iter()
+                    .map(|assignment| {
+                        Ok(ConflictAssignment {
+                            target: assignment.target,
+                            value: hoist_conflict_subqueries(
+                                assignment.value,
+                                &table_ref,
+                                &excluded_ref,
+                                &mut hoisted,
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let selection = selection
+                    .map(|selection| {
+                        hoist_conflict_subqueries(
+                            selection,
+                            &table_ref,
+                            &excluded_ref,
+                            &mut hoisted,
+                        )
+                    })
+                    .transpose()?;
+                if !hoisted.is_empty() {
+                    let mut exprs: Vec<Expr> = source
+                        .schema()
+                        .iter()
+                        .map(|(qualifier, field)| Expr::Column(Column::from((qualifier, field))))
+                        .collect();
+                    exprs.extend(hoisted);
+                    source = project(source, exprs)?;
+                }
+
                 // The alias named the target row while the clause was being
                 // read; downstream consumers know the row by the relation it
                 // belongs to, so restate the planned references under that name.
@@ -4977,23 +5027,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Some(ConflictTarget::OnConstraint(name.to_string()))
             }
             Some(ast::ConflictTarget::Inference(inference)) => {
-                // The elements and predicate must be well-formed against the
-                // target table; the arbiter index itself is matched by the
-                // executor, which owns the index catalog.
-                let inference_schema = DFSchema::try_from_qualified_schema(
-                    TableReference::bare(table_name.table()),
-                    &table_schema.as_arrow().clone(),
-                )?;
-                for element in &inference.elements {
-                    self.sql_to_expr_ref(
-                        &element.expr,
-                        &inference_schema,
-                        planner_context,
-                    )?;
-                }
-                if let Some(predicate) = &inference.predicate {
-                    self.sql_to_expr_ref(predicate, &inference_schema, planner_context)?;
-                }
                 let plain_columns = inference.predicate.is_none()
                     && inference.elements.iter().all(|element| {
                         element.collation.is_none()
@@ -5012,19 +5045,53 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             .collect(),
                     ))
                 } else {
-                    Some(ConflictTarget::Inference {
-                        elements: inference
-                            .elements
-                            .iter()
-                            .map(|element| element.expr.clone())
-                            .collect(),
-                        predicate: inference.predicate.clone(),
-                    })
+                    // The elements and the predicate are planned over the
+                    // table's own columns, the way the table source planned
+                    // the keys of its unique indexes, and matched to an index
+                    // whose keys are the same set. A partial index arbitrates
+                    // only when the clause names its predicate.
+                    let inference_schema = DFSchema::try_from(table_source.schema())?;
+                    let mut elements = Vec::with_capacity(inference.elements.len());
+                    for element in &inference.elements {
+                        elements.push(self.sql_to_expr_ref(
+                            &element.expr,
+                            &inference_schema,
+                            planner_context,
+                        )?);
+                    }
+                    let predicate = inference
+                        .predicate
+                        .as_ref()
+                        .map(|predicate| {
+                            self.sql_to_expr_ref(predicate, &inference_schema, planner_context)
+                        })
+                        .transpose()?;
+                    let arbiter = table_source.unique_index_arbiters().iter().find(|arbiter| {
+                        arbiter.key_exprs.len() == elements.len()
+                            && elements
+                                .iter()
+                                .all(|element| arbiter.key_exprs.contains(element))
+                            && arbiter.key_exprs.iter().all(|key| elements.contains(key))
+                            && match &arbiter.predicate {
+                                None => true,
+                                Some(index_predicate) => {
+                                    predicate.as_ref() == Some(index_predicate)
+                                }
+                            }
+                    });
+                    match arbiter {
+                        Some(arbiter) => Some(ConflictTarget::Index(arbiter.name.clone())),
+                        None => {
+                            return plan_err!(
+                                "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+                            );
+                        }
+                    }
                 }
             }
         };
 
-        Ok(OnConflict::new(conflict_target, action))
+        Ok((OnConflict::new(conflict_target, action), source))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5285,6 +5352,119 @@ ON p.function_name = r.routine_name
 /// `(a, b) = (SELECT x, y ...)` assigns one scalar sub-select per target
 /// column: the `idx`-th value is the original query narrowed to its `idx`-th
 /// projection item, so `a = (SELECT x ...)` and `b = (SELECT y ...)`.
+/// A sub-select in a DO UPDATE assignment or WHERE is computed on the INSERT
+/// source, where it plans like any other sub-select: it becomes a column of
+/// the source row after the table's own, and the conflict clause reads it
+/// back as a column of `EXCLUDED`. Its references to `EXCLUDED` are the
+/// source row's columns. A reference to the conflicting target row cannot be
+/// computed before the conflict is found and is refused.
+fn hoist_conflict_subqueries(
+    expr: Expr,
+    target: &TableReference,
+    excluded: &TableReference,
+    hoisted: &mut Vec<Expr>,
+) -> Result<Expr> {
+    expr.transform_down(|node| {
+        if !matches!(
+            node,
+            Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery(_)
+        ) {
+            return Ok(Transformed::no(node));
+        }
+        let name = format!("__conflict_src_{}", hoisted.len());
+        let computed = excluded_refs_to_source(node, target, excluded)?;
+        hoisted.push(computed.alias(&name));
+        Ok(Transformed::new(
+            Expr::Column(Column::new(Some(excluded.clone()), name)),
+            true,
+            TreeNodeRecursion::Jump,
+        ))
+    })
+    .map(|transformed| transformed.data)
+}
+
+fn excluded_refs_to_source(
+    expr: Expr,
+    target: &TableReference,
+    excluded: &TableReference,
+) -> Result<Expr> {
+    expr.transform_down(|node| {
+        Ok(match node {
+            Expr::Column(column) => {
+                Transformed::yes(Expr::Column(source_row_column(column, target, excluded)?))
+            }
+            Expr::ScalarSubquery(subquery) => Transformed::yes(Expr::ScalarSubquery(
+                subquery_refs_to_source(subquery, target, excluded)?,
+            )),
+            Expr::Exists(exists) => Transformed::yes(Expr::Exists(Exists {
+                subquery: subquery_refs_to_source(exists.subquery, target, excluded)?,
+                negated: exists.negated,
+            })),
+            Expr::InSubquery(in_subquery) => Transformed::yes(Expr::InSubquery(InSubquery {
+                expr: in_subquery.expr,
+                subquery: subquery_refs_to_source(in_subquery.subquery, target, excluded)?,
+                negated: in_subquery.negated,
+            })),
+            other => Transformed::no(other),
+        })
+    })
+    .map(|transformed| transformed.data)
+}
+
+fn source_row_column(
+    column: Column,
+    target: &TableReference,
+    excluded: &TableReference,
+) -> Result<Column> {
+    match &column.relation {
+        Some(relation) if relation.resolved_eq(excluded) => Ok(Column::from_name(column.name)),
+        Some(relation) if relation.resolved_eq(target) => not_impl_err!(
+            "ON CONFLICT DO UPDATE sub-select referencing the conflicting row is not supported"
+        ),
+        _ => Ok(column),
+    }
+}
+
+fn subquery_refs_to_source(
+    subquery: Subquery,
+    target: &TableReference,
+    excluded: &TableReference,
+) -> Result<Subquery> {
+    let outer_ref_columns = subquery
+        .outer_ref_columns
+        .into_iter()
+        .map(|expr| match expr {
+            Expr::OuterReferenceColumn(field, column) => Ok(Expr::OuterReferenceColumn(
+                field,
+                source_row_column(column, target, excluded)?,
+            )),
+            other => Ok(other),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let plan = Arc::unwrap_or_clone(subquery.subquery)
+        .transform_down_with_subqueries(|plan| {
+            plan.map_expressions(|expr| {
+                expr.transform(|expr| {
+                    Ok(match expr {
+                        Expr::OuterReferenceColumn(field, column) => {
+                            Transformed::yes(Expr::OuterReferenceColumn(
+                                field,
+                                source_row_column(column, target, excluded)?,
+                            ))
+                        }
+                        other => Transformed::no(other),
+                    })
+                })
+            })
+        })?
+        .data;
+    Ok(Subquery {
+        subquery: Arc::new(plan),
+        outer_ref_columns,
+        spans: subquery.spans,
+    })
+}
+
 fn tuple_subquery_column_values(
     query: &Query,
     column_count: usize,

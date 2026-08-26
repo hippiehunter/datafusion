@@ -115,7 +115,9 @@ pub use partition_evaluator::PartitionEvaluator;
 
 pub use session::{NoSession, SessionProvider, no_session};
 pub use sqlparser;
-pub use table_source::{TableProviderFilterPushDown, TableSource, TableType};
+pub use table_source::{
+    TableProviderFilterPushDown, TableSource, TableType, UniqueIndexArbiter,
+};
 pub use udaf::{
     AggregateUDF, AggregateUDFImpl, ReversedUDAF, SetMonotonicity, StatisticsArgs,
     udaf_default_display_name, udaf_default_human_display, udaf_default_return_field,
