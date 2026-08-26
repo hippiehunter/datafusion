@@ -26,7 +26,8 @@ use crate::parser::{
     ExplainStatement, LexOrdering, ResetStatement, Statement as DFStatement,
 };
 use crate::planner::{
-    ContextProvider, PlannerContext, SqlToRel, ValuesDefault, object_name_to_qualifier,
+    ContextProvider, PlannerContext, SqlToRel, ValuesAssembly, ValuesDefault,
+    object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
@@ -86,6 +87,28 @@ use sqlparser::ast::{
     TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
+
+/// A quoted reference to `field` of the relation `qualifier`, as the
+/// expression planner reads one back.
+fn column_reference(qualifier: Option<&TableReference>, field: &Field) -> SQLExpr {
+    let quoted = |name: &str| Ident::with_quote('"', name);
+    let mut parts = Vec::with_capacity(4);
+    if let Some(qualifier) = qualifier {
+        if let Some(catalog) = qualifier.catalog() {
+            parts.push(quoted(catalog));
+        }
+        if let Some(schema) = qualifier.schema() {
+            parts.push(quoted(schema));
+        }
+        parts.push(quoted(qualifier.table()));
+    }
+    parts.push(quoted(field.name()));
+    if parts.len() == 1 {
+        SQLExpr::Identifier(parts.remove(0))
+    } else {
+        SQLExpr::CompoundIdentifier(parts)
+    }
+}
 
 fn normalize_graph_properties(
     properties: ast::GraphPropertiesClause,
@@ -305,6 +328,13 @@ fn rewrite_update_returning_exprs(
     let mut rewritten_exprs = Vec::with_capacity(exprs.len());
 
     for expr in exprs {
+        // The output keeps the name the user's expression had; a joined-source
+        // column is renamed to its passthrough slot below and must not leak
+        // that slot's name into the result set.
+        let output_name = match &expr {
+            Expr::Alias(alias) => alias.name.clone(),
+            other => other.schema_name().to_string(),
+        };
         let rewritten = expr
             .transform_up(|node| {
                 let Expr::Column(column) = node else {
@@ -352,10 +382,114 @@ fn rewrite_update_returning_exprs(
                 ))))
             })?
             .data;
+        let rewritten = match rewritten {
+            Expr::Alias(alias) => Expr::Alias(alias),
+            other if other.schema_name().to_string() == output_name => other,
+            other => other.alias(output_name),
+        };
         rewritten_exprs.push(rewritten);
     }
 
     Ok((rewritten_exprs, passthrough_exprs))
+}
+
+fn expr_contains_subquery(expr: &Expr) -> Result<bool> {
+    expr.exists(|node| {
+        Ok(matches!(
+            node,
+            Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_)
+        ))
+    })
+}
+
+/// A RETURNING expression that contains a subquery is evaluated in the
+/// source plan, where subquery unnesting can see it, and reaches RETURNING
+/// as one more passthrough column. Returns the RETURNING list with those
+/// expressions replaced by their passthrough column (keeping the output
+/// name) and the projections to append to the source plan.
+fn lift_subquery_returning_exprs(
+    exprs: Vec<Expr>,
+    first_passthrough_idx: usize,
+) -> Result<(Vec<Expr>, Vec<Expr>)> {
+    let mut lifted = Vec::new();
+    let mut rewritten = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        if !expr_contains_subquery(&expr)? {
+            rewritten.push(expr);
+            continue;
+        }
+        let (inner, output_name) = match expr {
+            Expr::Alias(alias) => (*alias.expr, alias.name),
+            other => {
+                let name = other.schema_name().to_string();
+                (other, name)
+            }
+        };
+        let passthrough = format!(
+            "__returning_src_{}",
+            first_passthrough_idx + lifted.len()
+        );
+        lifted.push(inner.alias(passthrough.clone()));
+        rewritten.push(Expr::Column(Column::from_name(passthrough)).alias(output_name));
+    }
+    Ok((rewritten, lifted))
+}
+
+/// Widen `source` with `lifted` expressions computed over its current
+/// output, keeping every existing column in place.
+fn project_with_lifted_exprs(source: LogicalPlan, lifted: Vec<Expr>) -> Result<LogicalPlan> {
+    if lifted.is_empty() {
+        return Ok(source);
+    }
+    let mut exprs: Vec<Expr> = source
+        .schema()
+        .iter()
+        .map(|(qualifier, field)| Expr::Column(Column::from((qualifier, field))))
+        .collect();
+    exprs.extend(lifted);
+    project(source, exprs)
+}
+
+/// Expand the planned RETURNING items into one expression per output
+/// column; `*` and `t.*` cover the target table's user-visible columns.
+fn expand_returning_select_exprs(
+    prepared: Vec<datafusion_expr::select_expr::SelectExpr>,
+    table_schema: &DFSchema,
+) -> Result<Vec<Expr>> {
+    prepared
+        .into_iter()
+        .flat_map(|select_expr| match select_expr {
+            datafusion_expr::select_expr::SelectExpr::Expression(expr) => {
+                vec![Ok(expr)]
+            }
+            datafusion_expr::select_expr::SelectExpr::Wildcard(_) => table_schema
+                .fields()
+                .iter()
+                .filter(|field| !is_gantry_hidden_dml_column(field.name()))
+                .map(|field| Ok(Expr::Column(Column::from_name(field.name()))))
+                .collect(),
+            datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(qualifier, _) => {
+                table_schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, _)| {
+                        let (q, field) = table_schema.qualified_field(idx);
+                        if is_gantry_hidden_dml_column(field.name()) {
+                            return None;
+                        }
+                        if q.map(|q| q.to_string().to_ascii_lowercase())
+                            == Some(qualifier.to_string().to_ascii_lowercase())
+                        {
+                            Some(Ok(Expr::Column(Column::from_name(field.name()))))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+        })
+        .collect::<Result<Vec<_>>>()
 }
 
 fn get_schema_name(schema_name: &SchemaName) -> String {
@@ -3251,8 +3385,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // Extract table name from the TableWithJoins
-        let table_name = match &table.relation {
-            TableFactor::Table { name, .. } => name.clone(),
+        let (table_name, table_alias) = match &table.relation {
+            TableFactor::Table { name, alias, .. } => (name.clone(), alias.clone()),
             _ => plan_err!("Cannot delete from non-table relation!")?,
         };
 
@@ -3299,23 +3433,91 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
 
-        let returning_col_names = returning.map(select_items_to_column_names);
-        let returning_output_schema = returning_col_names
-            .as_ref()
-            .map(|cols| {
-                returning_columns_to_output_schema(
-                    &table_schema,
-                    cols,
-                    source.schema().metadata(),
+        let mut source = source;
+        let mut returning_exprs = None;
+        let mut returning_col_names = None;
+        let mut returning_output_schema = None;
+        if let Some(returning_items) = returning {
+            let plain_columns = returning_items.iter().all(|item| {
+                matches!(
+                    item,
+                    SelectItem::UnnamedExpr(SQLExpr::Identifier(_))
+                        | SelectItem::Wildcard(_)
+                        | SelectItem::QualifiedWildcard(_, _)
                 )
-            })
-            .transpose()?
-            .flatten();
+            });
+            if plain_columns {
+                let cols = select_items_to_column_names(returning_items);
+                returning_output_schema = returning_columns_to_output_schema(
+                    &table_schema,
+                    &cols,
+                    source.schema().metadata(),
+                )?;
+                returning_col_names = Some(cols);
+            } else {
+                // Anything beyond bare target columns is planned as an
+                // expression over the deleted row: the row's own columns are
+                // projected under their names, and USING-source columns or
+                // subqueries ride alongside as passthrough columns.
+                let target_alias = table_alias
+                    .as_ref()
+                    .map(|alias| self.ident_normalizer.normalize(alias.name.clone()));
+                let mut projected_exprs = table_schema
+                    .iter()
+                    .map(|(qualifier, field)| {
+                        let column = match &target_alias {
+                            Some(alias) => {
+                                Expr::Column(Column::new(Some(alias.clone()), field.name()))
+                            }
+                            None => Expr::Column(Column::from((qualifier, field))),
+                        };
+                        column.alias(field.name())
+                    })
+                    .collect::<Vec<_>>();
+                let prepared = self.prepare_select_exprs_ref(
+                    &source,
+                    returning_items,
+                    false,
+                    &mut planner_context,
+                )?;
+                let logical_exprs = expand_returning_select_exprs(prepared, &table_schema)?;
+                let target_column_names = table_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().to_string())
+                    .collect::<HashSet<_>>();
+                let (rewritten, passthrough_exprs) = rewrite_update_returning_exprs(
+                    logical_exprs,
+                    source.schema(),
+                    &target_column_names,
+                    &table_ref,
+                    target_alias.as_deref(),
+                )?;
+                let (rewritten, lifted_exprs) =
+                    lift_subquery_returning_exprs(rewritten, passthrough_exprs.len())?;
+                projected_exprs.extend(passthrough_exprs);
+                source = project(source, projected_exprs)?;
+                source = project_with_lifted_exprs(source, lifted_exprs)?;
+
+                let fields = exprlist_to_fields(rewritten.iter(), &source)?;
+                let schema = Arc::new(DFSchema::new_with_metadata(
+                    fields,
+                    source.schema().metadata().clone(),
+                )?);
+                returning_col_names =
+                    Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+                returning_output_schema = Some(schema);
+                returning_exprs = Some(rewritten);
+            }
+        }
 
         let mut dml =
             DmlStatement::new(table_ref, table_source, WriteOp::Delete, Arc::new(source));
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
+        }
+        if let Some(ret_exprs) = returning_exprs {
+            dml = dml.with_returning_exprs(ret_exprs);
         }
         if let Some(output_schema) = returning_output_schema {
             dml = dml.with_output_schema(output_schema);
@@ -3617,7 +3819,51 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// Plan one assignment through a subscript or field path below a column.
     /// `base` is the column's value before the assignment; the result is its
     /// whole value after it.
-    fn plan_assignment_target(
+    /// The values of a `ROW(...)` on the right of a tuple assignment, a
+    /// wildcard argument expanded to the columns of the relation it names.
+    fn row_constructor_values<'a>(
+        &self,
+        function: &'a ast::Function,
+        schema: &DFSchema,
+    ) -> Result<Vec<Cow<'a, SQLExpr>>> {
+        let ast::FunctionArguments::List(list) = &function.args else {
+            return plan_err!("ROW() in a tuple assignment takes a value list");
+        };
+        let mut values = Vec::with_capacity(list.args.len());
+        for arg in &list.args {
+            match arg {
+                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr)) => {
+                    values.push(Cow::Borrowed(expr));
+                }
+                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::QualifiedWildcard(name)) => {
+                    let relation = self.object_name_to_table_reference(name.clone())?;
+                    let mut expanded = 0;
+                    for (qualifier, field) in schema.iter() {
+                        if qualifier.is_some_and(|qualifier| qualifier.resolved_eq(&relation)) {
+                            values.push(Cow::Owned(column_reference(qualifier, field)));
+                            expanded += 1;
+                        }
+                    }
+                    if expanded == 0 {
+                        return plan_err!("Invalid qualifier {relation}");
+                    }
+                }
+                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => {
+                    for (qualifier, field) in schema.iter() {
+                        values.push(Cow::Owned(column_reference(qualifier, field)));
+                    }
+                }
+                other => {
+                    return plan_err!(
+                        "Unsupported ROW() argument in a tuple assignment: {other}"
+                    );
+                }
+            }
+        }
+        Ok(values)
+    }
+
+    pub(crate) fn plan_assignment_target(
         &self,
         base: Expr,
         column: FieldRef,
@@ -3769,6 +4015,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Ok((extract_column_name(name)?, Vec::new()))
         };
 
+        // Build scan, join with from table if it exists.
+        let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
+        if let Some(from) = from {
+            let old_outer_from_schema =
+                planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
+            let right = self.plan_table_with_joins_ref(from, &mut planner_context)?;
+            scan = LogicalPlanBuilder::from(scan).cross_join(right)?.build()?;
+            planner_context.set_outer_from_schema(old_outer_from_schema);
+        }
+
         // Process each assignment
         for assign in assignments {
             match &assign.target {
@@ -3830,6 +4086,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             } else {
                                 vec![Cow::Borrowed(inner.as_ref())]
                             }
+                        }
+                        SQLExpr::Function(function)
+                            if function.name.to_string().eq_ignore_ascii_case("row") =>
+                        {
+                            self.row_constructor_values(function, scan.schema())?
                         }
                         SQLExpr::Subquery(query) => {
                             // For subqueries, the subquery is expected to return exactly 1 row with N columns
@@ -3908,16 +4169,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                 }
             }
-        }
-
-        // Build scan, join with from table if it exists.
-        let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
-        if let Some(from) = from {
-            let old_outer_from_schema =
-                planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
-            let right = self.plan_table_with_joins_ref(from, &mut planner_context)?;
-            scan = LogicalPlanBuilder::from(scan).cross_join(right)?.build()?;
-            planner_context.set_outer_from_schema(old_outer_from_schema);
         }
 
         // Filter
@@ -4023,41 +4274,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 false,
                 &mut planner_context,
             )?;
-            let logical_exprs = prepared
-                .into_iter()
-                .flat_map(|select_expr| match select_expr {
-                    datafusion_expr::select_expr::SelectExpr::Expression(expr) => {
-                        vec![Ok(expr)]
-                    }
-                    datafusion_expr::select_expr::SelectExpr::Wildcard(_) => table_schema
-                        .fields()
-                        .iter()
-                        .filter(|field| !is_gantry_hidden_dml_column(field.name()))
-                        .map(|field| Ok(Expr::Column(Column::from_name(field.name()))))
-                        .collect(),
-                    datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(
-                        qualifier,
-                        _,
-                    ) => table_schema
-                        .fields()
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, _)| {
-                            let (q, field) = table_schema.qualified_field(idx);
-                            if is_gantry_hidden_dml_column(field.name()) {
-                                return None;
-                            }
-                            if q.map(|q| q.to_string().to_ascii_lowercase())
-                                == Some(qualifier.to_string().to_ascii_lowercase())
-                            {
-                                Some(Ok(Expr::Column(Column::from_name(field.name()))))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let logical_exprs = expand_returning_select_exprs(prepared, &table_schema)?;
 
             let target_column_names = table_schema
                 .fields()
@@ -4075,9 +4292,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     &table_name,
                     target_alias.as_deref(),
                 )?;
+            let (rewritten_returning_exprs, lifted_exprs) =
+                lift_subquery_returning_exprs(
+                    rewritten_returning_exprs,
+                    passthrough_exprs.len(),
+                )?;
 
             projected_exprs.extend(passthrough_exprs);
             source = project(source, projected_exprs)?;
+            source = project_with_lifted_exprs(source, lifted_exprs)?;
 
             let fields = exprlist_to_fields(rewritten_returning_exprs.iter(), &source)?;
             let returning_output_schema = Arc::new(DFSchema::new_with_metadata(
@@ -4249,10 +4472,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         //
         // If value_indices[i] = None, it means that the value of the i-th target table's column is
         // not provided, and should be filled with a default value later.
-        let target_col_names: Vec<String> = columns
-            .iter()
-            .map(|c| self.ident_normalizer.normalize(c.clone()))
-            .collect();
+        // A column written through several paths is one target column.
+        let mut target_col_names: Vec<String> = Vec::with_capacity(columns.len());
+        for column in columns {
+            let name = self.ident_normalizer.normalize(column.clone());
+            if !target_col_names.contains(&name) {
+                target_col_names.push(name);
+            }
+        }
 
         // Per target table column, the source columns feeding it, each with
         // the subscript/field path below the column it writes (`a[2]`,
@@ -4358,8 +4585,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // A source row is a row of the inserted relation, not of the target
         // table: several of its fields may write parts of one column, so they
         // are named by position, the way a values list names its columns.
+        // A values list under such a part target assembles the table's rows
+        // itself, so each slot is typed by the part it writes while it is
+        // still the written expression; any other source is assembled by a
+        // projection over it.
+        let assemble_values = matches!(source.body.as_ref(), SetExpr::Values(_))
+            && value_sources
+                .iter()
+                .flatten()
+                .any(|(_, path)| !path.is_empty());
+        let row_fields = if assemble_values {
+            table_schema.fields().clone()
+        } else {
+            fields.clone()
+        };
         let source_fields = Fields::from(
-            fields
+            row_fields
                 .iter()
                 .enumerate()
                 .map(|(i, field)| {
@@ -4389,7 +4630,36 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             planner_context.set_values_defaults(Some(defaults));
         }
+        if assemble_values {
+            planner_context.set_values_assembly(Some(ValuesAssembly {
+                fields: table_schema.fields().clone(),
+                sources: value_sources
+                    .iter()
+                    .map(|sources| {
+                        sources
+                            .iter()
+                            .map(|(slot, path)| (*slot, path.to_vec()))
+                            .collect()
+                    })
+                    .collect(),
+                defaults: table_schema
+                    .fields()
+                    .iter()
+                    .map(|field| table_source.get_column_default(field.name()).cloned())
+                    .collect(),
+            }));
+        }
         let source = self.query_to_plan_ref(source, &mut planner_context)?;
+        let (fields, value_sources) = if assemble_values {
+            (
+                table_schema.fields().clone(),
+                (0..table_schema.fields().len())
+                    .map(|i| vec![(i, empty_path)])
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            (fields, value_sources)
+        };
         if fields.len() != source.schema().fields().len() {
             plan_err!("Column count doesn't match insert query!")?;
         }
@@ -4550,18 +4820,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             );
                         }
                         AssignmentTarget::ColumnName(_) => {
-                            vec![(assignment.target.clone(), &assignment.value)]
+                            vec![(
+                                assignment.target.clone(),
+                                Cow::Borrowed(&assignment.value),
+                            )]
                         }
                         AssignmentTarget::Tuple(targets) => {
                             let mut value = &assignment.value;
                             while let SQLExpr::Nested(inner) = value {
                                 value = inner;
                             }
-                            let SQLExpr::Tuple(values) = value else {
-                                return plan_err!(
-                                    "Expected tuple value for tuple assignment, got: {:?}",
-                                    assignment.value
-                                );
+                            let values: Vec<Cow<'_, SQLExpr>> = match value {
+                                SQLExpr::Tuple(values) => {
+                                    values.iter().map(Cow::Borrowed).collect()
+                                }
+                                SQLExpr::Subquery(query) => {
+                                    tuple_subquery_column_values(query, targets.len())?
+                                }
+                                other => {
+                                    return plan_err!(
+                                        "Expected tuple value for tuple assignment, got: {other}"
+                                    );
+                                }
                             };
                             if targets.len() != values.len() {
                                 return plan_err!(
@@ -4583,7 +4863,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                     for (target, sql_value) in scalar_assignments {
                         let value = self.sql_to_expr_ref(
-                            sql_value,
+                            sql_value.as_ref(),
                             &combined_schema,
                             planner_context,
                         )?;
@@ -4653,9 +4933,50 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Some(ConflictTarget::OnConstraint(name.to_string()))
             }
             Some(ast::ConflictTarget::Inference(inference)) => {
-                return not_impl_err!(
-                    "ON CONFLICT with an index inference clause is not supported: {inference}"
-                );
+                // The elements and predicate must be well-formed against the
+                // target table; the arbiter index itself is matched by the
+                // executor, which owns the index catalog.
+                let inference_schema = DFSchema::try_from_qualified_schema(
+                    TableReference::bare(table_name.table()),
+                    &table_schema.as_arrow().clone(),
+                )?;
+                for element in &inference.elements {
+                    self.sql_to_expr_ref(
+                        &element.expr,
+                        &inference_schema,
+                        planner_context,
+                    )?;
+                }
+                if let Some(predicate) = &inference.predicate {
+                    self.sql_to_expr_ref(predicate, &inference_schema, planner_context)?;
+                }
+                let plain_columns = inference.predicate.is_none()
+                    && inference.elements.iter().all(|element| {
+                        element.collation.is_none()
+                            && element.opclass.is_none()
+                            && matches!(element.expr, SQLExpr::Identifier(_))
+                    });
+                if plain_columns {
+                    Some(ConflictTarget::Columns(
+                        inference
+                            .elements
+                            .iter()
+                            .filter_map(|element| match &element.expr {
+                                SQLExpr::Identifier(ident) => Some(ident.value.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                    ))
+                } else {
+                    Some(ConflictTarget::Inference {
+                        elements: inference
+                            .elements
+                            .iter()
+                            .map(|element| element.expr.clone())
+                            .collect(),
+                        predicate: inference.predicate.clone(),
+                    })
+                }
             }
         };
 
@@ -4915,4 +5236,32 @@ ON p.function_name = r.routine_name
             Some(BeginTransactionKind::Work) => Ok(()),
         }
     }
+}
+
+/// `(a, b) = (SELECT x, y ...)` assigns one scalar sub-select per target
+/// column: the `idx`-th value is the original query narrowed to its `idx`-th
+/// projection item, so `a = (SELECT x ...)` and `b = (SELECT y ...)`.
+fn tuple_subquery_column_values(
+    query: &Query,
+    column_count: usize,
+) -> Result<Vec<Cow<'static, SQLExpr>>> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return plan_err!("Tuple assignment with subquery requires a SELECT statement");
+    };
+    if select.projection.len() != column_count {
+        return plan_err!(
+            "Tuple assignment mismatch: {} columns but subquery returns {} columns",
+            column_count,
+            select.projection.len()
+        );
+    }
+    Ok((0..column_count)
+        .map(|idx| {
+            let mut column_query = query.clone();
+            if let SetExpr::Select(column_select) = column_query.body.as_mut() {
+                column_select.projection = vec![select.projection[idx].clone()];
+            }
+            Cow::Owned(SQLExpr::Subquery(SQLBox::new(column_query)))
+        })
+        .collect())
 }

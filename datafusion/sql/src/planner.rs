@@ -37,7 +37,7 @@ use datafusion_expr::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 pub use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::utils::find_column_exprs;
 use datafusion_expr::{Expr, col};
-use sqlparser::ast::{ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
+use sqlparser::ast::{AccessExpr, ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
 use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption, ColumnOptionDef};
 use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
 
@@ -254,6 +254,21 @@ pub enum ValuesDefault {
     Refused(&'static str),
 }
 
+/// How an INSERT's values list assembles the target table's rows when a
+/// target is written below a column (`f2[1]`, `f3.if1`): each row of the list
+/// is turned into one row of the table, so a slot value is typed by the part
+/// it writes while it is still the written expression.
+#[derive(Debug, Clone)]
+pub struct ValuesAssembly {
+    /// The target table's fields, one output column each.
+    pub fields: Fields,
+    /// Per target field, the slots writing it with the path below the column
+    /// each one writes; an empty path writes the whole column.
+    pub sources: Vec<Vec<(usize, Vec<AccessExpr>)>>,
+    /// Per target field, its declared default for when no slot writes it.
+    pub defaults: Vec<Option<Expr>>,
+}
+
 /// Struct to store the states used by the Planner. The Planner will leverage the states
 /// to resolve CTEs, Views, subqueries and PREPARE statements. The states include
 /// Common Table Expression (CTE) provided with WITH clause and
@@ -287,6 +302,8 @@ pub struct PlannerContext {
     create_table_schema: Option<DFSchemaRef>,
     /// Default expressions for VALUES planning (e.g. INSERT ... VALUES DEFAULT)
     values_defaults: Option<Vec<ValuesDefault>>,
+    /// Row assembly for VALUES planning under indirect INSERT targets.
+    values_assembly: Option<ValuesAssembly>,
     /// Schema for PSM (Persistent Stored Modules) variables and parameters.
     /// Used to resolve variable references in procedure/function bodies.
     psm_schema: Option<DFSchemaRef>,
@@ -311,6 +328,7 @@ impl PlannerContext {
             outer_from_schema: None,
             create_table_schema: None,
             values_defaults: None,
+            values_assembly: None,
             psm_schema: None,
             next_anonymous_placeholder: Cell::new(1),
         }
@@ -394,6 +412,20 @@ impl PlannerContext {
     /// Consume defaults for VALUES planning (one-shot).
     pub fn take_values_defaults(&mut self) -> Option<Vec<ValuesDefault>> {
         self.values_defaults.take()
+    }
+
+    /// Sets the row assembly for VALUES planning, returning the previous one.
+    pub fn set_values_assembly(
+        &mut self,
+        mut assembly: Option<ValuesAssembly>,
+    ) -> Option<ValuesAssembly> {
+        std::mem::swap(&mut self.values_assembly, &mut assembly);
+        assembly
+    }
+
+    /// Consume the row assembly for VALUES planning (one-shot).
+    pub fn take_values_assembly(&mut self) -> Option<ValuesAssembly> {
+        self.values_assembly.take()
     }
 
     // Return a clone of the outer FROM schema
