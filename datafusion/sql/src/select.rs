@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use crate::query::to_order_by_exprs_with_select;
+use crate::expr::grouping_set::is_empty_grouping_element;
 use crate::utils::{
     CheckColumnsMustReferenceAggregatePurpose, CheckColumnsSatisfyExprsPurpose,
     check_columns_satisfy_exprs, extract_aliases, rebase_expr, resolve_aliases_to_exprs,
@@ -31,14 +32,17 @@ use crate::utils::{
 use datafusion_common::error::DataFusionErrorBuilder;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{Column, DFSchema, RecursionUnnestOption, UnnestOptions};
-use datafusion_common::{Result, not_impl_err, plan_err};
-use datafusion_expr::expr::{Alias, PlannedReplaceSelectItem, WildcardOptions};
+use datafusion_common::{
+    Result, ScalarValue, not_impl_err, plan_datafusion_err, plan_err,
+};
+use datafusion_expr::expr::{self, Alias, PlannedReplaceSelectItem, WildcardOptions};
 use datafusion_expr::expr_rewriter::{
     normalize_col, normalize_col_with_schemas_and_ambiguity_check, normalize_sorts,
 };
 use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::utils::{
-    expr_as_column_expr, expr_to_columns, find_aggregate_exprs, find_window_exprs,
+    enumerate_grouping_sets, expr_as_column_expr, expr_to_columns, find_aggregate_exprs,
+    find_window_exprs,
 };
 use datafusion_expr::{
     Aggregate, Expr, Filter, GroupingSet, LogicalPlan, LogicalPlanBuilder,
@@ -48,14 +52,18 @@ use datafusion_expr::{
 use indexmap::IndexMap;
 use sqlparser::ast::{
     AstBox as SQLBox, AttachedToken, Distinct, Expr as SQLExpr, FunctionArg,
-    FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Join, JoinConstraint,
+    FunctionArgExpr, FunctionArguments, GroupByExpr, GroupBySetQuantifier, Ident, Join,
+    JoinConstraint,
     JoinOperator, NamedWindowExpr, ObjectName, OrderBy, Query as SQLQuery, SelectFlavor,
     SelectItemQualifiedWildcardKind, SetExpr, TableAlias, TableFactor,
     WildcardAdditionalOptions, WindowType, visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
 
-const PROJECTION_SRF_TABLE_FUNCTIONS: &[&str] = &[
+/// The set-returning functions this planner lifts out of a SELECT list into a
+/// lateral table function. Exported so a dialect layer can enforce where a
+/// set-returning call may appear without keeping a second copy of the list.
+pub const PROJECTION_SRF_TABLE_FUNCTIONS: &[&str] = &[
     "generate_series",
     "generate_subscripts",
     "jsonb_each",
@@ -88,6 +96,33 @@ struct AggregatePlanResult {
     qualify_expr: Option<Expr>,
     /// ORDER BY expressions rewritten to reference aggregate output columns
     order_by_exprs: Vec<SortExpr>,
+}
+
+/// `GROUP BY DISTINCT ...`: the same grouping set reached through more than one
+/// grouping element is grouped once, not once per way of naming it.
+fn deduplicate_grouping_sets(group_expr: Vec<Expr>) -> Result<Vec<Expr>> {
+    let enumerated = enumerate_grouping_sets(group_expr)?;
+    let [Expr::GroupingSet(GroupingSet::GroupingSets(sets))] = enumerated.as_slice() else {
+        return Ok(enumerated);
+    };
+    let mut seen = HashSet::new();
+    let mut distinct = Vec::with_capacity(sets.len());
+    for set in sets {
+        // A grouping set that names one expression twice groups exactly as it
+        // would naming it once, so the repeat is dropped before the sets
+        // themselves are compared.
+        let mut set_seen = HashSet::new();
+        let collapsed = set
+            .iter()
+            .filter(|expr| set_seen.insert(expr.to_string()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let key = collapsed.iter().map(ToString::to_string).collect::<Vec<_>>();
+        if seen.insert(key) {
+            distinct.push(collapsed);
+        }
+    }
+    Ok(vec![Expr::GroupingSet(GroupingSet::GroupingSets(distinct))])
 }
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
@@ -244,11 +279,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             })
             .transpose()?;
 
-        // All of the group by expressions
-        let group_by_exprs = if let GroupByExpr::Expressions(exprs, _) = &select.group_by
-        {
-            exprs
+        // All of the group by expressions, and the set quantifier that decides
+        // whether repeated grouping sets survive.
+        let (group_by_sql_exprs, set_quantifier) = match &select.group_by {
+            GroupByExpr::Expressions(exprs, _) => (Some(exprs.as_slice()), None),
+            GroupByExpr::Quantified {
+                quantifier,
+                expressions,
+                ..
+            } => (Some(expressions.as_slice()), Some(*quantifier)),
+            _ => (None, None),
+        };
+        let group_by_exprs = if let Some(exprs) = group_by_sql_exprs {
+            let planned = exprs
                 .iter()
+                // `()` names no column, so it adds nothing to the fixed part of
+                // every grouping set.
+                .filter(|expr| !is_empty_grouping_element(expr))
                 .map(|e| {
                     let group_by_expr = self.sql_expr_to_logical_expr(
                         e,
@@ -272,7 +319,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     )?;
                     Ok(group_by_expr)
                 })
-                .collect::<Result<Vec<Expr>>>()?
+                .collect::<Result<Vec<Expr>>>()?;
+            if matches!(set_quantifier, Some(GroupBySetQuantifier::Distinct)) {
+                deduplicate_grouping_sets(planned)?
+            } else {
+                planned
+            }
         } else {
             // 'group by all' groups wrt. all select expressions except 'AggregateFunction's.
             // Filter and collect non-aggregate select expressions
@@ -355,20 +407,44 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 &group_by_exprs,
                 &aggr_exprs,
             )?
+        } else if having_expr_opt.is_some() {
+            // A HAVING clause with neither GROUP BY nor an aggregate still
+            // makes the whole input one group, which the clause keeps or
+            // drops. That group exists even over an empty input, so the
+            // aggregate carries one call to anchor it; the projection over
+            // the aggregate does not select it.
+            let count_udf = self
+                .context_provider
+                .get_aggregate_meta("count")
+                .ok_or_else(|| {
+                    plan_datafusion_err!(
+                        "HAVING without GROUP BY needs the count aggregate to form its group"
+                    )
+                })?;
+            let group_anchor = Expr::AggregateFunction(expr::AggregateFunction::new_udf(
+                count_udf,
+                vec![Expr::Literal(ScalarValue::Int64(Some(1)), None)],
+                false,
+                None,
+                vec![],
+                None,
+            ));
+            self.aggregate(
+                &base_plan,
+                &select_exprs,
+                having_expr_opt.as_ref(),
+                qualify_expr_opt.as_ref(),
+                &order_by_rex,
+                &group_by_exprs,
+                &[group_anchor],
+            )?
         } else {
-            match having_expr_opt {
-                Some(having_expr) => {
-                    return plan_err!(
-                        "HAVING clause references: {having_expr} must appear in the GROUP BY clause or be used in an aggregate function"
-                    );
-                }
-                None => AggregatePlanResult {
-                    plan: base_plan.clone(),
-                    select_exprs: select_exprs.clone(),
-                    having_expr: having_expr_opt,
-                    qualify_expr: qualify_expr_opt,
-                    order_by_exprs: order_by_rex,
-                },
+            AggregatePlanResult {
+                plan: base_plan.clone(),
+                select_exprs: select_exprs.clone(),
+                having_expr: having_expr_opt,
+                qualify_expr: qualify_expr_opt,
+                order_by_exprs: order_by_rex,
             }
         };
 
@@ -1183,6 +1259,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         func: &sqlparser::ast::Function,
         alias: Option<Ident>,
     ) -> Option<(ObjectName, Vec<FunctionArg>, Ident)> {
+        // `OVER` names a window function; a set-returning function is not one,
+        // so leave the call alone and let function resolution report it.
+        if func.over.is_some() {
+            return None;
+        }
         let name = func.name.to_string().to_ascii_lowercase();
         let base = name.rsplit('.').next().unwrap_or(name.as_str());
         if !PROJECTION_SRF_TABLE_FUNCTIONS.contains(&base) {
@@ -1626,8 +1707,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         aggr_exprs: &[Expr],
     ) -> Result<AggregatePlanResult> {
         // create the aggregate plan
-        let options =
-            LogicalPlanBuilderOptions::new().with_add_implicit_group_by_exprs(true);
+        //
+        // A column the query never reads must not join the grouping: it would
+        // change what `GROUPING()` reports without any query asking for it.
+        let mut referenced = HashSet::new();
+        for expr in select_exprs
+            .iter()
+            .chain(having_expr_opt)
+            .chain(qualify_expr_opt)
+            .chain(order_by_exprs.iter().map(|sort| &sort.expr))
+        {
+            expr_to_columns(expr, &mut referenced)?;
+        }
+        let options = LogicalPlanBuilderOptions::new()
+            .with_add_implicit_group_by_exprs(true)
+            .with_implicit_group_by_candidates(
+                referenced
+                    .iter()
+                    .map(|column| column.flat_name())
+                    .collect::<Vec<_>>(),
+            );
         let plan = LogicalPlanBuilder::from(input.clone())
             .with_options(options)
             .aggregate(group_by_exprs.to_vec(), aggr_exprs.to_vec())?

@@ -401,12 +401,67 @@ impl WindowFrameBound {
     }
 }
 
+/// The value of a frame offset that is a constant integer expression, or `None`
+/// when the expression is not one.
+///
+/// A frame offset may not reference a column, an aggregate or a window
+/// function, so an arithmetic offset such as `(1 + 1) PRECEDING` names a single
+/// value that a frame bound can carry directly.
+fn fold_integer_frame_offset(expr: &ast::Expr) -> Option<i128> {
+    match expr {
+        ast::Expr::Nested(inner) => fold_integer_frame_offset(inner),
+        ast::Expr::Value(ValueWithSpan {
+            value: ast::Value::Number(text, false),
+            span: _,
+        }) => text.parse::<i128>().ok(),
+        ast::Expr::UnaryOp { op, expr } => {
+            let value = fold_integer_frame_offset(expr)?;
+            match op {
+                ast::UnaryOperator::Plus => Some(value),
+                ast::UnaryOperator::Minus => value.checked_neg(),
+                _ => None,
+            }
+        }
+        ast::Expr::BinaryOp { left, op, right } => {
+            let left = fold_integer_frame_offset(left)?;
+            let right = fold_integer_frame_offset(right)?;
+            match op {
+                ast::BinaryOperator::Plus => left.checked_add(right),
+                ast::BinaryOperator::Minus => left.checked_sub(right),
+                ast::BinaryOperator::Multiply => left.checked_mul(right),
+                ast::BinaryOperator::Divide => left.checked_div(right),
+                ast::BinaryOperator::Modulo => left.checked_rem(right),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn convert_frame_bound_to_scalar_value(
     v: ast::Expr,
     units: &ast::WindowFrameUnits,
 ) -> Result<ScalarValue> {
     use arrow::datatypes::DataType;
     use datafusion_common::exec_err;
+    // An arithmetic offset reduces to the one value the bound measures with,
+    // for every frame type.
+    if let Some(offset) = fold_integer_frame_offset(&v) {
+        return match units {
+            ast::WindowFrameUnits::Rows | ast::WindowFrameUnits::Groups => {
+                if offset < 0 {
+                    return plan_err!(
+                        "Invalid window frame: frame offsets for ROWS / GROUPS must be non negative integers"
+                    );
+                }
+                Ok(ScalarValue::try_from_string(
+                    offset.to_string(),
+                    &DataType::UInt64,
+                )?)
+            }
+            ast::WindowFrameUnits::Range => Ok(ScalarValue::Utf8(Some(offset.to_string()))),
+        };
+    }
     match units {
         // For ROWS and GROUPS we are sure that the ScalarValue must be a non-negative integer ...
         ast::WindowFrameUnits::Rows | ast::WindowFrameUnits::Groups => match v {

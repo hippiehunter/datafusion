@@ -110,6 +110,89 @@ pub trait ContextProvider {
         &[]
     }
 
+    /// Gantry: resolve a DML statement's target when it names an
+    /// automatically updatable view whose write retargets onto its base
+    /// relation. `Ok(None)` when the target is not such a view — including
+    /// when an INSTEAD OF trigger or an INSTEAD rule owns the write, in
+    /// which case the view stays the target. `Err` when the target is a
+    /// view that cannot carry the write at all; the provider owns that
+    /// error's identity.
+    fn resolve_dml_view_target(
+        &self,
+        _table: &ObjectName,
+        _event: DmlViewEvent,
+    ) -> Result<Option<ViewDmlTarget>> {
+        Ok(None)
+    }
+
+    /// Gantry: the generated columns of a DML target relation, or `None`
+    /// when it has none. Drives write rejection and UPDATE-time
+    /// recomputation in DML planning.
+    fn dml_generated_columns(
+        &self,
+        _table: &ObjectName,
+    ) -> Result<Option<DmlGeneratedColumns>> {
+        Ok(None)
+    }
+
+    /// Gantry: construct the host's error for a statement that supplies a
+    /// non-DEFAULT value for a generated column.
+    fn generated_column_write_error(
+        &self,
+        table_name: &str,
+        column: &str,
+    ) -> datafusion_common::DataFusionError {
+        datafusion_common::DataFusionError::Plan(format!(
+            "cannot insert a non-DEFAULT value into column \"{column}\" of relation \
+             \"{table_name}\""
+        ))
+    }
+
+    /// Gantry: construct the host's error for a statement that writes a
+    /// non-DEFAULT value to a `GENERATED ALWAYS AS IDENTITY` column without
+    /// `OVERRIDING SYSTEM VALUE` (`insert`), or updates one to anything but
+    /// DEFAULT (`!insert`).
+    fn identity_column_write_error(
+        &self,
+        _table_name: &str,
+        column: &str,
+        insert: bool,
+    ) -> datafusion_common::DataFusionError {
+        datafusion_common::DataFusionError::Plan(if insert {
+            format!("cannot insert a non-DEFAULT value into column \"{column}\"")
+        } else {
+            format!("column \"{column}\" can only be updated to DEFAULT")
+        })
+    }
+
+    /// Gantry: adapt one INSERT source value for its target column before
+    /// planning — canonicalizing a flexible timestamp text literal, or
+    /// wrapping a value in a dialect conversion. `None` leaves the value as
+    /// written.
+    fn adapt_insert_value(&self, _value: &SQLExpr, _target: &Field) -> Option<SQLExpr> {
+        None
+    }
+
+    /// Gantry: construct the host's error for a view-write failure the SQL
+    /// planner detects while retargeting a statement onto the view's base
+    /// relation.
+    fn dml_view_error(&self, error: ViewDmlError<'_>) -> datafusion_common::DataFusionError {
+        match error {
+            ViewDmlError::ColumnNotUpdatable {
+                verb,
+                view_name,
+                column,
+            } => datafusion_common::DataFusionError::Plan(format!(
+                "cannot {verb} column \"{column}\" of view \"{view_name}\""
+            )),
+            ViewDmlError::MergeNotSupported { view_name } => {
+                datafusion_common::DataFusionError::Plan(format!(
+                    "cannot merge into view \"{view_name}\""
+                ))
+            }
+        }
+    }
+
     /// Return [`TypePlanner`] extensions for planning data types
 
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
@@ -462,6 +545,120 @@ pub enum PlannerResult<T> {
     Planned(Expr),
     /// The raw expression could not be planned, and is returned unmodified
     Original(T),
+}
+
+/// The DML statement kind a view-write resolution is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmlViewEvent {
+    /// `INSERT INTO view ...`
+    Insert,
+    /// `UPDATE view SET ...`
+    Update,
+    /// `DELETE FROM view ...`
+    Delete,
+    /// `MERGE INTO view ...`
+    Merge,
+}
+
+/// How a write against an automatically updatable view retargets onto the
+/// view's base relation. Produced by
+/// [`ContextProvider::resolve_dml_view_target`]; consumed by the SQL
+/// planner's DML planning, which performs the retarget in place of any
+/// post-planning rewrite.
+#[derive(Debug, Clone)]
+pub struct ViewDmlTarget {
+    /// The base relation the write lands on.
+    pub base_relation: ObjectName,
+    /// Per view output column in order, the base column backing it. `None`
+    /// marks a computed column, which is readable but not writable.
+    pub columns: Vec<(String, Option<String>)>,
+    /// The view stack's row restrictions, written against the base
+    /// relation's namespace, outermost first. An UPDATE or DELETE through
+    /// the view may only touch rows the view shows.
+    pub row_restrictions: Vec<SQLExpr>,
+    /// The outermost view whose check option the written row must satisfy,
+    /// recorded on the DML plan node.
+    pub check_option_view: Option<TableReference>,
+    /// The view's bare name, kept reachable as a qualifier where the
+    /// statement uses it and named in errors.
+    pub view_name: String,
+    /// Column defaults attached to the view itself (`ALTER VIEW ... ALTER
+    /// COLUMN ... SET DEFAULT`), which override the base relation's. Each
+    /// expression is parsed under its owning grammar by the host. An INSERT
+    /// with an explicit column list materializes omitted view-default
+    /// columns; a column with no view default stays omitted so the base
+    /// relation's own default remains authoritative.
+    pub column_defaults: Vec<(String, SQLExpr)>,
+}
+
+impl ViewDmlTarget {
+    /// The base column backing a view column: outer `None` when the name is
+    /// not a view column at all, `Some(None)` when the column is computed.
+    pub fn base_column(&self, view_column: &str) -> Option<Option<&str>> {
+        self.columns
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(view_column))
+            .map(|(_, base)| base.as_deref())
+    }
+
+    /// True when every view column passes through to a same-named base
+    /// column.
+    pub fn columns_are_passthrough(&self) -> bool {
+        self.columns.iter().all(|(name, base)| {
+            base.as_deref()
+                .is_some_and(|base| base.eq_ignore_ascii_case(name))
+        })
+    }
+}
+
+/// A DML target relation's generated columns, resolved by
+/// [`ContextProvider::dml_generated_columns`]. A generated column's value is
+/// its generation expression's, so a statement supplying any other value is
+/// refused, and an UPDATE recomputes every stored generated column as part
+/// of the statement that changes its inputs.
+#[derive(Debug, Clone)]
+pub struct DmlGeneratedColumns {
+    /// Every generated column name; writing one with a non-DEFAULT value is
+    /// refused.
+    pub columns: Vec<String>,
+    /// For stored generated columns, the generation expression parsed under
+    /// its owning grammar by the host.
+    pub stored_expressions: Vec<(String, SQLExpr)>,
+    /// The relation's full positional column list, for rejecting a
+    /// positional VALUES row that reaches a generated column.
+    pub positional_columns: Vec<String>,
+    /// The relation's bare name, for error labels.
+    pub table_name: String,
+    /// `GENERATED ALWAYS AS IDENTITY` columns: they take only DEFAULT unless
+    /// the statement says `OVERRIDING ... VALUE` (PostgreSQL 428C9).
+    pub identity_always: Vec<String>,
+    /// Every identity column; `OVERRIDING USER VALUE` discards what the
+    /// statement wrote for these in favor of the sequence's value.
+    pub identity: Vec<String>,
+    /// For `SET col = DEFAULT` on a sequence-backed column, the expression
+    /// that draws the sequence, parsed under its owning grammar by the host —
+    /// the resolution the column's absent planner default cannot supply.
+    pub update_default_overrides: Vec<(String, SQLExpr)>,
+}
+
+/// A view-write failure the SQL planner detects while retargeting; handed to
+/// [`ContextProvider::dml_view_error`] so the host owns the error identity.
+#[derive(Debug, Clone, Copy)]
+pub enum ViewDmlError<'a> {
+    /// The statement writes a view column no base column backs.
+    ColumnNotUpdatable {
+        /// The verb to name in the error, e.g. `"insert into"`.
+        verb: &'a str,
+        /// The view's bare name.
+        view_name: &'a str,
+        /// The column the statement writes.
+        column: &'a str,
+    },
+    /// MERGE on a view that renames columns or restricts rows.
+    MergeNotSupported {
+        /// The view's bare name.
+        view_name: &'a str,
+    },
 }
 
 /// Result of planning a relation with [`RelationPlanner`]

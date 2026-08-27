@@ -24,7 +24,7 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use crate::stack::StackGuard;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{
-    Constraints, DFSchema, Result, TableReference, not_impl_err, plan_err,
+    Constraints, DFSchema, Result, ScalarValue, TableReference, not_impl_err, plan_err,
 };
 use datafusion_expr::expr::Sort;
 
@@ -47,6 +47,9 @@ struct LimitInfo<'a> {
     with_ties: bool,
     /// If true, the limit value represents a percentage of total rows
     is_percent: bool,
+    /// `FETCH FIRST ROW ONLY` names no row count, which the standard defines
+    /// as one row.
+    implicit_single_row: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +245,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             limit_by,
             with_ties,
             is_percent,
+            implicit_single_row: fetch_quantity.is_none(),
         })
     }
 
@@ -272,6 +276,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             limit_by,
             with_ties,
             is_percent,
+            implicit_single_row: false,
         })
     }
 
@@ -288,6 +293,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             limit_by,
             with_ties,
             is_percent: _is_percent,
+            implicit_single_row,
         } = limit_info;
 
         // WITH TIES requires ORDER BY
@@ -295,7 +301,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return plan_err!("FETCH WITH TIES requires an ORDER BY clause");
         }
 
-        if limit.is_none() && offset.is_none() && limit_by.is_empty() {
+        if limit.is_none() && !implicit_single_row && offset.is_none() && limit_by.is_empty() {
             return Ok(input);
         }
 
@@ -305,9 +311,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .map(|o| self.sql_to_expr_ref(o, &empty_schema, planner_context))
             .transpose()?;
 
-        let fetch = limit
-            .map(|e| self.sql_to_expr_ref(e, &empty_schema, planner_context))
-            .transpose()?;
+        let fetch = match limit {
+            Some(expr) => Some(self.sql_to_expr_ref(expr, &empty_schema, planner_context)?),
+            // `FETCH FIRST ROW ONLY` spells a row count of one.
+            None if implicit_single_row => {
+                Some(Expr::Literal(ScalarValue::Int64(Some(1)), None))
+            }
+            None => None,
+        };
 
         // For FETCH PERCENT: Currently we accept the syntax but treat it as a simple limit
         // The percentage value will be used directly as the limit count (not semantically correct,

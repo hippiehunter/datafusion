@@ -44,6 +44,7 @@
 //! [`Expr`]: datafusion_expr::expr::Expr
 
 mod cte;
+mod dml_front;
 mod expr;
 pub mod parser;
 pub mod planner;
@@ -52,9 +53,11 @@ mod query;
 mod relation;
 pub mod resolve;
 mod select;
+pub use select::PROJECTION_SRF_TABLE_FUNCTIONS;
 mod set_expr;
 mod stack;
 mod statement;
+mod view_dml;
 #[cfg(feature = "unparser")]
 pub mod unparser;
 pub mod utils;

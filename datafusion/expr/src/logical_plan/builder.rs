@@ -25,7 +25,8 @@ use std::iter::once;
 use std::sync::Arc;
 
 use crate::dml::CopyTo;
-use crate::expr::{Alias, PlannedReplaceSelectItem, Sort as SortExpr};
+use crate::expr::{Alias, GroupingSet, PlannedReplaceSelectItem, Sort as SortExpr};
+use datafusion_expr_common::type_coercion::binary::comparison_coercion;
 use crate::expr_rewriter::{
     coerce_plan_expr_for_schema, normalize_col,
     normalize_col_with_schemas_and_ambiguity_check, normalize_cols, normalize_sorts,
@@ -73,6 +74,12 @@ pub struct LogicalPlanBuilderOptions {
     /// Flag indicating whether the plan builder should add
     /// functionally dependent expressions as additional aggregation groupings.
     add_implicit_group_by_exprs: bool,
+    /// The flat names of the columns an implicit grouping may add, when the
+    /// caller knows which ones the query actually reads. Grouping by a column
+    /// nobody asked for is not wrong, but it is visible: `GROUPING()` reports
+    /// on the columns the aggregate groups by, so adding a column no query
+    /// reads would change that answer.
+    implicit_group_by_candidates: Option<Vec<String>>,
 }
 
 impl LogicalPlanBuilderOptions {
@@ -83,6 +90,12 @@ impl LogicalPlanBuilderOptions {
     /// Should the builder add functionally dependent expressions as additional aggregation groupings.
     pub fn with_add_implicit_group_by_exprs(mut self, add: bool) -> Self {
         self.add_implicit_group_by_exprs = add;
+        self
+    }
+
+    /// Restrict an implicit grouping to the columns named here.
+    pub fn with_implicit_group_by_candidates(mut self, candidates: Vec<String>) -> Self {
+        self.implicit_group_by_candidates = Some(candidates);
         self
     }
 }
@@ -209,6 +222,33 @@ impl LogicalPlanBuilder {
                 recursive_fields_len
             );
         }
+        // The query's column types come from the non-recursive term, so a
+        // recursive term whose own type is wider has no type the query could
+        // settle on: coercing it would silently narrow the recursive values.
+        for (index, (static_field, recursive_field)) in self
+            .plan
+            .schema()
+            .fields()
+            .iter()
+            .zip(recursive_term.schema().fields())
+            .enumerate()
+        {
+            let static_type = static_field.data_type();
+            let recursive_type = recursive_field.data_type();
+            if static_type == recursive_type {
+                continue;
+            }
+            let overall = comparison_coercion(static_type, recursive_type);
+            if overall.as_ref() != Some(static_type) {
+                let overall = overall.unwrap_or_else(|| recursive_type.clone());
+                return plan_err!(
+                    "recursive query \"{name}\" column {} has type {static_type} in \
+                     non-recursive term but type {overall} overall",
+                    index + 1
+                );
+            }
+        }
+
         // Ensure that the recursive term has the same field types as the static term
         let coerced_recursive_term =
             coerce_plan_expr_for_schema(recursive_term, self.plan.schema())?;
@@ -1306,7 +1346,11 @@ impl LogicalPlanBuilder {
         let aggr_expr = normalize_cols(aggr_expr, &self.plan)?;
 
         let group_expr = if self.options.add_implicit_group_by_exprs {
-            add_group_by_exprs_from_dependencies(group_expr, self.plan.schema())?
+            add_group_by_exprs_from_dependencies(
+                group_expr,
+                self.plan.schema(),
+                self.options.implicit_group_by_candidates.as_deref(),
+            )?
         } else {
             group_expr
         };
@@ -1412,7 +1456,7 @@ impl LogicalPlanBuilder {
         let left_plan = left_builder.build()?;
         let right_plan = right_builder.build()?;
 
-        let join_keys = left_plan
+        let join_keys: (Vec<Column>, Vec<Column>) = left_plan
             .schema()
             .fields()
             .iter()
@@ -1424,13 +1468,16 @@ impl LogicalPlanBuilder {
                 )
             })
             .unzip();
+        // Two relations of no columns have nothing to equate, so the operation
+        // turns on whether the other side holds any row at all.
+        let filter = join_keys.0.is_empty().then(|| lit(true));
         if is_all {
             LogicalPlanBuilder::from(left_plan)
                 .join_detailed(
                     right_plan,
                     join_type,
                     join_keys,
-                    None,
+                    filter,
                     NullEquality::NullEqualsNull,
                 )?
                 .build()
@@ -1441,7 +1488,7 @@ impl LogicalPlanBuilder {
                     right_plan,
                     join_type,
                     join_keys,
-                    None,
+                    filter,
                     NullEquality::NullEqualsNull,
                 )?
                 .build()
@@ -1844,7 +1891,14 @@ pub fn requalify_sides_if_needed(
 pub fn add_group_by_exprs_from_dependencies(
     mut group_expr: Vec<Expr>,
     schema: &DFSchemaRef,
+    candidates: Option<&[String]>,
 ) -> Result<Vec<Expr>> {
+    if let [Expr::GroupingSet(GroupingSet::GroupingSets(sets))] = group_expr.as_slice() {
+        return Ok(vec![Expr::GroupingSet(GroupingSet::GroupingSets(
+            add_grouping_set_exprs_from_dependencies(sets, schema, candidates),
+        ))]);
+    }
+
     // Names of the fields produced by the GROUP BY exprs for example, `GROUP BY
     // c1 + 1` produces an output field named `"c1 + 1"`
     let mut group_by_field_names = group_expr
@@ -1856,7 +1910,11 @@ pub fn add_group_by_exprs_from_dependencies(
         get_target_functional_dependencies(schema, &group_by_field_names)
     {
         for idx in target_indices {
-            let expr = Expr::Column(Column::from(schema.qualified_field(idx)));
+            let column = Column::from(schema.qualified_field(idx));
+            if !is_implicit_group_by_candidate(&column, candidates) {
+                continue;
+            }
+            let expr = Expr::Column(column);
             let expr_name = expr.schema_name().to_string();
             if !group_by_field_names.contains(&expr_name) {
                 group_by_field_names.push(expr_name);
@@ -1865,6 +1923,73 @@ pub fn add_group_by_exprs_from_dependencies(
         }
     }
     Ok(group_expr)
+}
+
+/// Whether an implicit grouping may add this column: any dependent column when
+/// the caller named no candidates, and only a named one otherwise.
+fn is_implicit_group_by_candidate(column: &Column, candidates: Option<&[String]>) -> bool {
+    match candidates {
+        None => true,
+        Some(candidates) => {
+            let flat = column.flat_name();
+            candidates
+                .iter()
+                .any(|candidate| *candidate == flat || *candidate == column.name)
+        }
+    }
+}
+
+/// The dependent columns a grouping set exposes, added to the sets that carry
+/// the key they depend on.
+///
+/// A set is only extended when it already holds the whole determinant: adding
+/// the dependent column there leaves the set's groups unchanged, while adding it
+/// to a set without the key would split groups that belong together.
+///
+/// A column the query already groups by in *some* set is never added to
+/// another: its grouping status is what distinguishes the sets, and `GROUPING()`
+/// reports that status. Forcing it into every set would report every column as
+/// grouped everywhere.
+fn add_grouping_set_exprs_from_dependencies(
+    sets: &[Vec<Expr>],
+    schema: &DFSchemaRef,
+    candidates: Option<&[String]>,
+) -> Vec<Vec<Expr>> {
+    let grouped_anywhere = sets
+        .iter()
+        .flatten()
+        .map(|expr| expr.schema_name().to_string())
+        .collect::<Vec<_>>();
+    sets.iter()
+        .map(|set| {
+            let mut set_field_names = set
+                .iter()
+                .map(|expr| expr.schema_name().to_string())
+                .collect::<Vec<_>>();
+            let Some(target_indices) =
+                get_target_functional_dependencies(schema, &set_field_names)
+            else {
+                return set.clone();
+            };
+            let mut extended = set.clone();
+            for idx in target_indices {
+                let column = Column::from(schema.qualified_field(idx));
+                if !is_implicit_group_by_candidate(&column, candidates) {
+                    continue;
+                }
+                let expr = Expr::Column(column);
+                let expr_name = expr.schema_name().to_string();
+                if grouped_anywhere.contains(&expr_name) {
+                    continue;
+                }
+                if !set_field_names.contains(&expr_name) {
+                    set_field_names.push(expr_name);
+                    extended.push(expr);
+                }
+            }
+            extended
+        })
+        .collect()
 }
 
 /// Errors if one or more expressions have equal names.

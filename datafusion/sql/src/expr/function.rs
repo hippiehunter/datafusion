@@ -19,8 +19,7 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
-    DataFusionError,
-    Column, DFSchema, Dependency, Diagnostic, Result, Span, Spans,
+    Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, Span, Spans,
     internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::{
@@ -33,10 +32,9 @@ use datafusion_expr::{
     planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
 };
 use sqlparser::ast::{
-    Value,
     AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
     FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
-    FunctionArguments, ObjectName, OrderByExpr, Spanned, WindowType,
+    FunctionArguments, ObjectName, OrderByExpr, Spanned, Value, WindowType,
 };
 
 /// Suggest a valid function based on an invalid input function name
@@ -813,6 +811,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     args
                 };
 
+                if distinct {
+                    // DISTINCT reduces the input to its distinct argument
+                    // values before the aggregate sees them, so a sort key
+                    // outside the argument list no longer names anything.
+                    if let Some(foreign) = order_by
+                        .iter()
+                        .find(|sort| !resolved_args.contains(&sort.expr))
+                    {
+                        return plan_err!(
+                            "in an aggregate with DISTINCT, ORDER BY expressions must \
+                             appear in argument list, but '{}' does not",
+                            foreign.expr
+                        );
+                    }
+                }
+
                 let mut aggregate_expr = RawAggregateExpr {
                     func: fm,
                     args: resolved_args,
@@ -1315,11 +1329,15 @@ pub const VARIADIC_MARKER_FUNCTION: &str = "__dbl_variadic";
 /// PostgreSQL spells the Unicode normal form of `normalize(text, NFC)` as a
 /// bare keyword. The parser hands it over as an identifier; lower it to the
 /// string literal the function takes.
-fn unicode_normal_form_args(name: &str, args: &[FunctionArg]) -> Option<Vec<FunctionArg>> {
+fn unicode_normal_form_args(
+    name: &str,
+    args: &[FunctionArg],
+) -> Option<Vec<FunctionArg>> {
     if !name.eq_ignore_ascii_case("normalize") || args.len() != 2 {
         return None;
     }
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Identifier(ident))) = &args[1]
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Identifier(ident))) =
+        &args[1]
     else {
         return None;
     };

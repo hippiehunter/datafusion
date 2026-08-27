@@ -46,7 +46,7 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 mod binary_op;
 mod function;
-mod grouping_set;
+pub(crate) mod grouping_set;
 mod identifier;
 mod order_by;
 mod sql_json;
@@ -902,6 +902,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             SQLExpr::Cube(exprs) => self.sql_cube_to_expr(exprs, schema, planner_context),
             SQLExpr::GroupingSets(exprs) => {
                 self.sql_grouping_sets_to_expr(exprs, schema, planner_context)
+            }
+            SQLExpr::GroupingSetsElements(elements) => {
+                self.sql_grouping_sets_elements_to_expr(elements, schema, planner_context)
             }
 
             SQLExpr::Floor { expr, field } => match field {

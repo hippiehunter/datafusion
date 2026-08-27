@@ -52,7 +52,9 @@ use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_che
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
 use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
-use datafusion_expr::planner::{AssignmentStep, PlannerResult, RawAssignmentTarget};
+use datafusion_expr::planner::{
+    AssignmentStep, DmlViewEvent, PlannerResult, RawAssignmentTarget, ViewDmlError,
+};
 use datafusion_expr::utils::{expr_to_columns, exprlist_to_fields};
 use datafusion_expr::{
     AlterMaterializedView, AlterSequence, Analyze, AnalyzeTable, Call, CreateAssertion,
@@ -1051,9 +1053,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 {
                     return not_impl_err!("Oracle CREATE VIEW options are not supported");
                 }
-                if let Some(check_option) = &view.check_option {
-                    return not_impl_err!("CREATE VIEW ... {check_option} is not supported");
-                }
                 // put the statement back together temporarily to get the SQL
                 // string representation
                 let sql = Statement::CreateView(view.clone()).to_string();
@@ -1801,6 +1800,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         on_conflict,
                         returning_clause_into_items(returning)?,
                         table_alias.as_ref(),
+                        overriding.as_ref(),
                         planner_context,
                     )?
                 };
@@ -3424,6 +3424,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         returning: Option<&[SelectItem]>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        // A delete through an automatically updatable view retargets onto its
+        // base relation, restricted to the rows the view shows.
+        if let TableFactor::Table { name, .. } = &table.relation
+            && let Some(view_target) = self
+                .context_provider
+                .resolve_dml_view_target(name, DmlViewEvent::Delete)?
+        {
+            let rewritten =
+                crate::view_dml::rewrite_delete(&view_target, table, predicate_expr, returning);
+            let plan = self.delete_to_plan_ref(
+                &rewritten.table,
+                using,
+                rewritten.predicate.as_ref(),
+                rewritten.returning.as_deref(),
+                outer_planner_context,
+            )?;
+            return crate::view_dml::stamp_check_option(plan, view_target.check_option_view);
+        }
         // Extract table name from the TableWithJoins
         let (table_name, table_alias) = match &table.relation {
             TableFactor::Table { name, alias, .. } => (name.clone(), alias.clone()),
@@ -3661,6 +3679,43 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<LogicalPlan> {
         if output.is_some() {
             return not_impl_err!("MERGE OUTPUT/RETURNING not supported");
+        }
+
+        // MERGE's target row set feeds both the join and every clause's
+        // assignments, so only a view whose namespace and row set are
+        // identical to its base relation's may retarget; anything else is
+        // refused rather than rewritten wrong. A passthrough view stack has
+        // no row restriction, so there is no check-option obligation to
+        // record.
+        let view_target = match &table {
+            TableFactor::Table { name, .. } => self
+                .context_provider
+                .resolve_dml_view_target(name, DmlViewEvent::Merge)?,
+            _ => None,
+        };
+        let mut table = table;
+        if let Some(view_target) = view_target {
+            if !crate::view_dml::merge_target_is_passthrough(&view_target) {
+                return Err(self.context_provider.dml_view_error(
+                    ViewDmlError::MergeNotSupported {
+                        view_name: &view_target.view_name,
+                    },
+                ));
+            }
+            if let TableFactor::Table { name, .. } = &mut table {
+                *name = view_target.base_relation.clone();
+            }
+        }
+
+        // MERGE insert clauses face the same generated- and identity-column
+        // contract as a standalone INSERT.
+        let mut clauses = clauses;
+        if let TableFactor::Table { name, .. } = &table {
+            crate::dml_front::prepare_merge_insert_clauses(
+                self.context_provider,
+                name,
+                &mut clauses,
+            )?;
         }
 
         let (table_name, table_alias) = match table {
@@ -3998,6 +4053,53 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         returning: Option<&[SelectItem]>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        // A write on an automatically updatable view retargets onto its base
+        // relation before planning, so defaults, hidden row identity and
+        // RETURNING all resolve against the base relation. The recursion
+        // terminates because the retargeted statement names a base table.
+        if let TableFactor::Table { name, .. } = &table.relation
+            && let Some(view_target) = self
+                .context_provider
+                .resolve_dml_view_target(name, DmlViewEvent::Update)?
+        {
+            let rewritten = crate::view_dml::rewrite_update(
+                &view_target,
+                table,
+                assignments,
+                predicate_expr,
+                returning,
+            )
+            .map_err(|failure| {
+                self.context_provider
+                    .dml_view_error(failure.as_view_error(&view_target.view_name))
+            })?;
+            let plan = self.update_to_plan_ref(
+                &rewritten.table,
+                &rewritten.assignments,
+                from,
+                rewritten.predicate.as_ref(),
+                rewritten.returning.as_deref(),
+                outer_planner_context,
+            )?;
+            return crate::view_dml::stamp_check_option(plan, view_target.check_option_view);
+        }
+        // Reject writes to generated columns and recompute the stored ones as
+        // part of the statement that changes their inputs, so the new row the
+        // plan produces — `RETURNING new.*` included — already carries their
+        // values.
+        let generated_assignments;
+        let assignments = if let TableFactor::Table { name, .. } = &table.relation
+            && let Some(extended) = crate::dml_front::prepare_update_assignments(
+                self.context_provider,
+                name,
+                assignments,
+            )?
+        {
+            generated_assignments = extended;
+            &generated_assignments[..]
+        } else {
+            assignments
+        };
         let (table_name, table_alias) = match &table.relation {
             TableFactor::Table { name, alias, .. } => (name.clone(), alias.clone()),
             _ => plan_err!("Cannot update non-table relation!")?,
@@ -4444,6 +4546,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 on_conflict,
                 returning_clause_items(insert.returning.as_ref())?,
                 insert.table_alias.as_ref(),
+                insert.overriding.as_ref(),
                 planner_context,
             )?
         } else {
@@ -4476,6 +4579,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         on_conflict: Option<SqlOnConflict>,
         returning: Option<Vec<SelectItem>>,
         table_alias: Option<&Ident>,
+        overriding: Option<&OverridingKind>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         self.insert_to_plan_ref(
@@ -4488,6 +4592,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             on_conflict.as_ref(),
             returning.as_deref(),
             table_alias,
+            overriding,
             outer_planner_context,
         )
     }
@@ -4504,12 +4609,105 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         on_conflict: Option<&SqlOnConflict>,
         returning: Option<&[SelectItem]>,
         table_alias: Option<&Ident>,
+        overriding: Option<&OverridingKind>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        // An insert into an automatically updatable view retargets onto its
+        // base relation, with the column list materialized so the base
+        // relation's own defaults fill the unwritten columns.
+        if let Some(view_target) = self
+            .context_provider
+            .resolve_dml_view_target(table_name, DmlViewEvent::Insert)?
+        {
+            let rewritten = crate::view_dml::rewrite_insert(
+                &view_target,
+                table_name,
+                columns,
+                Some(source),
+                returning,
+            )
+            .map_err(|failure| {
+                self.context_provider
+                    .dml_view_error(failure.as_view_error(&view_target.view_name))
+            })?;
+            let plan = self.insert_to_plan_ref(
+                &rewritten.table,
+                &rewritten.columns,
+                column_targets,
+                rewritten.source.as_ref().unwrap_or(source),
+                overwrite,
+                replace_into,
+                on_conflict,
+                rewritten.returning.as_deref(),
+                table_alias,
+                overriding,
+                outer_planner_context,
+            )?;
+            return crate::view_dml::stamp_check_option(plan, view_target.check_option_view);
+        }
+        // Generated columns accept only DEFAULT (their value is the
+        // generation expression's), a GENERATED ALWAYS identity takes a write
+        // only under an OVERRIDING clause, and an ON CONFLICT DO UPDATE
+        // recomputes the stored generated columns as part of the statement
+        // that changes their inputs.
+        crate::dml_front::reject_insert_generated_writes(
+            self.context_provider,
+            table_name,
+            columns,
+            Some(source),
+            overriding,
+        )?;
+        // OVERRIDING USER VALUE discards what the statement wrote for an
+        // identity column in favor of the sequence's value.
+        let user_value_override = if matches!(overriding, Some(OverridingKind::UserValue)) {
+            crate::dml_front::apply_insert_user_value_override(
+                self.context_provider,
+                table_name,
+                columns,
+                source,
+            )?
+        } else {
+            None
+        };
+        let source = user_value_override.as_ref().unwrap_or(source);
+        let adapted_conflict = crate::dml_front::prepare_on_conflict_assignments(
+            self.context_provider,
+            table_name,
+            on_conflict,
+        )?;
+        let on_conflict = match &adapted_conflict {
+            Some(conflict) => Some(conflict),
+            None => on_conflict,
+        };
         // Do a table lookup to verify the table exists
         let table_name = self.object_name_to_table_reference(table_name.clone())?;
         let table_source = self.context_provider.get_table_source(table_name.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
+
+        // A VALUES position every row leaves to the column's default is a
+        // column the statement does not write; narrowing the write to the
+        // written columns separates `DEFAULT` from a written NULL for a
+        // column the storage layer generates.
+        let positional_columns: Vec<String> = table_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        // A subscript or field target (`f2[1]`, `f3.if1`) never resolves to
+        // the column's default: the planner refuses `DEFAULT` in such a slot.
+        let narrowed = if column_targets.is_some() {
+            None
+        } else {
+            crate::dml_front::narrow_insert_to_written_columns(
+                columns,
+                source,
+                &positional_columns,
+            )
+        };
+        let (columns, source): (&[Ident], &Query) = match &narrowed {
+            Some(narrowed) => (&narrowed.columns, &narrowed.source),
+            None => (columns, source),
+        };
 
         // Get insert fields and target table's value indices
         //
@@ -4595,6 +4793,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .collect::<Result<Vec<_>>>()?;
                 (Fields::from(fields), value_sources)
             };
+
+        // Adapt source literals to their target columns — canonicalizing a
+        // flexible timestamp text literal, or wrapping a value in a dialect
+        // conversion — before anything below reads them.
+        let adapted_source =
+            crate::dml_front::adapt_insert_source_values(self.context_provider, source, &fields);
+        let source = adapted_source.as_ref().unwrap_or(source);
 
         // infer types for Values clause... other types should be resolvable the regular way
         let mut prepare_param_data_types = BTreeMap::new();
@@ -5169,6 +5374,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             on_conflict,
             None,
             table_alias,
+            None,
             planner_context,
         )
     }

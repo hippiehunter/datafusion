@@ -1579,6 +1579,7 @@ impl LogicalPlan {
                 new_dml.returning_columns = dml.returning_columns.clone();
                 new_dml.returning_exprs = dml.returning_exprs.clone();
                 new_dml.overriding_system_value = dml.overriding_system_value;
+                new_dml.check_option_view = dml.check_option_view.clone();
                 Ok(LogicalPlan::Dml(new_dml))
             }
             LogicalPlan::Merge(merge) => {

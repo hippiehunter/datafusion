@@ -171,6 +171,11 @@ pub struct DmlStatement {
     pub returning_exprs: Option<Vec<Expr>>,
     /// OVERRIDING SYSTEM VALUE was specified (PostgreSQL identity columns)
     pub overriding_system_value: bool,
+    /// The automatically updatable view this write was retargeted from, when
+    /// that view (or one it is stacked on) carries a check option. The row this
+    /// statement produces must be visible through the view, so the write's
+    /// constraint set gains the view's row restriction.
+    pub check_option_view: Option<TableReference>,
 }
 impl Eq for DmlStatement {}
 impl Hash for DmlStatement {
@@ -184,6 +189,7 @@ impl Hash for DmlStatement {
         self.returning_columns.hash(state);
         self.returning_exprs.hash(state);
         self.overriding_system_value.hash(state);
+        self.check_option_view.hash(state);
     }
 }
 
@@ -198,6 +204,7 @@ impl PartialEq for DmlStatement {
             && self.returning_columns == other.returning_columns
             && self.returning_exprs == other.returning_exprs
             && self.overriding_system_value == other.overriding_system_value
+            && self.check_option_view == other.check_option_view
     }
 }
 
@@ -235,6 +242,7 @@ impl DmlStatement {
             returning_columns: None,
             returning_exprs: None,
             overriding_system_value: false,
+            check_option_view: None,
         }
     }
 
@@ -271,6 +279,12 @@ impl DmlStatement {
     /// Mark this INSERT as using OVERRIDING SYSTEM VALUE.
     pub fn with_overriding_system_value(mut self) -> Self {
         self.overriding_system_value = true;
+        self
+    }
+
+    /// Record the updatable view whose check option this write must satisfy.
+    pub fn with_check_option_view(mut self, view: TableReference) -> Self {
+        self.check_option_view = Some(view);
         self
     }
 

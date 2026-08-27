@@ -22,7 +22,7 @@ use datafusion_common::{
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, SortExpr};
 use sqlparser::ast::{
-    Expr as SQLExpr, OrderByExpr, OrderByOptions, Value, ValueWithSpan,
+    BinaryOperator, Expr as SQLExpr, OrderByExpr, OrderByOptions, Value, ValueWithSpan,
 };
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
@@ -84,9 +84,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             if let Some(with_fill) = with_fill {
                 return not_impl_err!("ORDER BY WITH FILL is not supported: {with_fill}");
             }
-            if let Some(using) = using {
-                return not_impl_err!("ORDER BY ... USING {using} is not supported");
-            }
+            // `USING <operator>` names the ordering operator instead of
+            // spelling ASC/DESC: a less-than operator sorts ascending, a
+            // greater-than operator descending.
+            let asc = match using {
+                None => *asc,
+                Some(_) if asc.is_some() => {
+                    return plan_err!(
+                        "ORDER BY ... USING may not be combined with ASC or DESC"
+                    );
+                }
+                Some(BinaryOperator::Lt) => Some(true),
+                Some(BinaryOperator::Gt) => Some(false),
+                Some(other) => {
+                    return plan_err!(
+                        "operator {other} is not a valid ordering operator; \
+                         ordering operators must be \"<\" or \">\" members of an operator family"
+                    );
+                }
+            };
 
             let expr = match expr {
                 SQLExpr::Value(ValueWithSpan {
@@ -117,7 +133,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     self.sql_expr_to_logical_expr(e, order_by_schema, planner_context)?
                 }
             };
-            sort_expr_vec.push(make_sort_expr(expr, *asc, *nulls_first));
+            sort_expr_vec.push(make_sort_expr(expr, asc, *nulls_first));
         }
 
         Ok(sort_expr_vec)
