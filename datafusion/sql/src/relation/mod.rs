@@ -23,8 +23,8 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, Diagnostic, Result, ScalarValue, Span, Spans, TableReference,
-    UnnestOptions, not_impl_err, plan_err,
+    Column, DFSchema, DataFusionError, Diagnostic, Result, ScalarValue, Span, Spans,
+    TableReference, UnnestOptions, not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::planner::{
@@ -650,7 +650,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let quantity = sample
             .quantity
             .as_ref()
-            .ok_or_else(|| datafusion_common::DataFusionError::Plan(
+            .ok_or_else(|| DataFusionError::Plan(
                 "TABLESAMPLE percentage is required".to_string(),
             ))?;
         if matches!(quantity.unit, Some(sqlparser::ast::TableSampleUnit::Rows)) {

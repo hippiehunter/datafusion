@@ -203,8 +203,8 @@ pub trait ContextProvider {
         &self,
         table_name: &str,
         column: &str,
-    ) -> datafusion_common::DataFusionError {
-        datafusion_common::DataFusionError::Plan(format!(
+    ) -> DataFusionError {
+        DataFusionError::Plan(format!(
             "cannot insert a non-DEFAULT value into column \"{column}\" of relation \
              \"{table_name}\""
         ))
@@ -219,8 +219,8 @@ pub trait ContextProvider {
         _table_name: &str,
         column: &str,
         insert: bool,
-    ) -> datafusion_common::DataFusionError {
-        datafusion_common::DataFusionError::Plan(if insert {
+    ) -> DataFusionError {
+        DataFusionError::Plan(if insert {
             format!("cannot insert a non-DEFAULT value into column \"{column}\"")
         } else {
             format!("column \"{column}\" can only be updated to DEFAULT")
@@ -241,17 +241,17 @@ pub trait ContextProvider {
     fn dml_view_error(
         &self,
         error: ViewDmlError<'_>,
-    ) -> datafusion_common::DataFusionError {
+    ) -> DataFusionError {
         match error {
             ViewDmlError::ColumnNotUpdatable {
                 verb,
                 view_name,
                 column,
-            } => datafusion_common::DataFusionError::Plan(format!(
+            } => DataFusionError::Plan(format!(
                 "cannot {verb} column \"{column}\" of view \"{view_name}\""
             )),
             ViewDmlError::MergeNotSupported { view_name } => {
-                datafusion_common::DataFusionError::Plan(format!(
+                DataFusionError::Plan(format!(
                     "cannot merge into view \"{view_name}\""
                 ))
             }

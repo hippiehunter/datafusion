@@ -3316,7 +3316,7 @@ impl PartialOrd for EmptyRelation {
 ///   intermediate table, then empty the intermediate table.
 ///
 /// [Postgres Docs]: https://www.postgresql.org/docs/current/queries-with.html#QUERIES-WITH-RECURSIVE
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecursiveQuery {
     /// Name of the query
     pub name: String,
@@ -3334,6 +3334,28 @@ pub struct RecursiveQuery {
     pub schema: DFSchemaRef,
     /// Runtime traversal contract for SQL `SEARCH ... SET ...`.
     pub search: Option<RecursiveSearch>,
+}
+
+// Manual implementation needed because of `schema` field. Comparison excludes this field.
+impl PartialOrd for RecursiveQuery {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (
+            &self.name,
+            &self.static_term,
+            &self.recursive_term,
+            self.is_distinct,
+            &self.search,
+        )
+            .partial_cmp(&(
+                &other.name,
+                &other.static_term,
+                &other.recursive_term,
+                other.is_distinct,
+                &other.search,
+            ))
+            // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
+            .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
