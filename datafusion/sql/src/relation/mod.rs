@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use arrow::datatypes::{DataType, Field};
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
     Column, DFSchema, DataFusionError, Diagnostic, Result, ScalarValue, Span, Spans,
@@ -1402,6 +1403,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(JsonTableColumnDef::Path {
                     name,
                     data_type,
+                    metadata: FieldMetadata::from(field.as_ref()),
                     path,
                     exists: named.exists,
                     format_json: false,
@@ -1593,6 +1595,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(JsonTableColumnDef::Path {
                     name: name.value,
                     data_type: field.data_type().clone(),
+                    metadata: FieldMetadata::from(field.as_ref()),
                     path,
                     exists: false,
                     format_json,
@@ -1617,14 +1620,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if !matches!(
                     field.data_type(),
                     DataType::Boolean
-                        | DataType::Int8
-                        | DataType::Int16
                         | DataType::Int32
-                        | DataType::Int64
-                        | DataType::UInt8
-                        | DataType::UInt16
-                        | DataType::UInt32
-                        | DataType::UInt64
                         | DataType::Utf8
                         | DataType::LargeUtf8
                         | DataType::Utf8View
@@ -1632,13 +1628,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     return Err(datafusion_common::sqlstate_datafusion_err(
                         "42804",
                         format!(
-                            "JSON_TABLE EXISTS column {name} must have type boolean, integer, or text"
+                            "JSON_TABLE EXISTS column {name} must accept assignment from boolean"
                         ),
                     ));
                 }
                 Ok(JsonTableColumnDef::Path {
                     name: name.value,
                     data_type: field.data_type().clone(),
+                    metadata: FieldMetadata::from(field.as_ref()),
                     path,
                     exists: true,
                     format_json: false,

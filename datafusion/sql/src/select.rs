@@ -497,6 +497,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             plan
         };
 
+        // Keep the typed select-list expressions until ORDER BY is bound to
+        // the post-UNNEST output. `try_process_unnest` replaces an Expr::Unnest
+        // with a relational Unnest plus output columns; a sort planned before
+        // that expansion must read the resulting column, not attempt to run
+        // the set-returning expression again inside a scalar sort key.
+        let unnest_output_exprs = select_exprs_post_aggr.clone();
+
         // Try processing unnest expression or do the final projection
         let plan = self.try_process_unnest(plan, select_exprs_post_aggr)?;
 
@@ -532,6 +539,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // DISTRIBUTE BY - removed from sqlparser Select struct (non-PG syntax)
 
+        let order_by_rex = bind_unnest_order_by_to_output(
+            &plan,
+            &unnest_output_exprs,
+            order_by_rex,
+        )?;
         let plan = self.order_by(plan, order_by_rex)?;
         Ok(plan)
     }
@@ -1662,4 +1674,33 @@ fn has_unnest_expr_recursively(expr: &Expr) -> bool {
         }
     });
     has_unnest
+}
+
+/// Bind an ORDER BY expression copied from a select-list SRF to the ordinary
+/// output column produced after relational UNNEST expansion.
+fn bind_unnest_order_by_to_output(
+    plan: &LogicalPlan,
+    select_exprs: &[Expr],
+    order_by: Vec<SortExpr>,
+) -> Result<Vec<SortExpr>> {
+    order_by
+        .into_iter()
+        .map(|sort| {
+            if !has_unnest_expr_recursively(&sort.expr) {
+                return Ok(sort);
+            }
+            let order_expr = sort.expr.clone().unalias();
+            let Some(output_index) = select_exprs
+                .iter()
+                .position(|select_expr| select_expr.clone().unalias() == order_expr)
+            else {
+                return Ok(sort);
+            };
+            let (qualifier, field) = plan.schema().qualified_field(output_index);
+            Ok(sort.with_expr(Expr::Column(Column::new(
+                qualifier.cloned(),
+                field.name(),
+            ))))
+        })
+        .collect()
 }

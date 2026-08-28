@@ -124,11 +124,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             });
         }
 
-        let schema = target_schema.unwrap_or(empty_schema);
+        let schema = target_schema.unwrap_or_else(|| Arc::clone(&empty_schema));
         if relational {
             return self.values_rows_to_union(rows, &schema);
         }
-        let values = rows.into_iter().map(|row| row.exprs).collect();
+        let values = rows
+            .into_iter()
+            .map(|row| {
+                row.exprs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, expr)| {
+                        let Some(target) = schema.fields().get(index) else {
+                            return Ok(expr);
+                        };
+                        Ok(self
+                            .context_provider
+                            .plan_assignment_coercion(&expr, target, &empty_schema)?
+                            .unwrap_or(expr))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
         if schema.fields().is_empty() {
             LogicalPlanBuilder::values(values)?.build()
         } else {
@@ -295,6 +312,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         rows: Vec<ValuesRow>,
         schema: &DFSchemaRef,
     ) -> Result<LogicalPlan> {
+        let target_fields = (!schema.fields().is_empty()).then(|| schema.fields().clone());
         let mut columns: Vec<(String, DataType)> = schema
             .fields()
             .iter()
@@ -333,7 +351,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .exprs
                 .into_iter()
                 .zip(&columns)
-                .map(|(expr, (name, data_type))| {
+                .enumerate()
+                .map(|(index, (expr, (name, data_type)))| {
+                    let expr = match target_fields.as_ref().and_then(|fields| fields.get(index)) {
+                        Some(target) => self
+                            .context_provider
+                            .plan_assignment_coercion(&expr, target, input.schema())?
+                            .unwrap_or(expr),
+                        None => expr,
+                    };
                     let expr = if expr.get_type(input.schema())? == *data_type {
                         expr
                     } else {

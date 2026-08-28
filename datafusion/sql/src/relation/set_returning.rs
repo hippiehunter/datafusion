@@ -38,6 +38,7 @@ use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::{
     Column, DFSchema, Result, Spans, UnnestOptions, not_impl_err, plan_err,
 };
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_expr::expr::WindowFunction;
 use datafusion_expr::{
     Cast, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Subquery,
@@ -391,7 +392,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 } else {
                     Expr::Cast(Cast::new(Box::new(expr), definition.data_type().clone()))
                 };
-                Ok(expr.alias(definition.name()))
+                let mut metadata = definition.metadata().clone();
+                metadata.insert(
+                    "pg_column_definition_list".to_string(),
+                    "true".to_string(),
+                );
+                Ok(expr.alias_with_metadata(
+                    definition.name(),
+                    Some(FieldMetadata::from(metadata)),
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
         LogicalPlanBuilder::from(plan).project(output)?.build()

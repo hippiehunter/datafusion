@@ -216,11 +216,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         elements: &[SQLExpr],
         schema: &DFSchema,
+        planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let values = elements
             .iter()
             .map(|element| {
-                self.sql_expr_to_logical_expr(element, schema, &mut PlannerContext::new())
+                self.sql_expr_to_logical_expr(element, schema, planner_context)
             })
             .collect::<Result<Vec<_>>>()?;
 

@@ -401,7 +401,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 not_impl_err!("Extract not supported by ExprPlanner: {extract_args:?}")
             }
 
-            SQLExpr::Array(arr) => self.sql_array_literal(&arr.elem, schema),
+            SQLExpr::Array(arr) => {
+                self.sql_array_literal(&arr.elem, schema, planner_context)
+            }
             SQLExpr::Interval(interval) => {
                 self.sql_interval_to_expr(false, interval, schema, planner_context)
             }

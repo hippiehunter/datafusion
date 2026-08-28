@@ -56,7 +56,7 @@ use crate::{
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datafusion_common::cse::{NormalizeEq, Normalizeable};
 use datafusion_common::format::ExplainFormat;
-use datafusion_common::metadata::check_metadata_with_storage_equal;
+use datafusion_common::metadata::{FieldMetadata, check_metadata_with_storage_equal};
 use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
@@ -409,6 +409,9 @@ pub enum JsonTableColumnDef {
     Path {
         name: String,
         data_type: DataType,
+        /// SQL type metadata produced by the dialect's type planner (for
+        /// example PostgreSQL type identity and typmod).
+        metadata: FieldMetadata,
         path: String,
         /// Whether this is an EXISTS column (returns 1/0 for path existence)
         exists: bool,
@@ -522,9 +525,12 @@ impl JsonTable {
                 JsonTableColumnDef::Path {
                     name,
                     data_type,
+                    metadata,
                     ..
                 } => {
-                    fields.push(Arc::new(Field::new(name, data_type.clone(), true)));
+                    fields.push(Arc::new(
+                        metadata.add_to_field(Field::new(name, data_type.clone(), true)),
+                    ));
                 }
                 JsonTableColumnDef::Ordinality { name } => {
                     // Ordinality is a row number, always BIGINT
