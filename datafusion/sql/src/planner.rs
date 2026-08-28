@@ -256,6 +256,16 @@ pub enum ValuesDefault {
     Refused(&'static str),
 }
 
+/// INSERT-owned default semantics for a VALUES relation.
+#[derive(Debug, Clone)]
+pub struct ValuesDefaults {
+    /// Default expression for each declared target slot.
+    pub slots: Vec<ValuesDefault>,
+    /// A positional INSERT without a column list may omit a trailing suffix;
+    /// those slots have exactly the same semantics as writing `DEFAULT`.
+    pub fill_omitted_trailing: bool,
+}
+
 /// How an INSERT's values list assembles the target table's rows when a
 /// target is written below a column (`f2[1]`, `f3.if1`): each row of the list
 /// is turned into one row of the table, so a slot value is typed by the part
@@ -303,7 +313,7 @@ pub struct PlannerContext {
     /// The query schema defined by the table
     create_table_schema: Option<DFSchemaRef>,
     /// Default expressions for VALUES planning (e.g. INSERT ... VALUES DEFAULT)
-    values_defaults: Option<Vec<ValuesDefault>>,
+    values_defaults: Option<ValuesDefaults>,
     /// Row assembly for VALUES planning under indirect INSERT targets.
     values_assembly: Option<ValuesAssembly>,
     /// Schema for PSM (Persistent Stored Modules) variables and parameters.
@@ -427,14 +437,14 @@ impl PlannerContext {
     /// Sets default expressions for VALUES planning, returning the previous value if any.
     pub fn set_values_defaults(
         &mut self,
-        mut defaults: Option<Vec<ValuesDefault>>,
-    ) -> Option<Vec<ValuesDefault>> {
+        mut defaults: Option<ValuesDefaults>,
+    ) -> Option<ValuesDefaults> {
         std::mem::swap(&mut self.values_defaults, &mut defaults);
         defaults
     }
 
     /// Consume defaults for VALUES planning (one-shot).
-    pub fn take_values_defaults(&mut self) -> Option<Vec<ValuesDefault>> {
+    pub fn take_values_defaults(&mut self) -> Option<ValuesDefaults> {
         self.values_defaults.take()
     }
 

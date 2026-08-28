@@ -5197,7 +5197,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     };
                 }
             }
-            planner_context.set_values_defaults(Some(defaults));
+            planner_context.set_values_defaults(Some(crate::planner::ValuesDefaults {
+                slots: defaults,
+                fill_omitted_trailing: columns.is_empty(),
+            }));
         }
         if assemble_values {
             planner_context.set_values_assembly(Some(ValuesAssembly {
