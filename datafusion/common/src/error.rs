@@ -58,6 +58,35 @@ pub type Result<T, E = DataFusionError> = result::Result<T, E>;
 /// Result type for operations that could result in an [DataFusionError] and needs to be shared (wrapped into `Arc`).
 pub type SharedResult<T> = result::Result<T, Arc<DataFusionError>>;
 
+/// A planner or executor rejection with a SQLSTATE chosen at the semantic
+/// violation site. Embedders can downcast this from `DataFusionError::External`
+/// without recovering protocol identity from display text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFusionSqlStateError {
+    pub sqlstate: String,
+    pub message: String,
+}
+
+impl Display for DataFusionSqlStateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for DataFusionSqlStateError {}
+
+/// Construct a typed SQLSTATE error at the point where the SQL semantic rule
+/// is known.
+pub fn sqlstate_datafusion_err(
+    sqlstate: impl Into<String>,
+    message: impl Into<String>,
+) -> DataFusionError {
+    DataFusionError::External(Box::new(DataFusionSqlStateError {
+        sqlstate: sqlstate.into(),
+        message: message.into(),
+    }))
+}
+
 /// Error type for generic operations that could result in DataFusionError::External
 pub type GenericError = Box<dyn Error + Send + Sync>;
 

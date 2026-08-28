@@ -180,6 +180,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .unwrap_or_default();
         let mut columns: Vec<(String, Expr)> = Vec::new();
         let mut relation_name = None;
+        // Earlier FROM items are correlated inputs, not columns of the
+        // function relation's own one-row input. They are on the outer-query
+        // stack above, so expression binding must use an empty local schema;
+        // `argument_schema` remains available to the provider for declared
+        // type checks and output planning.
+        let local_argument_schema = DFSchema::empty();
         for call in calls {
             let reference = self.object_name_to_table_reference(call.name)?;
             let name = reference.table();
@@ -187,7 +193,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             let args = self.plan_table_function_args(
                 name,
                 call.args,
-                argument_schema,
+                &local_argument_schema,
                 planner_context,
             )?;
             let column_definitions = call

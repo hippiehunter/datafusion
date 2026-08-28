@@ -68,7 +68,10 @@ fn validate_sql_json_table_names(
     fn insert_name(seen: &mut HashSet<String>, ident: &Ident) -> Result<()> {
         let name = normalized_json_table_ident(ident);
         if !seen.insert(name.clone()) {
-            return plan_err!("duplicate JSON_TABLE name {name}");
+            return Err(datafusion_common::sqlstate_datafusion_err(
+                "42712",
+                format!("duplicate JSON_TABLE name {name}"),
+            ));
         }
         Ok(())
     }
@@ -1508,9 +1511,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             None | Some(JsonOnBehavior::EmptyArray) => JsonTableErrorHandling::Null,
             Some(JsonOnBehavior::Error) => JsonTableErrorHandling::Error,
             Some(other) => {
-                return plan_err!(
-                    "JSON_TABLE table-level {other} ON ERROR is not permitted"
-                );
+                return Err(datafusion_common::sqlstate_datafusion_err(
+                    "42601",
+                    format!("JSON_TABLE table-level {other} ON ERROR is not permitted"),
+                ));
             }
         };
         Ok(LogicalPlan::JsonTable(JsonTable::try_new_with_options(
@@ -1613,14 +1617,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if !matches!(
                     field.data_type(),
                     DataType::Boolean
+                        | DataType::Int8
+                        | DataType::Int16
                         | DataType::Int32
+                        | DataType::Int64
+                        | DataType::UInt8
+                        | DataType::UInt16
+                        | DataType::UInt32
+                        | DataType::UInt64
                         | DataType::Utf8
                         | DataType::LargeUtf8
                         | DataType::Utf8View
                 ) {
-                    return plan_err!(
-                        "JSON_TABLE EXISTS column {name} must have type boolean, integer, or text"
-                    );
+                    return Err(datafusion_common::sqlstate_datafusion_err(
+                        "42804",
+                        format!(
+                            "JSON_TABLE EXISTS column {name} must have type boolean, integer, or text"
+                        ),
+                    ));
                 }
                 Ok(JsonTableColumnDef::Path {
                     name: name.value,

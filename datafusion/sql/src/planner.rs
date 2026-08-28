@@ -681,12 +681,14 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         if idents.is_empty() {
             Ok(plan)
         } else if idents.len() > plan.schema().fields().len() {
-            plan_err!(
-                "Source table contains {} columns but {} \
-                names given as column alias",
-                plan.schema().fields().len(),
-                idents.len()
-            )
+            Err(datafusion_common::sqlstate_datafusion_err(
+                "42P10",
+                format!(
+                    "Source table contains {} columns but {} names given as column alias",
+                    plan.schema().fields().len(),
+                    idents.len()
+                ),
+            ))
         } else {
             // SQL:2016 E051-09: Allow partial column aliasing
             // If fewer aliases than columns, only rename the first N columns

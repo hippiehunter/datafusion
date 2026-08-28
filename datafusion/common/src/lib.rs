@@ -73,8 +73,8 @@ pub use display::human_readable::{
     human_readable_count, human_readable_duration, human_readable_size, units,
 };
 pub use error::{
-    DataFusionError, Result, SchemaError, SharedResult, field_not_found,
-    unqualified_field_not_found,
+    DataFusionError, DataFusionSqlStateError, Result, SchemaError, SharedResult,
+    field_not_found, sqlstate_datafusion_err, unqualified_field_not_found,
 };
 pub use file_options::file_type::{
     DEFAULT_ARROW_EXTENSION, DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION,
