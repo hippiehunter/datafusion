@@ -449,15 +449,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let table_name = table_ref.to_string();
                 let cte = planner_context.get_cte(&table_name);
                 let is_cte = cte.is_some();
+                let resolved_table_ref = if is_cte {
+                    table_ref.clone()
+                } else {
+                    self.context_provider
+                        .resolve_table_reference(table_ref.clone())?
+                };
                 let mut plan = match (
                     cte,
-                    self.context_provider.get_table_source(table_ref.clone()),
+                    self.context_provider
+                        .get_table_source(resolved_table_ref.clone()),
                 ) {
                     (Some(cte_plan), _) => Ok(cte_plan.clone()),
                     (_, Ok(provider)) => {
-                        let plan =
-                            LogicalPlanBuilder::scan(table_ref.clone(), provider, None)?
-                                .build()?;
+                        let plan = LogicalPlanBuilder::scan(
+                            resolved_table_ref.clone(),
+                            provider,
+                            None,
+                        )?
+                        .build()?;
                         if *only {
                             if let LogicalPlan::TableScan(mut scan) = plan {
                                 scan.only = true;
@@ -479,7 +489,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if let Some(sample) = sample {
                     plan = self.apply_table_sample(
                         plan,
-                        &table_ref,
+                        &resolved_table_ref,
                         sample,
                         is_cte,
                         planner_context,
@@ -633,8 +643,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if is_cte {
             return Err(self.context_provider.table_sample_source_error(table_ref));
         }
-        if !matches!(sample.modifier, sqlparser::ast::TableSampleModifier::TableSample)
-            || sample.bucket.is_some()
+        if !matches!(
+            sample.modifier,
+            sqlparser::ast::TableSampleModifier::TableSample
+        ) || sample.bucket.is_some()
             || sample.offset.is_some()
         {
             return not_impl_err!("unsupported sampling clause on {table_ref}");
@@ -643,16 +655,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Some(sqlparser::ast::TableSampleMethod::Bernoulli) => {
                 LogicalTableSampleMethod::Bernoulli
             }
-            Some(sqlparser::ast::TableSampleMethod::System) => LogicalTableSampleMethod::System,
+            Some(sqlparser::ast::TableSampleMethod::System) => {
+                LogicalTableSampleMethod::System
+            }
             Some(method) => return plan_err!("unsupported TABLESAMPLE method {method}"),
             None => return plan_err!("TABLESAMPLE method is required"),
         };
-        let quantity = sample
-            .quantity
-            .as_ref()
-            .ok_or_else(|| DataFusionError::Plan(
-                "TABLESAMPLE percentage is required".to_string(),
-            ))?;
+        let quantity = sample.quantity.as_ref().ok_or_else(|| {
+            DataFusionError::Plan("TABLESAMPLE percentage is required".to_string())
+        })?;
         if matches!(quantity.unit, Some(sqlparser::ast::TableSampleUnit::Rows)) {
             return not_impl_err!("TABLESAMPLE row counts are not supported");
         }
@@ -667,17 +678,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .as_ref()
             .map(|seed| {
                 let seed_expr = seed.expr.clone().unwrap_or_else(|| {
-                    SQLExpr::Value(sqlparser::ast::ValueWithSpan::from(seed.value.clone()))
+                    SQLExpr::Value(sqlparser::ast::ValueWithSpan::from(
+                        seed.value.clone(),
+                    ))
                 });
                 self.sql_expr_to_logical_expr(seed_expr, &empty_schema, planner_context)
             })
             .transpose()?;
-        let predicate = self.context_provider.plan_table_sample(
-            table_ref,
-            method,
-            percentage,
-            repeatable,
-        )?;
+        let predicate = self
+            .context_provider
+            .plan_table_sample(table_ref, method, percentage, repeatable)?;
         LogicalPlanBuilder::from(plan).filter(predicate)?.build()
     }
 
@@ -733,14 +743,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let table_name = table_ref.to_string();
                 let cte = planner_context.get_cte(&table_name);
                 let is_cte = cte.is_some();
+                let resolved_table_ref = if is_cte {
+                    table_ref.clone()
+                } else {
+                    self.context_provider
+                        .resolve_table_reference(table_ref.clone())?
+                };
                 let mut plan = match (
                     cte,
-                    self.context_provider.get_table_source(table_ref.clone()),
+                    self.context_provider
+                        .get_table_source(resolved_table_ref.clone()),
                 ) {
                     (Some(cte_plan), _) => Ok(cte_plan.clone()),
                     (_, Ok(provider)) => {
-                        let plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)?
-                            .build()?;
+                        let plan = LogicalPlanBuilder::scan(
+                            resolved_table_ref.clone(),
+                            provider,
+                            None,
+                        )?
+                        .build()?;
                         // Preserve the PostgreSQL `FROM ONLY t` modifier on
                         // the scan so the engine can exclude inheriting
                         // descendant tables.
@@ -766,16 +787,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if let Some(sample) = sample.as_ref() {
                     plan = self.apply_table_sample(
                         plan,
-                        &table_ref,
+                        &resolved_table_ref,
                         sample,
                         is_cte,
                         planner_context,
                     )?;
                 }
-                (
-                    plan,
-                    alias,
-                )
+                (plan, alias)
             }
             TableFactor::Derived {
                 subquery, alias, ..
@@ -1483,7 +1501,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let empty_schema = DFSchema::empty();
         let df_json_expr =
             self.sql_expr_to_logical_expr(context_item, &empty_schema, planner_context)?;
-        let passing = self.plan_passing_variables(&passing, &empty_schema, planner_context)?;
+        let passing =
+            self.plan_passing_variables(&passing, &empty_schema, planner_context)?;
         let df_columns = self.convert_sql_json_table_columns(columns)?;
         let on_error = match on_error {
             None | Some(JsonOnBehavior::EmptyArray) => JsonTableErrorHandling::Null,
@@ -1552,7 +1571,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }) => {
                 let format_json = format.is_some();
                 let wrapper = wrapper.as_ref().map(|wrapper| match wrapper {
-                    JsonQueryWrapper::Without | JsonQueryWrapper::WithoutArray => "without",
+                    JsonQueryWrapper::Without | JsonQueryWrapper::WithoutArray => {
+                        "without"
+                    }
                     JsonQueryWrapper::WithConditional
                     | JsonQueryWrapper::WithConditionalArray => "conditional",
                     JsonQueryWrapper::With
@@ -1589,9 +1610,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }) => {
                 let path = Self::sql_json_table_column_path(&name, path)?;
                 let field = self.convert_data_type_to_field(&data_type)?;
-                if !matches!(field.data_type(), DataType::Boolean | DataType::Int32) {
+                if !matches!(
+                    field.data_type(),
+                    DataType::Boolean
+                        | DataType::Int32
+                        | DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Utf8View
+                ) {
                     return plan_err!(
-                        "JSON_TABLE EXISTS column {name} must have type boolean or integer"
+                        "JSON_TABLE EXISTS column {name} must have type boolean, integer, or text"
                     );
                 }
                 Ok(JsonTableColumnDef::Path {

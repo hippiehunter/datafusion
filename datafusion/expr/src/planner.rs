@@ -61,6 +61,15 @@ pub enum TableSampleMethod {
 ///
 /// [`TableProvider`]: https://docs.rs/datafusion/latest/datafusion/catalog/trait.TableProvider.html
 pub trait ContextProvider {
+    /// Resolve the durable identity of a relation before the planner records
+    /// it in a [`TableScan`]. Most providers use the SQL-written reference
+    /// verbatim. Providers that plan stored objects can qualify a bare name
+    /// under the stored object's namespace so later optimizer/executor phases
+    /// do not accidentally re-resolve it under the caller's namespace.
+    fn resolve_table_reference(&self, name: TableReference) -> Result<TableReference> {
+        Ok(name)
+    }
+
     /// Returns a table by reference, if it exists
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
 
@@ -116,6 +125,19 @@ pub trait ContextProvider {
         not_impl_err!("Table Functions are not supported")
     }
 
+    /// Getter for a table function whose anonymous record shape is supplied
+    /// by the call site's `AS (name type, ...)` column definition list.
+    /// Providers that do not need the definitions retain the ordinary table
+    /// function behavior.
+    fn get_table_function_source_with_columns(
+        &self,
+        name: &str,
+        args: Vec<Expr>,
+        _column_definitions: &[FieldRef],
+    ) -> Result<Arc<dyn TableSource>> {
+        self.get_table_function_source(name, args)
+    }
+
     /// Whether `name` is a set-returning function: a call that produces rows
     /// rather than one value, wherever it is written. The planner asks by
     /// name alone, before any argument is planned.
@@ -128,7 +150,7 @@ pub trait ContextProvider {
     /// `column_definitions` is the call's `AS (name type, ...)` list — `Some`
     /// (possibly empty) for a FROM item, `None` for a call in expression
     /// position, where no such list can be written. `Ok(None)` leaves the
-    /// call to [`Self::get_table_function_source`].
+    /// call to [`Self::get_table_function_source_with_columns`].
     fn plan_set_returning_function(
         &self,
         _name: &str,
@@ -187,6 +209,17 @@ pub trait ContextProvider {
         Ok(None)
     }
 
+    /// Whether a view remains the DML target because an INSTEAD OF ROW
+    /// trigger owns the event. UPDATE planning preserves the original row
+    /// beside the projected NEW row when this is true.
+    fn dml_view_uses_instead_of_trigger(
+        &self,
+        _table: &ObjectName,
+        _event: DmlViewEvent,
+    ) -> bool {
+        false
+    }
+
     /// Gantry: the generated columns of a DML target relation, or `None`
     /// when it has none. Drives write rejection and UPDATE-time
     /// recomputation in DML planning.
@@ -194,6 +227,19 @@ pub trait ContextProvider {
         &self,
         _table: &ObjectName,
     ) -> Result<Option<DmlGeneratedColumns>> {
+        Ok(None)
+    }
+
+    /// Provider-owned assignment coercion for semantic SQL types whose Arrow
+    /// carrier alone cannot identify the conversion (for example a user
+    /// `CREATE CAST ... AS ASSIGNMENT` into an enum). `Ok(None)` asks the SQL
+    /// planner to use its ordinary Arrow coercion.
+    fn plan_assignment_coercion(
+        &self,
+        _expr: &Expr,
+        _target: &FieldRef,
+        _schema: &DFSchema,
+    ) -> Result<Option<Expr>> {
         Ok(None)
     }
 
@@ -238,10 +284,7 @@ pub trait ContextProvider {
     /// Gantry: construct the host's error for a view-write failure the SQL
     /// planner detects while retargeting a statement onto the view's base
     /// relation.
-    fn dml_view_error(
-        &self,
-        error: ViewDmlError<'_>,
-    ) -> DataFusionError {
+    fn dml_view_error(&self, error: ViewDmlError<'_>) -> DataFusionError {
         match error {
             ViewDmlError::ColumnNotUpdatable {
                 verb,
@@ -251,9 +294,7 @@ pub trait ContextProvider {
                 "cannot {verb} column \"{column}\" of view \"{view_name}\""
             )),
             ViewDmlError::MergeNotSupported { view_name } => {
-                DataFusionError::Plan(format!(
-                    "cannot merge into view \"{view_name}\""
-                ))
+                DataFusionError::Plan(format!("cannot merge into view \"{view_name}\""))
             }
         }
     }

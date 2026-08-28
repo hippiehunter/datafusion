@@ -208,13 +208,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             match self.context_provider.plan_set_returning_function(
                 name,
                 &args,
-                &DFSchema::empty(),
+                argument_schema,
                 Some(&column_definitions),
             )? {
                 Some(expansion) => columns.extend(expansion.columns),
                 None if name == "unnest" => {
                     for arg in args {
-                        Self::check_unnest_arg(&arg, &DFSchema::empty())?;
+                        Self::check_unnest_arg(&arg, argument_schema)?;
                         columns.push((name.to_string(), arg));
                     }
                 }
@@ -310,7 +310,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<(LogicalPlan, Option<TableAlias>)> {
         let provider = self
             .context_provider
-            .get_table_function_source(name, args)?;
+            .get_table_function_source_with_columns(name, args, column_definitions)?;
         let mut plan = if let Some(inline_plan) = provider.get_logical_plan() {
             let inline_plan = inline_plan.into_owned();
             if inline_plan.all_out_ref_exprs().is_empty() {

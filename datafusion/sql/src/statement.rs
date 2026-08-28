@@ -50,7 +50,10 @@ use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
-use datafusion_expr::logical_plan::{DdlStatement, build_join_schema};
+use datafusion_expr::logical_plan::{
+    DdlStatement, TableScanRowLock, TableScanRowLockMode, TableScanRowLockWaitPolicy,
+    build_join_schema,
+};
 use datafusion_expr::planner::{
     AssignmentStep, DmlViewEvent, PlannerResult, RawAssignmentTarget, ViewDmlError,
 };
@@ -60,21 +63,22 @@ use datafusion_expr::{
     CreateCatalog, CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable,
     CreateFunction, CreateFunctionBody, CreateIndex as PlanCreateIndex,
     CreateMaterializedView, CreateMemoryTable, CreateProcedure, CreatePropertyGraph,
-    CreateTablePartitionBound, CreateTablePartitionBoundValue, CreateTablePartitionKey,
-    CreateTablePartitionOf, CreateTablePartitioning, CreateTablePartitioningStrategy,
-    CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable, DmlStatement,
-    DropAssertion, DropCatalogSchema, DropFunction, DropIndex, DropMaterializedView,
-    DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation,
-    Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter, Grant, GrantRole,
-    GraphEdgeEndpoint, GraphEdgeTableDefinition, GraphKeyClause, GraphPropertiesClause,
-    GraphPropertyDefinition, GraphVertexTableDefinition, JoinType, LogicalPlan,
-    LogicalPlanBuilder, Merge, MergeAction, MergeAssignment, MergeClause,
-    MergeInsertExpr, MergeInsertKind, MergeUpdateExpr, OperateFunctionArg, PlanType,
-    Prepare, RefreshMaterializedView, ReleaseSavepoint, ResetVariable, Revoke,
-    RevokeRole, RollbackToSavepoint, Savepoint, SetTransaction, SetVariable, SortExpr,
-    Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode,
-    TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
-    TruncateTable, UseDatabase, Vacuum, Volatility, WriteOp, cast, col,
+    CreateRole, CreateSequence, CreateTablePartitionBound,
+    CreateTablePartitionBoundValue, CreateTablePartitionKey, CreateTablePartitionOf,
+    CreateTablePartitioning, CreateTablePartitioningStrategy, CreateView, Deallocate,
+    DescribeTable, DmlStatement, DropAssertion, DropCatalogSchema, DropFunction,
+    DropIndex, DropMaterializedView, DropPropertyGraph, DropRole, DropSequence,
+    DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr,
+    ExprSchemable, Filter, Grant, GrantRole, GraphEdgeEndpoint, GraphEdgeTableDefinition,
+    GraphKeyClause, GraphPropertiesClause, GraphPropertyDefinition,
+    GraphVertexTableDefinition, JoinType, LogicalPlan, LogicalPlanBuilder, Merge,
+    MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
+    MergeUpdateExpr, OperateFunctionArg, PlanType, Prepare, RefreshMaterializedView,
+    ReleaseSavepoint, ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint,
+    SetTransaction, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan,
+    TransactionAccessMode, TransactionConclusion, TransactionEnd,
+    TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
+    Volatility, WriteOp, cast, col,
 };
 use datafusion_expr::{Subquery, TableSource};
 use sqlparser::ast::{
@@ -93,6 +97,27 @@ use sqlparser::ast::{
     TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
+
+/// Attach the write-intent lock to the target relation before UPDATE/DELETE
+/// joins any auxiliary FROM/USING inputs. Descendant expansion then inherits
+/// the same target-row contract, while non-target relations remain unlocked.
+fn lock_dml_target_scan(plan: LogicalPlan) -> Result<LogicalPlan> {
+    match plan {
+        LogicalPlan::TableScan(mut scan) => {
+            scan.row_lock = Some(TableScanRowLock {
+                mode: TableScanRowLockMode::ForUpdate,
+                wait_policy: TableScanRowLockWaitPolicy::Block,
+            });
+            Ok(LogicalPlan::TableScan(scan))
+        }
+        LogicalPlan::SubqueryAlias(alias) => {
+            let input = lock_dml_target_scan(Arc::unwrap_or_clone(alias.input))?;
+            datafusion_expr::SubqueryAlias::try_new(Arc::new(input), alias.alias)
+                .map(LogicalPlan::SubqueryAlias)
+        }
+        other => Ok(other),
+    }
+}
 
 /// A quoted reference to `field` of the relation `qualifier`, as the
 /// expression planner reads one back.
@@ -697,22 +722,32 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return Ok(None);
         };
         let bound = match bound.ok_or_else(|| {
-            DataFusionError::Plan("PARTITION OF is missing its partition bound".to_string())
+            DataFusionError::Plan(
+                "PARTITION OF is missing its partition bound".to_string(),
+            )
         })? {
-            ast::PartitionBoundSpec::Range { from, to } => CreateTablePartitionBound::Range {
-                lower: from
-                    .into_iter()
-                    .map(|value| {
-                        self.plan_create_table_partition_bound_value(value, planner_context)
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                upper: to
-                    .into_iter()
-                    .map(|value| {
-                        self.plan_create_table_partition_bound_value(value, planner_context)
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            },
+            ast::PartitionBoundSpec::Range { from, to } => {
+                CreateTablePartitionBound::Range {
+                    lower: from
+                        .into_iter()
+                        .map(|value| {
+                            self.plan_create_table_partition_bound_value(
+                                value,
+                                planner_context,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    upper: to
+                        .into_iter()
+                        .map(|value| {
+                            self.plan_create_table_partition_bound_value(
+                                value,
+                                planner_context,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                }
+            }
             ast::PartitionBoundSpec::List { values } => {
                 let empty_schema = DFSchema::empty();
                 CreateTablePartitionBound::List {
@@ -1088,9 +1123,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 let has_columns = !columns.is_empty();
                 let schema = self.build_schema(columns)?.to_dfschema_ref()?;
+                // A subpartition declaration inherits its columns from the
+                // parent. Plan its typed partition keys against that parent
+                // schema while preserving the empty local CREATE input for
+                // the downstream inheritance merge.
+                let partition_schema = if schema.fields().is_empty()
+                    && let Some(parent) = partition_of.as_ref()
+                {
+                    let parent_ref =
+                        self.object_name_to_table_reference(parent.clone())?;
+                    let parent_source =
+                        self.context_provider.get_table_source(parent_ref.clone())?;
+                    Arc::new(DFSchema::try_from_qualified_schema(
+                        parent_ref,
+                        parent_source.schema().as_ref(),
+                    )?)
+                } else {
+                    Arc::clone(&schema)
+                };
                 let partitioning = self.plan_create_table_partitioning(
                     partition_by,
-                    schema.as_ref(),
+                    partition_schema.as_ref(),
                     planner_context,
                 )?;
                 let partition_of = self.plan_create_table_partition_of(
@@ -3623,7 +3676,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Build scan, joining with USING tables if present (similar to UPDATE FROM)
         // This implements PostgreSQL's DELETE ... USING syntax where additional
         // tables can be specified to form joins for the WHERE clause.
-        let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
+        let mut scan = lock_dml_target_scan(
+            self.plan_table_with_joins_ref(table, &mut planner_context)?,
+        )?;
         if let Some(using_tables) = using {
             let old_outer_from_schema =
                 planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
@@ -4282,6 +4337,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             TableFactor::Table { name, alias, .. } => (name.clone(), alias.clone()),
             _ => plan_err!("Cannot update non-table relation!")?,
         };
+        let preserve_view_old = self
+            .context_provider
+            .dml_view_uses_instead_of_trigger(&table_name, DmlViewEvent::Update);
 
         // Do a table lookup to verify the table exists
         let table_name = self.object_name_to_table_reference(table_name)?;
@@ -4349,7 +4407,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             };
 
         // Build scan, join with from table if it exists.
-        let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
+        let mut scan = lock_dml_target_scan(
+            self.plan_table_with_joins_ref(table, &mut planner_context)?,
+        )?;
         if let Some(from) = from {
             let old_outer_from_schema =
                 planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
@@ -4590,13 +4650,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 .or_else(|| Some(Arc::clone(field)));
                         }
                         // Cast to target column type, if necessary
-                        expr.cast_to(field.data_type(), source.schema())?
+                        match self.context_provider.plan_assignment_coercion(
+                            &expr,
+                            field,
+                            source.schema(),
+                        )? {
+                            Some(coerced) => coerced,
+                            None => expr.cast_to(field.data_type(), source.schema())?,
+                        }
                     }
                     None => stored_column(),
                 };
                 Ok(expr.alias(field.name()))
             })
             .collect::<Result<Vec<_>>>()?;
+        if preserve_view_old {
+            projected_exprs.extend(table_schema.iter().enumerate().map(
+                |(index, (qualifier, field))| {
+                    let column = match &table_alias {
+                        Some(alias) => Expr::Column(Column::new(
+                            Some(self.ident_normalizer.normalize(alias.name.clone())),
+                            field.name(),
+                        )),
+                        None => Expr::Column(Column::from((qualifier, field))),
+                    };
+                    column.alias(format!("__dbl_view_old_{index}"))
+                },
+            ));
+        }
 
         let mut returning_exprs = None;
         let mut returning_col_names = None;
@@ -5124,8 +5205,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let target_field = table_schema.field(i);
                 let expr = match sources.as_slice() {
                     [(v, path)] if path.is_empty() => {
-                        Expr::Column(Column::from(source.schema().qualified_field(*v)))
-                            .cast_to(target_field.data_type(), source.schema())?
+                        let value = Expr::Column(Column::from(
+                            source.schema().qualified_field(*v),
+                        ));
+                        match self.context_provider.plan_assignment_coercion(
+                            &value,
+                            target_field,
+                            source.schema(),
+                        )? {
+                            Some(coerced) => coerced,
+                            None => value
+                                .cast_to(target_field.data_type(), source.schema())?,
+                        }
                     }
                     // The value is not specified. Fill in the default value for the column.
                     [] => table_source
