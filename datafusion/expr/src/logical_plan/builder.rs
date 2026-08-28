@@ -26,7 +26,6 @@ use std::sync::Arc;
 
 use crate::dml::CopyTo;
 use crate::expr::{Alias, GroupingSet, PlannedReplaceSelectItem, Sort as SortExpr};
-use datafusion_expr_common::type_coercion::binary::comparison_coercion;
 use crate::expr_rewriter::{
     coerce_plan_expr_for_schema, normalize_col,
     normalize_col_with_schemas_and_ambiguity_check, normalize_cols, normalize_sorts,
@@ -48,6 +47,7 @@ use crate::{
     DmlStatement, ExplainOption, Expr, ExprSchemable, Operator, RecursiveQuery,
     Statement, TableProviderFilterPushDown, TableSource, WriteOp, and, binary_expr, lit,
 };
+use datafusion_expr_common::type_coercion::binary::comparison_coercion;
 
 use super::dml::InsertOp;
 use arrow::compute::can_cast_types;
@@ -151,8 +151,9 @@ pub struct LogicalPlanBuilder {
 /// how such a value is written.
 pub fn value_reads_into(data_type: &DataType, field_type: &DataType) -> bool {
     let mut leaf = field_type;
-    while let DataType::List(inner) | DataType::LargeList(inner) | DataType::FixedSizeList(inner, _) =
-        leaf
+    while let DataType::List(inner)
+    | DataType::LargeList(inner)
+    | DataType::FixedSizeList(inner, _) = leaf
     {
         leaf = inner.data_type();
     }
@@ -252,11 +253,14 @@ impl LogicalPlanBuilder {
         // Ensure that the recursive term has the same field types as the static term
         let coerced_recursive_term =
             coerce_plan_expr_for_schema(recursive_term, self.plan.schema())?;
+        let schema = Arc::clone(self.plan.schema());
         Ok(Self::from(LogicalPlan::RecursiveQuery(RecursiveQuery {
             name,
             static_term: self.plan,
             recursive_term: Arc::new(coerced_recursive_term),
             is_distinct,
+            schema,
+            search: None,
         })))
     }
 
@@ -272,9 +276,6 @@ impl LogicalPlanBuilder {
             return plan_err!("Values list cannot be empty");
         }
         let n_cols = values[0].len();
-        if n_cols == 0 {
-            return plan_err!("Values list cannot be zero length");
-        }
         for (i, row) in values.iter().enumerate() {
             if row.len() != n_cols {
                 return plan_err!(
@@ -307,9 +308,6 @@ impl LogicalPlanBuilder {
             return plan_err!("Values list cannot be empty");
         }
         let n_cols = schema.fields().len();
-        if n_cols == 0 {
-            return plan_err!("Values list cannot be zero length");
-        }
         for (i, row) in values.iter().enumerate() {
             if row.len() != n_cols {
                 return plan_err!(
@@ -1927,7 +1925,10 @@ pub fn add_group_by_exprs_from_dependencies(
 
 /// Whether an implicit grouping may add this column: any dependent column when
 /// the caller named no candidates, and only a named one otherwise.
-fn is_implicit_group_by_candidate(column: &Column, candidates: Option<&[String]>) -> bool {
+fn is_implicit_group_by_candidate(
+    column: &Column,
+    candidates: Option<&[String]>,
+) -> bool {
     match candidates {
         None => true,
         Some(candidates) => {
@@ -2420,10 +2421,24 @@ mod tests {
     use crate::{col, expr, expr_fn::exists, in_subquery, lit, scalar_subquery};
 
     use crate::test::function_stub::sum;
-    use datafusion_common::{
-        Constraint, DataFusionError, RecursionUnnestOption, SchemaError,
-    };
+    use datafusion_common::{Constraint, DataFusionError, RecursionUnnestOption};
     use insta::assert_snapshot;
+
+    #[test]
+    fn values_with_empty_schema_can_represent_one_zero_column_row() -> Result<()> {
+        let schema = Arc::new(DFSchema::empty());
+        for plan in [
+            LogicalPlanBuilder::values(vec![vec![]])?.build()?,
+            LogicalPlanBuilder::values_with_schema(vec![vec![]], &schema)?.build()?,
+        ] {
+            let LogicalPlan::Values(values) = plan else {
+                panic!("expected VALUES plan");
+            };
+            assert_eq!(values.values, vec![Vec::<Expr>::new()]);
+            assert!(values.schema.fields().is_empty());
+        }
+        Ok(())
+    }
 
     #[test]
     fn plan_builder_simple() -> Result<()> {
@@ -2654,31 +2669,25 @@ mod tests {
             // project id and first_name by column index
             Some(vec![0, 1]),
         )?
-        // two columns with the same name => error
-        .project(vec![col("id"), col("first_name").alias("id")]);
+        // A qualified and an unqualified field may share a name: the
+        // unqualified name means the unqualified field, the qualified one is
+        // reached through its qualifier.
+        .project(vec![col("id"), col("first_name").alias("id")])?
+        .build()?;
 
-        match plan {
-            Err(DataFusionError::SchemaError(err, _)) => {
-                if let SchemaError::AmbiguousReference { field } = *err {
-                    let Column {
-                        relation,
-                        name,
-                        spans: _,
-                    } = *field;
-                    let Some(TableReference::Bare { table }) = relation else {
-                        return plan_err!(
-                            "wrong relation: {relation:?}, expected table name"
-                        );
-                    };
-                    assert_eq!(*"employee_csv", *table);
-                    assert_eq!("id", &name);
-                    Ok(())
-                } else {
-                    plan_err!("Plan should have returned an DataFusionError::SchemaError")
-                }
-            }
-            _ => plan_err!("Plan should have returned an DataFusionError::SchemaError"),
-        }
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 2);
+        let (qualifier, _) = schema.qualified_field_with_unqualified_name("id")?;
+        assert!(qualifier.is_none());
+        assert_eq!(schema.index_of_column_by_name(None, "id"), Some(1));
+        assert_eq!(
+            schema.index_of_column_by_name(
+                Some(&TableReference::bare("employee_csv")),
+                "id"
+            ),
+            Some(0)
+        );
+        Ok(())
     }
 
     fn employee_schema() -> Schema {
@@ -3051,19 +3060,19 @@ mod tests {
         .build()?;
         assert_eq!(*values.schema().field(0).metadata(), metadata.to_hashmap());
 
-        // Do not allow VALUES with different metadata mixed together
+        // VALUES keeps only metadata every row agrees on. Conflicting values
+        // for the same key therefore leave that key off the output field.
         let metadata2: HashMap<String, String> =
             [("ARROW:extension:metadata".to_string(), "test2".to_string())]
                 .into_iter()
                 .collect();
         let metadata2 = FieldMetadata::from(metadata2);
-        assert!(
-            LogicalPlanBuilder::values(vec![
-                vec![lit_with_metadata(1, Some(metadata.clone()))],
-                vec![lit_with_metadata(2, Some(metadata2.clone()))],
-            ])
-            .is_err()
-        );
+        let values = LogicalPlanBuilder::values(vec![
+            vec![lit_with_metadata(1, Some(metadata.clone()))],
+            vec![lit_with_metadata(2, Some(metadata2.clone()))],
+        ])?
+        .build()?;
+        assert!(values.schema().field(0).metadata().is_empty());
 
         Ok(())
     }

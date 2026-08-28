@@ -96,6 +96,35 @@ use std::{sync::Arc, vec};
 ///
 /// [`SqlToRel::sql_statement_to_plan`]: crate::planner::SqlToRel::sql_statement_to_plan
 /// [`expr_to_sql`]: crate::unparser::expr_to_sql
+/// Whether `projection` is the column list the planner places over a USING
+/// join: the join's key names, aliased unqualified, first; after them nothing
+/// but columns of the join's own schema.
+fn is_using_join_column_list(projection: &Projection) -> Result<bool> {
+    let LogicalPlan::Join(join) = projection.input.as_ref() else {
+        return Ok(false);
+    };
+    if join.join_constraint != JoinConstraint::Using
+        || projection.expr.len() < join.on.len()
+    {
+        return Ok(false);
+    }
+    let (merged, rest) = projection.expr.split_at(join.on.len());
+    for ((left_key, _), expr) in join.on.iter().zip(merged) {
+        let Expr::Column(key) = left_key else {
+            return internal_err!(
+                "Invalid join key. Expected column, found {left_key:?}"
+            );
+        };
+        let Expr::Alias(alias) = expr else {
+            return Ok(false);
+        };
+        if alias.relation.is_some() || alias.name != key.name {
+            return Ok(false);
+        }
+    }
+    Ok(rest.iter().all(|expr| matches!(expr, Expr::Column(_))))
+}
+
 pub fn plan_to_sql(plan: &LogicalPlan) -> Result<ast::Statement> {
     let unparser = Unparser::default();
     unparser.plan_to_sql(plan)
@@ -217,6 +246,7 @@ impl Unparser<'_> {
             static_term,
             recursive_term,
             is_distinct,
+            ..
         } = rq;
 
         // Unparse the static term
@@ -523,6 +553,17 @@ impl Unparser<'_> {
                 if let Some(new_plan) = rewrite_plan_for_sort_on_non_projected_fields(p) {
                     return self
                         .select_to_sql_recursively(&new_plan, query, select, relation);
+                }
+
+                // The column list a USING join exposes is what `USING` means
+                // in SQL; planning the emitted join rebuilds it.
+                if is_using_join_column_list(p)? {
+                    return self.select_to_sql_recursively(
+                        p.input.as_ref(),
+                        query,
+                        select,
+                        relation,
+                    );
                 }
 
                 // Projection can be top-level plan for unnest relation

@@ -249,13 +249,11 @@ impl DFSchema {
             }
         }
 
-        for (qualifier, name) in qualified_names {
-            if unqualified_names.contains(name) {
-                return _schema_err!(SchemaError::AmbiguousReference {
-                    field: Box::new(Column::new(Some(qualifier.clone()), name))
-                });
-            }
-        }
+        // An unqualified field may share its name with qualified ones: an
+        // unqualified reference binds to the unqualified field (see
+        // `qualified_field_with_unqualified_name`), and a qualified reference
+        // names its field exactly. A USING join's merged column relies on
+        // this — it is the unqualified `i` standing beside `t1.i` and `t2.i`.
         Ok(())
     }
 
@@ -376,21 +374,34 @@ impl DFSchema {
         qualifier: Option<&TableReference>,
         name: &str,
     ) -> Option<usize> {
-        let mut matches = self
-            .iter()
-            .enumerate()
-            .filter(|(_, (q, f))| match (qualifier, q) {
-                // field to lookup is qualified.
-                // current field is qualified and not shared between relations, compare both
-                // qualifier and name.
-                (Some(q), Some(field_q)) => q.resolved_eq(field_q) && f.name() == name,
-                // field to lookup is qualified but current field is unqualified.
-                (Some(_), None) => false,
-                // field to lookup is unqualified, no need to compare qualifier
-                (None, Some(_)) | (None, None) => f.name() == name,
-            })
-            .map(|(idx, _)| idx);
-        matches.next()
+        let mut matches =
+            self.iter()
+                .enumerate()
+                .filter(|(_, (q, f))| match (qualifier, q) {
+                    // field to lookup is qualified.
+                    // current field is qualified and not shared between relations, compare both
+                    // qualifier and name.
+                    (Some(q), Some(field_q)) => {
+                        q.resolved_eq(field_q) && f.name() == name
+                    }
+                    // field to lookup is qualified but current field is unqualified.
+                    (Some(_), None) => false,
+                    // field to lookup is unqualified, no need to compare qualifier
+                    (None, Some(_)) | (None, None) => f.name() == name,
+                });
+        let Some((first, (first_qualifier, _))) = matches.next() else {
+            return None;
+        };
+        if qualifier.is_some() || first_qualifier.is_none() {
+            return Some(first);
+        }
+        // An unqualified lookup binds to the unqualified field of that name
+        // when there is one, wherever it sits; qualified fields of the same
+        // name are only reached through their qualifier.
+        matches
+            .find(|(_, (q, _))| q.is_none())
+            .map(|(idx, _)| idx)
+            .or(Some(first))
     }
 
     /// Find the index of the column with the given qualifier and name,
@@ -1508,12 +1519,16 @@ mod tests {
     fn join_mixed_duplicate() -> Result<()> {
         let left = DFSchema::try_from_qualified_schema("t1", &test_schema_1())?;
         let right = DFSchema::try_from(test_schema_1())?;
-        let join = left.join(&right);
-        assert_contains!(
-            join.unwrap_err().to_string(),
-            "Schema error: Schema contains qualified \
-                          field name t1.c0 and unqualified field name c0 which would be ambiguous"
+        let join = left.join(&right)?;
+        // An unqualified name binds to the unqualified field; the qualified
+        // field of the same name is reached only through its qualifier.
+        assert_eq!(join.index_of_column_by_name(None, "c0"), Some(2));
+        assert_eq!(
+            join.index_of_column_by_name(Some(&TableReference::bare("t1")), "c0"),
+            Some(0)
         );
+        let (qualifier, _) = join.qualified_field_with_unqualified_name("c0")?;
+        assert!(qualifier.is_none());
         Ok(())
     }
 

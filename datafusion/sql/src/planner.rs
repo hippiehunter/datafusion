@@ -28,15 +28,17 @@ use datafusion_common::TableReference;
 use datafusion_common::config::SqlParserOptions;
 use datafusion_common::datatype::{DataTypeExt, FieldExt};
 use datafusion_common::error::add_possible_columns_to_diag;
-use datafusion_common::{DFSchema, DataFusionError, Result, not_impl_err, plan_err};
+use datafusion_common::{
+    Column, DFSchema, DataFusionError, Result, not_impl_err, plan_err,
+};
 use datafusion_common::{
     DFSchemaRef, Diagnostic, SchemaError, field_not_found, internal_err,
     plan_datafusion_err,
 };
+use datafusion_expr::Expr;
 use datafusion_expr::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 pub use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::utils::find_column_exprs;
-use datafusion_expr::{Expr, col};
 use sqlparser::ast::{AccessExpr, ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
 use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption, ColumnOptionDef};
 use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
@@ -310,6 +312,11 @@ pub struct PlannerContext {
     /// Counter for generating unique IDs for anonymous placeholders (?)
     /// Each ? is converted to $1, $2, etc.
     next_anonymous_placeholder: Cell<usize>,
+    /// Aggregates a subquery handed to an enclosing query, keyed by that
+    /// query's depth (its `outer_query_schema_stack` length while it plans
+    /// its own expressions). The enclosing query evaluates them alongside
+    /// its own aggregates; the subquery reads each as an outer reference.
+    outer_level_aggregates: Vec<(usize, Expr)>,
 }
 
 impl Default for PlannerContext {
@@ -331,7 +338,24 @@ impl PlannerContext {
             values_assembly: None,
             psm_schema: None,
             next_anonymous_placeholder: Cell::new(1),
+            outer_level_aggregates: Vec::new(),
         }
+    }
+
+    /// Hand an aggregate whose arguments belong to the query at `level` to
+    /// that query.
+    pub fn push_outer_level_aggregate(&mut self, level: usize, aggregate: Expr) {
+        self.outer_level_aggregates.push((level, aggregate));
+    }
+
+    /// The aggregates handed to the query at `level`, in order of appearance.
+    pub fn take_outer_level_aggregates(&mut self, level: usize) -> Vec<Expr> {
+        let (taken, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.outer_level_aggregates)
+                .into_iter()
+                .partition(|(target, _)| *target == level);
+        self.outer_level_aggregates = kept;
+        taken.into_iter().map(|(_, aggregate)| aggregate).collect()
     }
 
     /// Update the PlannerContext with provided prepare_param_data_types
@@ -572,7 +596,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             let not_nullable = column
                 .options
                 .iter()
-                .any(|x| x.option == ColumnOption::NotNull);
+                .any(|x| x.option == ColumnOption::NotNull)
+                || !data_type.is_nullable();
             let mut field = data_type
                 .as_ref()
                 .clone()
@@ -674,14 +699,14 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 .map(|id| self.ident_normalizer.normalize(id.clone()))
                 .collect();
 
-            // Create projection expressions without validation to prevent
-            // normalization which would re-qualify columns with their original
-            // table names. We need unqualified columns so that SubqueryAlias
-            // can properly apply the new table qualifier.
+            // Each column is named by position, through its own qualifier: a
+            // join subtree may carry the same column name on both sides. The
+            // projection is not validated so the columns stay as written and
+            // SubqueryAlias applies the new qualifier on top.
             let mut exprs: Vec<_> = Vec::with_capacity(num_fields);
             for i in 0..num_fields {
-                let (_qualifier, field) = schema.qualified_field(i);
-                let col_expr = col(field.name());
+                let (qualifier, field) = schema.qualified_field(i);
+                let col_expr = Expr::Column(Column::from((qualifier, field)));
                 let expr = if i < idents.len() {
                     // Rename this column
                     col_expr.alias(self.ident_normalizer.normalize(idents[i].clone()))
@@ -785,7 +810,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         if let Some(type_planner) = self.context_provider.get_type_planner()
             && let Some(data_type) = type_planner.plan_type(sql_type)?
         {
-            let field: Field = data_type.into_nullable_field();
+            let nullable = type_planner.plan_field_nullable(sql_type)?.unwrap_or(true);
+            let field = Field::new("", data_type, nullable);
             let field =
                 if let Some(metadata) = type_planner.plan_field_metadata(sql_type)? {
                     field.with_metadata(metadata)

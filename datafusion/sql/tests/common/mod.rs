@@ -233,7 +233,8 @@ impl ContextProvider for MockContextProvider {
 
         match schema {
             Ok(t) => Ok(Arc::new(
-                EmptyTable::new(Arc::new(t)).with_column_defaults(column_defaults(name.table())),
+                EmptyTable::new(Arc::new(t))
+                    .with_column_defaults(column_defaults(name.table())),
             )),
             Err(e) => Err(e),
         }

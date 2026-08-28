@@ -25,18 +25,20 @@ use arrow::datatypes::{Field, FieldRef};
 use std::collections::HashSet;
 use std::fmt;
 
-/// A set of columns tied together by a USING / NATURAL join clause, with an
-/// optional preferred column for ambiguous-reference resolution.
+/// The columns one USING / NATURAL join clause ties together.
 ///
-/// SQL standard: the shared columns of a USING join produce a single coalesced
-/// value.  For INNER / LEFT joins picking the left-side column is correct (it is
-/// never NULL when the row is present).  For RIGHT joins the left-side column
-/// **is** NULL on unmatched rows, so `preferred` is set to the right-side
-/// column to match PostgreSQL semantics.
+/// A USING join exposes one merged column per join name. When the plan
+/// carries that column — an unqualified field beside the two inputs' own
+/// copies — the copies are `hidden`: still reachable by their qualifier, but
+/// left out of `*` and never what an unqualified name means. A plan built
+/// straight from the join, without the merged column, instead keeps one copy
+/// visible: the right-side one for a RIGHT join (`preferred`), the left one
+/// otherwise, since that is the copy that is never null when the row exists.
 #[derive(Debug, Clone)]
 pub struct UsingColumns {
     pub columns: HashSet<Column>,
     pub preferred: Option<Column>,
+    pub hidden: HashSet<Column>,
 }
 
 impl UsingColumns {
@@ -44,6 +46,7 @@ impl UsingColumns {
         Self {
             columns,
             preferred: None,
+            hidden: HashSet::new(),
         }
     }
 
@@ -51,7 +54,13 @@ impl UsingColumns {
         Self {
             columns,
             preferred: Some(preferred),
+            hidden: HashSet::new(),
         }
+    }
+
+    pub fn with_hidden(mut self, hidden: HashSet<Column>) -> Self {
+        self.hidden = hidden;
+        self
     }
 }
 
@@ -274,6 +283,15 @@ impl Column {
                         .iter()
                         .flat_map(|s| s.columns_with_unqualified_name(&self.name))
                         .collect::<Vec<_>>();
+                    // An unqualified field beside qualified ones of the same
+                    // name is what the unqualified name means, the same rule
+                    // `DFSchema::qualified_field_with_unqualified_name` applies.
+                    let mut unqualified = columns.iter().filter(|c| c.relation.is_none());
+                    if let Some(column) = unqualified.next()
+                        && unqualified.next().is_none()
+                    {
+                        return Ok(column.clone());
+                    }
                     for using_col in using_columns {
                         let all_matched =
                             columns.iter().all(|c| using_col.columns.contains(c));

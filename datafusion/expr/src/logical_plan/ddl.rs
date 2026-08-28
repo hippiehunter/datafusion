@@ -847,6 +847,65 @@ pub struct CreateMemoryTable {
     pub temporary: bool,
     /// Storage parameters supplied via CREATE TABLE WITH (...)
     pub storage_parameters: BTreeMap<String, String>,
+    /// Typed declarative partition key planned against the table schema.
+    /// Consumers must not reconstruct this information from SQL display text.
+    pub partitioning: Option<CreateTablePartitioning>,
+    /// Typed `PARTITION OF` declaration. The parent identity and bound remain
+    /// semantic plan data; consumers never reconstruct them from storage
+    /// parameter strings or rendered SQL.
+    pub partition_of: Option<CreateTablePartitionOf>,
+    /// Parent relations named by `INHERITS`, in declaration order.
+    pub inherits: Vec<TableReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateTablePartitionOf {
+    pub parent: TableReference,
+    pub bound: CreateTablePartitionBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum CreateTablePartitionBound {
+    Range {
+        lower: Vec<CreateTablePartitionBoundValue>,
+        upper: Vec<CreateTablePartitionBoundValue>,
+    },
+    /// Each entry is one partition key row. A scalar list item has one
+    /// expression; a tuple item has one expression per partition key column.
+    List { values: Vec<Vec<Expr>> },
+    Hash { modulus: u64, remainder: u64 },
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum CreateTablePartitionBoundValue {
+    MinValue,
+    MaxValue,
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateTablePartitioning {
+    pub strategy: CreateTablePartitioningStrategy,
+    pub keys: Vec<CreateTablePartitionKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CreateTablePartitioningStrategy {
+    Range,
+    List,
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateTablePartitionKey {
+    /// `Some` only for a plain column key. Expression keys retain the planned
+    /// expression in `expr` and deliberately have no surrogate column.
+    pub column_name: Option<String>,
+    pub expr: Expr,
+    pub result_type: DataType,
+    pub opclass: Option<String>,
+    pub collation: Option<String>,
 }
 
 /// Creates a view.

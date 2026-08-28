@@ -848,6 +848,46 @@ fn plan_create_table_interval_day_to_second() {
 }
 
 #[test]
+fn plan_create_table_as_with_no_data_keeps_schema_and_limits_input_to_zero() {
+    let plan =
+        logical_plan("CREATE TABLE empty_people AS SELECT id FROM person WITH NO DATA")
+            .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+        input,
+        ..
+    })) = plan
+    else {
+        panic!("expected CreateMemoryTable plan");
+    };
+    assert_eq!(input.schema().fields().len(), 1);
+    let LogicalPlan::Limit(limit) = input.as_ref() else {
+        panic!("WITH NO DATA input must be limited to zero rows");
+    };
+    assert!(matches!(
+        limit.fetch.as_deref(),
+        Some(datafusion_expr::Expr::Literal(
+            datafusion_common::ScalarValue::Int64(Some(0)),
+            _
+        ))
+    ));
+}
+
+#[test]
+fn plan_inline_primary_key_preserves_quoted_column_identity() {
+    let plan =
+        logical_plan(r#"CREATE TABLE "Person" ("Id" INT PRIMARY KEY, "Name" TEXT)"#)
+            .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) = plan else {
+        panic!("expected CreateMemoryTable plan");
+    };
+    assert_eq!(table.input.schema().field(0).name(), "Id");
+    assert!(matches!(
+        table.constraints.clone().into_iter().next(),
+        Some(datafusion_common::Constraint::PrimaryKey(columns)) if columns == vec![0]
+    ));
+}
+
+#[test]
 fn plan_oracle_data_types() {
     let sql = "CREATE TABLE oracle_types (
         n NCHAR(10),
@@ -1396,7 +1436,7 @@ fn table_with_column_alias() {
         @r#"
         Projection: l.a, l.b, l.c
           SubqueryAlias: l
-            Projection: l_item_id AS a, l_description AS b, price AS c
+            Projection: lineitem.l_item_id AS a, lineitem.l_description AS b, lineitem.price AS c
               TableScan: lineitem
         "#
     );
@@ -1426,7 +1466,7 @@ fn table_with_column_alias_partial() {
         @r#"
         Projection: l.a, l.b, l.price
           SubqueryAlias: l
-            Projection: l_item_id AS a, l_description AS b, price
+            Projection: lineitem.l_item_id AS a, lineitem.l_description AS b, lineitem.price
               TableScan: lineitem
         "#
     );
@@ -1517,7 +1557,7 @@ fn table_with_column_alias_single_column() {
         @r#"
         Projection: l.renamed
           SubqueryAlias: l
-            Projection: l_item_id AS renamed, l_description, price
+            Projection: lineitem.l_item_id AS renamed, lineitem.l_description, lineitem.price
               TableScan: lineitem
         "#
     );
@@ -1591,12 +1631,13 @@ fn join_with_ambiguous_column() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: a.id
-          Inner Join: Using a.id = b.id
-            SubqueryAlias: a
-              TableScan: person
-            SubqueryAlias: b
-              TableScan: person
+        Projection: id
+          Projection: a.id AS id, a.first_name, a.last_name, a.age, a.state, a.salary, a.birth_date, a.😀, b.first_name, b.last_name, b.age, b.state, b.salary, b.birth_date, b.😀, a.id, b.id
+            Inner Join: Using a.id = b.id
+              SubqueryAlias: a
+                TableScan: person
+              SubqueryAlias: b
+                TableScan: person
         "#
     );
 }
@@ -1608,12 +1649,13 @@ fn natural_left_join() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: a.l_item_id
-          Left Join: Using a.l_item_id = b.l_item_id, a.l_description = b.l_description, a.price = b.price
-            SubqueryAlias: a
-              TableScan: lineitem
-            SubqueryAlias: b
-              TableScan: lineitem
+        Projection: l_item_id
+          Projection: a.l_item_id AS l_item_id, a.l_description AS l_description, a.price AS price, a.l_item_id, a.l_description, a.price, b.l_item_id, b.l_description, b.price
+            Left Join: Using a.l_item_id = b.l_item_id, a.l_description = b.l_description, a.price = b.price
+              SubqueryAlias: a
+                TableScan: lineitem
+              SubqueryAlias: b
+                TableScan: lineitem
         "#
     );
 }
@@ -1625,12 +1667,13 @@ fn natural_right_join() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: b.l_item_id
-          Right Join: Using a.l_item_id = b.l_item_id, a.l_description = b.l_description, a.price = b.price
-            SubqueryAlias: a
-              TableScan: lineitem
-            SubqueryAlias: b
-              TableScan: lineitem
+        Projection: l_item_id
+          Projection: b.l_item_id AS l_item_id, b.l_description AS l_description, b.price AS price, a.l_item_id, a.l_description, a.price, b.l_item_id, b.l_description, b.price
+            Right Join: Using a.l_item_id = b.l_item_id, a.l_description = b.l_description, a.price = b.price
+              SubqueryAlias: a
+                TableScan: lineitem
+              SubqueryAlias: b
+                TableScan: lineitem
         "#
     );
 }
@@ -3121,11 +3164,12 @@ fn join_with_using() {
     assert_snapshot!(
         plan,
         @r#"
-Projection: person.first_name, person.id
-  Inner Join: Using person.id = person2.id
-    TableScan: person
-    SubqueryAlias: person2
+Projection: person.first_name, id
+  Projection: person.id AS id, person.first_name, person.last_name, person.age, person.state, person.salary, person.birth_date, person.😀, person2.first_name, person2.last_name, person2.age, person2.state, person2.salary, person2.birth_date, person2.😀, person.id, person2.id
+    Inner Join: Using person.id = person2.id
       TableScan: person
+      SubqueryAlias: person2
+        TableScan: person
 "#
     );
 }
@@ -5160,11 +5204,12 @@ fn test_ambiguous_column_references_with_in_using_join() {
         plan,
         @r#"
 Projection: p1.id, p1.age, p2.id
-  Inner Join: Using p1.id = p2.id
-    SubqueryAlias: p1
-      TableScan: person
-    SubqueryAlias: p2
-      TableScan: person
+  Projection: p1.id AS id, p1.first_name, p1.last_name, p1.age, p1.state, p1.salary, p1.birth_date, p1.😀, p2.first_name, p2.last_name, p2.age, p2.state, p2.salary, p2.birth_date, p2.😀, p1.id, p2.id
+    Inner Join: Using p1.id = p2.id
+      SubqueryAlias: p1
+        TableScan: person
+      SubqueryAlias: p2
+        TableScan: person
 "#
     );
 }
@@ -5431,14 +5476,14 @@ fn test_using_join_wildcard_schema() {
 
     let sql = "SELECT * FROM orders o1 NATURAL JOIN orders o2";
     let plan = logical_plan(sql).unwrap();
-    // Only columns from one join side should be present
+    // Every column is a join column, so each appears once, merged.
     let expected_fields = vec![
-        "o1.order_id".to_string(),
-        "o1.customer_id".to_string(),
-        "o1.o_item_id".to_string(),
-        "o1.qty".to_string(),
-        "o1.price".to_string(),
-        "o1.delivered".to_string(),
+        "order_id".to_string(),
+        "customer_id".to_string(),
+        "o_item_id".to_string(),
+        "qty".to_string(),
+        "price".to_string(),
+        "delivered".to_string(),
     ];
     assert_eq!(plan.schema().field_names(), expected_fields);
 
@@ -5450,7 +5495,7 @@ fn test_using_join_wildcard_schema() {
     assert_eq!(
         plan.schema().field_names(),
         [
-            "t1.id".to_string(),
+            "id".to_string(),
             "t1.value1".to_string(),
             "t2.value2".to_string()
         ]
@@ -5462,12 +5507,14 @@ fn test_using_join_wildcard_schema() {
         t3 AS (SELECT 1 AS c, 2 AS d)
         SELECT * FROM t1 NATURAL JOIN t2 RIGHT JOIN t3 USING (c)";
     let plan = logical_plan(sql).unwrap();
+    // The merged column of each join comes first: `c` of the RIGHT join,
+    // then the left input's `a` (itself merged) and `b`, then `d`.
     assert_eq!(
         plan.schema().field_names(),
         [
-            "t1.a".to_string(),
+            "c".to_string(),
+            "a".to_string(),
             "t1.b".to_string(),
-            "t3.c".to_string(),
             "t3.d".to_string()
         ]
     );
@@ -5481,9 +5528,9 @@ fn test_using_join_wildcard_schema() {
     assert_eq!(
         plan.schema().field_names(),
         [
-            "t1.a".to_string(),
+            "c".to_string(),
+            "a".to_string(),
             "t1.b".to_string(),
-            "t2.c".to_string(),
             "t3.d".to_string()
         ]
     );

@@ -412,6 +412,12 @@ pub enum JsonTableColumnDef {
         path: String,
         /// Whether this is an EXISTS column (returns 1/0 for path existence)
         exists: bool,
+        /// Use JSON_QUERY rather than JSON_VALUE for `FORMAT JSON` columns.
+        format_json: bool,
+        /// SQL/JSON wrapper mode (`without`, `conditional`, `unconditional`).
+        wrapper: Option<String>,
+        /// Remove quotes when the selected JSON item is a string.
+        omit_quotes: bool,
         on_empty: Option<JsonTableErrorHandling>,
         on_error: Option<JsonTableErrorHandling>,
     },
@@ -453,10 +459,15 @@ pub enum JsonTableColumnDef {
 pub struct JsonTable {
     /// The JSON data expression to extract from
     pub json_expr: Expr,
+    /// JSON object containing variables supplied by `PASSING`.
+    pub passing: Expr,
     /// The JSON path expression (e.g., '$', '$.items[*]')
     pub json_path: String,
     /// Column definitions specifying what to extract
     pub columns: Vec<JsonTableColumnDef>,
+    /// Table-level row-path error handling. `Null` means the default empty
+    /// row set; `Error` propagates the JSONPath error.
+    pub on_error: JsonTableErrorHandling,
     /// The schema of the output table
     pub schema: DFSchemaRef,
 }
@@ -468,6 +479,24 @@ impl JsonTable {
         json_path: String,
         columns: Vec<JsonTableColumnDef>,
     ) -> Result<Self> {
+        Self::try_new_with_options(
+            json_expr,
+            Expr::Literal(ScalarValue::Utf8(None), None),
+            json_path,
+            columns,
+            JsonTableErrorHandling::Null,
+        )
+    }
+
+    /// Create a JSON_TABLE node retaining the PostgreSQL SQL/JSON clauses
+    /// needed by analyzer lowering.
+    pub fn try_new_with_options(
+        json_expr: Expr,
+        passing: Expr,
+        json_path: String,
+        columns: Vec<JsonTableColumnDef>,
+        on_error: JsonTableErrorHandling,
+    ) -> Result<Self> {
         // Build schema from column definitions
         let fields = Self::columns_to_fields(&columns)?;
         let schema = Arc::new(DFSchema::from_unqualified_fields(
@@ -477,8 +506,10 @@ impl JsonTable {
 
         Ok(Self {
             json_expr,
+            passing,
             json_path,
             columns,
+            on_error,
             schema,
         })
     }
@@ -491,16 +522,9 @@ impl JsonTable {
                 JsonTableColumnDef::Path {
                     name,
                     data_type,
-                    exists,
                     ..
                 } => {
-                    // EXISTS columns return INT (0 or 1)
-                    let field_type = if *exists {
-                        DataType::Int32
-                    } else {
-                        data_type.clone()
-                    };
-                    fields.push(Arc::new(Field::new(name, field_type, true)));
+                    fields.push(Arc::new(Field::new(name, data_type.clone(), true)));
                 }
                 JsonTableColumnDef::Ordinality { name } => {
                     // Ordinality is a row number, always BIGINT
@@ -521,7 +545,7 @@ impl PartialOrd for JsonTable {
         match self.json_path.partial_cmp(&other.json_path) {
             Some(Ordering::Equal) => {
                 match self.json_expr.partial_cmp(&other.json_expr) {
-                    Some(Ordering::Equal) => None, // schemas and columns don't matter for ordering
+                    Some(Ordering::Equal) => self.passing.partial_cmp(&other.passing),
                     cmp => cmp,
                 }
             }
@@ -1040,10 +1064,7 @@ impl LogicalPlan {
             LogicalPlan::CopyFrom(CopyFrom { output_schema, .. }) => output_schema,
             LogicalPlan::Ddl(ddl) => ddl.schema(),
             LogicalPlan::Unnest(Unnest { schema, .. }) => schema,
-            LogicalPlan::RecursiveQuery(RecursiveQuery { static_term, .. }) => {
-                // we take the schema of the static term as the schema of the entire recursive query
-                static_term.schema()
-            }
+            LogicalPlan::RecursiveQuery(RecursiveQuery { schema, .. }) => schema,
             LogicalPlan::MatchRecognize(MatchRecognize { schema, .. }) => schema,
             LogicalPlan::JsonTable(JsonTable { schema, .. }) => schema,
             LogicalPlan::GraphTable(GraphTable { schema, .. }) => schema,
@@ -1185,44 +1206,16 @@ impl LogicalPlan {
         }
     }
 
-    /// returns all `Using` join columns in a logical plan
+    /// The USING / NATURAL join columns this plan exposes, one entry per join
+    /// name.
+    ///
+    /// The walk follows plan inputs and stops at a `SubqueryAlias`: everything
+    /// beneath one is requalified, so nothing below is reachable by the names
+    /// the join gave it. Subqueries held in expressions are other scopes and
+    /// are not entered.
     pub fn using_columns(&self) -> Result<Vec<UsingColumns>, DataFusionError> {
         let mut using_columns: Vec<UsingColumns> = vec![];
-
-        self.apply_with_subqueries(|plan| {
-            if let LogicalPlan::Join(Join {
-                join_constraint: JoinConstraint::Using,
-                join_type,
-                on,
-                ..
-            }) = plan
-            {
-                for (l, r) in on {
-                    let Some(l) = l.get_as_join_column() else {
-                        return internal_err!(
-                            "Invalid join key. Expected column, found {l:?}"
-                        );
-                    };
-                    let Some(r) = r.get_as_join_column() else {
-                        return internal_err!(
-                            "Invalid join key. Expected column, found {r:?}"
-                        );
-                    };
-                    let r_owned = r.to_owned();
-                    let mut columns = HashSet::new();
-                    columns.insert(l.to_owned());
-                    columns.insert(r_owned.clone());
-                    let preferred = if *join_type == JoinType::Right {
-                        Some(r_owned)
-                    } else {
-                        None
-                    };
-                    using_columns.push(UsingColumns { columns, preferred });
-                }
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
-
+        collect_using_columns(self, &mut using_columns)?;
         Ok(using_columns)
     }
 
@@ -1494,12 +1487,14 @@ impl LogicalPlan {
             .map(LogicalPlan::MatchRecognize),
             LogicalPlan::JsonTable(JsonTable {
                 json_expr,
+                passing,
                 json_path,
                 columns,
+                on_error,
                 schema: _,
             }) => {
                 // Rebuild JsonTable to recompute schema
-                JsonTable::try_new(json_expr, json_path, columns)
+                JsonTable::try_new_with_options(json_expr, passing, json_path, columns, on_error)
                     .map(LogicalPlan::JsonTable)
             }
             LogicalPlan::GraphTable(GraphTable {
@@ -1910,6 +1905,9 @@ impl LogicalPlan {
                 column_defaults,
                 temporary,
                 storage_parameters,
+                partitioning,
+                partition_of,
+                inherits,
                 ..
             })) => {
                 self.assert_no_expressions(expr)?;
@@ -1924,6 +1922,9 @@ impl LogicalPlan {
                         column_defaults: column_defaults.clone(),
                         temporary: *temporary,
                         storage_parameters: storage_parameters.clone(),
+                        partitioning: partitioning.clone(),
+                        partition_of: partition_of.clone(),
+                        inherits: inherits.clone(),
                     },
                 )))
             }
@@ -1998,7 +1999,11 @@ impl LogicalPlan {
                 Ok(LogicalPlan::Distinct(distinct))
             }
             LogicalPlan::RecursiveQuery(RecursiveQuery {
-                name, is_distinct, ..
+                name,
+                is_distinct,
+                schema,
+                search,
+                ..
             }) => {
                 self.assert_no_expressions(expr)?;
                 let (static_term, recursive_term) = self.only_two_inputs(inputs)?;
@@ -2007,6 +2012,8 @@ impl LogicalPlan {
                     static_term: Arc::new(static_term),
                     recursive_term: Arc::new(recursive_term),
                     is_distinct: *is_distinct,
+                    schema: Arc::clone(schema),
+                    search: search.clone(),
                 }))
             }
             LogicalPlan::Analyze(a) => {
@@ -2156,18 +2163,29 @@ impl LogicalPlan {
                 .map(LogicalPlan::MatchRecognize)
             }
             LogicalPlan::JsonTable(JsonTable {
-                json_path, columns, ..
+                json_path,
+                columns,
+                on_error,
+                ..
             }) => {
-                // JsonTable has one expression (json_expr) and no inputs
+                // JsonTable has the context and PASSING object expressions.
                 self.assert_no_inputs(inputs)?;
                 assert_eq!(
                     expr.len(),
-                    1,
-                    "JsonTable should have exactly one expression"
+                    2,
+                    "JsonTable should have exactly two expressions"
                 );
-                let json_expr = expr.into_iter().next().unwrap();
-                JsonTable::try_new(json_expr, json_path.clone(), columns.clone())
-                    .map(LogicalPlan::JsonTable)
+                let mut expr = expr.into_iter();
+                let json_expr = expr.next().unwrap();
+                let passing = expr.next().unwrap();
+                JsonTable::try_new_with_options(
+                    json_expr,
+                    passing,
+                    json_path.clone(),
+                    columns.clone(),
+                    on_error.clone(),
+                )
+                .map(LogicalPlan::JsonTable)
             }
             LogicalPlan::GraphTable(GraphTable {
                 graph_name,
@@ -3310,6 +3328,26 @@ pub struct RecursiveQuery {
     /// Should the output of the recursive term be deduplicated (`UNION`) or
     /// not (`UNION ALL`).
     pub is_distinct: bool,
+    /// Output schema. Ordinarily this is the static term's schema; a SQL
+    /// `SEARCH` clause appends its generated traversal-order column without
+    /// changing either recursive term's row shape.
+    pub schema: DFSchemaRef,
+    /// Runtime traversal contract for SQL `SEARCH ... SET ...`.
+    pub search: Option<RecursiveSearch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RecursiveSearchOrder {
+    DepthFirst,
+    BreadthFirst,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RecursiveSearch {
+    pub order: RecursiveSearchOrder,
+    /// Positions in the unextended recursive row used by the `BY` list.
+    pub by_column_indices: Vec<usize>,
+    pub set_column: String,
 }
 
 /// Values expression. See
@@ -3398,6 +3436,97 @@ impl Projection {
             schema,
         }
     }
+}
+
+/// The join key columns of one USING join, as written on the join.
+fn using_join_key_columns(join: &Join) -> Result<Vec<(Column, Column)>> {
+    join.on
+        .iter()
+        .map(|(l, r)| {
+            let Some(l) = l.get_as_join_column() else {
+                return internal_err!("Invalid join key. Expected column, found {l:?}");
+            };
+            let Some(r) = r.get_as_join_column() else {
+                return internal_err!("Invalid join key. Expected column, found {r:?}");
+            };
+            Ok((l.to_owned(), r.to_owned()))
+        })
+        .collect()
+}
+
+/// The USING columns a projection placed over a USING join exposes, when the
+/// projection carries the join's merged columns: one unqualified field per
+/// join name, beside which every qualified field of that name is a copy the
+/// merged column hides. `None` when the projection does not carry them all.
+fn merged_using_columns(
+    projection: &Projection,
+    join: &Join,
+) -> Result<Option<Vec<UsingColumns>>> {
+    let schema = projection.schema.as_ref();
+    let mut entries = Vec::new();
+    for (l, r) in using_join_key_columns(join)? {
+        let name = l.name.as_str();
+        let merged_present = schema
+            .iter()
+            .any(|(qualifier, field)| qualifier.is_none() && field.name() == name);
+        if !merged_present {
+            return Ok(None);
+        }
+        let hidden = schema
+            .iter()
+            .filter(|(qualifier, field)| qualifier.is_some() && field.name() == name)
+            .map(Column::from)
+            .collect();
+        let columns = HashSet::from([l, r]);
+        entries.push(UsingColumns::new(columns).with_hidden(hidden));
+    }
+    Ok(Some(entries))
+}
+
+/// The USING columns of a join that carries no merged column: one copy per
+/// join name stays visible — the right one for a RIGHT join, else the first —
+/// and the other is hidden.
+fn raw_using_columns(join: &Join) -> Result<Vec<UsingColumns>> {
+    using_join_key_columns(join)?
+        .into_iter()
+        .map(|(l, r)| {
+            let columns = HashSet::from([l.clone(), r.clone()]);
+            let preferred = (join.join_type == JoinType::Right).then(|| r.clone());
+            let mut copies = vec![l, r];
+            copies.sort();
+            let kept = preferred.clone().unwrap_or_else(|| copies[0].clone());
+            let hidden = copies.into_iter().filter(|c| *c != kept).collect();
+            let entry = match preferred {
+                Some(preferred) => UsingColumns::with_preferred(columns, preferred),
+                None => UsingColumns::new(columns),
+            };
+            Ok(entry.with_hidden(hidden))
+        })
+        .collect()
+}
+
+fn collect_using_columns(plan: &LogicalPlan, out: &mut Vec<UsingColumns>) -> Result<()> {
+    match plan {
+        LogicalPlan::SubqueryAlias(_) => return Ok(()),
+        LogicalPlan::Projection(projection) => {
+            if let LogicalPlan::Join(join) = projection.input.as_ref()
+                && join.join_constraint == JoinConstraint::Using
+                && let Some(entries) = merged_using_columns(projection, join)?
+            {
+                out.extend(entries);
+                collect_using_columns(&join.left, out)?;
+                return collect_using_columns(&join.right, out);
+            }
+        }
+        LogicalPlan::Join(join) if join.join_constraint == JoinConstraint::Using => {
+            out.extend(raw_using_columns(join)?);
+        }
+        _ => {}
+    }
+    for input in plan.inputs() {
+        collect_using_columns(input, out)?;
+    }
+    Ok(())
 }
 
 /// Computes the schema of the result produced by applying a projection to the input logical plan.
@@ -5433,10 +5562,25 @@ fn get_unnested_columns(
     match data_type {
         DataType::List(_) | DataType::FixedSizeList(_, _) | DataType::LargeList(_) => {
             let data_type = get_unnested_list_datatype_recursive(data_type, depth)?;
-            // The element keeps the list field's type metadata: what names
-            // the list's element type names the unnested value's type. A
-            // declared array dimension count drops by the unnested depth.
+            // The unnested value is described by the traversed item field,
+            // not only by the outer projection field. Dialects attach logical
+            // identities such as jsonb/composite types to that item field.
+            // Merge every consumed item's metadata, with the innermost item
+            // winning, so a list-valued SRF keeps the type of the row it
+            // expands into even when an intervening projection did not copy
+            // the metadata onto the list itself.
             let mut metadata = field.metadata().clone();
+            let mut nested_type = field.data_type();
+            for _ in 0..depth {
+                let item = match nested_type {
+                    DataType::List(item)
+                    | DataType::FixedSizeList(item, _)
+                    | DataType::LargeList(item) => item,
+                    _ => break,
+                };
+                metadata.extend(item.metadata().clone());
+                nested_type = item.data_type();
+            }
             if let Some(dimensions) = metadata
                 .get(ARRAY_DIMENSIONS_METADATA)
                 .and_then(|value| value.parse::<usize>().ok())

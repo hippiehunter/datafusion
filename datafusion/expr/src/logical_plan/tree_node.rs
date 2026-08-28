@@ -324,6 +324,9 @@ impl TreeNode for LogicalPlan {
                         column_defaults,
                         temporary,
                         storage_parameters,
+                        partitioning,
+                        partition_of,
+                        inherits,
                     }) => input.map_elements(f)?.update_data(|input| {
                         DdlStatement::CreateMemoryTable(CreateMemoryTable {
                             name,
@@ -334,6 +337,9 @@ impl TreeNode for LogicalPlan {
                             column_defaults,
                             temporary,
                             storage_parameters,
+                            partitioning,
+                            partition_of,
+                            inherits,
                         })
                     }),
                     DdlStatement::CreateView(CreateView {
@@ -439,6 +445,8 @@ impl TreeNode for LogicalPlan {
                 static_term,
                 recursive_term,
                 is_distinct,
+                schema,
+                search,
             }) => (static_term, recursive_term).map_elements(f)?.update_data(
                 |(static_term, recursive_term)| {
                     LogicalPlan::RecursiveQuery(RecursiveQuery {
@@ -446,6 +454,8 @@ impl TreeNode for LogicalPlan {
                         static_term,
                         recursive_term,
                         is_distinct,
+                        schema,
+                        search,
                     })
                 },
             ),
@@ -659,9 +669,11 @@ impl LogicalPlan {
                 }
                 Ok(TreeNodeRecursion::Continue)
             }
-            LogicalPlan::JsonTable(JsonTable { json_expr, .. }) => {
-                // Apply to the JSON expression
+            LogicalPlan::JsonTable(JsonTable {
+                json_expr, passing, ..
+            }) => {
                 f(json_expr)?;
+                f(passing)?;
                 Ok(TreeNodeRecursion::Continue)
             }
             LogicalPlan::GraphTable(GraphTable {

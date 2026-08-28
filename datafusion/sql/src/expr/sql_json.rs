@@ -298,7 +298,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// `PASSING v AS n, ...` becomes the `vars` object the jsonpath evaluator
     /// takes, built so each binding keeps the JSON type its SQL type maps to —
     /// a text binding is a JSON string, never a number.
-    fn plan_passing_variables(
+    pub(crate) fn plan_passing_variables(
         &self,
         bindings: &[ExprWithAlias],
         schema: &DFSchema,

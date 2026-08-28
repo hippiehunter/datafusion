@@ -584,7 +584,7 @@ fn roundtrip_statement_with_dialect_13() -> Result<(), DataFusionError> {
             ",
         parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT agg.string_count FROM (SELECT j1_id AS id, "min(j2.j2_string)" AS string_count FROM (SELECT j1.j1_id, min(j2.j2_string) FROM j1 LEFT OUTER JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id)) AS agg"#,
+        expected: @r#"SELECT agg.string_count FROM (SELECT j1.j1_id, min(j2.j2_string) AS "min" FROM j1 LEFT OUTER JOIN j2 ON (j1.j1_id = j2.j2_id) GROUP BY j1.j1_id) AS agg (id, string_count)"#,
     );
     Ok(())
 }
@@ -659,7 +659,7 @@ fn roundtrip_statement_with_dialect_16() -> Result<(), DataFusionError> {
         sql: "SELECT id FROM (SELECT j1_id from j1) AS c (id)",
         parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT c.id FROM (SELECT j1_id AS id FROM (SELECT j1.j1_id FROM j1)) AS c"#,
+        expected: @r#"SELECT c.id FROM (SELECT j1.j1_id FROM j1) AS c (id)"#,
     );
     Ok(())
 }
@@ -738,7 +738,7 @@ fn roundtrip_statement_with_dialect_23() -> Result<(), DataFusionError> {
         sql: "SELECT temp_j.id2 FROM (SELECT j1_id, j1_string FROM j1) AS temp_j(id2, string2)",
         parser_dialect: PostgreSqlDialect {},
         unparser_dialect: UnparserDefaultDialect {},
-        expected: @r#"SELECT temp_j.id2 FROM (SELECT j1_id AS id2, j1_string AS string2 FROM (SELECT j1.j1_id, j1.j1_string FROM j1)) AS temp_j"#,
+        expected: @r#"SELECT temp_j.id2 FROM (SELECT j1.j1_id, j1.j1_string FROM j1) AS temp_j (id2, string2)"#,
     );
     Ok(())
 }
@@ -749,7 +749,7 @@ fn roundtrip_statement_with_dialect_24() -> Result<(), DataFusionError> {
         sql: "SELECT temp_j.id2 FROM (SELECT j1_id, j1_string FROM j1) AS temp_j(id2, string2)",
         parser_dialect: PostgreSqlDialect {},
         unparser_dialect: SqliteDialect {},
-        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1_id` AS `id2`, `j1_string` AS `string2` FROM (SELECT `j1`.`j1_id`, `j1`.`j1_string` FROM `j1`)) AS `temp_j`"#,
+        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1`.`j1_id` AS `id2`, `j1`.`j1_string` AS `string2` FROM `j1`) AS `temp_j`"#,
     );
     Ok(())
 }
@@ -771,7 +771,7 @@ fn roundtrip_statement_with_dialect_26() -> Result<(), DataFusionError> {
         sql: "SELECT * FROM (SELECT j1_id FROM j1 LIMIT 1) AS temp_j(id2)",
         parser_dialect: PostgreSqlDialect {},
         unparser_dialect: SqliteDialect {},
-        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1_id` AS `id2` FROM (SELECT `j1`.`j1_id` FROM `j1` LIMIT 1)) AS `temp_j`"#,
+        expected: @r#"SELECT `temp_j`.`id2` FROM (SELECT `j1`.`j1_id` AS `id2` FROM `j1` LIMIT 1) AS `temp_j`"#,
     );
     Ok(())
 }
@@ -2798,11 +2798,14 @@ fn test_recursive_cte_unparse() {
         .unwrap(),
     ));
 
+    let schema = Arc::clone(static_term.schema());
     let recursive_query = RecursiveQuery {
         name: "numbers".to_string(),
         static_term,
         recursive_term,
         is_distinct: false, // UNION ALL
+        schema,
+        search: None,
     };
 
     let plan = LogicalPlan::RecursiveQuery(recursive_query);
@@ -2861,11 +2864,14 @@ fn test_recursive_cte_union_distinct() {
         .unwrap(),
     ));
 
+    let schema = Arc::clone(static_term.schema());
     let recursive_query = RecursiveQuery {
         name: "tree".to_string(),
         static_term,
         recursive_term,
         is_distinct: true, // UNION (distinct)
+        schema,
+        search: None,
     };
 
     let plan = LogicalPlan::RecursiveQuery(recursive_query);

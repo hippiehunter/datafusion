@@ -15,17 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{ContextProvider, IdentNormalizer, PlannerContext, SqlToRel};
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion_common::{
-    Result, not_impl_err, plan_err,
+    DFSchema, Result, not_impl_err, plan_err,
     tree_node::{TreeNode, TreeNodeRecursion},
 };
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, TableSource};
-use sqlparser::ast::{Ident, Query, SelectItem, SetExpr, SetOperator, With};
+use datafusion_expr::{
+    LogicalPlan, LogicalPlanBuilder, RecursiveSearch, RecursiveSearchOrder, TableSource,
+};
+use sqlparser::ast::{
+    Cte, Ident, ObjectName, Query, SearchClause, SearchOrder, SelectItem, SetExpr,
+    SetOperator, Visit, Visitor, With,
+};
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn plan_with_clause_ref(
@@ -36,16 +43,41 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if !with.oracle_declarations.is_empty() {
             return not_impl_err!("Oracle PL/SQL declarations in WITH are not supported");
         }
+        if with.cycle.is_some() {
+            return not_impl_err!("CYCLE clauses of a recursive WITH are not supported");
+        }
         let is_recursive = with.recursive;
-        // Process CTEs from top to bottom
-        for cte in &with.cte_tables {
-            // A `WITH` block can't use the same name more than once
-            let cte_name = self.ident_normalizer.normalize(cte.alias.name.clone());
-            if planner_context.contains_cte(&cte_name) {
+        let cte_names: Vec<String> = with
+            .cte_tables
+            .iter()
+            .map(|cte| self.ident_normalizer.normalize(cte.alias.name.clone()))
+            .collect();
+        // A `WITH` block can't use the same name more than once; a nested
+        // WITH may shadow a name of an enclosing one.
+        for (idx, cte_name) in cte_names.iter().enumerate() {
+            if cte_names[..idx].contains(cte_name) {
                 return plan_err!(
                     "WITH query name {cte_name:?} specified more than once"
                 );
             }
+        }
+        // Every name of a recursive WITH list is in scope for every item, so
+        // an item may reference one declared after it; items are planned in
+        // dependency order. A plain WITH resolves names top to bottom, and a
+        // forward reference there is a missing relation.
+        let order = if is_recursive {
+            with_list_dependency_order(
+                &with.cte_tables,
+                &cte_names,
+                &self.ident_normalizer,
+            )?
+        } else {
+            (0..with.cte_tables.len()).collect()
+        };
+        let search_target = with.cte_tables.len().checked_sub(1);
+        for idx in order {
+            let cte = &with.cte_tables[idx];
+            let cte_name = cte_names[idx].clone();
 
             // Create a logical plan for the CTE
             // For recursive CTEs, we need to extract column aliases early and pass them
@@ -62,6 +94,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     &cte_name,
                     cte.query.as_ref(),
                     &column_aliases,
+                    (Some(idx) == search_target)
+                        .then_some(with.search.as_ref())
+                        .flatten(),
                     planner_context,
                 )?
             } else {
@@ -92,6 +127,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         cte_name: &str,
         cte_query: &Query,
         column_aliases: &[Ident],
+        search: Option<&SearchClause>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         if !self
@@ -103,6 +139,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return not_impl_err!("Recursive CTEs are not enabled");
         }
 
+        // The CTE's own WITH list is its scope: visible to both of its terms
+        // and to nothing outside the CTE.
+        let mut cte_planner_context = planner_context.clone();
+        let planner_context = &mut cte_planner_context;
+        if let Some(with) = cte_query.with.as_deref() {
+            self.plan_with_clause_ref(with, planner_context)?;
+        }
+
         let (left_expr, right_expr, set_quantifier) = match cte_query.body.as_ref() {
             SetExpr::SetOperation {
                 op: SetOperator::Union,
@@ -112,7 +156,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             } => (left.as_ref(), right.as_ref(), set_quantifier),
             _ => {
                 // If the query is not a UNION, then it is not a recursive CTE
-                return self.non_recursive_cte_ref(cte_query, planner_context);
+            let plan = self.non_recursive_cte_ref(cte_query, planner_context)?;
+            return if search.is_some() {
+                plan_err!("SEARCH clause requires a recursive query")
+            } else {
+                Ok(plan)
+            };
             }
         };
 
@@ -219,9 +268,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // ---------- Step 4: Create the final plan ------------------
         let distinct = !Self::is_union_all(set_quantifier.clone())?;
-        LogicalPlanBuilder::from(static_plan)
+        let plan = LogicalPlanBuilder::from(static_plan)
             .to_recursive_query(name, recursive_plan, distinct)?
-            .build()
+            .build()?;
+        apply_recursive_search(plan, search, &self.ident_normalizer)
     }
 
     /// Apply column aliases to a schema, returning a new schema with the aliased names
@@ -307,6 +357,155 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 Ok(set_expr)
             }
         }
+    }
+}
+
+fn apply_recursive_search(
+    plan: LogicalPlan,
+    search: Option<&SearchClause>,
+    normalizer: &IdentNormalizer,
+) -> Result<LogicalPlan> {
+    let Some(search) = search else {
+        return Ok(plan);
+    };
+    let LogicalPlan::RecursiveQuery(mut recursive) = plan else {
+        return plan_err!("SEARCH clause requires a recursive query");
+    };
+    let source_schema = recursive.static_term.schema();
+    let set_column = normalizer.normalize(search.set_column.clone());
+    if source_schema
+        .index_of_column_by_name(None, &set_column)
+        .is_some()
+    {
+        return plan_err!("SEARCH sequence column {set_column:?} already exists");
+    }
+    let mut by_column_indices = Vec::with_capacity(search.by_columns.len());
+    for ident in &search.by_columns {
+        let name = normalizer.normalize(ident.clone());
+        let Some(index) = source_schema.index_of_column_by_name(None, &name) else {
+            return plan_err!("SEARCH BY column {name:?} does not exist");
+        };
+        by_column_indices.push(index);
+    }
+    if by_column_indices.is_empty() {
+        return plan_err!("SEARCH BY requires at least one column");
+    }
+
+    let mut fields = source_schema
+        .iter()
+        .map(|(qualifier, field)| (qualifier.cloned(), Arc::clone(field)))
+        .collect::<Vec<_>>();
+    fields.push((
+        None,
+        Arc::new(Field::new(
+            set_column.clone(),
+            arrow::datatypes::DataType::Binary,
+            false,
+        )),
+    ));
+    recursive.schema = Arc::new(DFSchema::new_with_metadata(
+        fields,
+        source_schema.metadata().clone(),
+    )?);
+    recursive.search = Some(RecursiveSearch {
+        order: match search.order {
+            SearchOrder::DepthFirst => RecursiveSearchOrder::DepthFirst,
+            SearchOrder::BreadthFirst => RecursiveSearchOrder::BreadthFirst,
+        },
+        by_column_indices,
+        set_column,
+    });
+    Ok(LogicalPlan::RecursiveQuery(recursive))
+}
+
+/// The order in which to plan the items of a recursive WITH list: each item
+/// after every other item it references. An item's reference to itself is its
+/// recursion and imposes no order; a reference cycle between distinct items is
+/// mutual recursion, which PostgreSQL does not implement either.
+fn with_list_dependency_order(
+    ctes: &[Cte],
+    cte_names: &[String],
+    normalizer: &IdentNormalizer,
+) -> Result<Vec<usize>> {
+    let dependencies: Vec<HashSet<usize>> = ctes
+        .iter()
+        .enumerate()
+        .map(|(idx, cte)| {
+            let mut referenced = WithListReferences {
+                names: cte_names,
+                normalizer,
+                shadowed: Vec::new(),
+                referenced: HashSet::new(),
+            };
+            let _ = cte.query.visit(&mut referenced);
+            referenced.referenced.remove(&idx);
+            referenced.referenced
+        })
+        .collect();
+    let mut order = Vec::with_capacity(ctes.len());
+    let mut planned = vec![false; ctes.len()];
+    while order.len() < ctes.len() {
+        let next = (0..ctes.len()).find(|&idx| {
+            !planned[idx] && dependencies[idx].iter().all(|&dep| planned[dep])
+        });
+        let Some(idx) = next else {
+            return not_impl_err!(
+                "mutual recursion between WITH items is not implemented"
+            );
+        };
+        planned[idx] = true;
+        order.push(idx);
+    }
+    Ok(order)
+}
+
+/// Collects which items of a WITH list a query references by their bare
+/// name, ignoring names a WITH nested inside the query shadows.
+struct WithListReferences<'a> {
+    names: &'a [String],
+    normalizer: &'a IdentNormalizer,
+    shadowed: Vec<Vec<String>>,
+    referenced: HashSet<usize>,
+}
+
+impl Visitor for WithListReferences<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+        let inner_names = query
+            .with
+            .as_deref()
+            .map(|with| {
+                with.cte_tables
+                    .iter()
+                    .map(|cte| self.normalizer.normalize(cte.alias.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.shadowed.push(inner_names);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
+        self.shadowed.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<()> {
+        let [part] = relation.0.as_slice() else {
+            return ControlFlow::Continue(());
+        };
+        let Some(ident) = part.as_ident() else {
+            return ControlFlow::Continue(());
+        };
+        let name = self.normalizer.normalize(ident.clone());
+        if self.shadowed.iter().any(|scope| scope.contains(&name)) {
+            return ControlFlow::Continue(());
+        }
+        if let Some(idx) = self.names.iter().position(|cte_name| *cte_name == name) {
+            self.referenced.insert(idx);
+        }
+        ControlFlow::Continue(())
     }
 }
 

@@ -16,8 +16,13 @@
 // under the License.
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::{Column, Result, not_impl_err, plan_datafusion_err};
-use datafusion_expr::{JoinType, LogicalPlan, LogicalPlanBuilder};
+use arrow::datatypes::DataType;
+use datafusion_common::{
+    Column, Result, TableReference, not_impl_err, plan_datafusion_err,
+};
+use datafusion_expr::expr::{Alias, Case, Cast};
+use datafusion_expr::type_coercion::binary::comparison_coercion;
+use datafusion_expr::{Expr, JoinType, LogicalPlan, LogicalPlanBuilder};
 use sqlparser::ast::{
     Join, JoinConstraint, JoinOperator, ObjectName, TableFactor, TableWithJoins,
 };
@@ -139,52 +144,35 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .join_on(right, join_type, Some(expr))?
                     .build()
             }
-            JoinConstraint::UsingWithAlias { alias, .. } => {
-                not_impl_err!("JOIN ... USING (...) AS {alias} is not supported")
+            JoinConstraint::UsingWithAlias { columns, alias } => {
+                let keys = self.using_clause_keys(columns)?;
+                let alias =
+                    TableReference::bare(self.ident_normalizer.normalize(alias.clone()));
+                self.plan_using_join(left, right, join_type, keys, Some(alias))
             }
             JoinConstraint::Using(object_names) => {
-                let keys = object_names
-                    .iter()
-                    .map(|object_name| {
-                        let ObjectName(object_names) = object_name;
-                        if object_names.len() != 1 {
-                            not_impl_err!(
-                                "Invalid identifier in USING clause. Expected single identifier, got {}", object_name
-                            )
-                        } else {
-                            let id = &object_names[0];
-                            id.as_ident()
-                                .ok_or_else(|| {
-                                    plan_datafusion_err!(
-                                        "Expected identifier in USING clause"
-                                    )
-                                })
-                                .map(|ident| Column::from_name(self.ident_normalizer.normalize(ident.clone())))
-                        }
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                LogicalPlanBuilder::from(left)
-                    .join_using(right, join_type, keys)?
-                    .build()
+                let keys = self.using_clause_keys(object_names)?;
+                self.plan_using_join(left, right, join_type, keys, None)
             }
             JoinConstraint::Natural => {
-                let left_cols: HashSet<&String> =
-                    left.schema().fields().iter().map(|f| f.name()).collect();
-                let keys: Vec<Column> = right
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .filter(|f| left_cols.contains(f))
-                    .map(Column::from_name)
+                let left_names: HashSet<String> = visible_column_names(&left)?;
+                let keys: Vec<String> = visible_column_names(&right)?
+                    .into_iter()
+                    .filter(|name| left_names.contains(name))
                     .collect();
                 if keys.is_empty() {
                     self.parse_cross_join(left, right)
                 } else {
-                    LogicalPlanBuilder::from(left)
-                        .join_using(right, join_type, keys)?
-                        .build()
+                    // The right side's visible names come back in no particular
+                    // order; PostgreSQL merges them in the left input's order.
+                    let mut ordered: Vec<String> = Vec::with_capacity(keys.len());
+                    for (_, field) in left.schema().iter() {
+                        if keys.contains(field.name()) && !ordered.contains(field.name())
+                        {
+                            ordered.push(field.name().clone());
+                        }
+                    }
+                    self.plan_using_join(left, right, join_type, ordered, None)
                 }
             }
             JoinConstraint::None => LogicalPlanBuilder::from(left)
@@ -192,6 +180,185 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .build(),
         }
     }
+
+    /// The column names a USING clause lists, normalized.
+    fn using_clause_keys(&self, object_names: &[ObjectName]) -> Result<Vec<String>> {
+        object_names
+            .iter()
+            .map(|object_name| {
+                let ObjectName(parts) = object_name;
+                if parts.len() != 1 {
+                    return not_impl_err!(
+                        "Invalid identifier in USING clause. Expected single identifier, got {object_name}"
+                    );
+                }
+                parts[0]
+                    .as_ident()
+                    .ok_or_else(|| plan_datafusion_err!("Expected identifier in USING clause"))
+                    .map(|ident| self.ident_normalizer.normalize(ident.clone()))
+            })
+            .collect()
+    }
+
+    /// A USING or NATURAL join in PostgreSQL's merged-column model.
+    ///
+    /// The join itself keeps both inputs' columns. The projection placed over
+    /// it is the join's column list: one merged column per join name first —
+    /// the left input's value for an inner or left join, the right input's for
+    /// a right join, whichever is not null for a full join, in the two inputs'
+    /// common type — then each input's remaining columns. After those come the
+    /// inputs' own copies of the join columns and, for `USING (...) AS alias`,
+    /// the merged columns again under that alias: reachable by their
+    /// qualifier, but neither what an unqualified name means nor part of `*`
+    /// (see `LogicalPlan::using_columns`). A copy that is itself unqualified —
+    /// the merged column of an unaliased join below — has no qualifier to be
+    /// reached by, so the new merged column replaces it outright.
+    fn plan_using_join(
+        &self,
+        left: LogicalPlan,
+        right: LogicalPlan,
+        join_type: JoinType,
+        keys: Vec<String>,
+        alias: Option<TableReference>,
+    ) -> Result<LogicalPlan> {
+        let left_keys = keys
+            .iter()
+            .map(|key| normalize_visible_column(&left, key))
+            .collect::<Result<Vec<Column>>>()?;
+        let right_keys = keys
+            .iter()
+            .map(|key| normalize_visible_column(&right, key))
+            .collect::<Result<Vec<Column>>>()?;
+        let hidden_below: HashSet<Column> = hidden_columns(&left)?
+            .into_iter()
+            .chain(hidden_columns(&right)?)
+            .collect();
+
+        let mut merged_exprs = Vec::with_capacity(keys.len());
+        let mut alias_copies = Vec::new();
+        for ((name, l), r) in keys.iter().zip(&left_keys).zip(&right_keys) {
+            let left_type = left
+                .schema()
+                .qualified_field_from_column(l)?
+                .1
+                .data_type()
+                .clone();
+            let right_type = right
+                .schema()
+                .qualified_field_from_column(r)?
+                .1
+                .data_type()
+                .clone();
+            let common = if left_type == right_type {
+                left_type.clone()
+            } else {
+                comparison_coercion(&left_type, &right_type).ok_or_else(|| {
+                    plan_datafusion_err!(
+                        "JOIN/USING types {left_type} and {right_type} cannot be matched"
+                    )
+                })?
+            };
+            let cast_to_common = |column: &Column, data_type: &DataType| {
+                let expr = Expr::Column(column.clone());
+                if *data_type == common {
+                    expr
+                } else {
+                    Expr::Cast(Cast::new(Box::new(expr), common.clone()))
+                }
+            };
+            let left_value = cast_to_common(l, &left_type);
+            let right_value = cast_to_common(r, &right_type);
+            let merged = match join_type {
+                JoinType::Inner
+                | JoinType::Left
+                | JoinType::LeftSemi
+                | JoinType::LeftAnti
+                | JoinType::LeftMark => left_value,
+                JoinType::Right
+                | JoinType::RightSemi
+                | JoinType::RightAnti
+                | JoinType::RightMark => right_value,
+                JoinType::Full => Expr::Case(Case {
+                    expr: None,
+                    when_then_expr: vec![(
+                        Box::new(left_value.clone().is_not_null()),
+                        Box::new(left_value),
+                    )],
+                    else_expr: Some(Box::new(right_value)),
+                }),
+            };
+            if let Some(alias) = &alias {
+                alias_copies.push(Expr::Alias(Alias::new(
+                    merged.clone(),
+                    Some(alias.clone()),
+                    name.clone(),
+                )));
+            }
+            merged_exprs.push(merged.alias(name.clone()));
+        }
+
+        let join = LogicalPlanBuilder::from(left)
+            .join_using(
+                right,
+                join_type,
+                keys.iter().map(Column::from_name).collect(),
+            )?
+            .build()?;
+        let key_columns: HashSet<&Column> = left_keys.iter().chain(&right_keys).collect();
+        let mut exprs = merged_exprs;
+        for (qualifier, field) in join.schema().iter() {
+            let column = Column::from((qualifier, field));
+            if key_columns.contains(&column) || hidden_below.contains(&column) {
+                continue;
+            }
+            exprs.push(Expr::Column(column));
+        }
+        for column in left_keys.iter().chain(&right_keys) {
+            if column.relation.is_some() && join.schema().has_column(column) {
+                exprs.push(Expr::Column(column.clone()));
+            }
+        }
+        for (qualifier, field) in join.schema().iter() {
+            let column = Column::from((qualifier, field));
+            if hidden_below.contains(&column) {
+                exprs.push(Expr::Column(column));
+            }
+        }
+        exprs.extend(alias_copies);
+        LogicalPlanBuilder::from(join).project(exprs)?.build()
+    }
+}
+
+/// The columns a USING join beneath `plan` hides from unqualified lookup and
+/// from `*`.
+fn hidden_columns(plan: &LogicalPlan) -> Result<HashSet<Column>> {
+    Ok(plan
+        .using_columns()?
+        .into_iter()
+        .flat_map(|using| using.hidden)
+        .collect())
+}
+
+/// The names `plan` exposes to an unqualified reference or to `*`.
+fn visible_column_names(plan: &LogicalPlan) -> Result<HashSet<String>> {
+    let hidden = hidden_columns(plan)?;
+    Ok(plan
+        .schema()
+        .iter()
+        .filter(|(qualifier, field)| {
+            !hidden.contains(&Column::from((*qualifier, *field)))
+        })
+        .map(|(_, field)| field.name().clone())
+        .collect())
+}
+
+/// Resolve a USING name against one join input, as an unqualified reference
+/// written in the query would be.
+fn normalize_visible_column(plan: &LogicalPlan, name: &str) -> Result<Column> {
+    Column::from_name(name).normalize_with_schemas_and_ambiguity_check(
+        &[&[plan.schema()]],
+        &plan.using_columns()?,
+    )
 }
 
 /// Return `true` iff the given [`TableFactor`] is lateral.
@@ -199,6 +366,7 @@ pub(crate) fn is_lateral(factor: &TableFactor) -> bool {
     match factor {
         TableFactor::Derived { lateral, .. } => *lateral,
         TableFactor::Function { lateral, .. } => *lateral,
+        TableFactor::RowsFrom { lateral, .. } => *lateral,
         TableFactor::UNNEST { .. } => true,
         _ => false,
     }

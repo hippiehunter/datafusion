@@ -36,6 +36,17 @@ enum RowQuantifier {
     All,
 }
 
+/// The expression compared against a one-column subquery: a row constructor
+/// is compared element-wise, so `ROW(x)` compares `x` itself, at any nesting
+/// depth (`ROW(ROW(ROW(1))) = ANY (SELECT ROW(ROW(1)))` compares `ROW(ROW(1))`
+/// to the column). Anything else is compared as written.
+fn single_row_element<'a>(expr: &'a SQLExpr, row: Option<&[&'a SQLExpr]>) -> &'a SQLExpr {
+    match row {
+        Some([element]) => element,
+        _ => expr,
+    }
+}
+
 /// The elements of a syntactic row constructor: `(a, b)` or `ROW(a, b)`.
 fn row_constructor_elements(expr: &SQLExpr) -> Option<Vec<&SQLExpr>> {
     match expr {
@@ -112,12 +123,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
 
-        if let Some(row) = row_constructor_elements(expr)
-            && sub_plan.schema().fields().len() > 1
+        let row = row_constructor_elements(expr);
+        if let Some(row) = &row
+            && row.len() > 1
         {
             // `row IN (subquery)` is `row = ANY (subquery)`.
             let any = self.row_quantified_subquery(
-                &row,
+                row,
                 &BinaryOperator::Eq,
                 RowQuantifier::Any,
                 sub_plan,
@@ -134,6 +146,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "Select only one column in the subquery",
         )?;
 
+        let expr = single_row_element(expr, row.as_deref());
         let expr_obj = self.sql_to_expr_ref(expr, input_schema, planner_context)?;
 
         Ok(Expr::InSubquery(InSubquery::new(
@@ -235,11 +248,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
 
-        if let Some(row) = row_constructor_elements(expr)
-            && sub_plan.schema().fields().len() > 1
+        let row = row_constructor_elements(expr);
+        if let Some(row) = &row
+            && row.len() > 1
         {
             return self.row_quantified_subquery(
-                &row,
+                row,
                 compare_op,
                 RowQuantifier::Any,
                 sub_plan,
@@ -255,6 +269,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "Select only one column in the subquery",
         )?;
 
+        let expr = single_row_element(expr, row.as_deref());
         let expr_obj = self.sql_to_expr_ref(expr, input_schema, planner_context)?;
         let op = self.parse_sql_binary_op(compare_op)?;
 
@@ -298,11 +313,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Restore the stack to its previous state
         planner_context.pop_outer_query_schema(prev_stack_len);
 
-        if let Some(row) = row_constructor_elements(expr)
-            && sub_plan.schema().fields().len() > 1
+        let row = row_constructor_elements(expr);
+        if let Some(row) = &row
+            && row.len() > 1
         {
             return self.row_quantified_subquery(
-                &row,
+                row,
                 compare_op,
                 RowQuantifier::All,
                 sub_plan,
@@ -318,6 +334,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             "Select only one column in the subquery",
         )?;
 
+        let expr = single_row_element(expr, row.as_deref());
         let expr_obj = self.sql_to_expr_ref(expr, input_schema, planner_context)?;
         let op = self.parse_sql_binary_op(compare_op)?;
 

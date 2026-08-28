@@ -19,8 +19,9 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
-    Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, Span, Spans,
-    internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
+    Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, ScalarValue, Span,
+    Spans, internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err,
+    plan_err,
 };
 use datafusion_expr::{
     Expr, ExprSchemable, LogicalPlanBuilder, Operator, SortExpr, Subquery, WindowFrame,
@@ -232,12 +233,6 @@ impl<'a> FunctionArgs<'a> {
             }
         }
 
-        if within_group.len() > 1 {
-            return not_impl_err!(
-                "Only a single ordering expression is permitted in a WITHIN GROUP clause"
-            );
-        }
-
         let order_by = order_by.unwrap_or_default();
 
         Ok(Self {
@@ -442,28 +437,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         }
 
-        // PostgreSQL set-returning functions in projection context.
-        // Build them as UNNEST(<list-returning-scalar>) so they can emit rows.
-        if matches!(
-            name.as_str(),
-            "regexp_split_to_table"
-                | "regexp_matches"
-                | "_pg_expandarray"
-                | "information_schema._pg_expandarray"
-        ) {
-            if let Some(fm) = self.context_provider.get_function_meta(&name) {
-                let (srf_args, arg_names) =
-                    self.function_args_to_expr_with_names(args, schema, planner_context)?;
-                if arg_names.iter().any(|arg_name| arg_name.is_some()) {
-                    return plan_err!(
-                        "Function '{}' does not support named arguments",
-                        fm.name()
-                    );
-                }
-                return Ok(Expr::Unnest(Unnest::new(Expr::ScalarFunction(
-                    ScalarFunction::new_udf(fm, srf_args),
-                ))));
-            }
+        // A set-returning function multiplies the row it is written in: each
+        // of its rows becomes a row of the query, so the call plans as the
+        // unnest of the lists it expands to. In the SELECT list that unnest
+        // happens after grouping, windows and HAVING, where the planner turns
+        // `Expr::Unnest` into the plan's `Unnest`.
+        if over.is_none() && self.context_provider.is_set_returning_function(&name) {
+            let (srf_args, arg_names) =
+                self.function_args_to_expr_with_names(args, schema, planner_context)?;
+            let srf_args = self.resolve_named_arguments(&name, srf_args, arg_names)?;
+            return match self
+                .context_provider
+                .plan_set_returning_function(&name, &srf_args, schema, None)?
+            {
+                Some(expansion) => self.set_returning_expr(&name, expansion.columns),
+                None => self.set_returning_source_expr(&name, srf_args),
+            };
         }
 
         // User-defined function (UDF) should have precedence
@@ -484,7 +473,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     if let Some(key_name) = name {
                         // Add the key as a string literal
                         positional_args.push(Expr::Literal(
-                            datafusion_common::ScalarValue::Utf8(Some(key_name.clone())),
+                            ScalarValue::Utf8(Some(key_name.clone())),
                             None,
                         ));
                         // Add the value
@@ -775,9 +764,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             if let Some(key_name) = name {
                                 // Add the key as a string literal
                                 positional_args.push(Expr::Literal(
-                                    datafusion_common::ScalarValue::Utf8(Some(
-                                        key_name.clone(),
-                                    )),
+                                    ScalarValue::Utf8(Some(key_name.clone())),
                                     None,
                                 ));
                                 // Add the value
@@ -936,18 +923,24 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         &self,
         name: &str,
     ) -> Result<WindowFunctionDefinition> {
-        // Check udaf first
-        let udaf = self.context_provider.get_aggregate_meta(name);
-        // Use the builtin window function instead of the user-defined aggregate function
-        if udaf.as_ref().is_some_and(|udaf| {
-            udaf.name() != "first_value"
-                && udaf.name() != "last_value"
-                && udaf.name() != "nth_value"
-        }) {
-            Ok(WindowFunctionDefinition::AggregateUDF(udaf.unwrap()))
+        let window_udf = self.context_provider.get_window_meta(name);
+        // An aggregate of the same name wins over the window function, except
+        // for the positional functions and for an ordered-set aggregate: a
+        // hypothetical-set aggregate such as `rank` shares its name with a
+        // window function, and `rank(...) OVER (...)` is the window function.
+        let udaf = self
+            .context_provider
+            .get_aggregate_meta(name)
+            .filter(|udaf| {
+                udaf.name() != "first_value"
+                    && udaf.name() != "last_value"
+                    && udaf.name() != "nth_value"
+                    && !(udaf.supports_within_group_clause() && window_udf.is_some())
+            });
+        if let Some(udaf) = udaf {
+            Ok(WindowFunctionDefinition::AggregateUDF(udaf))
         } else {
-            self.context_provider
-                .get_window_meta(name)
+            window_udf
                 .map(WindowFunctionDefinition::WindowUDF)
                 .ok_or_else(|| {
                     plan_datafusion_err!("There is no window function named {name}")
@@ -1014,6 +1007,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let qualified_indices = schema.fields_indices_with_qualified(&qualifier);
                 if qualified_indices.is_empty() {
                     return plan_err!("Invalid qualifier {qualifier}");
+                }
+
+                // In a function argument PostgreSQL's `relation.*` is one
+                // composite whole-row value, not a projection wildcard. This
+                // is what lets calls such as `row_to_json(t.*)` preserve the
+                // relation's field names. A bare `*` remains the special
+                // aggregate wildcard used by count(*).
+                if let Some(record) =
+                    self.try_plan_whole_row_reference(qualifier.table(), schema)
+                {
+                    return Ok((record, None));
                 }
 
                 #[expect(deprecated)]
@@ -1304,6 +1308,138 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             outer_ref_columns,
             spans: Spans::new(),
         }))
+    }
+
+    /// Positional arguments for a call that named some of them, resolved
+    /// against the function's declared parameter names.
+    fn resolve_named_arguments(
+        &self,
+        name: &str,
+        args: Vec<Expr>,
+        arg_names: Vec<Option<String>>,
+    ) -> Result<Vec<Expr>> {
+        if !arg_names.iter().any(Option::is_some) {
+            return Ok(args);
+        }
+        let signature = self
+            .context_provider
+            .get_function_meta(name)
+            .map(|function| function.signature().clone());
+        match signature.as_ref().and_then(|s| s.parameter_names.as_ref()) {
+            Some(parameter_names) => {
+                datafusion_expr::arguments::resolve_function_arguments(
+                    parameter_names,
+                    signature
+                        .as_ref()
+                        .and_then(|s| s.parameter_defaults.as_deref()),
+                    args,
+                    arg_names,
+                )
+            }
+            None => plan_err!("Function '{name}' does not support named arguments"),
+        }
+    }
+
+    /// The expression a set-returning call stands for in a SELECT list: the
+    /// unnest of its one column, or of each column gathered into a record
+    /// when it returns several. The columns unnest together, so the record's
+    /// fields come from the same row of the call.
+    fn set_returning_expr(
+        &self,
+        name: &str,
+        mut columns: Vec<(String, Expr)>,
+    ) -> Result<Expr> {
+        if columns.is_empty() {
+            return plan_err!("{name} produces no columns");
+        }
+        if columns.len() == 1 {
+            let (_, expr) = columns.swap_remove(0);
+            return Ok(Expr::Unnest(Unnest::new(expr)));
+        }
+        let unnested = columns
+            .into_iter()
+            .map(|(column, expr)| (column, Expr::Unnest(Unnest::new(expr))))
+            .collect();
+        self.record_of_columns(name, unnested)
+    }
+
+    /// A set-returning function the provider plans as a table source, in
+    /// expression position: its rows gathered into one array per evaluation
+    /// and unnested back, so it multiplies the row the way a list expansion
+    /// does. A multi-column source is gathered as records.
+    fn set_returning_source_expr(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
+        let source = self
+            .context_provider
+            .get_table_function_source(name, args)?;
+        let plan = match source.get_logical_plan() {
+            Some(plan) => plan.into_owned(),
+            None => LogicalPlanBuilder::scan(name, source, None)?.build()?,
+        };
+        let outer_ref_columns = plan.all_out_ref_exprs();
+        let mut columns: Vec<(String, Expr)> = plan
+            .schema()
+            .columns()
+            .into_iter()
+            .map(|column| (column.name.clone(), Expr::Column(column)))
+            .collect();
+        let element = if columns.len() == 1 {
+            columns.swap_remove(0).1
+        } else {
+            self.record_of_columns(name, columns)?
+        };
+        let Some(array_agg) = self.context_provider.get_aggregate_meta("array_agg")
+        else {
+            return plan_err!(
+                "{name} in expression position needs the array_agg aggregate"
+            );
+        };
+        let gathered = Expr::AggregateFunction(expr::AggregateFunction::new_udf(
+            array_agg,
+            vec![element],
+            false,
+            None,
+            vec![],
+            None,
+        ));
+        let rows = LogicalPlanBuilder::from(plan)
+            .aggregate(Vec::<Expr>::new(), vec![gathered])?
+            .build()?;
+        Ok(Expr::Unnest(Unnest::new(Expr::ScalarSubquery(Subquery {
+            subquery: std::sync::Arc::new(rows),
+            outer_ref_columns,
+            spans: Spans::new(),
+        }))))
+    }
+
+    /// A record whose fields are the named columns, built the way the dialect
+    /// builds `named_struct`.
+    fn record_of_columns(
+        &self,
+        name: &str,
+        columns: Vec<(String, Expr)>,
+    ) -> Result<Expr> {
+        let mut args = Vec::with_capacity(columns.len() * 2);
+        for (column, expr) in columns {
+            args.push(Expr::Literal(ScalarValue::Utf8(Some(column)), None));
+            args.push(expr);
+        }
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_struct_literal(args, true)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(original) => args = original,
+            }
+        }
+        if let Some(named_struct) =
+            self.context_provider.get_function_meta("named_struct")
+        {
+            return Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                named_struct,
+                args,
+            )));
+        }
+        plan_err!(
+            "{name} returns several columns and no record constructor is registered"
+        )
     }
 
     pub(crate) fn check_unnest_arg(arg: &Expr, schema: &DFSchema) -> Result<()> {

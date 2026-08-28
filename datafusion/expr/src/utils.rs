@@ -377,33 +377,14 @@ fn get_exprs_except_skipped(
         .collect::<Vec<Expr>>()
 }
 
-/// For each column specified in the USING JOIN condition, the JOIN plan outputs it twice
-/// (once for each join side), but an unqualified wildcard should include it only once.
-/// This function returns the columns that should be excluded.
+/// The columns a USING join hides from `*`: the inputs' own copies of each
+/// join name once the merged column stands for them.
 fn exclude_using_columns(plan: &LogicalPlan) -> Result<HashSet<Column>> {
-    let using_columns = plan.using_columns()?;
-    let excluded = using_columns
+    Ok(plan
+        .using_columns()?
         .into_iter()
-        .flat_map(|uc| {
-            let mut cols = uc.columns.into_iter().collect::<Vec<_>>();
-            cols.sort();
-            if let Some(preferred) = uc.preferred {
-                // RIGHT USING/NATURAL joins must retain the right-side
-                // coalesced column. The generic first-column rule would
-                // otherwise exclude both the earlier non-preferred column
-                // and the later preferred one.
-                cols.into_iter()
-                    .filter(|column| column != &preferred)
-                    .collect::<Vec<_>>()
-            } else {
-                let mut output_column_names: HashSet<String> = HashSet::new();
-                cols.into_iter()
-                    .filter(|column| !output_column_names.insert(column.name.clone()))
-                    .collect::<Vec<_>>()
-            }
-        })
-        .collect::<HashSet<_>>();
-    Ok(excluded)
+        .flat_map(|using| using.hidden)
+        .collect())
 }
 
 /// Resolves an `Expr::Wildcard` to a collection of `Expr::Column`'s.

@@ -36,8 +36,6 @@ use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_expr::expr::{Exists, InSubquery};
-use datafusion_expr::{Subquery, TableSource};
 use datafusion_common::{
     Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, MatchType,
     NullsDistinct, ReferentialAction, Result, ScalarValue, SchemaError, SchemaReference,
@@ -48,6 +46,7 @@ use datafusion_expr::dml::{
     ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, InsertOp,
     OnConflict, OnConflictAction,
 };
+use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::psm::{ParameterMode, ProcedureArg};
@@ -61,6 +60,8 @@ use datafusion_expr::{
     CreateCatalog, CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable,
     CreateFunction, CreateFunctionBody, CreateIndex as PlanCreateIndex,
     CreateMaterializedView, CreateMemoryTable, CreateProcedure, CreatePropertyGraph,
+    CreateTablePartitionBound, CreateTablePartitionBoundValue, CreateTablePartitionKey,
+    CreateTablePartitionOf, CreateTablePartitioning, CreateTablePartitioningStrategy,
     CreateRole, CreateSequence, CreateView, Deallocate, DescribeTable, DmlStatement,
     DropAssertion, DropCatalogSchema, DropFunction, DropIndex, DropMaterializedView,
     DropPropertyGraph, DropRole, DropSequence, DropTable, DropView, EmptyRelation,
@@ -75,6 +76,7 @@ use datafusion_expr::{
     TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
     TruncateTable, UseDatabase, Vacuum, Volatility, WriteOp, cast, col,
 };
+use datafusion_expr::{Subquery, TableSource};
 use sqlparser::ast::{
     self, AstBox as SQLBox, BeginTransactionKind, IndexColumn, IndexType,
     OnConflict as SqlOnConflict, OnConflictAction as SqlOnConflictAction, OnInsert,
@@ -84,11 +86,11 @@ use sqlparser::ast::{
 
 use sqlparser::ast::{
     AccessExpr, Assignment, AssignmentTarget, ColumnDef, ColumnTarget, CreateIndex,
-    CreateTable,
-    CreateTableOptions, CreateTableWithData, Delete, DescribeAlias, Expr as SQLExpr, ForeignKeyColumnOrPeriod,
-    FromTable, Ident, Insert, ObjectName, ObjectType, Query, SchemaName, SelectItem,
-    SetExpr, ShowCreateObject, ShowStatementFilter, SqlOption, Statement, Subscript,
-    TableConstraint, TableFactor, TableWithJoins, TransactionMode, UnaryOperator, Value,
+    CreateTable, CreateTableOptions, CreateTableWithData, Delete, DescribeAlias,
+    Expr as SQLExpr, ForeignKeyColumnOrPeriod, FromTable, Ident, Insert, ObjectName,
+    ObjectType, Query, SchemaName, SelectItem, SetExpr, ShowCreateObject,
+    ShowStatementFilter, SqlOption, Statement, Subscript, TableConstraint, TableFactor,
+    TableWithJoins, TransactionMode, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError::ParserError;
 
@@ -343,6 +345,7 @@ fn rewrite_update_returning_exprs(
         // that slot's name into the result set.
         let output_name = match &expr {
             Expr::Alias(alias) => alias.name.clone(),
+            Expr::Column(column) => column.name.clone(),
             other => other.schema_name().to_string(),
         };
         let rewritten = expr
@@ -435,10 +438,8 @@ fn lift_subquery_returning_exprs(
                 (other, name)
             }
         };
-        let passthrough = format!(
-            "__returning_src_{}",
-            first_passthrough_idx + lifted.len()
-        );
+        let passthrough =
+            format!("__returning_src_{}", first_passthrough_idx + lifted.len());
         lifted.push(inner.alias(passthrough.clone()));
         rewritten.push(Expr::Column(Column::from_name(passthrough)).alias(output_name));
     }
@@ -447,7 +448,10 @@ fn lift_subquery_returning_exprs(
 
 /// Widen `source` with `lifted` expressions computed over its current
 /// output, keeping every existing column in place.
-fn project_with_lifted_exprs(source: LogicalPlan, lifted: Vec<Expr>) -> Result<LogicalPlan> {
+fn project_with_lifted_exprs(
+    source: LogicalPlan,
+    lifted: Vec<Expr>,
+) -> Result<LogicalPlan> {
     if lifted.is_empty() {
         return Ok(source);
     }
@@ -584,7 +588,9 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         index_options: unique_constraint.index_options.clone(),
                         characteristics: unique_constraint.characteristics,
                         nulls_distinct: unique_constraint.nulls_distinct.clone(),
-                        period_without_overlaps: unique_constraint.period_without_overlaps.clone(),
+                        period_without_overlaps: unique_constraint
+                            .period_without_overlaps
+                            .clone(),
                         index_details: unique_constraint.index_details.clone(),
                     }));
                 }
@@ -663,6 +669,129 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
 }
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
+    fn plan_create_table_partition_bound_value(
+        &self,
+        value: ast::Expr,
+        planner_context: &mut PlannerContext,
+    ) -> Result<CreateTablePartitionBoundValue> {
+        if let ast::Expr::Identifier(identifier) = &value {
+            if identifier.value.eq_ignore_ascii_case("minvalue") {
+                return Ok(CreateTablePartitionBoundValue::MinValue);
+            }
+            if identifier.value.eq_ignore_ascii_case("maxvalue") {
+                return Ok(CreateTablePartitionBoundValue::MaxValue);
+            }
+        }
+        let empty_schema = DFSchema::empty();
+        self.sql_expr_to_logical_expr(value, &empty_schema, planner_context)
+            .map(CreateTablePartitionBoundValue::Expr)
+    }
+
+    fn plan_create_table_partition_of(
+        &self,
+        parent: Option<ObjectName>,
+        bound: Option<ast::PartitionBoundSpec>,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Option<CreateTablePartitionOf>> {
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        let bound = match bound.ok_or_else(|| {
+            DataFusionError::Plan("PARTITION OF is missing its partition bound".to_string())
+        })? {
+            ast::PartitionBoundSpec::Range { from, to } => CreateTablePartitionBound::Range {
+                lower: from
+                    .into_iter()
+                    .map(|value| {
+                        self.plan_create_table_partition_bound_value(value, planner_context)
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                upper: to
+                    .into_iter()
+                    .map(|value| {
+                        self.plan_create_table_partition_bound_value(value, planner_context)
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            ast::PartitionBoundSpec::List { values } => {
+                let empty_schema = DFSchema::empty();
+                CreateTablePartitionBound::List {
+                    values: values
+                        .into_iter()
+                        .map(|value| {
+                            let values = match value {
+                                ast::Expr::Tuple(values) => values,
+                                value => vec![value],
+                            };
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    self.sql_expr_to_logical_expr(
+                                        value,
+                                        &empty_schema,
+                                        planner_context,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>>>()
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                }
+            }
+            ast::PartitionBoundSpec::Hash { modulus, remainder } => {
+                CreateTablePartitionBound::Hash { modulus, remainder }
+            }
+            ast::PartitionBoundSpec::Default => CreateTablePartitionBound::Default,
+        };
+        Ok(Some(CreateTablePartitionOf {
+            parent: self.object_name_to_table_reference(parent)?,
+            bound,
+        }))
+    }
+
+    fn plan_create_table_partitioning(
+        &self,
+        partition_by: Option<ast::PartitionByClause>,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Option<CreateTablePartitioning>> {
+        let Some(partition_by) = partition_by else {
+            return Ok(None);
+        };
+        if partition_by.interval.is_some() || !partition_by.partitions.is_empty() {
+            return not_impl_err!(
+                "Oracle interval/inline partition definitions are not supported"
+            );
+        }
+        let strategy = match partition_by.strategy {
+            ast::PartitionStrategy::Range => CreateTablePartitioningStrategy::Range,
+            ast::PartitionStrategy::List => CreateTablePartitioningStrategy::List,
+            ast::PartitionStrategy::Hash => CreateTablePartitioningStrategy::Hash,
+            ast::PartitionStrategy::Reference => {
+                return not_impl_err!("reference partitioning is not supported");
+            }
+        };
+        let mut keys = Vec::with_capacity(partition_by.columns.len());
+        for key in partition_by.columns {
+            let (column_name, sql_expr) = match key.column_or_expr {
+                ast::PartitionKeyExpr::Column(identifier) => (
+                    Some(identifier.value.clone()),
+                    SQLExpr::Identifier(identifier),
+                ),
+                ast::PartitionKeyExpr::Expr(expr) => (None, expr),
+            };
+            let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
+            let result_type = expr.get_type(schema)?;
+            keys.push(CreateTablePartitionKey {
+                column_name,
+                expr,
+                result_type,
+                opclass: key.opclass.map(|name| name.to_string()),
+                collation: key.collation.map(|name| name.to_string()),
+            });
+        }
+        Ok(Some(CreateTablePartitioning { strategy, keys }))
+    }
+
     /// Generate a logical plan from an DataFusion SQL statement
     pub fn statement_to_plan(&self, statement: DFStatement) -> Result<LogicalPlan> {
         match statement {
@@ -872,6 +1001,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 like_elements,
                 execute,
                 with_data,
+                partition_by,
+                partition_of,
+                partition_bound,
                 ..
             }) => {
                 if external {
@@ -890,9 +1022,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if execute.is_some() {
                     return not_impl_err!("CREATE TABLE ... AS EXECUTE is not supported");
-                }
-                if with_data == Some(CreateTableWithData::WithNoData) {
-                    return not_impl_err!("CREATE TABLE ... AS ... WITH NO DATA is not supported");
                 }
                 if global.is_some() {
                     return not_impl_err!("Global tables not supported")?;
@@ -914,9 +1043,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
                 if comment.is_some() {
                     return not_impl_err!("Comment not supported")?;
-                }
-                if inherits.is_some() {
-                    return not_impl_err!("Table inheritance not supported")?;
                 }
                 if dynamic {
                     return not_impl_err!("Dynamic tables not supported")?;
@@ -962,6 +1088,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 let has_columns = !columns.is_empty();
                 let schema = self.build_schema(columns)?.to_dfschema_ref()?;
+                let partitioning = self.plan_create_table_partitioning(
+                    partition_by,
+                    schema.as_ref(),
+                    planner_context,
+                )?;
+                let partition_of = self.plan_create_table_partition_of(
+                    partition_of,
+                    partition_bound,
+                    planner_context,
+                )?;
+                let inherits = inherits
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|parent| self.object_name_to_table_reference(parent))
+                    .collect::<Result<Vec<_>>>()?;
                 if has_columns {
                     planner_context.set_table_schema(Some(Arc::clone(&schema)));
                 }
@@ -970,6 +1111,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     Some(query) => {
                         let plan = self
                             .query_to_plan(SQLBox::into_owned(query), planner_context)?;
+                        // WITH NO DATA still plans the query so the created
+                        // relation receives its names and types, but exposes a
+                        // zero-row input to the CTAS executor.
+                        let plan = if with_data == Some(CreateTableWithData::WithNoData) {
+                            LogicalPlanBuilder::from(plan).limit(0, Some(0))?.build()?
+                        } else {
+                            plan
+                        };
                         let input_schema = plan.schema();
 
                         let plan = if has_columns {
@@ -1016,6 +1165,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 column_defaults,
                                 temporary,
                                 storage_parameters: storage_parameters.clone(),
+                                partitioning: partitioning.clone(),
+                                partition_of: partition_of.clone(),
+                                inherits: inherits.clone(),
                             },
                         )))
                     }
@@ -1040,6 +1192,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 column_defaults,
                                 temporary,
                                 storage_parameters,
+                                partitioning,
+                                partition_of,
+                                inherits,
                             },
                         )))
                     }
@@ -1120,13 +1275,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     );
                 }
                 Ok(LogicalPlan::Ddl(DdlStatement::RefreshMaterializedView(
-                RefreshMaterializedView {
-                    name: self.object_name_to_table_reference(name)?,
-                    concurrently,
-                    method,
-                    schema: DFSchemaRef::new(DFSchema::empty()),
-                },
-            )))
+                    RefreshMaterializedView {
+                        name: self.object_name_to_table_reference(name)?,
+                        concurrently,
+                        method,
+                        schema: DFSchemaRef::new(DFSchema::empty()),
+                    },
+                )))
             }
             Statement::AlterMaterializedView {
                 name,
@@ -1138,13 +1293,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         "ALTER MATERIALIZED VIEW IF EXISTS is not supported"
                     );
                 }
-                Ok(LogicalPlan::Ddl(
-                DdlStatement::AlterMaterializedView(AlterMaterializedView {
-                    name: self.object_name_to_table_reference(name)?,
-                    operation,
-                    schema: DFSchemaRef::new(DFSchema::empty()),
-                }),
-            ))
+                Ok(LogicalPlan::Ddl(DdlStatement::AlterMaterializedView(
+                    AlterMaterializedView {
+                        name: self.object_name_to_table_reference(name)?,
+                        operation,
+                        schema: DFSchemaRef::new(DFSchema::empty()),
+                    },
+                )))
             }
             Statement::AlterTable(mut alter_table) => {
                 let mut operations = Vec::with_capacity(alter_table.operations.len());
@@ -1930,7 +2085,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let isolation_level: ast::TransactionIsolationLevel = modes
                     .iter()
                     .filter_map(|m: &TransactionMode| match m {
-                        TransactionMode::AccessMode(_) | TransactionMode::Deferrable(_) => None,
+                        TransactionMode::AccessMode(_)
+                        | TransactionMode::Deferrable(_) => None,
                         TransactionMode::IsolationLevel(level) => Some(level),
                     })
                     .next_back()
@@ -1940,7 +2096,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .iter()
                     .filter_map(|m: &TransactionMode| match m {
                         TransactionMode::AccessMode(mode) => Some(mode),
-                        TransactionMode::IsolationLevel(_) | TransactionMode::Deferrable(_) => None,
+                        TransactionMode::IsolationLevel(_)
+                        | TransactionMode::Deferrable(_) => None,
                     })
                     .next_back()
                     .copied()
@@ -3431,8 +3588,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .context_provider
                 .resolve_dml_view_target(name, DmlViewEvent::Delete)?
         {
-            let rewritten =
-                crate::view_dml::rewrite_delete(&view_target, table, predicate_expr, returning);
+            let rewritten = crate::view_dml::rewrite_delete(
+                &view_target,
+                table,
+                predicate_expr,
+                returning,
+            );
             let plan = self.delete_to_plan_ref(
                 &rewritten.table,
                 using,
@@ -3440,7 +3601,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 rewritten.returning.as_deref(),
                 outer_planner_context,
             )?;
-            return crate::view_dml::stamp_check_option(plan, view_target.check_option_view);
+            return crate::view_dml::stamp_check_option(
+                plan,
+                view_target.check_option_view,
+            );
         }
         // Extract table name from the TableWithJoins
         let (table_name, table_alias) = match &table.relation {
@@ -3527,9 +3691,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .iter()
                     .map(|field| {
                         let column = match &target_alias {
-                            Some(alias) => {
-                                Expr::Column(Column::new(Some(alias.clone()), field.name()))
-                            }
+                            Some(alias) => Expr::Column(Column::new(
+                                Some(alias.clone()),
+                                field.name(),
+                            )),
                             None => Expr::Column(Column::new(
                                 Some(table_ref.clone()),
                                 field.name(),
@@ -3544,7 +3709,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     false,
                     &mut planner_context,
                 )?;
-                let logical_exprs = expand_returning_select_exprs(prepared, &table_schema)?;
+                let logical_exprs =
+                    expand_returning_select_exprs(prepared, &table_schema)?;
                 let target_column_names = table_schema
                     .fields()
                     .iter()
@@ -3793,16 +3959,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // SOURCE clause has no source row. Resolving their expressions against
         // the whole join would make a name the two sides share ambiguous, and
         // would let a clause read a row that is not there.
-        let mut normalize_expr_in = |sql_expr: SQLExpr, schema: &DFSchema| -> Result<Expr> {
-            let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
-            let mut using_columns = HashSet::new();
-            expr_to_columns(&expr, &mut using_columns)?;
-            normalize_col_with_schemas_and_ambiguity_check(
-                expr,
-                &[&[schema]],
-                &[using_columns.into()],
-            )
-        };
+        let mut normalize_expr_in =
+            |sql_expr: SQLExpr, schema: &DFSchema| -> Result<Expr> {
+                let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
+                let mut using_columns = HashSet::new();
+                expr_to_columns(&expr, &mut using_columns)?;
+                normalize_col_with_schemas_and_ambiguity_check(
+                    expr,
+                    &[&[schema]],
+                    &[using_columns.into()],
+                )
+            };
 
         let on_expr = normalize_expr_in(*on, &join_schema)?;
 
@@ -3810,12 +3977,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         for clause in clauses {
             let clause_schema = match clause.clause_kind {
                 ast::MergeClauseKind::NotMatched
-                | ast::MergeClauseKind::NotMatchedByTarget => source_plan.schema().as_ref(),
+                | ast::MergeClauseKind::NotMatchedByTarget => {
+                    source_plan.schema().as_ref()
+                }
                 ast::MergeClauseKind::NotMatchedBySource => target_plan.schema().as_ref(),
                 ast::MergeClauseKind::Matched => &join_schema,
             };
-            let mut normalize_expr =
-                |sql_expr: SQLExpr| -> Result<Expr> { normalize_expr_in(sql_expr, clause_schema) };
+            let mut normalize_expr = |sql_expr: SQLExpr| -> Result<Expr> {
+                normalize_expr_in(sql_expr, clause_schema)
+            };
             let predicate = match clause.predicate {
                 Some(predicate) => Some(normalize_expr(predicate)?),
                 None => None,
@@ -3834,13 +4004,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         // DEFAULT VALUES is the whole row taken from defaults:
                         // an empty explicit row that the expansion below fills.
                         ast::MergeInsertKind::DefaultValues => {
-                            MergeInsertKind::Values(vec![self.merge_insert_row_in_table_order(
-                                &target_schema,
-                                &named_columns,
-                                Vec::new(),
-                                table_source.as_ref(),
-                                clause_schema,
-                            )?])
+                            MergeInsertKind::Values(vec![
+                                self.merge_insert_row_in_table_order(
+                                    &target_schema,
+                                    &named_columns,
+                                    Vec::new(),
+                                    table_source.as_ref(),
+                                    clause_schema,
+                                )?,
+                            ])
                         }
                         ast::MergeInsertKind::Values(values) => {
                             let mut rows = Vec::with_capacity(values.rows.len());
@@ -3936,11 +4108,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr)) => {
                     values.push(Cow::Borrowed(expr));
                 }
-                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::QualifiedWildcard(name)) => {
+                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::QualifiedWildcard(
+                    name,
+                )) => {
                     let relation = self.object_name_to_table_reference(name.clone())?;
                     let mut expanded = 0;
                     for (qualifier, field) in schema.iter() {
-                        if qualifier.is_some_and(|qualifier| qualifier.resolved_eq(&relation)) {
+                        if qualifier
+                            .is_some_and(|qualifier| qualifier.resolved_eq(&relation))
+                        {
                             values.push(Cow::Owned(column_reference(qualifier, field)));
                             expanded += 1;
                         }
@@ -4081,7 +4257,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 rewritten.returning.as_deref(),
                 outer_planner_context,
             )?;
-            return crate::view_dml::stamp_check_option(plan, view_target.check_option_view);
+            return crate::view_dml::stamp_check_option(
+                plan,
+                view_target.check_option_view,
+            );
         }
         // Reject writes to generated columns and recompute the stored ones as
         // part of the statement that changes their inputs, so the new row the
@@ -4093,8 +4272,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.context_provider,
                 name,
                 assignments,
-            )?
-        {
+            )? {
             generated_assignments = extended;
             &generated_assignments[..]
         } else {
@@ -4139,29 +4317,36 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // A dotted target names the column first: `SET fn.first = ..` writes
         // field `first` of column `fn`, as PostgreSQL reads it. A leading
         // name that is not a column (a table alias) is a qualifier instead.
-        let split_column_target = |name: &ObjectName| -> Result<(String, Vec<AccessExpr>)> {
-            let idents = name
-                .0
-                .iter()
-                .map(|part| {
-                    part.as_ident().cloned().ok_or_else(|| {
-                        plan_datafusion_err!("Assignment target must be a column name")
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let Some(first) = idents.first() else {
-                return plan_err!("Empty column id");
-            };
-            let first_name = self.ident_normalizer.normalize(first.clone());
-            if idents.len() > 1 && table_schema.field_with_unqualified_name(&first_name).is_ok() {
-                let fields = idents[1..]
+        let split_column_target =
+            |name: &ObjectName| -> Result<(String, Vec<AccessExpr>)> {
+                let idents = name
+                    .0
                     .iter()
-                    .map(|ident| AccessExpr::Dot(SQLExpr::Identifier(ident.clone())))
-                    .collect();
-                return Ok((first_name, fields));
-            }
-            Ok((extract_column_name(name)?, Vec::new()))
-        };
+                    .map(|part| {
+                        part.as_ident().cloned().ok_or_else(|| {
+                            plan_datafusion_err!(
+                                "Assignment target must be a column name"
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let Some(first) = idents.first() else {
+                    return plan_err!("Empty column id");
+                };
+                let first_name = self.ident_normalizer.normalize(first.clone());
+                if idents.len() > 1
+                    && table_schema
+                        .field_with_unqualified_name(&first_name)
+                        .is_ok()
+                {
+                    let fields = idents[1..]
+                        .iter()
+                        .map(|ident| AccessExpr::Dot(SQLExpr::Identifier(ident.clone())))
+                        .collect();
+                    return Ok((first_name, fields));
+                }
+                Ok((extract_column_name(name)?, Vec::new()))
+            };
 
         // Build scan, join with from table if it exists.
         let mut scan = self.plan_table_with_joins_ref(table, &mut planner_context)?;
@@ -4309,7 +4494,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                     // Add each column-value pair
                     for (col, val) in columns.into_iter().zip(values.into_iter()) {
-                        if assign_map.contains_key(&col) || path_assign_map.contains_key(&col)
+                        if assign_map.contains_key(&col)
+                            || path_assign_map.contains_key(&col)
                         {
                             return multiple_assignments_err(&col);
                         }
@@ -4643,7 +4829,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 overriding,
                 outer_planner_context,
             )?;
-            return crate::view_dml::stamp_check_option(plan, view_target.check_option_view);
+            return crate::view_dml::stamp_check_option(
+                plan,
+                view_target.check_option_view,
+            );
         }
         // Generated columns accept only DEFAULT (their value is the
         // generation expression's), a GENERATED ALWAYS identity takes a write
@@ -4659,7 +4848,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         )?;
         // OVERRIDING USER VALUE discards what the statement wrote for an
         // identity column in favor of the sequence's value.
-        let user_value_override = if matches!(overriding, Some(OverridingKind::UserValue)) {
+        let user_value_override = if matches!(overriding, Some(OverridingKind::UserValue))
+        {
             crate::dml_front::apply_insert_user_value_override(
                 self.context_provider,
                 table_name,
@@ -4747,9 +4937,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .enumerate()
                     .map(|(i, c)| {
                         let c = self.ident_normalizer.normalize(c);
-                        let column_index = table_schema
-                            .index_of_column_by_name(None, &c)
-                            .ok_or_else(|| unqualified_field_not_found(&c, &table_schema))?;
+                        let column_index =
+                            table_schema.index_of_column_by_name(None, &c).ok_or_else(
+                                || unqualified_field_not_found(&c, &table_schema),
+                            )?;
                         let path = column_targets
                             .and_then(|targets| targets.get(i))
                             .map(|target| target.indirection.as_slice())
@@ -4781,8 +4972,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                     DataType::List(item)
                                     | DataType::LargeList(item)
                                     | DataType::FixedSizeList(item, _) => Arc::new(
-                                        Field::new(field.name(), item.data_type().clone(), true)
-                                            .with_metadata(field.metadata().clone()),
+                                        Field::new(
+                                            field.name(),
+                                            item.data_type().clone(),
+                                            true,
+                                        )
+                                        .with_metadata(field.metadata().clone()),
                                     ),
                                     _ => Arc::clone(field),
                                 }
@@ -4797,8 +4992,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // Adapt source literals to their target columns — canonicalizing a
         // flexible timestamp text literal, or wrapping a value in a dialect
         // conversion — before anything below reads them.
-        let adapted_source =
-            crate::dml_front::adapt_insert_source_values(self.context_provider, source, &fields);
+        let adapted_source = crate::dml_front::adapt_insert_source_values(
+            self.context_provider,
+            source,
+            &fields,
+        );
         let source = adapted_source.as_ref().unwrap_or(source);
 
         // infer types for Values clause... other types should be resolvable the regular way
@@ -4869,13 +5067,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     defaults[*slot] = match path.last() {
                         None => ValuesDefault::Column(
                             table_source
-                                .get_column_default(table_schema.field(column_index).name())
+                                .get_column_default(
+                                    table_schema.field(column_index).name(),
+                                )
                                 .cloned(),
                         ),
-                        Some(AccessExpr::Subscript(_)) => {
-                            ValuesDefault::Refused("cannot set an array element to DEFAULT")
+                        Some(AccessExpr::Subscript(_)) => ValuesDefault::Refused(
+                            "cannot set an array element to DEFAULT",
+                        ),
+                        Some(_) => {
+                            ValuesDefault::Refused("cannot set a subfield to DEFAULT")
                         }
-                        Some(_) => ValuesDefault::Refused("cannot set a subfield to DEFAULT"),
                     };
                 }
             }
@@ -5191,7 +5393,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     let mut exprs: Vec<Expr> = source
                         .schema()
                         .iter()
-                        .map(|(qualifier, field)| Expr::Column(Column::from((qualifier, field))))
+                        .map(|(qualifier, field)| {
+                            Expr::Column(Column::from((qualifier, field)))
+                        })
                         .collect();
                     exprs.extend(hoisted);
                     source = project(source, exprs)?;
@@ -5268,24 +5472,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         .predicate
                         .as_ref()
                         .map(|predicate| {
-                            self.sql_to_expr_ref(predicate, &inference_schema, planner_context)
+                            self.sql_to_expr_ref(
+                                predicate,
+                                &inference_schema,
+                                planner_context,
+                            )
                         })
                         .transpose()?;
-                    let arbiter = table_source.unique_index_arbiters().iter().find(|arbiter| {
-                        arbiter.key_exprs.len() == elements.len()
-                            && elements
-                                .iter()
-                                .all(|element| arbiter.key_exprs.contains(element))
-                            && arbiter.key_exprs.iter().all(|key| elements.contains(key))
-                            && match &arbiter.predicate {
-                                None => true,
-                                Some(index_predicate) => {
-                                    predicate.as_ref() == Some(index_predicate)
+                    let arbiter =
+                        table_source.unique_index_arbiters().iter().find(|arbiter| {
+                            arbiter.key_exprs.len() == elements.len()
+                                && elements
+                                    .iter()
+                                    .all(|element| arbiter.key_exprs.contains(element))
+                                && arbiter
+                                    .key_exprs
+                                    .iter()
+                                    .all(|key| elements.contains(key))
+                                && match &arbiter.predicate {
+                                    None => true,
+                                    Some(index_predicate) => {
+                                        predicate.as_ref() == Some(index_predicate)
+                                    }
                                 }
-                            }
-                    });
+                        });
                     match arbiter {
-                        Some(arbiter) => Some(ConflictTarget::Index(arbiter.name.clone())),
+                        Some(arbiter) => {
+                            Some(ConflictTarget::Index(arbiter.name.clone()))
+                        }
                         None => {
                             return plan_err!(
                                 "there is no unique or exclusion constraint matching the ON CONFLICT specification"
@@ -5596,9 +5810,9 @@ fn excluded_refs_to_source(
 ) -> Result<Expr> {
     expr.transform_down(|node| {
         Ok(match node {
-            Expr::Column(column) => {
-                Transformed::yes(Expr::Column(source_row_column(column, target, excluded)?))
-            }
+            Expr::Column(column) => Transformed::yes(Expr::Column(source_row_column(
+                column, target, excluded,
+            )?)),
             Expr::ScalarSubquery(subquery) => Transformed::yes(Expr::ScalarSubquery(
                 subquery_refs_to_source(subquery, target, excluded)?,
             )),
@@ -5606,11 +5820,17 @@ fn excluded_refs_to_source(
                 subquery: subquery_refs_to_source(exists.subquery, target, excluded)?,
                 negated: exists.negated,
             })),
-            Expr::InSubquery(in_subquery) => Transformed::yes(Expr::InSubquery(InSubquery {
-                expr: in_subquery.expr,
-                subquery: subquery_refs_to_source(in_subquery.subquery, target, excluded)?,
-                negated: in_subquery.negated,
-            })),
+            Expr::InSubquery(in_subquery) => {
+                Transformed::yes(Expr::InSubquery(InSubquery {
+                    expr: in_subquery.expr,
+                    subquery: subquery_refs_to_source(
+                        in_subquery.subquery,
+                        target,
+                        excluded,
+                    )?,
+                    negated: in_subquery.negated,
+                }))
+            }
             other => Transformed::no(other),
         })
     })
@@ -5623,7 +5843,9 @@ fn source_row_column(
     excluded: &TableReference,
 ) -> Result<Column> {
     match &column.relation {
-        Some(relation) if relation.resolved_eq(excluded) => Ok(Column::from_name(column.name)),
+        Some(relation) if relation.resolved_eq(excluded) => {
+            Ok(Column::from_name(column.name))
+        }
         Some(relation) if relation.resolved_eq(target) => not_impl_err!(
             "ON CONFLICT DO UPDATE sub-select referencing the conflicting row is not supported"
         ),

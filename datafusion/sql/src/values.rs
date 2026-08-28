@@ -23,7 +23,8 @@ use crate::planner::{
 use arrow::datatypes::DataType;
 use datafusion_common::tree_node::TreeNode;
 use datafusion_common::{
-    Column, DFSchema, DFSchemaRef, Result, ScalarValue, not_impl_err, plan_err,
+    Column, DFSchema, DFSchemaRef, Result, ScalarValue, UnnestOptions, not_impl_err,
+    plan_err,
 };
 use datafusion_expr::{
     EmptyRelation, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder,
@@ -91,18 +92,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 exprs.push(self.sql_to_expr_ref(value, &row_schema, planner_context)?);
             }
             let exprs = match &assembly {
-                Some(assembly) => {
-                    self.assemble_values_row(exprs, assembly, &row_schema, planner_context)?
-                }
+                Some(assembly) => self.assemble_values_row(
+                    exprs,
+                    assembly,
+                    &row_schema,
+                    planner_context,
+                )?,
                 None => exprs,
             };
+            // A row that reads the enclosing query — through a sub-select or
+            // an outer reference — takes a value per outer row rather than
+            // one for the statement.
             let computed = exprs.iter().try_fold(false, |found, expr| {
                 Ok::<bool, datafusion_common::DataFusionError>(
                     found
                         || expr.exists(|node| {
                             Ok(matches!(
                                 node,
-                                Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_)
+                                Expr::ScalarSubquery(_)
+                                    | Expr::InSubquery(_)
+                                    | Expr::Exists(_)
+                                    | Expr::OuterReferenceColumn(_, _)
                             ))
                         })?,
                 )
@@ -158,7 +168,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<Option<LogicalPlan>> {
         let name = function.name.to_string().to_ascii_lowercase();
-        if self.context_provider.get_function_meta(&name).is_some() {
+        let is_set_returning = self.context_provider.is_set_returning_function(&name);
+        if !is_set_returning && self.context_provider.get_function_meta(&name).is_some() {
             return Ok(None);
         }
         let schema = DFSchema::empty();
@@ -172,7 +183,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                             arg: FunctionArgExpr::Expr(expr),
                             ..
                         } => {
-                            args.push(self.sql_to_expr_ref(expr, &schema, planner_context)?);
+                            args.push(self.sql_to_expr_ref(
+                                expr,
+                                &schema,
+                                planner_context,
+                            )?);
                         }
                         _ => return Ok(None),
                     }
@@ -182,6 +197,38 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             FunctionArguments::None => Vec::new(),
             _ => return Ok(None),
         };
+        if is_set_returning
+            && let Some(expansion) = self
+                .context_provider
+                .plan_set_returning_function(&name, &args, &schema, None)?
+        {
+            let internal = (0..expansion.columns.len())
+                .map(|index| format!("__values_srf_{index}"))
+                .collect::<Vec<_>>();
+            let lists = expansion
+                .columns
+                .iter()
+                .zip(&internal)
+                .map(|((_, expr), internal)| expr.clone().alias(internal))
+                .collect::<Vec<_>>();
+            let output = expansion
+                .columns
+                .iter()
+                .zip(&internal)
+                .map(|((name, _), internal)| {
+                    Expr::Column(Column::from_name(internal)).alias(name)
+                })
+                .collect::<Vec<_>>();
+            let plan = LogicalPlanBuilder::empty(true)
+                .project(lists)?
+                .unnest_columns_with_options(
+                    internal.iter().map(Column::from_name).collect(),
+                    UnnestOptions::new().with_preserve_nulls(false),
+                )?
+                .project(output)?
+                .build()?;
+            return Ok(Some(plan));
+        }
         match self.context_provider.get_table_function_source(&name, args) {
             Ok(provider) => Ok(Some(
                 LogicalPlanBuilder::scan(&name, provider, None)?.build()?,
@@ -263,14 +310,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }),
             };
             if columns.is_empty() {
-                columns = row
-                    .exprs
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, expr)| {
-                        Ok((format!("column{}", idx + 1), expr.get_type(input.schema())?))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                columns =
+                    row.exprs
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, expr)| {
+                            Ok((
+                                format!("column{}", idx + 1),
+                                expr.get_type(input.schema())?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
             }
             if row.exprs.len() != columns.len() {
                 return plan_err!(
@@ -292,13 +342,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     Ok(expr.alias(name))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let plan = LogicalPlanBuilder::from(input).project(projected)?.build()?;
+            let plan = LogicalPlanBuilder::from(input)
+                .project(projected)?
+                .build()?;
             union = Some(match union {
                 None => plan,
                 Some(union) => LogicalPlanBuilder::from(union).union(plan)?.build()?,
             });
         }
-        union.ok_or_else(|| datafusion_common::plan_datafusion_err!("Values list cannot be empty"))
+        union.ok_or_else(|| {
+            datafusion_common::plan_datafusion_err!("Values list cannot be empty")
+        })
     }
 }
 

@@ -137,7 +137,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// `row_to_json`). Returns `None` when the name matches no relation in the
     /// schema or when the context provides no `named_struct` implementation, so
     /// the caller falls back to plain column resolution.
-    fn try_plan_whole_row_reference(
+    pub(super) fn try_plan_whole_row_reference(
         &self,
         relation: &str,
         schema: &DFSchema,

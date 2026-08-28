@@ -23,6 +23,7 @@ use std::sync::Arc;
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use crate::query::to_order_by_exprs_with_select;
 use crate::expr::grouping_set::is_empty_grouping_element;
+use crate::outer_aggregates::hoist_outer_level_aggregates;
 use crate::utils::{
     CheckColumnsMustReferenceAggregatePurpose, CheckColumnsSatisfyExprsPurpose,
     check_columns_satisfy_exprs, extract_aliases, rebase_expr, resolve_aliases_to_exprs,
@@ -31,7 +32,7 @@ use crate::utils::{
 
 use datafusion_common::error::DataFusionErrorBuilder;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{Column, DFSchema, RecursionUnnestOption, UnnestOptions};
+use datafusion_common::{Column, RecursionUnnestOption, UnnestOptions};
 use datafusion_common::{
     Result, ScalarValue, not_impl_err, plan_datafusion_err, plan_err,
 };
@@ -59,29 +60,6 @@ use sqlparser::ast::{
     WildcardAdditionalOptions, WindowType, visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
-
-/// The set-returning functions this planner lifts out of a SELECT list into a
-/// lateral table function. Exported so a dialect layer can enforce where a
-/// set-returning call may appear without keeping a second copy of the list.
-pub const PROJECTION_SRF_TABLE_FUNCTIONS: &[&str] = &[
-    "generate_series",
-    "generate_subscripts",
-    "jsonb_each",
-    "jsonb_each_text",
-    "json_object_keys",
-    "jsonb_object_keys",
-    "jsonb_array_elements",
-    "jsonb_array_elements_text",
-    "jsonb_path_query",
-    "regexp_matches",
-    "regexp_split_to_table",
-    "pg_get_sequence_data",
-    // `unnest` is intentionally excluded: DataFusion has native
-    // unnest-in-projection handling, which this rewrite must not shadow.
-    "pg_options_to_table",
-    "pg_partition_ancestors",
-    "pg_partition_tree",
-];
 
 /// Result of the `aggregate` function, containing the aggregate plan and
 /// rewritten expressions that reference the aggregate output columns.
@@ -153,21 +131,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         query_order_by: Option<OrderBy>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        Self::rewrite_projection_srfs_to_lateral(&mut select);
         Self::rewrite_projection_tvf_star(&mut select);
-
-        let srf_plan = if select.from.is_empty() {
-            self.try_rewrite_srf_select(&mut select, planner_context)?
-        } else {
-            None
-        };
-
-        self.select_to_plan_ref_prepared(
-            &select,
-            query_order_by.as_ref(),
-            planner_context,
-            srf_plan,
-        )
+        self.select_to_plan_ref_prepared(&select, query_order_by.as_ref(), planner_context)
     }
 
     pub(super) fn select_to_plan_ref(
@@ -176,14 +141,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         query_order_by: Option<&OrderBy>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        if Self::select_requires_owned_rewrite(select) {
+        if Self::is_projection_tvf_star(select) {
             return self.select_to_plan(
                 select.clone(),
                 query_order_by.cloned(),
                 planner_context,
             );
         }
-        self.select_to_plan_ref_prepared(select, query_order_by, planner_context, None)
+        self.select_to_plan_ref_prepared(select, query_order_by, planner_context)
     }
 
     fn select_to_plan_ref_prepared(
@@ -191,7 +156,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         select: &Select,
         query_order_by: Option<&OrderBy>,
         planner_context: &mut PlannerContext,
-        srf_plan: Option<LogicalPlan>,
     ) -> Result<LogicalPlan> {
         // Check for unsupported syntax first
         if select.top.is_some() {
@@ -199,10 +163,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         }
 
         // Process `from` clause
-        let plan = match srf_plan {
-            Some(plan) => plan,
-            None => self.plan_from_tables_ref(&select.from, planner_context)?,
-        };
+        let plan = self.plan_from_tables_ref(&select.from, planner_context)?;
         let empty_from = matches!(plan, LogicalPlan::EmptyRelation(_));
 
         // Process `where` clause
@@ -223,6 +184,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             empty_from,
             planner_context,
         )?;
+        let select_exprs = select_exprs
+            .into_iter()
+            .map(|select_expr| match select_expr {
+                SelectExpr::Expression(expr) => {
+                    hoist_outer_level_aggregates(expr, planner_context)
+                        .map(SelectExpr::Expression)
+                }
+                other => Ok(other),
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // Having and group by clause may reference aliases defined in select projection
         let projected_plan = self.project(base_plan.clone(), select_exprs)?;
@@ -261,6 +232,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     &combined_schema,
                     planner_context,
                 )?;
+                let having_expr =
+                    hoist_outer_level_aggregates(having_expr, planner_context)?;
                 // This step "dereferences" any aliases in the HAVING clause.
                 //
                 // This is how we support queries with HAVING expressions that
@@ -387,6 +360,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         for order_by_aggr in order_by_aggrs {
             if !aggr_exprs.iter().any(|e| e == &order_by_aggr) {
                 aggr_exprs.push(order_by_aggr);
+            }
+        }
+        // Aggregates a subquery of this query handed up: their arguments are
+        // this query's columns, so this query's aggregation evaluates them
+        // and the subquery reads the result as an outer reference.
+        let level = planner_context.outer_query_schema_stack().len();
+        for hoisted in planner_context.take_outer_level_aggregates(level) {
+            let hoisted = normalize_col(hoisted, &projected_plan)?;
+            if !aggr_exprs.contains(&hoisted) {
+                aggr_exprs.push(hoisted);
             }
         }
 
@@ -794,101 +777,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         Ok((intermediate_plan, intermediate_select_exprs))
     }
 
-    /// Checks if a SELECT with no FROM clause contains a single set-returning function
-    /// call, and if so rewrites the plan as `SELECT * FROM func(args)`.
-    fn try_rewrite_srf_select(
-        &self,
-        select: &mut Select,
-        planner_context: &mut PlannerContext,
-    ) -> Result<Option<LogicalPlan>> {
-        if select.projection.len() != 1 {
-            return Ok(None);
-        }
-
-        // Accept both a bare `srf(args)` and an aliased `srf(args) AS name`.
-        let (func, alias) = match &select.projection[0] {
-            SelectItem::UnnamedExpr(SQLExpr::Function(f)) => (f.clone(), None),
-            SelectItem::ExprWithAlias {
-                expr: SQLExpr::Function(f),
-                alias,
-            } => (f.clone(), Some(alias.clone())),
-            _ => return Ok(None),
-        };
-
-        let func_name = func.name.to_string().to_ascii_lowercase();
-
-        let schema = DFSchema::empty();
-        let func_args = match func.args {
-            FunctionArguments::List(list) => list
-                .args
-                .into_iter()
-                .map(|arg| match arg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                    | FunctionArg::Variadic(FunctionArgExpr::Expr(expr))
-                    | FunctionArg::Named {
-                        arg: FunctionArgExpr::Expr(expr),
-                        ..
-                    } => self.sql_expr_to_logical_expr(expr, &schema, planner_context),
-                    _ => plan_err!("Unsupported function argument: {arg:?}"),
-                })
-                .collect::<Result<Vec<Expr>>>()?,
-            FunctionArguments::None => vec![],
-            _ => return Ok(None),
-        };
-
-        match self
-            .context_provider
-            .get_table_function_source(&func_name, func_args)
-        {
-            Ok(provider) => {
-                let plan =
-                    LogicalPlanBuilder::scan(&func_name, provider, None)?.build()?;
-                // `SELECT srf(args) AS name` aliases the function's single output
-                // column to `name`; the unaliased form exposes all its columns.
-                select.projection = match alias {
-                    Some(alias) => {
-                        let col = plan.schema().field(0).name().clone();
-                        vec![SelectItem::ExprWithAlias {
-                            expr: SQLExpr::Identifier(Ident::new(col)),
-                            alias,
-                        }]
-                    }
-                    None => {
-                        vec![SelectItem::Wildcard(WildcardAdditionalOptions::default())]
-                    }
-                };
-                Ok(Some(plan))
-            }
-            Err(_) => Ok(None),
-        }
-    }
-
-    fn select_requires_owned_rewrite(select: &Select) -> bool {
-        let has_projection_srf = select.projection.iter().any(|item| match item {
-            SelectItem::UnnamedExpr(expr) => Self::expr_contains_projection_srf(expr),
-            SelectItem::ExprWithAlias { expr, .. } => {
-                Self::expr_contains_projection_srf(expr)
-            }
-            _ => false,
-        });
-
-        has_projection_srf || Self::is_projection_tvf_star(select)
-    }
-
-    /// Whether a select-list expression contains a set-returning call, at its
-    /// top level or nested inside a surrounding expression.
-    fn expr_contains_projection_srf(expr: &SQLExpr) -> bool {
-        if let SQLExpr::Function(function) = expr
-            && Self::projection_srf_parts(function, None).is_some()
-        {
-            return true;
-        }
-        let mut expr = expr.clone();
-        Self::projection_expr_children(&mut expr)
-            .into_iter()
-            .any(|child| Self::expr_contains_projection_srf(child))
-    }
-
     fn is_projection_tvf_star(select: &Select) -> bool {
         if select.projection.len() != 1
             || select.from.is_empty()
@@ -915,190 +803,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let name = function.name.to_string().to_ascii_lowercase();
         let base = name.rsplit('.').next().unwrap_or(name.as_str());
         Self::TVF_STAR_FUNCTIONS.contains(&base)
-    }
-
-    /// PostgreSQL evaluates a set-returning function in the SELECT list as an
-    /// implicit LATERAL cross-join against the rest of the row. When such an SRF
-    /// appears with a FROM clause (so the empty-FROM `SELECT srf(args)` shorthand
-    /// does not apply), hoist each one into `CROSS JOIN LATERAL func(args)
-    /// AS __srf_n(col)` and replace the projection entry with a reference to that
-    /// column. Correlated args (e.g. `generate_series(array_lower(t.c,1),
-    /// array_upper(t.c,1))`) resolve against the outer relations via the lateral
-    /// planning path.
-    fn rewrite_projection_srfs_to_lateral(select: &mut Select) {
-        let mut lateral_joins: Vec<Join> = Vec::new();
-        for item in &mut select.projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) => {
-                    // A bare call with no FROM is the shorthand the relation
-                    // planner expands on its own; anything else is hoisted.
-                    if select.from.is_empty() && matches!(expr, SQLExpr::Function(_)) {
-                        continue;
-                    }
-                    let parts = match expr {
-                        SQLExpr::Function(function) => {
-                            Self::projection_srf_parts(function, None)
-                        }
-                        _ => None,
-                    };
-                    match parts {
-                        Some((name, args, col)) => {
-                            let reference =
-                                Self::push_srf_join(&mut lateral_joins, name, args, col.clone());
-                            *item = SelectItem::ExprWithAlias {
-                                expr: reference,
-                                alias: col,
-                            };
-                        }
-                        None => Self::hoist_nested_srfs(expr, &mut lateral_joins),
-                    }
-                }
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    if select.from.is_empty() && matches!(expr, SQLExpr::Function(_)) {
-                        continue;
-                    }
-                    let parts = match expr {
-                        SQLExpr::Function(function) => {
-                            Self::projection_srf_parts(function, Some(alias.clone()))
-                        }
-                        _ => None,
-                    };
-                    match parts {
-                        Some((name, args, col)) => {
-                            *expr =
-                                Self::push_srf_join(&mut lateral_joins, name, args, col.clone());
-                        }
-                        None => Self::hoist_nested_srfs(expr, &mut lateral_joins),
-                    }
-                }
-                _ => {}
-            }
-        }
-        if lateral_joins.is_empty() {
-            return;
-        }
-        // A hoisted call needs something to join against, so a query written
-        // without a FROM clause gets the one-row relation it implies.
-        if select.from.is_empty() {
-            select.from.push(TableWithJoins {
-                relation: Self::one_row_relation(),
-                joins: Vec::new(),
-            });
-        }
-        if let Some(last) = select.from.last_mut() {
-            last.joins.extend(lateral_joins);
-        }
-    }
-
-    /// Record one hoisted set-returning call and return the column reference
-    /// that replaces it.
-    fn push_srf_join(
-        lateral_joins: &mut Vec<Join>,
-        name: ObjectName,
-        args: Vec<FunctionArg>,
-        col: Ident,
-    ) -> SQLExpr {
-        let srf_alias = Ident::new(format!("__srf_{}", lateral_joins.len()));
-        let table_alias = TableAlias::new(
-            srf_alias.clone(),
-            vec![sqlparser::ast::TableAliasColumnDef {
-                name: col.clone(),
-                data_type: None,
-                collation: None,
-            }],
-        );
-        lateral_joins.push(Join {
-            relation: TableFactor::Function {
-                lateral: true,
-                name,
-                args,
-                alias: Some(table_alias),
-            },
-            global: false,
-            join_operator: JoinOperator::CrossJoin(JoinConstraint::None),
-        });
-        SQLExpr::CompoundIdentifier(vec![srf_alias, col])
-    }
-
-    /// PostgreSQL applies the expression around a set-returning call to each
-    /// row the call returns, so a call nested inside a larger select-list
-    /// expression (`srf(x)::text`, `srf(x) || 'y'`) is hoisted the same way a
-    /// bare one is and the expression keeps the column reference in its place.
-    fn hoist_nested_srfs(expr: &mut SQLExpr, lateral_joins: &mut Vec<Join>) {
-        if let SQLExpr::Function(function) = expr
-            && let Some((name, args, col)) = Self::projection_srf_parts(function, None)
-        {
-            *expr = Self::push_srf_join(lateral_joins, name, args, col);
-            return;
-        }
-        for child in Self::projection_expr_children(expr) {
-            Self::hoist_nested_srfs(child, lateral_joins);
-        }
-    }
-
-    /// The sub-expressions a select-list expression can wrap a call in.
-    fn projection_expr_children(expr: &mut SQLExpr) -> Vec<&mut SQLExpr> {
-        match expr {
-            SQLExpr::Cast { expr, .. }
-            | SQLExpr::Nested(expr)
-            | SQLExpr::UnaryOp { expr, .. }
-            | SQLExpr::IsNull { expr, .. }
-            | SQLExpr::IsNotNull { expr, .. }
-            | SQLExpr::Collate { expr, .. } => vec![expr.as_mut()],
-            SQLExpr::BinaryOp { left, right, .. } => vec![left.as_mut(), right.as_mut()],
-            SQLExpr::Function(function) => match &mut function.args {
-                FunctionArguments::List(list) => list
-                    .args
-                    .iter_mut()
-                    .filter_map(|arg| match arg {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))
-                        | FunctionArg::Named {
-                            arg: FunctionArgExpr::Expr(inner),
-                            ..
-                        } => Some(inner),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        }
-    }
-
-    /// `(SELECT 1) AS __srf_base`: the one-row relation a hoisted lateral join
-    /// needs when the query was written without a FROM clause.
-    fn one_row_relation() -> TableFactor {
-        let inner = Select {
-            select_token: AttachedToken::empty(),
-            distinct: None,
-            top: None,
-            top_before_distinct: false,
-            projection: vec![SelectItem::UnnamedExpr(SQLExpr::Value(
-                sqlparser::ast::Value::Number("1".to_string(), false).into(),
-            ))],
-            into: None,
-            from: Vec::new(),
-            selection: None,
-            group_by: GroupByExpr::Expressions(Vec::new(), Vec::new()),
-            having: None,
-            qualify: None,
-            named_window: Vec::new(),
-            connect_by: None,
-            flavor: SelectFlavor::Standard,
-        };
-        TableFactor::Derived {
-            lateral: false,
-            subquery: SQLBox::new(SQLQuery {
-                with: None,
-                body: SQLBox::new(SetExpr::Select(SQLBox::new(inner))),
-                order_by: None,
-                limit_clause: None,
-                fetch: None,
-                locks: Vec::new(),
-                for_clause: None,
-            }),
-            alias: Some(TableAlias::new(Ident::new("__srf_base"), Vec::new())),
-        }
     }
 
     /// PostgreSQL expands `(table_function(args)).*` in the select list into
@@ -1233,8 +937,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     /// Table functions whose composite output `(<tvf>(args)).*` expands in the
-    /// select list: the projection-SRF set plus the logical-replication
-    /// catalog functions PostgreSQL subscribers call in that form.
+    /// select list: the PostgreSQL set-returning functions plus the
+    /// logical-replication catalog functions subscribers call in that form.
     const TVF_STAR_FUNCTIONS: &'static [&'static str] = &[
         "generate_series",
         "jsonb_each",
@@ -1251,32 +955,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         "pg_partition_tree",
         "pg_get_publication_tables",
     ];
-
-    /// If `func` names a set-returning table function (mirroring the provider's
-    /// `get_table_function_source` set), return its name, argument list, and the
-    /// output column name (the projection alias, else the function name).
-    fn projection_srf_parts(
-        func: &sqlparser::ast::Function,
-        alias: Option<Ident>,
-    ) -> Option<(ObjectName, Vec<FunctionArg>, Ident)> {
-        // `OVER` names a window function; a set-returning function is not one,
-        // so leave the call alone and let function resolution report it.
-        if func.over.is_some() {
-            return None;
-        }
-        let name = func.name.to_string().to_ascii_lowercase();
-        let base = name.rsplit('.').next().unwrap_or(name.as_str());
-        if !PROJECTION_SRF_TABLE_FUNCTIONS.contains(&base) {
-            return None;
-        }
-        let args = match &func.args {
-            FunctionArguments::List(list) => list.args.clone(),
-            FunctionArguments::None => Vec::new(),
-            _ => return None,
-        };
-        let col = alias.unwrap_or_else(|| Ident::new(base.to_string()));
-        Some((func.name.clone(), args, col))
-    }
 
     pub(crate) fn plan_selection_ref(
         &self,
@@ -1295,11 +973,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
                 let filter_expr =
                     self.sql_to_expr_ref(predicate_expr, plan.schema(), planner_context)?;
+                let filter_expr =
+                    hoist_outer_level_aggregates(filter_expr, planner_context)?;
 
-                // Check for aggregation functions
+                // An aggregate of this query level — written here, or handed
+                // up by a subquery of this clause because its arguments are
+                // this level's columns — has no aggregation to run in.
+                let level = planner_context.outer_query_schema_stack().len();
                 let aggregate_exprs =
                     find_aggregate_exprs(std::slice::from_ref(&filter_expr));
-                if !aggregate_exprs.is_empty() {
+                if !aggregate_exprs.is_empty()
+                    || !planner_context.take_outer_level_aggregates(level).is_empty()
+                {
                     return plan_err!(
                         "Aggregate functions are not allowed in the WHERE clause. Consider using HAVING instead"
                     );
@@ -1977,15 +1662,4 @@ fn has_unnest_expr_recursively(expr: &Expr) -> bool {
         }
     });
     has_unnest
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PROJECTION_SRF_TABLE_FUNCTIONS;
-
-    #[test]
-    fn postgres_catalog_projection_set_returning_functions_are_recognized() {
-        assert!(PROJECTION_SRF_TABLE_FUNCTIONS.contains(&"generate_subscripts"));
-        assert!(PROJECTION_SRF_TABLE_FUNCTIONS.contains(&"pg_partition_ancestors"));
-    }
 }

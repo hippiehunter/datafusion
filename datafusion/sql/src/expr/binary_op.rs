@@ -16,7 +16,7 @@
 // under the License.
 
 use crate::planner::{ContextProvider, SqlToRel};
-use datafusion_common::{Result, not_impl_err};
+use datafusion_common::{Result, not_impl_err, plan_err};
 use datafusion_expr::Operator;
 use sqlparser::ast::BinaryOperator;
 
@@ -102,11 +102,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     "?" => Ok(Operator::Question),
                     "?&" => Ok(Operator::QuestionAnd),
                     "?|" => Ok(Operator::QuestionPipe),
-                    _ => not_impl_err!(
-                        "Unsupported qualified operator: OPERATOR({})",
+                    _ => plan_err!(
+                        "operator OPERATOR({}) does not exist",
                         names.join(".")
                     ),
                 }
+            }
+            BinaryOperator::Custom(ref operator) => {
+                plan_err!("operator {operator} does not exist")
             }
             _ => not_impl_err!("Unsupported binary operator: {:?}", op),
         }

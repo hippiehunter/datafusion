@@ -15,11 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
-use arrow::datatypes::Field;
+use arrow::datatypes::{DataType, Field};
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
     Column, DFSchema, Diagnostic, Result, ScalarValue, Span, Spans, TableReference,
@@ -28,6 +29,7 @@ use datafusion_common::{
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::planner::{
     PlannedRelation, RelationPlannerContext, RelationPlanning,
+    TableSampleMethod as LogicalTableSampleMethod,
 };
 use datafusion_expr::{
     EdgeDirection, EdgePattern, GraphColumn, GraphPattern, GraphPatternElement,
@@ -37,13 +39,63 @@ use datafusion_expr::{
 };
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, expr::Unnest};
 use sqlparser::ast::{
-    AstBox as SQLBox, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, JsonOnBehavior, Spanned, SqlJsonTable, SqlJsonTableColumn,
-    SqlJsonTableExistsColumn, SqlJsonTableNestedColumn, SqlJsonTableRegularColumn,
-    TableAliasColumnDef, TableFactor,
+    AstBox as SQLBox, Expr as SQLExpr, FunctionArg, FunctionArgExpr, Ident,
+    JsonOnBehavior, JsonQueryWrapper, JsonQuotesBehavior, Spanned, SqlJsonTable,
+    SqlJsonTableColumn, SqlJsonTableExistsColumn, SqlJsonTableNestedColumn,
+    SqlJsonTableRegularColumn, TableAliasColumnDef, TableFactor,
 };
 
 mod join;
+mod set_returning;
+
+use set_returning::SetReturningCall;
+
+fn normalized_json_table_ident(ident: &Ident) -> String {
+    if ident.quote_style.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_ascii_lowercase()
+    }
+}
+
+/// PostgreSQL puts JSON path names and output column names in one namespace.
+/// Validate it before discarding the optional `AS path_name` labels during
+/// relational lowering.
+fn validate_sql_json_table_names(
+    root_path_name: Option<&Ident>,
+    columns: &[SqlJsonTableColumn],
+) -> Result<()> {
+    fn insert_name(seen: &mut HashSet<String>, ident: &Ident) -> Result<()> {
+        let name = normalized_json_table_ident(ident);
+        if !seen.insert(name.clone()) {
+            return plan_err!("duplicate JSON_TABLE name {name}");
+        }
+        Ok(())
+    }
+
+    fn visit(columns: &[SqlJsonTableColumn], seen: &mut HashSet<String>) -> Result<()> {
+        for column in columns {
+            match column {
+                SqlJsonTableColumn::ForOrdinality(name) => insert_name(seen, name)?,
+                SqlJsonTableColumn::Regular(column) => insert_name(seen, &column.name)?,
+                SqlJsonTableColumn::Exists(column) => insert_name(seen, &column.name)?,
+                SqlJsonTableColumn::Nested(column) => {
+                    if let Some(name) = &column.path_name {
+                        insert_name(seen, name)?;
+                    }
+                    visit(&column.columns, seen)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut seen = HashSet::new();
+    if let Some(name) = root_path_name {
+        insert_name(&mut seen, name)?;
+    }
+    visit(columns, &mut seen)
+}
 
 struct SqlToRelRelationContext<'a, 'b, S: ContextProvider> {
     planner: &'a SqlToRel<'b, S>,
@@ -207,16 +259,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     return plan_err!("Unsupported function argument: {other:?}");
                 }
             };
-            // A bare column argument can only refer to the enclosing (lateral)
-            // query, so carry its real field so the table function receives a
-            // correctly typed outer reference.
-            planned.push(match expr {
-                Expr::Column(col) => match schema.qualified_field_from_column(&col) {
-                    Ok((_, field)) => Expr::OuterReferenceColumn(Arc::clone(field), col),
-                    Err(_) => Expr::Column(col),
-                },
-                other => other,
-            });
+            // Every column in a function argument refers to the preceding
+            // (implicit-lateral) FROM items. Convert nested references too:
+            // ARRAY[r, r + 1] has a constructor at its root, so matching only
+            // a top-level Column leaves its children local to the function's
+            // empty one-row input.
+            let expr = expr
+                .transform(|expr| match expr {
+                    Expr::Column(column) => {
+                        match schema.qualified_field_from_column(&column) {
+                            Ok((_, field)) => Ok(Transformed::yes(
+                                Expr::OuterReferenceColumn(Arc::clone(field), column),
+                            )),
+                            Err(_) => Ok(Transformed::no(Expr::Column(column))),
+                        }
+                    }
+                    other => Ok(Transformed::no(other)),
+                })
+                .data()?;
+            planned.push(expr);
         }
         if !arg_names.iter().any(Option::is_some) {
             return Ok(planned);
@@ -234,7 +295,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 planned,
                 arg_names,
             ),
-            None => plan_err!("Function '{function_name}' does not support named arguments"),
+            None => {
+                plan_err!("Function '{function_name}' does not support named arguments")
+            }
         }
     }
 
@@ -361,89 +424,68 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             TableFactor::Table {
                 name,
                 alias,
-                args,
+                args: Some(func_args),
+                with_ordinality,
+                ..
+            } => self.plan_function_relations(
+                vec![SetReturningCall {
+                    name: name.clone(),
+                    args: func_args.args.clone(),
+                    column_defs: Vec::new(),
+                }],
+                *with_ordinality,
+                alias.clone(),
+                planner_context,
+            )?,
+            TableFactor::Table {
+                name,
+                alias,
+                args: None,
                 only,
+                sample,
                 ..
             } => {
-                if let Some(func_args) = args {
-                    let tbl_func_name =
-                        name.0.last().unwrap().as_ident().unwrap().to_string();
-                    let args = func_args
-                        .args
-                        .iter()
-                        .map(|arg| {
-                            if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = arg
-                            {
-                                self.sql_expr_to_logical_expr(
-                                    expr,
-                                    &DFSchema::empty(),
-                                    planner_context,
-                                )
-                            } else {
-                                plan_err!("Unsupported function argument type: {arg}")
-                            }
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let provider = self
-                        .context_provider
-                        .get_table_function_source(&tbl_func_name, args)?;
-                    let mut plan = LogicalPlanBuilder::scan(
-                        TableReference::Bare {
-                            table: format!("{tbl_func_name}()").into(),
-                        },
-                        provider,
-                        None,
-                    )?
-                    .build()?;
-                    if plan.schema().fields().len() == 1
-                        && let Some(tbl_alias) = alias
-                        && tbl_alias.columns.is_empty()
-                    {
-                        let alias_name = tbl_alias.name.value.clone();
-                        let field = plan.schema().field(0);
-                        let orig_col =
-                            Expr::Column(Column::new(None::<String>, field.name()));
-                        plan = LogicalPlanBuilder::from(plan)
-                            .project(vec![orig_col.alias(&alias_name)])?
-                            .build()?;
-                    }
-                    (plan, alias.clone())
-                } else {
-                    let table_ref = self.object_name_to_table_reference(name.clone())?;
-                    let table_name = table_ref.to_string();
-                    let cte = planner_context.get_cte(&table_name);
-                    let plan = match (
-                        cte,
-                        self.context_provider.get_table_source(table_ref.clone()),
-                    ) {
-                        (Some(cte_plan), _) => Ok(cte_plan.clone()),
-                        (_, Ok(provider)) => {
-                            let plan = LogicalPlanBuilder::scan(
-                                table_ref.clone(),
-                                provider,
-                                None,
-                            )?
-                            .build()?;
-                            if *only {
-                                if let LogicalPlan::TableScan(mut scan) = plan {
-                                    scan.only = true;
-                                    Ok(LogicalPlan::TableScan(scan))
-                                } else {
-                                    Ok(plan)
-                                }
+                let table_ref = self.object_name_to_table_reference(name.clone())?;
+                let table_name = table_ref.to_string();
+                let cte = planner_context.get_cte(&table_name);
+                let is_cte = cte.is_some();
+                let mut plan = match (
+                    cte,
+                    self.context_provider.get_table_source(table_ref.clone()),
+                ) {
+                    (Some(cte_plan), _) => Ok(cte_plan.clone()),
+                    (_, Ok(provider)) => {
+                        let plan =
+                            LogicalPlanBuilder::scan(table_ref.clone(), provider, None)?
+                                .build()?;
+                        if *only {
+                            if let LogicalPlan::TableScan(mut scan) = plan {
+                                scan.only = true;
+                                Ok(LogicalPlan::TableScan(scan))
                             } else {
                                 Ok(plan)
                             }
+                        } else {
+                            Ok(plan)
                         }
-                        (None, Err(error)) => {
-                            Err(error.with_diagnostic(Diagnostic::new_error(
-                                format!("table '{table_ref}' not found"),
-                                Span::try_from_sqlparser_span(relation_span),
-                            )))
-                        }
-                    }?;
-                    (plan, alias.clone())
+                    }
+                    (None, Err(error)) => {
+                        Err(error.with_diagnostic(Diagnostic::new_error(
+                            format!("table '{table_ref}' not found"),
+                            Span::try_from_sqlparser_span(relation_span),
+                        )))
+                    }
+                }?;
+                if let Some(sample) = sample {
+                    plan = self.apply_table_sample(
+                        plan,
+                        &table_ref,
+                        sample,
+                        is_cte,
+                        planner_context,
+                    )?;
                 }
+                (plan, alias.clone())
             }
             TableFactor::Derived {
                 subquery, alias, ..
@@ -454,13 +496,30 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             TableFactor::NestedJoin {
                 table_with_joins,
                 alias,
-            } => (
-                self.plan_table_with_joins_ref(
+            } => {
+                let plan = self.plan_table_with_joins_ref(
                     table_with_joins.as_ref(),
                     planner_context,
+                )?;
+                let plan = match alias {
+                    Some(_) => project_visible_columns(plan)?,
+                    None => plan,
+                };
+                (plan, alias.clone())
+            }
+            TableFactor::UNNEST {
+                alias,
+                array_exprs,
+                with_offset: false,
+                with_offset_alias: None,
+                with_ordinality,
+            } if self.context_provider.is_set_returning_function("unnest") => self
+                .plan_function_relations(
+                    vec![SetReturningCall::unnest(array_exprs)],
+                    *with_ordinality,
+                    alias.clone(),
+                    planner_context,
                 )?,
-                alias.clone(),
-            ),
             TableFactor::UNNEST {
                 alias,
                 array_exprs,
@@ -512,86 +571,114 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
             TableFactor::Function {
                 name, args, alias, ..
+            } => self.plan_function_relations(
+                vec![SetReturningCall {
+                    name: name.clone(),
+                    args: args.clone(),
+                    column_defs: Vec::new(),
+                }],
+                false,
+                alias.clone(),
+                planner_context,
+            )?,
+            TableFactor::TableFunction { expr, alias } => self.plan_function_relations(
+                vec![SetReturningCall::from_function_expr(expr, &[])?],
+                false,
+                alias.clone(),
+                planner_context,
+            )?,
+            TableFactor::RowsFrom {
+                functions,
+                with_ordinality,
+                alias,
+                ..
             } => {
-                let tbl_func_ref = self.object_name_to_table_reference(name.clone())?;
-                let schema = planner_context
-                    .outer_query_schema()
-                    .cloned()
-                    .unwrap_or_else(DFSchema::empty);
-                let func_args = self.plan_table_function_args(
-                    tbl_func_ref.table(),
-                    args.iter().cloned(),
-                    &schema,
+                let calls = functions
+                    .iter()
+                    .map(|item| {
+                        SetReturningCall::from_function_expr(
+                            &item.function,
+                            &item.column_defs,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                self.plan_function_relations(
+                    calls,
+                    *with_ordinality,
+                    alias.clone(),
                     planner_context,
-                )?;
-                let provider = self
-                    .context_provider
-                    .get_table_function_source(tbl_func_ref.table(), func_args)?;
-                let plan = if let Some(inline_plan) = provider.get_logical_plan() {
-                    let inline_plan = inline_plan.into_owned();
-                    if inline_plan.all_out_ref_exprs().is_empty() {
-                        LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                            .build()?
-                    } else {
-                        LogicalPlanBuilder::new(inline_plan)
-                            .alias(tbl_func_ref.table())?
-                            .build()?
-                    }
-                } else {
-                    LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                        .build()?
-                };
-                (plan, alias.clone())
-            }
-            TableFactor::TableFunction { expr, alias } => {
-                let SQLExpr::Function(func) = expr else {
-                    return not_impl_err!(
-                        "TableFunction with non-function expression: {expr:?}"
-                    );
-                };
-                let tbl_func_ref =
-                    self.object_name_to_table_reference(func.name.clone())?;
-                let schema = planner_context
-                    .outer_query_schema()
-                    .cloned()
-                    .unwrap_or_else(DFSchema::empty);
-                let func_args = match &func.args {
-                    FunctionArguments::List(list) => list
-                        .args
-                        .iter()
-                        .map(|arg| match arg {
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                            | FunctionArg::Named {
-                                arg: FunctionArgExpr::Expr(expr),
-                                ..
-                            } => self.sql_expr_to_logical_expr(
-                                expr,
-                                &schema,
-                                planner_context,
-                            ),
-                            _ => plan_err!("Unsupported function argument: {arg:?}"),
-                        })
-                        .collect::<Result<Vec<_>>>()?,
-                    FunctionArguments::None => vec![],
-                    other => {
-                        return not_impl_err!(
-                            "Unsupported table function arguments: {other:?}"
-                        );
-                    }
-                };
-                let provider = self
-                    .context_provider
-                    .get_table_function_source(tbl_func_ref.table(), func_args)?;
-                let plan =
-                    LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                        .build()?;
-                (plan, alias.clone())
+                )?
             }
             // Complex relation extensions retain the established owned
             // implementation and only detach this individual factor.
             _ => return self.create_default_relation(relation.clone(), planner_context),
         };
         Ok(PlannedRelation::new(plan, alias))
+    }
+
+    /// Lower a parsed TABLESAMPLE clause directly into the provider's typed
+    /// sampling predicate. No SQL rendering or reparsing occurs here.
+    fn apply_table_sample(
+        &self,
+        plan: LogicalPlan,
+        table_ref: &TableReference,
+        kind: &sqlparser::ast::TableSampleKind,
+        is_cte: bool,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        let sample = match kind {
+            sqlparser::ast::TableSampleKind::BeforeTableAlias(sample)
+            | sqlparser::ast::TableSampleKind::AfterTableAlias(sample) => sample.as_ref(),
+        };
+        if is_cte {
+            return Err(self.context_provider.table_sample_source_error(table_ref));
+        }
+        if !matches!(sample.modifier, sqlparser::ast::TableSampleModifier::TableSample)
+            || sample.bucket.is_some()
+            || sample.offset.is_some()
+        {
+            return not_impl_err!("unsupported sampling clause on {table_ref}");
+        }
+        let method = match &sample.name {
+            Some(sqlparser::ast::TableSampleMethod::Bernoulli) => {
+                LogicalTableSampleMethod::Bernoulli
+            }
+            Some(sqlparser::ast::TableSampleMethod::System) => LogicalTableSampleMethod::System,
+            Some(method) => return plan_err!("unsupported TABLESAMPLE method {method}"),
+            None => return plan_err!("TABLESAMPLE method is required"),
+        };
+        let quantity = sample
+            .quantity
+            .as_ref()
+            .ok_or_else(|| datafusion_common::DataFusionError::Plan(
+                "TABLESAMPLE percentage is required".to_string(),
+            ))?;
+        if matches!(quantity.unit, Some(sqlparser::ast::TableSampleUnit::Rows)) {
+            return not_impl_err!("TABLESAMPLE row counts are not supported");
+        }
+        let empty_schema = DFSchema::empty();
+        let percentage = self.sql_expr_to_logical_expr(
+            &quantity.value,
+            &empty_schema,
+            planner_context,
+        )?;
+        let repeatable = sample
+            .seed
+            .as_ref()
+            .map(|seed| {
+                let seed_expr = seed.expr.clone().unwrap_or_else(|| {
+                    SQLExpr::Value(sqlparser::ast::ValueWithSpan::from(seed.value.clone()))
+                });
+                self.sql_expr_to_logical_expr(seed_expr, &empty_schema, planner_context)
+            })
+            .transpose()?;
+        let predicate = self.context_provider.plan_table_sample(
+            table_ref,
+            method,
+            percentage,
+            repeatable,
+        )?;
+        LogicalPlanBuilder::from(plan).filter(predicate)?.build()
     }
 
     fn create_extension_relation(
@@ -629,108 +716,66 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         relation: TableFactor,
         planner_context: &mut PlannerContext,
     ) -> Result<PlannedRelation> {
+        if Self::is_function_relation(&relation, self.context_provider) {
+            return self.create_default_relation_ref(&relation, planner_context);
+        }
         let relation_span = relation.span();
         let (plan, alias) = match relation {
             TableFactor::Table {
                 name,
                 alias,
-                args,
                 only,
+                sample,
                 ..
             } => {
-                if let Some(func_args) = args {
-                    let tbl_func_name =
-                        name.0.last().unwrap().as_ident().unwrap().to_string();
-                    let args = func_args
-                        .args
-                        .into_iter()
-                        .flat_map(|arg| {
-                            if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = arg
-                            {
-                                self.sql_expr_to_logical_expr(
-                                    expr,
-                                    &DFSchema::empty(),
-                                    planner_context,
-                                )
+                // Normalize name and alias
+                let table_ref = self.object_name_to_table_reference(name)?;
+                let table_name = table_ref.to_string();
+                let cte = planner_context.get_cte(&table_name);
+                let is_cte = cte.is_some();
+                let mut plan = match (
+                    cte,
+                    self.context_provider.get_table_source(table_ref.clone()),
+                ) {
+                    (Some(cte_plan), _) => Ok(cte_plan.clone()),
+                    (_, Ok(provider)) => {
+                        let plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)?
+                            .build()?;
+                        // Preserve the PostgreSQL `FROM ONLY t` modifier on
+                        // the scan so the engine can exclude inheriting
+                        // descendant tables.
+                        if only {
+                            if let LogicalPlan::TableScan(mut scan) = plan {
+                                scan.only = true;
+                                Ok(LogicalPlan::TableScan(scan))
                             } else {
-                                plan_err!("Unsupported function argument type: {}", arg)
+                                Ok(plan)
                             }
-                        })
-                        .collect::<Vec<_>>();
-                    let provider = self
-                        .context_provider
-                        .get_table_function_source(&tbl_func_name, args)?;
-                    let mut plan = LogicalPlanBuilder::scan(
-                        TableReference::Bare {
-                            table: format!("{tbl_func_name}()").into(),
-                        },
-                        provider,
-                        None,
-                    )?
-                    .build()?;
-                    // For single-column table functions with a table alias but no column
-                    // aliases, add a projection that renames the column to match the table
-                    // alias. PostgreSQL allows using the table alias as a column name for
-                    // single-column set-returning functions.
-                    if plan.schema().fields().len() == 1 {
-                        if let Some(ref tbl_alias) = alias {
-                            if tbl_alias.columns.is_empty() {
-                                let alias_name = tbl_alias.name.value.clone();
-                                let field = plan.schema().field(0);
-                                let orig_col = Expr::Column(Column::new(
-                                    None::<String>,
-                                    field.name(),
-                                ));
-                                plan = LogicalPlanBuilder::from(plan)
-                                    .project(vec![orig_col.alias(&alias_name)])?
-                                    .build()?;
-                            }
+                        } else {
+                            Ok(plan)
                         }
                     }
-                    (plan, alias)
-                } else {
-                    // Normalize name and alias
-                    let table_ref = self.object_name_to_table_reference(name)?;
-                    let table_name = table_ref.to_string();
-                    let cte = planner_context.get_cte(&table_name);
-                    (
-                        match (
-                            cte,
-                            self.context_provider.get_table_source(table_ref.clone()),
-                        ) {
-                            (Some(cte_plan), _) => Ok(cte_plan.clone()),
-                            (_, Ok(provider)) => {
-                                let plan = LogicalPlanBuilder::scan(
-                                    table_ref.clone(),
-                                    provider,
-                                    None,
-                                )?
-                                .build()?;
-                                // Preserve the PostgreSQL `FROM ONLY t` modifier on
-                                // the scan so the engine can exclude inheriting
-                                // descendant tables.
-                                if only {
-                                    if let LogicalPlan::TableScan(mut scan) = plan {
-                                        scan.only = true;
-                                        Ok(LogicalPlan::TableScan(scan))
-                                    } else {
-                                        Ok(plan)
-                                    }
-                                } else {
-                                    Ok(plan)
-                                }
-                            }
-                            (None, Err(e)) => {
-                                let e = e.with_diagnostic(Diagnostic::new_error(
-                                    format!("table '{table_ref}' not found"),
-                                    Span::try_from_sqlparser_span(relation_span),
-                                ));
-                                Err(e)
-                            }
-                        }?,
-                        alias,
-                    )
+                    (None, Err(e)) => {
+                        let e = e.with_diagnostic(Diagnostic::new_error(
+                            format!("table '{table_ref}' not found"),
+                            Span::try_from_sqlparser_span(relation_span),
+                        ));
+                        Err(e)
+                    }
+                }?;
+                if let Some(sample) = sample.as_ref() {
+                    plan = self.apply_table_sample(
+                        plan,
+                        &table_ref,
+                        sample,
+                        is_cte,
+                        planner_context,
+                    )?;
                 }
+                (
+                    plan,
+                    alias,
+                )
             }
             TableFactor::Derived {
                 subquery, alias, ..
@@ -742,13 +787,17 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             TableFactor::NestedJoin {
                 table_with_joins,
                 alias,
-            } => (
-                self.plan_table_with_joins(
+            } => {
+                let plan = self.plan_table_with_joins(
                     SQLBox::into_owned(table_with_joins),
                     planner_context,
-                )?,
-                alias,
-            ),
+                )?;
+                let plan = match alias {
+                    Some(_) => project_visible_columns(plan)?,
+                    None => plan,
+                };
+                (plan, alias)
+            }
             TableFactor::UNNEST {
                 mut alias,
                 array_exprs,
@@ -813,39 +862,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 return not_impl_err!(
                     "UNNEST table factor with offset is not supported yet"
                 );
-            }
-            TableFactor::Function {
-                name, args, alias, ..
-            } => {
-                let tbl_func_ref = self.object_name_to_table_reference(name)?;
-                let schema = planner_context
-                    .outer_query_schema()
-                    .cloned()
-                    .unwrap_or_else(DFSchema::empty);
-                let func_args = self.plan_table_function_args(
-                    tbl_func_ref.table(),
-                    args,
-                    &schema,
-                    planner_context,
-                )?;
-                let provider = self
-                    .context_provider
-                    .get_table_function_source(tbl_func_ref.table(), func_args)?;
-                let plan = if let Some(inline_plan) = provider.get_logical_plan() {
-                    let inline_plan = inline_plan.into_owned();
-                    if inline_plan.all_out_ref_exprs().is_empty() {
-                        LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                            .build()?
-                    } else {
-                        LogicalPlanBuilder::new(inline_plan)
-                            .alias(tbl_func_ref.table())?
-                            .build()?
-                    }
-                } else {
-                    LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                        .build()?
-                };
-                (plan, alias)
             }
             TableFactor::MatchRecognize {
                 table,
@@ -1139,7 +1155,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // Plan JSON_TABLE function
                 let plan = self.plan_json_table(
                     json_expr,
-                    json_path.to_string(),
+                    Self::json_table_path_string(json_path)?,
                     columns,
                     planner_context,
                 )?;
@@ -1163,50 +1179,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 )?;
                 (plan, alias)
             }
-            TableFactor::TableFunction { expr, alias } => {
-                if let SQLExpr::Function(func) = expr {
-                    let tbl_func_ref = self.object_name_to_table_reference(func.name)?;
-                    let schema = planner_context
-                        .outer_query_schema()
-                        .cloned()
-                        .unwrap_or_else(DFSchema::empty);
-                    let func_args = match func.args {
-                        FunctionArguments::List(list) => list
-                            .args
-                            .into_iter()
-                            .map(|arg| match arg {
-                                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
-                                | FunctionArg::Named {
-                                    arg: FunctionArgExpr::Expr(expr),
-                                    ..
-                                } => self.sql_expr_to_logical_expr(
-                                    expr,
-                                    &schema,
-                                    planner_context,
-                                ),
-                                _ => plan_err!("Unsupported function argument: {arg:?}"),
-                            })
-                            .collect::<Result<Vec<Expr>>>()?,
-                        FunctionArguments::None => vec![],
-                        other => {
-                            return not_impl_err!(
-                                "Unsupported table function arguments: {other:?}"
-                            );
-                        }
-                    };
-                    let provider = self
-                        .context_provider
-                        .get_table_function_source(tbl_func_ref.table(), func_args)?;
-                    let plan =
-                        LogicalPlanBuilder::scan(tbl_func_ref.table(), provider, None)?
-                            .build()?;
-                    (plan, alias)
-                } else {
-                    return not_impl_err!(
-                        "TableFunction with non-function expression: {expr:?}"
-                    );
-                }
-            }
             _ => {
                 return not_impl_err!(
                     "Unsupported ast node {relation:?} in create_relation"
@@ -1214,6 +1186,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
         };
         Ok(PlannedRelation::new(plan, alias))
+    }
+
+    /// The FROM items that are function calls, planned by
+    /// [`Self::plan_function_relations`] whichever way the factor is spelled.
+    fn is_function_relation(relation: &TableFactor, provider: &S) -> bool {
+        match relation {
+            TableFactor::Table { args: Some(_), .. }
+            | TableFactor::Function { .. }
+            | TableFactor::TableFunction { .. }
+            | TableFactor::RowsFrom { .. } => true,
+            TableFactor::UNNEST {
+                with_offset: false,
+                with_offset_alias: None,
+                ..
+            } => provider.is_set_returning_function("unnest"),
+            _ => false,
+        }
     }
 
     pub(crate) fn create_relation_subquery_ref(
@@ -1270,6 +1259,29 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             })),
         }
     }
+}
+
+/// Narrow a join subtree that is about to be given an alias to its visible
+/// column list. The alias renames every column of the subtree, and the copies
+/// a USING join hides behind its merged columns have no name to be reached by
+/// under it.
+fn project_visible_columns(plan: LogicalPlan) -> Result<LogicalPlan> {
+    let hidden: HashSet<Column> = plan
+        .using_columns()?
+        .into_iter()
+        .flat_map(|using| using.hidden)
+        .collect();
+    if hidden.is_empty() {
+        return Ok(plan);
+    }
+    let exprs: Vec<Expr> = plan
+        .schema()
+        .iter()
+        .map(Column::from)
+        .filter(|column| !hidden.contains(column))
+        .map(Expr::Column)
+        .collect();
+    LogicalPlanBuilder::from(plan).project(exprs)?.build()
 }
 
 fn optimize_subquery_sort(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
@@ -1371,6 +1383,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     data_type,
                     path,
                     exists: named.exists,
+                    format_json: false,
+                    wrapper: None,
+                    omit_quotes: false,
                     on_empty,
                     on_error,
                 })
@@ -1456,31 +1471,35 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             on_error,
             alias: _,
         } = json_table;
-        if let Some(path_name) = path_name {
-            return not_impl_err!("JSON_TABLE path name AS {path_name} is not supported");
-        }
-        if !passing.is_empty() {
-            return not_impl_err!("JSON_TABLE PASSING clause is not supported");
-        }
-        if let Some(on_error) = on_error {
-            return not_impl_err!(
-                "JSON_TABLE table-level {on_error} ON ERROR is not supported"
-            );
-        }
+        validate_sql_json_table_names(path_name.as_ref(), &columns)?;
         let json_path = match path {
             SQLExpr::Value(value) => Self::json_table_path_string(value.value)?,
             other => {
-                return plan_err!("JSON_TABLE path must be a string literal, got {other}");
+                return plan_err!(
+                    "JSON_TABLE path must be a string literal, got {other}"
+                );
             }
         };
         let empty_schema = DFSchema::empty();
         let df_json_expr =
             self.sql_expr_to_logical_expr(context_item, &empty_schema, planner_context)?;
+        let passing = self.plan_passing_variables(&passing, &empty_schema, planner_context)?;
         let df_columns = self.convert_sql_json_table_columns(columns)?;
-        Ok(LogicalPlan::JsonTable(JsonTable::try_new(
+        let on_error = match on_error {
+            None | Some(JsonOnBehavior::EmptyArray) => JsonTableErrorHandling::Null,
+            Some(JsonOnBehavior::Error) => JsonTableErrorHandling::Error,
+            Some(other) => {
+                return plan_err!(
+                    "JSON_TABLE table-level {other} ON ERROR is not permitted"
+                );
+            }
+        };
+        Ok(LogicalPlan::JsonTable(JsonTable::try_new_with_options(
             df_json_expr,
+            passing,
             json_path,
             df_columns,
+            on_error,
         )?))
     }
 
@@ -1531,21 +1550,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 on_empty,
                 on_error,
             }) => {
-                if let Some(format) = format {
-                    return not_impl_err!(
-                        "JSON_TABLE column {name} {format} is not supported"
-                    );
-                }
-                if let Some(wrapper) = wrapper {
-                    return not_impl_err!(
-                        "JSON_TABLE column {name} {wrapper} is not supported"
-                    );
-                }
-                if let Some(quotes) = quotes {
-                    return not_impl_err!(
-                        "JSON_TABLE column {name} {quotes} is not supported"
-                    );
-                }
+                let format_json = format.is_some();
+                let wrapper = wrapper.as_ref().map(|wrapper| match wrapper {
+                    JsonQueryWrapper::Without | JsonQueryWrapper::WithoutArray => "without",
+                    JsonQueryWrapper::WithConditional
+                    | JsonQueryWrapper::WithConditionalArray => "conditional",
+                    JsonQueryWrapper::With
+                    | JsonQueryWrapper::WithArray
+                    | JsonQueryWrapper::WithUnconditional
+                    | JsonQueryWrapper::WithUnconditionalArray => "unconditional",
+                });
+                let omit_quotes = quotes
+                    .as_ref()
+                    .is_some_and(|quotes| quotes.behavior == JsonQuotesBehavior::Omit);
                 let path = Self::sql_json_table_column_path(&name, path)?;
                 let field = self.convert_data_type_to_field(&data_type)?;
                 Ok(JsonTableColumnDef::Path {
@@ -1553,6 +1570,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     data_type: field.data_type().clone(),
                     path,
                     exists: false,
+                    format_json,
+                    wrapper: wrapper.map(str::to_string),
+                    omit_quotes,
                     on_empty: on_empty
                         .map(Self::convert_sql_json_behavior)
                         .transpose()?,
@@ -1569,11 +1589,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }) => {
                 let path = Self::sql_json_table_column_path(&name, path)?;
                 let field = self.convert_data_type_to_field(&data_type)?;
+                if !matches!(field.data_type(), DataType::Boolean | DataType::Int32) {
+                    return plan_err!(
+                        "JSON_TABLE EXISTS column {name} must have type boolean or integer"
+                    );
+                }
                 Ok(JsonTableColumnDef::Path {
                     name: name.value,
                     data_type: field.data_type().clone(),
                     path,
                     exists: true,
+                    format_json: false,
+                    wrapper: None,
+                    omit_quotes: false,
                     on_empty: None,
                     on_error: on_error
                         .map(Self::convert_sql_json_behavior)
@@ -1585,11 +1613,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 path_name,
                 columns,
             }) => {
-                if let Some(path_name) = path_name {
-                    return not_impl_err!(
-                        "JSON_TABLE nested path name AS {path_name} is not supported"
-                    );
-                }
+                let _ = path_name;
                 Ok(JsonTableColumnDef::Nested {
                     path: Self::json_table_path_string(path)?,
                     columns: self.convert_sql_json_table_columns(columns)?,

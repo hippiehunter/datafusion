@@ -134,6 +134,16 @@ fn reorder_named_arguments(
                 })?;
 
             if result[param_index].is_some() {
+                // A name repeated in the call is a malformed argument list; a
+                // name that lands on a slot a positional argument already
+                // filled means no declaration accepts this argument list.
+                if param_index < positional_count {
+                    return plan_err!(
+                        "Parameter '{}' is already supplied positionally at position {}",
+                        name,
+                        param_index + 1
+                    );
+                }
                 return plan_err!("Parameter '{}' specified multiple times", name);
             }
 
@@ -159,10 +169,7 @@ fn reorder_named_arguments(
             match default {
                 Some(value) => *slot = Some(Expr::Literal(value.clone(), None)),
                 None => {
-                    return plan_err!(
-                        "Missing required parameter '{}'",
-                        param_names[i]
-                    );
+                    return plan_err!("Missing required parameter '{}'", param_names[i]);
                 }
             }
         }
@@ -184,7 +191,8 @@ mod tests {
         let arg_names = vec![None, None];
 
         let result =
-            resolve_function_arguments(&param_names, None, args.clone(), arg_names).unwrap();
+            resolve_function_arguments(&param_names, None, args.clone(), arg_names)
+                .unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -195,7 +203,8 @@ mod tests {
         let args = vec![lit(1), lit("hello")];
         let arg_names = vec![Some("a".to_string()), Some("b".to_string())];
 
-        let result = resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
+        let result =
+            resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -211,7 +220,8 @@ mod tests {
             Some("b".to_string()),
         ];
 
-        let result = resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
+        let result =
+            resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
 
         // Should be reordered to [a, b, c] = [1, "hello", 3.0]
         assert_eq!(result.len(), 3);
@@ -228,7 +238,8 @@ mod tests {
         let args = vec![lit(1), lit(3.0), lit("hello")];
         let arg_names = vec![None, Some("c".to_string()), Some("b".to_string())];
 
-        let result = resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
+        let result =
+            resolve_function_arguments(&param_names, None, args, arg_names).unwrap();
 
         // Should be reordered to [a, b, c] = [1, "hello", 3.0]
         assert_eq!(result.len(), 3);

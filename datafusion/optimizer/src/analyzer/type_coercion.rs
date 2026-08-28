@@ -43,7 +43,7 @@ use datafusion_expr::expr_schema::cast_subquery;
 use datafusion_expr::logical_plan::Subquery;
 use datafusion_expr::type_coercion::binary::{comparison_coercion, like_coercion};
 use datafusion_expr::type_coercion::functions::{
-    data_types_with_scalar_udf, fields_with_aggregate_udf,
+    data_types_with_scalar_udf, fields_with_aggregate_udf, fields_with_window_udf,
 };
 use datafusion_expr::type_coercion::other::{
     get_coerce_type_for_case_expression, get_coerce_type_for_list,
@@ -52,7 +52,7 @@ use datafusion_expr::type_coercion::{is_datetime, is_utf8_or_utf8view_or_large_u
 use datafusion_expr::utils::merge_schema;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable, Join, Limit, LogicalPlan, Operator, Projection,
-    ScalarUDF, Union, WindowFrame, WindowFrameBound, WindowFrameUnits, is_false,
+    ScalarUDF, Union, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowUDF, is_false,
     is_not_false, is_not_true, is_not_unknown, is_true, is_unknown, not,
 };
 
@@ -568,7 +568,13 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                             udf,
                         )?
                     }
-                    _ => args,
+                    expr::WindowFunctionDefinition::WindowUDF(udf) => {
+                        coerce_arguments_for_signature_with_window_udf(
+                            args,
+                            self.schema,
+                            udf,
+                        )?
+                    }
                 };
 
                 let new_expr = Expr::from(WindowFunction {
@@ -919,6 +925,36 @@ fn coerce_arguments_for_signature_with_aggregate_udf(
         .into_iter()
         .enumerate()
         .map(|(i, expr)| expr.cast_to(&new_types[i], schema))
+        .collect()
+}
+
+/// Returns window-UDF arguments coerced to the fields selected by the UDF's
+/// signature. Window UDFs participate in the same analyzer pass as aggregate
+/// window functions; otherwise a user-defined signature affects only schema
+/// inference while the executable expression retains its original types.
+fn coerce_arguments_for_signature_with_window_udf(
+    expressions: Vec<Expr>,
+    schema: &DFSchema,
+    func: &WindowUDF,
+) -> Result<Vec<Expr>> {
+    if expressions.is_empty() {
+        return Ok(expressions);
+    }
+
+    let current_fields = expressions
+        .iter()
+        .map(|e| e.to_field(schema).map(|(_, f)| f))
+        .collect::<Result<Vec<_>>>()?;
+
+    let new_types = fields_with_window_udf(&current_fields, func)?
+        .into_iter()
+        .map(|f| f.data_type().clone())
+        .collect::<Vec<_>>();
+
+    expressions
+        .into_iter()
+        .zip(new_types)
+        .map(|(expr, data_type)| expr.cast_to(&data_type, schema))
         .collect()
 }
 

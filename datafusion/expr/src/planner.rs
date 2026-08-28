@@ -31,11 +31,29 @@ use crate::{
 use arrow::datatypes::{DataType, Field, FieldRef, SchemaRef};
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::{
-    DFSchema, Result, TableReference, config::ConfigOptions,
+    DFSchema, DataFusionError, Result, TableReference, config::ConfigOptions,
     file_options::file_type::FileType, not_impl_err,
 };
 
 use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor};
+
+/// The output of a set-returning function call as lists: one list-valued
+/// expression per output column, holding the call's `n`th row at position `n`
+/// of every column. Unnesting the columns together yields the call's rows;
+/// a column that runs short pads with NULL, which is what lets `ROWS FROM`
+/// zip several calls into one row set.
+#[derive(Debug, Clone)]
+pub struct SetReturningColumns {
+    /// `(output column name, list-valued expression)` in output order.
+    pub columns: Vec<(String, Expr)>,
+}
+
+/// Physical sampling strategy requested by a SQL `TABLESAMPLE` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TableSampleMethod {
+    Bernoulli,
+    System,
+}
 
 /// Provides the `SQL` query planner meta-data about tables and
 /// functions referenced in SQL statements, without a direct dependency on the
@@ -45,6 +63,27 @@ use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor
 pub trait ContextProvider {
     /// Returns a table by reference, if it exists
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
+
+    /// Build the engine-owned predicate for a physical table sample. The SQL
+    /// planner owns clause parsing and expression typing; the table provider
+    /// owns stable row identity and the sampling algorithm.
+    fn plan_table_sample(
+        &self,
+        _name: &TableReference,
+        _method: TableSampleMethod,
+        _percentage: Expr,
+        _repeatable: Option<Expr>,
+    ) -> Result<Expr> {
+        not_impl_err!("TABLESAMPLE is not supported by this table provider")
+    }
+
+    /// Error identity for attaching `TABLESAMPLE` to a CTE or another
+    /// non-physical relation.
+    fn table_sample_source_error(&self, name: &TableReference) -> DataFusionError {
+        DataFusionError::Plan(format!(
+            "TABLESAMPLE clause can only be applied to physical tables, not \"{name}\""
+        ))
+    }
 
     /// Resolve an unquoted SQL column identifier against a provider-owned
     /// schema when its physical field spelling is not the dialect's canonical
@@ -75,6 +114,29 @@ pub trait ContextProvider {
         _args: Vec<Expr>,
     ) -> Result<Arc<dyn TableSource>> {
         not_impl_err!("Table Functions are not supported")
+    }
+
+    /// Whether `name` is a set-returning function: a call that produces rows
+    /// rather than one value, wherever it is written. The planner asks by
+    /// name alone, before any argument is planned.
+    fn is_set_returning_function(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// The row expansion of a set-returning function call, when the function
+    /// expands as lists. The arguments were planned against `schema`.
+    /// `column_definitions` is the call's `AS (name type, ...)` list — `Some`
+    /// (possibly empty) for a FROM item, `None` for a call in expression
+    /// position, where no such list can be written. `Ok(None)` leaves the
+    /// call to [`Self::get_table_function_source`].
+    fn plan_set_returning_function(
+        &self,
+        _name: &str,
+        _args: &[Expr],
+        _schema: &DFSchema,
+        _column_definitions: Option<&[FieldRef]>,
+    ) -> Result<Option<SetReturningColumns>> {
+        Ok(None)
     }
 
     /// Provides an intermediate table that is used to store the results of a CTE during execution
@@ -176,7 +238,10 @@ pub trait ContextProvider {
     /// Gantry: construct the host's error for a view-write failure the SQL
     /// planner detects while retargeting a statement onto the view's base
     /// relation.
-    fn dml_view_error(&self, error: ViewDmlError<'_>) -> datafusion_common::DataFusionError {
+    fn dml_view_error(
+        &self,
+        error: ViewDmlError<'_>,
+    ) -> datafusion_common::DataFusionError {
         match error {
             ViewDmlError::ColumnNotUpdatable {
                 verb,
@@ -758,6 +823,17 @@ pub trait TypePlanner: Debug + Send + Sync {
         &self,
         _sql_type: &sqlparser::ast::DataType,
     ) -> Result<Option<HashMap<String, String>>> {
+        Ok(None)
+    }
+
+    /// Return the type declaration's default nullability, when it carries one.
+    /// Column constraints are applied on top of this value by the SQL planner.
+    /// Most SQL types have no declaration-level nullability and therefore use
+    /// the default nullable behavior.
+    fn plan_field_nullable(
+        &self,
+        _sql_type: &sqlparser::ast::DataType,
+    ) -> Result<Option<bool>> {
         Ok(None)
     }
 }

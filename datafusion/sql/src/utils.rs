@@ -685,10 +685,23 @@ pub(crate) fn rewrite_recursive_unnest_bottom_up(
             Ok(vec![transformed_expr])
         } else {
             // We need to evaluate the expr in the inner projection,
-            // outer projection just select its name
+            // outer projection just selects its name. Alias the inner value
+            // explicitly: a qualified expression's schema name is a display
+            // spelling (for example `v.r`) and reconstructing a Column from
+            // that spelling turns the qualifier into part of the bare column
+            // name.
             let column_name = transformed_expr.schema_name().to_string();
-            push_projection_dedupl(inner_projection_exprs, transformed_expr);
-            Ok(vec![Expr::Column(Column::from_name(column_name))])
+            let inner_name = format!(
+                "{UNNEST_PLACEHOLDER}(scalar={})",
+                inner_projection_exprs.len()
+            );
+            push_projection_dedupl(
+                inner_projection_exprs,
+                transformed_expr.alias(inner_name.clone()),
+            );
+            Ok(vec![
+                Expr::Column(Column::from_name(inner_name)).alias(column_name),
+            ])
         }
     } else {
         if let Some(transformed_root_exprs) = rewriter.transformed_root_exprs {

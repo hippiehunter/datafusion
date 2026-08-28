@@ -645,36 +645,30 @@ fn f311_03_create_view() {
 /// F311-04: CREATE VIEW with CHECK OPTION
 #[test]
 fn f311_04_create_view_check_option() {
-    crate::assert_not_implemented!(
+    assert_plans!(
         "CREATE VIEW active_persons AS
          SELECT * FROM person WHERE age >= 18
-         WITH CHECK OPTION",
-        "F311-04",
-        "CREATE VIEW with CHECK OPTION"
+         WITH CHECK OPTION"
     );
 }
 
 /// F311-04: CREATE VIEW with CASCADED CHECK OPTION
 #[test]
 fn f311_04_create_view_cascaded_check() {
-    crate::assert_not_implemented!(
+    assert_plans!(
         "CREATE VIEW active_persons AS
          SELECT * FROM person WHERE age >= 18
-         WITH CASCADED CHECK OPTION",
-        "F311-04",
-        "CREATE VIEW with CASCADED CHECK OPTION"
+         WITH CASCADED CHECK OPTION"
     );
 }
 
 /// F311-04: CREATE VIEW with LOCAL CHECK OPTION
 #[test]
 fn f311_04_create_view_local_check() {
-    crate::assert_not_implemented!(
+    assert_plans!(
         "CREATE VIEW active_persons AS
          SELECT * FROM person WHERE age >= 18
-         WITH LOCAL CHECK OPTION",
-        "F311-04",
-        "CREATE VIEW with LOCAL CHECK OPTION"
+         WITH LOCAL CHECK OPTION"
     );
 }
 
