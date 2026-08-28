@@ -1824,7 +1824,7 @@ impl Unparser<'_> {
                         columns,
                         kind,
                         where_clause,
-                        overriding: None,
+                        overriding: insert.overriding.clone(),
                     })
                 }
                 MergeAction::Update(update) => {

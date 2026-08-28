@@ -28,9 +28,9 @@ use arrow::datatypes::Fields;
 use datafusion_common::Result;
 use datafusion_expr::planner::{ContextProvider, DmlGeneratedColumns};
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, AstBox, Expr as SQLExpr, Ident, MergeAction, MergeClause,
-    MergeInsertKind, ObjectName, OnConflict, OnConflictAction, OverridingKind, Query, SelectItem,
-    SetExpr, Value,
+    Assignment, AssignmentTarget, AstBox, Expr as SQLExpr, Ident, MergeAction,
+    MergeClause, MergeInsertKind, ObjectName, OnConflict, OnConflictAction,
+    OverridingKind, Query, SelectItem, SetExpr, Value,
 };
 
 use crate::values::is_default_identifier;
@@ -109,133 +109,50 @@ fn check_insert_rows(
             None => !columns.is_empty(),
         };
         if is_generated && (!columns.is_empty() || written) {
-            return Err(provider.generated_column_write_error(&generated.table_name, column));
+            return Err(
+                provider.generated_column_write_error(&generated.table_name, column)
+            );
         }
         if is_identity && written {
-            return Err(provider.identity_column_write_error(&generated.table_name, column, true));
+            return Err(provider.identity_column_write_error(
+                &generated.table_name,
+                column,
+                true,
+            ));
         }
     }
     Ok(())
-}
-
-/// Apply `OVERRIDING USER VALUE` to an INSERT over a VALUES source: whatever
-/// the statement wrote for an identity column is discarded for the sequence's
-/// value, which spelling DEFAULT there says in the form insert planning
-/// already resolves. `None` when nothing changes.
-pub(crate) fn apply_insert_user_value_override(
-    provider: &dyn ContextProvider,
-    table: &ObjectName,
-    columns: &[Ident],
-    source: &Query,
-) -> Result<Option<Query>> {
-    let Some(generated) = provider.dml_generated_columns(table)? else {
-        return Ok(None);
-    };
-    if generated.identity.is_empty() {
-        return Ok(None);
-    }
-    let SetExpr::Values(_) = source.body.as_ref() else {
-        return Ok(None);
-    };
-    let targets: Vec<&str> = if columns.is_empty() {
-        generated
-            .positional_columns
-            .iter()
-            .map(String::as_str)
-            .collect()
-    } else {
-        columns.iter().map(|column| column.value.as_str()).collect()
-    };
-    let identity_positions: Vec<usize> = targets
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| generated.identity.iter().any(|name| name == *column))
-        .map(|(position, _)| position)
-        .collect();
-    if identity_positions.is_empty() {
-        return Ok(None);
-    }
-    let mut source = source.clone();
-    let mut changed = false;
-    if let SetExpr::Values(values) = source.body.as_mut() {
-        for row in &mut values.rows {
-            for &position in &identity_positions {
-                if let Some(value) = row.get_mut(position)
-                    && !is_default_identifier_expr(value)
-                {
-                    *value = SQLExpr::Identifier(Ident::new("DEFAULT"));
-                    changed = true;
-                }
-            }
-        }
-    }
-    Ok(changed.then_some(source))
 }
 
 /// Check MERGE insert clauses against the target's generated and identity
-/// columns, and apply `OVERRIDING USER VALUE` where a clause carries it. A
-/// MERGE insert list has no DEFAULT marker, so the identity columns are
-/// dropped from the list and their values from every row: an omitted identity
-/// draws its sequence.
+/// columns and return their typed storage contract. `OVERRIDING USER VALUE`
+/// is represented by the logical MERGE insert's provided-column set; this
+/// validation never edits the parsed statement.
 pub(crate) fn prepare_merge_insert_clauses(
     provider: &dyn ContextProvider,
     table: &ObjectName,
-    clauses: &mut [MergeClause],
-) -> Result<()> {
+    clauses: &[MergeClause],
+) -> Result<Option<DmlGeneratedColumns>> {
     let Some(generated) = provider.dml_generated_columns(table)? else {
-        return Ok(());
+        return Ok(None);
     };
-    for clause in clauses.iter_mut() {
-        let MergeAction::Insert(insert) = &mut clause.action else {
+    for clause in clauses {
+        let MergeAction::Insert(insert) = &clause.action else {
             continue;
         };
-        {
-            let rows = match &insert.kind {
-                MergeInsertKind::Values(values) => Some(values.rows.as_slice()),
-                _ => None,
-            };
-            check_insert_rows(
-                provider,
-                &generated,
-                &insert.columns,
-                rows,
-                insert.overriding.as_ref(),
-            )?;
-        }
-        if !matches!(insert.overriding, Some(OverridingKind::UserValue))
-            || generated.identity.is_empty()
-            || insert.columns.is_empty()
-        {
-            continue;
-        }
-        let dropped: Vec<usize> = insert
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| generated.identity.iter().any(|name| *name == column.value))
-            .map(|(position, _)| position)
-            .collect();
-        if dropped.is_empty() {
-            continue;
-        }
-        let mut position = 0usize;
-        insert.columns.retain(|_| {
-            let keep = !dropped.contains(&position);
-            position += 1;
-            keep
-        });
-        if let MergeInsertKind::Values(values) = &mut insert.kind {
-            for row in values.rows.iter_mut() {
-                let mut position = 0usize;
-                row.retain(|_| {
-                    let keep = !dropped.contains(&position);
-                    position += 1;
-                    keep
-                });
-            }
-        }
+        let rows = match &insert.kind {
+            MergeInsertKind::Values(values) => Some(values.rows.as_slice()),
+            _ => None,
+        };
+        check_insert_rows(
+            provider,
+            &generated,
+            &insert.columns,
+            rows,
+            insert.overriding.as_ref(),
+        )?;
     }
-    Ok(())
+    Ok(Some(generated))
 }
 
 /// Reject writes to generated columns in an UPDATE's assignment list, then
@@ -311,7 +228,8 @@ pub(crate) fn prepare_on_conflict_assignments(
     let Some(generated) = provider.dml_generated_columns(table)? else {
         return Ok(None);
     };
-    let Some(extended) = append_generated_assignments(&generated, &do_update.assignments) else {
+    let Some(extended) = append_generated_assignments(&generated, &do_update.assignments)
+    else {
         return Ok(None);
     };
     let mut rewritten = on_conflict.clone();
@@ -338,10 +256,16 @@ fn reject_generated_assignments(
             continue;
         }
         if generated.columns.iter().any(|name| *name == leaf) {
-            return Err(provider.generated_column_write_error(&generated.table_name, &leaf));
+            return Err(
+                provider.generated_column_write_error(&generated.table_name, &leaf)
+            );
         }
         if generated.identity_always.iter().any(|name| *name == leaf) {
-            return Err(provider.identity_column_write_error(&generated.table_name, &leaf, false));
+            return Err(provider.identity_column_write_error(
+                &generated.table_name,
+                &leaf,
+                false,
+            ));
         }
     }
     Ok(())
@@ -418,7 +342,8 @@ fn substitute_assigned_columns(expr: &mut SQLExpr, assigned: &HashMap<String, SQ
             substitute_assigned_columns(expr, assigned);
         }
         SQLExpr::Function(function) => {
-            if let sqlparser::ast::FunctionArguments::List(arguments) = &mut function.args {
+            if let sqlparser::ast::FunctionArguments::List(arguments) = &mut function.args
+            {
                 for argument in &mut arguments.args {
                     if let sqlparser::ast::FunctionArg::Unnamed(
                         sqlparser::ast::FunctionArgExpr::Expr(argument),
@@ -454,23 +379,16 @@ fn substitute_assigned_columns(expr: &mut SQLExpr, assigned: &HashMap<String, SQ
     }
 }
 
-pub(crate) struct NarrowedInsert {
-    pub columns: Vec<Ident>,
-    pub source: Query,
-}
-
-/// Narrow an INSERT over a VALUES source to the columns some row actually
-/// writes. A position every row leaves to the column's default — a short
-/// row's missing tail included — is a column the statement does not write;
-/// naming only the written columns says that in the form the planner and the
-/// write path both read, which is what separates `DEFAULT` from a written
-/// NULL for a column the storage layer generates. `None` when nothing
-/// changes.
-pub(crate) fn narrow_insert_to_written_columns(
+/// Return the typed set of columns an INSERT over a VALUES source actually
+/// provides. A position every row leaves to the column's default — a short
+/// row's missing tail included — is omitted from the storage write contract.
+/// The parsed VALUES rows remain untouched and are still planned in their
+/// declared target shape. `None` means every target position is provided.
+pub(crate) fn insert_written_columns(
     columns: &[Ident],
     source: &Query,
     positional_columns: &[String],
-) -> Option<NarrowedInsert> {
+) -> Option<Vec<Ident>> {
     let SetExpr::Values(values) = source.body.as_ref() else {
         return None;
     };
@@ -495,56 +413,12 @@ pub(crate) fn narrow_insert_to_written_columns(
     if written.len() == target_columns.len() {
         return None;
     }
-    if written.is_empty() {
-        // `INSERT INTO t VALUES (DEFAULT, DEFAULT)` writes no column and has
-        // no column-list spelling; it keeps the padded form.
-        if !columns.is_empty() {
-            return None;
-        }
-        let needs_padding = values
-            .rows
+    Some(
+        written
             .iter()
-            .any(|row| row.len() < target_columns.len());
-        if !needs_padding {
-            return None;
-        }
-        let mut source = source.clone();
-        if let SetExpr::Values(values) = source.body.as_mut() {
-            for row in &mut values.rows {
-                if row.len() < target_columns.len() {
-                    row.extend(
-                        std::iter::repeat_with(|| SQLExpr::Identifier(Ident::new("DEFAULT")))
-                            .take(target_columns.len() - row.len()),
-                    );
-                }
-            }
-        }
-        return Some(NarrowedInsert {
-            columns: columns.to_vec(),
-            source,
-        });
-    }
-    let mut source = source.clone();
-    if let SetExpr::Values(values) = source.body.as_mut() {
-        for row in &mut values.rows {
-            *row = written
-                .iter()
-                .map(|&position| {
-                    row.get(position)
-                        .cloned()
-                        .unwrap_or_else(|| SQLExpr::Identifier(Ident::new("DEFAULT")))
-                })
-                .collect();
-        }
-    }
-    let narrowed_columns = written
-        .iter()
-        .map(|&position| Ident::new(target_columns[position]))
-        .collect();
-    Some(NarrowedInsert {
-        columns: narrowed_columns,
-        source,
-    })
+            .map(|&position| Ident::new(target_columns[position]))
+            .collect(),
+    )
 }
 
 fn is_default_identifier_expr(expr: &SQLExpr) -> bool {

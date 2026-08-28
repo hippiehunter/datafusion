@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use datafusion_common::{DFSchemaRef, TableReference};
-use sqlparser::ast::{AssignmentTarget, MergeClauseKind, ObjectName};
+use sqlparser::ast::{AssignmentTarget, MergeClauseKind, ObjectName, OverridingKind};
 
 use crate::logical_plan::dml::make_count_schema;
 use crate::{Expr, LogicalPlan};
@@ -144,7 +144,13 @@ pub enum MergeInsertKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct MergeInsertExpr {
+    /// Full target-row evaluation columns, in table order.
     pub columns: Vec<ObjectName>,
+    /// Columns the statement actually provides to storage. Identity columns
+    /// discarded by `OVERRIDING USER VALUE` are absent here.
+    pub provided_columns: Vec<ObjectName>,
+    /// The statement's identity override contract.
+    pub overriding: Option<OverridingKind>,
     pub kind: MergeInsertKind,
     pub insert_predicate: Option<Expr>,
 }

@@ -3930,14 +3930,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // MERGE insert clauses face the same generated- and identity-column
         // contract as a standalone INSERT.
-        let mut clauses = clauses;
-        if let TableFactor::Table { name, .. } = &table {
+        let generated_columns = if let TableFactor::Table { name, .. } = &table {
             crate::dml_front::prepare_merge_insert_clauses(
                 self.context_provider,
                 name,
-                &mut clauses,
-            )?;
-        }
+                &clauses,
+            )?
+        } else {
+            None
+        };
 
         let (table_name, table_alias) = match table {
             TableFactor::Table {
@@ -4050,11 +4051,36 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 ast::MergeAction::Insert(insert) => {
                     let insert_predicate =
                         insert.where_clause.map(&mut normalize_expr).transpose()?;
+                    let overriding = insert.overriding.clone();
                     let named_columns = insert
                         .columns
                         .iter()
                         .map(|ident| self.ident_normalizer.normalize(ident.clone()))
                         .collect::<Vec<_>>();
+                    let positional_count = match &insert.kind {
+                        ast::MergeInsertKind::DefaultValues => 0,
+                        ast::MergeInsertKind::Values(values) => {
+                            values.rows.first().map_or(0, Vec::len)
+                        }
+                        ast::MergeInsertKind::Row => target_schema.fields().len(),
+                    };
+                    let mut provided_column_names = if named_columns.is_empty() {
+                        target_schema
+                            .fields()
+                            .iter()
+                            .take(positional_count)
+                            .map(|field| field.name().clone())
+                            .collect::<Vec<_>>()
+                    } else {
+                        named_columns.clone()
+                    };
+                    if matches!(overriding, Some(ast::OverridingKind::UserValue))
+                        && let Some(generated) = &generated_columns
+                    {
+                        provided_column_names.retain(|column| {
+                            !generated.identity.iter().any(|identity| identity == column)
+                        });
+                    }
                     let kind = match insert.kind {
                         // DEFAULT VALUES is the whole row taken from defaults:
                         // an empty explicit row that the expansion below fills.
@@ -4095,8 +4121,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         .iter()
                         .map(|field| ObjectName::from(vec![Ident::new(field.name())]))
                         .collect();
+                    let provided_columns = provided_column_names
+                        .into_iter()
+                        .map(|name| ObjectName::from(vec![Ident::new(name)]))
+                        .collect();
                     MergeAction::Insert(MergeInsertExpr {
                         columns,
+                        provided_columns,
+                        overriding,
                         kind,
                         insert_predicate,
                     })
@@ -4927,20 +4959,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Some(source),
             overriding,
         )?;
-        // OVERRIDING USER VALUE discards what the statement wrote for an
-        // identity column in favor of the sequence's value.
-        let user_value_override = if matches!(overriding, Some(OverridingKind::UserValue))
-        {
-            crate::dml_front::apply_insert_user_value_override(
-                self.context_provider,
-                table_name,
-                columns,
-                source,
-            )?
+        let overriding_user_value =
+            matches!(overriding, Some(OverridingKind::UserValue));
+        let overriding_user_identity_columns = if overriding_user_value {
+            self.context_provider
+                .dml_generated_columns(table_name)?
+                .map(|generated| generated.identity)
+                .unwrap_or_default()
         } else {
-            None
+            Vec::new()
         };
-        let source = user_value_override.as_ref().unwrap_or(source);
         let adapted_conflict = crate::dml_front::prepare_on_conflict_assignments(
             self.context_provider,
             table_name,
@@ -4955,10 +4983,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let table_source = self.context_provider.get_table_source(table_name.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
 
-        // A VALUES position every row leaves to the column's default is a
-        // column the statement does not write; narrowing the write to the
-        // written columns separates `DEFAULT` from a written NULL for a
-        // column the storage layer generates.
+        // A VALUES position every row leaves to the column's default is not a
+        // storage-provided column. Keep that typed contract separately from
+        // the parsed source; planning still sees the statement's declared
+        // target shape unchanged.
         let positional_columns: Vec<String> = table_schema
             .fields()
             .iter()
@@ -4966,18 +4994,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .collect();
         // A subscript or field target (`f2[1]`, `f3.if1`) never resolves to
         // the column's default: the planner refuses `DEFAULT` in such a slot.
-        let narrowed = if column_targets.is_some() {
+        let written_columns = if column_targets.is_some() {
             None
         } else {
-            crate::dml_front::narrow_insert_to_written_columns(
-                columns,
-                source,
-                &positional_columns,
-            )
-        };
-        let (columns, source): (&[Ident], &Query) = match &narrowed {
-            Some(narrowed) => (&narrowed.columns, &narrowed.source),
-            None => (columns, source),
+            crate::dml_front::insert_written_columns(columns, source, &positional_columns)
         };
 
         // Get insert fields and target table's value indices
@@ -4988,12 +5008,27 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // If value_indices[i] = None, it means that the value of the i-th target table's column is
         // not provided, and should be filled with a default value later.
         // A column written through several paths is one target column.
-        let mut target_col_names: Vec<String> = Vec::with_capacity(columns.len());
-        for column in columns {
+        let provided_columns = written_columns.as_deref().unwrap_or(columns);
+        let mut target_col_names: Vec<String> = if overriding_user_value
+            && written_columns.is_none()
+            && columns.is_empty()
+        {
+            positional_columns.clone()
+        } else {
+            Vec::with_capacity(provided_columns.len())
+        };
+        for column in provided_columns {
             let name = self.ident_normalizer.normalize(column.clone());
             if !target_col_names.contains(&name) {
                 target_col_names.push(name);
             }
+        }
+        if overriding_user_value {
+            target_col_names.retain(|column| {
+                !overriding_user_identity_columns
+                    .iter()
+                    .any(|identity| identity == column)
+            });
         }
 
         // Per target table column, the source columns feeding it, each with
@@ -5300,8 +5335,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Arc::clone(&table_source),
             WriteOp::Insert(insert_op),
             Arc::new(source),
-        )
-        .with_target_columns(target_col_names);
+        );
+        if written_columns.is_some() || !columns.is_empty() || overriding_user_value {
+            dml = dml.with_target_columns(target_col_names);
+        }
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }

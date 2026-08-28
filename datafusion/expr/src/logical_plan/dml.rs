@@ -248,9 +248,7 @@ impl DmlStatement {
 
     /// Set explicit INSERT target columns.
     pub fn with_target_columns(mut self, columns: Vec<String>) -> Self {
-        if !columns.is_empty() {
-            self.target_columns = Some(columns);
-        }
+        self.target_columns = Some(columns);
         self
     }
 

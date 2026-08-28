@@ -528,9 +528,11 @@ impl JsonTable {
                     metadata,
                     ..
                 } => {
-                    fields.push(Arc::new(
-                        metadata.add_to_field(Field::new(name, data_type.clone(), true)),
-                    ));
+                    fields.push(Arc::new(metadata.add_to_field(Field::new(
+                        name,
+                        data_type.clone(),
+                        true,
+                    ))));
                 }
                 JsonTableColumnDef::Ordinality { name } => {
                     // Ordinality is a row number, always BIGINT
@@ -549,12 +551,10 @@ impl JsonTable {
 impl PartialOrd for JsonTable {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.json_path.partial_cmp(&other.json_path) {
-            Some(Ordering::Equal) => {
-                match self.json_expr.partial_cmp(&other.json_expr) {
-                    Some(Ordering::Equal) => self.passing.partial_cmp(&other.passing),
-                    cmp => cmp,
-                }
-            }
+            Some(Ordering::Equal) => match self.json_expr.partial_cmp(&other.json_expr) {
+                Some(Ordering::Equal) => self.passing.partial_cmp(&other.passing),
+                cmp => cmp,
+            },
             cmp => cmp,
         }
         .filter(|cmp| *cmp != Ordering::Equal || self == other)
@@ -1500,8 +1500,10 @@ impl LogicalPlan {
                 schema: _,
             }) => {
                 // Rebuild JsonTable to recompute schema
-                JsonTable::try_new_with_options(json_expr, passing, json_path, columns, on_error)
-                    .map(LogicalPlan::JsonTable)
+                JsonTable::try_new_with_options(
+                    json_expr, passing, json_path, columns, on_error,
+                )
+                .map(LogicalPlan::JsonTable)
             }
             LogicalPlan::GraphTable(GraphTable {
                 graph_name,
@@ -1636,6 +1638,8 @@ impl LogicalPlan {
 
                             MergeAction::Insert(MergeInsertExpr {
                                 columns: insert.columns.clone(),
+                                provided_columns: insert.provided_columns.clone(),
+                                overriding: insert.overriding.clone(),
                                 kind,
                                 insert_predicate,
                             })
