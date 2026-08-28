@@ -1683,16 +1683,30 @@ fn bind_unnest_order_by_to_output(
     select_exprs: &[Expr],
     order_by: Vec<SortExpr>,
 ) -> Result<Vec<SortExpr>> {
+    if !select_exprs.iter().any(has_unnest_expr_recursively) {
+        return Ok(order_by);
+    }
     order_by
         .into_iter()
         .map(|sort| {
-            if !has_unnest_expr_recursively(&sort.expr) {
-                return Ok(sort);
-            }
             let order_expr = sort.expr.clone().unalias();
             let Some(output_index) = select_exprs
                 .iter()
-                .position(|select_expr| select_expr.clone().unalias() == order_expr)
+                .position(|select_expr| match &order_expr {
+                    // ORDER BY aliases and ordinals are resolved against
+                    // the provisional select projection before relational
+                    // UNNEST expansion. Every provisional output column
+                    // can acquire a different qualifier when that expansion
+                    // rebuilds the projection, not only the SRF's own slot.
+                    // Bind the typed output identity to the same final slot.
+                    Expr::Column(order_column) => {
+                        select_expr.qualified_name().1 == order_column.name
+                    }
+                    _ => {
+                        has_unnest_expr_recursively(select_expr)
+                            && select_expr.clone().unalias() == order_expr
+                    }
+                })
             else {
                 return Ok(sort);
             };
