@@ -455,8 +455,34 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             };
         }
 
-        // User-defined function (UDF) should have precedence
-        if let Some(fm) = self.context_provider.get_function_meta(&name) {
+        // User-defined function (UDF) should have precedence. PostgreSQL
+        // resolves routines by kind and signature together: when an
+        // aggregate family shares this name and the scalar family cannot
+        // accept the written argument types, the call belongs to aggregate
+        // resolution below rather than failing inside the scalar family's
+        // coercion.
+        let scalar_udf = match self.context_provider.get_function_meta(&name) {
+            Some(fm) if self.context_provider.get_aggregate_meta(&name).is_some() => {
+                let (probe_args, _) =
+                    self.function_args_to_expr_with_names(args, schema, planner_context)?;
+                let accepts = match probe_args
+                    .iter()
+                    .map(|arg| arg.get_type(schema))
+                    .collect::<datafusion_common::Result<Vec<_>>>()
+                {
+                    Ok(types) => {
+                        datafusion_expr::type_coercion::functions::data_types_with_scalar_udf(
+                            &types, &fm,
+                        )
+                        .is_ok()
+                    }
+                    Err(_) => true,
+                };
+                accepts.then_some(fm)
+            }
+            other => other,
+        };
+        if let Some(fm) = scalar_udf {
             let normal_form_args = unicode_normal_form_args(&name, args);
             let args = normal_form_args.as_deref().unwrap_or(args);
             let (args, arg_names) =
