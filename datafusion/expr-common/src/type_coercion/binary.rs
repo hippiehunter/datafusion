@@ -2030,6 +2030,21 @@ fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
             Some(Interval(MonthDayNano))
         }
         (Date64, Date32) | (Date32, Date64) => Some(Date64),
+        // Two times of day meet in the finer of their two units. A clock
+        // reading is bounded by one day, so the finest unit still leaves an
+        // i64 nowhere near overflow and the widening is exact -- the opposite
+        // of the timestamp case below, where a narrower unit costs range
+        // rather than precision. Without this a four-byte legacy clock field,
+        // which arrives as Time32, cannot be compared with the microsecond
+        // `TIME` carried by every time literal and stored time column.
+        (Time32(lhs_unit), Time32(rhs_unit)) => {
+            Some(Time32(finer_time_unit(lhs_unit, rhs_unit)))
+        }
+        (Time64(lhs_unit), Time64(rhs_unit)) => {
+            Some(Time64(finer_time_unit(lhs_unit, rhs_unit)))
+        }
+        // Every unit Time64 can hold is finer than every unit Time32 can.
+        (Time32(_), Time64(unit)) | (Time64(unit), Time32(_)) => Some(Time64(*unit)),
         // A date meets a timestamp in the timestamp's own unit and zone: a
         // nanosecond target would shrink the range to 1677..2262 and make
         // every microsecond timestamp outside it overflow.
@@ -2037,6 +2052,26 @@ fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
             Some(Timestamp(*unit, tz.clone()))
         }
         _ => None,
+    }
+}
+
+/// The finer of two time units, ordered second, millisecond, microsecond,
+/// nanosecond. Converting a time of day to a finer unit is exact, so this is
+/// the unit at which two differently carried clock values can be compared
+/// without either side losing a digit.
+fn finer_time_unit(lhs: &TimeUnit, rhs: &TimeUnit) -> TimeUnit {
+    fn rank(unit: &TimeUnit) -> u8 {
+        match unit {
+            TimeUnit::Second => 0,
+            TimeUnit::Millisecond => 1,
+            TimeUnit::Microsecond => 2,
+            TimeUnit::Nanosecond => 3,
+        }
+    }
+    if rank(rhs) > rank(lhs) {
+        *rhs
+    } else {
+        *lhs
     }
 }
 

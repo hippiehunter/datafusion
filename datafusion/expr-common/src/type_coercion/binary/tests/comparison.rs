@@ -791,3 +791,42 @@ fn test_decimal_cross_variant_comparison_coercion() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_time_of_day_comparison_coercion() -> Result<()> {
+    // A time of day is bounded by one day, so the two sides meet in the finer
+    // unit and neither loses a digit.
+    test_coercion_binary_rule!(
+        DataType::Time32(TimeUnit::Second),
+        DataType::Time32(TimeUnit::Millisecond),
+        Operator::Eq,
+        DataType::Time32(TimeUnit::Millisecond)
+    );
+    test_coercion_binary_rule!(
+        DataType::Time64(TimeUnit::Microsecond),
+        DataType::Time64(TimeUnit::Nanosecond),
+        Operator::Lt,
+        DataType::Time64(TimeUnit::Nanosecond)
+    );
+    // Mixed carriers: every unit Time64 can hold is finer than every unit
+    // Time32 can, so the 64-bit side sets the unit.
+    test_coercion_binary_rule!(
+        DataType::Time32(TimeUnit::Millisecond),
+        DataType::Time64(TimeUnit::Microsecond),
+        Operator::Eq,
+        DataType::Time64(TimeUnit::Microsecond)
+    );
+    test_coercion_binary_rule!(
+        DataType::Time64(TimeUnit::Microsecond),
+        DataType::Time32(TimeUnit::Millisecond),
+        Operator::GtEq,
+        DataType::Time64(TimeUnit::Microsecond)
+    );
+    test_coercion_binary_rule!(
+        DataType::Time32(TimeUnit::Second),
+        DataType::Time64(TimeUnit::Nanosecond),
+        Operator::NotEq,
+        DataType::Time64(TimeUnit::Nanosecond)
+    );
+    Ok(())
+}
