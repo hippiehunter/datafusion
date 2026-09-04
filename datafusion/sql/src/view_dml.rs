@@ -27,34 +27,54 @@
 //! hidden row identity and RETURNING all resolve against the base relation
 //! with no view-shaped special case downstream.
 //!
-//! [`ContextProvider::resolve_dml_view_target`]: datafusion_expr::planner::ContextProvider::resolve_dml_view_target
+//! [`ContextProvider::resolve_dml_view_target`]: crate::planner::ContextProvider::resolve_dml_view_target
 
+use crate::ast_walk::Walk as AstWalk;
+use crate::planner::{ViewDmlError, ViewDmlTarget};
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{Result, TableReference};
-use datafusion_expr::LogicalPlan;
-use datafusion_expr::planner::{ViewDmlError, ViewDmlTarget};
+use datafusion_common::{DataFusionError, Result};
+use datafusion_expr::{BoundSqlExpression, DmlCheckOption, LogicalPlan};
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, AstBox, BinaryOperator, Expr as SQLExpr, Ident, ObjectName,
-    ObjectNamePart, Query, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visit,
-    VisitMut, Visitor, VisitorMut,
+    Assignment, AssignmentTarget, Expr as SQLExpr, Ident, ObjectName, ObjectNamePart,
+    Query, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visitor, VisitorMut,
 };
 use std::ops::ControlFlow;
 
-/// Record the retargeted write's check-option obligation on its DML plan
-/// node. The predicate itself is re-derived from the view at lowering time,
-/// so a cached plan honors `ALTER VIEW ... RESET (check_option)`. A RETURNING
-/// clause can leave the write under a projection, so the DML node is found
-/// rather than assumed to be the root.
+/// Combine the already-bound check-option restrictions retained by the
+/// catalog. View source is never reopened during DML planning.
+pub(crate) fn bind_check_option(target: &ViewDmlTarget) -> Result<Option<DmlCheckOption>> {
+    let Some(view_name) = target.check_option_view.clone() else {
+        return Ok(None);
+    };
+    let predicate = target
+        .check_option_restrictions
+        .iter()
+        .map(|restriction| restriction.expression().clone())
+        .reduce(|left, right| left.and(right))
+        .ok_or_else(|| {
+        DataFusionError::Internal(format!(
+            "view {view_name} has a check-option marker without a row restriction"
+        ))
+    })?;
+    Ok(Some(DmlCheckOption {
+        view_name,
+        predicate: BoundSqlExpression::new(predicate),
+    }))
+}
+
+/// Record the retargeted write's already-bound check-option obligation on its
+/// DML plan node. A RETURNING clause can leave the write under a projection,
+/// so the DML node is found rather than assumed to be the root.
 pub(crate) fn stamp_check_option(
     plan: LogicalPlan,
-    view: Option<TableReference>,
+    check_option: Option<DmlCheckOption>,
 ) -> Result<LogicalPlan> {
-    let Some(view) = view else {
+    let Some(check_option) = check_option else {
         return Ok(plan);
     };
     plan.transform_down(|node| match node {
         LogicalPlan::Dml(mut dml) => {
-            dml.check_option_view = Some(view.clone());
+            dml.check_option = Some(check_option.clone());
             Ok(Transformed::yes(LogicalPlan::Dml(dml)))
         }
         other => Ok(Transformed::no(other)),
@@ -99,9 +119,10 @@ pub(crate) fn view_reference_qualifiers(
 pub(crate) struct RewrittenInsert {
     pub table: ObjectName,
     pub columns: Vec<Ident>,
-    /// `Some` when view-level column defaults were materialized into the
-    /// VALUES rows; the caller plans this source instead of the statement's.
-    pub source: Option<Query>,
+    /// View-level defaults for omitted columns, already mapped onto the final
+    /// base relation. The INSERT planner applies these semantic expressions
+    /// at the same projection boundary as ordinary table defaults.
+    pub column_defaults: Vec<(String, BoundSqlExpression)>,
     pub returning: Option<Vec<SelectItem>>,
 }
 
@@ -116,44 +137,6 @@ pub(crate) fn rewrite_insert(
     source: Option<&Query>,
     returning: Option<&[SelectItem]>,
 ) -> Result<RewrittenInsert, RewriteFailure> {
-    // Defaults attached to the view itself override the base relation's.
-    // With an explicit target list, materialize omitted view-default columns
-    // before the retarget; a column with no view default stays omitted so the
-    // base relation's own default remains authoritative.
-    let mut materialized_columns;
-    let mut materialized_source = None;
-    let mut columns = columns;
-    if !columns.is_empty() && !target.column_defaults.is_empty() {
-        let additions: Vec<(&String, &SQLExpr)> = target
-            .column_defaults
-            .iter()
-            .filter(|(name, _)| {
-                !columns
-                    .iter()
-                    .any(|column| column.value.eq_ignore_ascii_case(name))
-            })
-            .map(|(name, expr)| (name, expr))
-            .collect();
-        if !additions.is_empty()
-            && let Some(query) = source
-            && let SetExpr::Values(_) = query.body.as_ref()
-        {
-            let mut query = query.clone();
-            materialized_columns = columns.to_vec();
-            if let SetExpr::Values(values) = query.body.as_mut() {
-                for (name, expression) in additions {
-                    materialized_columns.push(Ident::new(name.clone()));
-                    for row in &mut values.rows {
-                        row.push((*expression).clone());
-                    }
-                }
-            }
-            materialized_source = Some(query);
-            columns = &materialized_columns;
-        }
-    }
-    let source = materialized_source.as_ref().or(source);
-
     let rewritten_columns = if columns.is_empty() {
         let width = source
             .and_then(insert_source_width)
@@ -172,18 +155,43 @@ pub(crate) fn rewrite_insert(
     } else {
         let mut rewritten = Vec::with_capacity(columns.len());
         for column in columns {
-            let base_column = target.base_column(&column.value).flatten().ok_or_else(|| {
-                RewriteFailure {
-                    verb: "insert into",
-                    column: column.value.clone(),
-                }
-            })?;
+            let base_column =
+                target.base_column(&column.value).flatten().ok_or_else(|| {
+                    RewriteFailure {
+                        verb: "insert into",
+                        column: column.value.clone(),
+                    }
+                })?;
             let mut renamed = column.clone();
             renamed.value = base_column.to_string();
             rewritten.push(renamed);
         }
         rewritten
     };
+
+    // Defaults attached to the view itself override the base relation's, but
+    // only for view columns this statement omitted. Keep them semantic and
+    // map their names onto the final base relation instead of appending AST
+    // expressions to a VALUES list (which also missed INSERT ... SELECT).
+    let mut column_defaults = Vec::new();
+    if !columns.is_empty() {
+        for (view_column, expression) in &target.column_defaults {
+            if columns
+                .iter()
+                .any(|column| column.value.eq_ignore_ascii_case(view_column))
+            {
+                continue;
+            }
+            let base_column = target
+                .base_column(view_column)
+                .flatten()
+                .ok_or_else(|| RewriteFailure {
+                    verb: "insert into",
+                    column: view_column.clone(),
+                })?;
+            column_defaults.push((base_column.to_string(), expression.clone()));
+        }
+    }
 
     // The written row's own column list already names base columns, so a
     // RETURNING item only has to be re-labelled where the view renames.
@@ -193,7 +201,7 @@ pub(crate) fn rewrite_insert(
     Ok(RewrittenInsert {
         table: target.base_relation.clone(),
         columns: rewritten_columns,
-        source: materialized_source,
+        column_defaults,
         returning,
     })
 }
@@ -238,8 +246,10 @@ pub(crate) fn rewrite_update(
     let needs_alias = assignments
         .iter()
         .any(|assignment| references_qualifier(&assignment.value, &qualifiers))
-        || predicate.is_some_and(|predicate| references_qualifier(predicate, &qualifiers))
-        || returning.is_some_and(|items| returning_references_qualifier(items, &qualifiers));
+        || predicate
+            .is_some_and(|predicate| references_qualifier(predicate, &qualifiers))
+        || returning
+            .is_some_and(|items| returning_references_qualifier(items, &qualifiers));
 
     let mut rewritten_table = table.clone();
     if let TableFactor::Table { name, alias, .. } = &mut rewritten_table.relation {
@@ -265,9 +275,6 @@ pub(crate) fn rewrite_update(
     if let Some(predicate) = rewritten_predicate.as_mut() {
         rewrite_expr(predicate, target, &qualifiers, "update")?;
     }
-    // An UPDATE through the view may only touch rows the view shows.
-    let rewritten_predicate = restrict(rewritten_predicate, target);
-
     let returning =
         returning.map(|items| rewrite_returning_items(items, target, &qualifiers, true));
     Ok(RewrittenUpdate {
@@ -320,8 +327,6 @@ pub(crate) fn rewrite_delete(
     if let Some(predicate) = rewritten_predicate.as_mut() {
         rewrite_predicate(predicate, target, &qualifiers);
     }
-    let rewritten_predicate = restrict(rewritten_predicate, target);
-
     let returning =
         returning.map(|items| rewrite_returning_items(items, target, &qualifiers, false));
     RewrittenDelete {
@@ -349,7 +354,8 @@ fn rewrite_assignment_target(
         AssignmentTarget::Indirection(_) => Vec::new(),
     };
     for name in names {
-        let Some(written) = name.0.last().and_then(ObjectNamePart::as_ident).cloned() else {
+        let Some(written) = name.0.last().and_then(ObjectNamePart::as_ident).cloned()
+        else {
             continue;
         };
         let base_column =
@@ -405,7 +411,7 @@ fn references_qualifier(expr: &SQLExpr, qualifiers: &[String]) -> bool {
         qualifiers,
         found: false,
     };
-    let _ = expr.visit(&mut search);
+    let _ = expr.walk(&mut search);
     search.found
 }
 
@@ -477,39 +483,6 @@ fn returned_column_label(expr: &SQLExpr, target: &ViewDmlTarget) -> Option<Strin
     (!base.eq_ignore_ascii_case(&name)).then_some(name)
 }
 
-/// Add the view stack's row restrictions to a predicate.
-fn restrict(selection: Option<SQLExpr>, target: &ViewDmlTarget) -> Option<SQLExpr> {
-    let mut restrictions = target.row_restrictions.clone();
-    if let Some(selection) = selection {
-        restrictions.insert(0, selection);
-    }
-    conjunction(restrictions)
-}
-
-/// Combine restrictions into a single `AND` chain, or `None` when there are
-/// none.
-fn conjunction(restrictions: Vec<SQLExpr>) -> Option<SQLExpr> {
-    restrictions
-        .into_iter()
-        .reduce(|left, right| SQLExpr::BinaryOp {
-            left: AstBox::new(nest_if_needed(left)),
-            op: BinaryOperator::And,
-            right: AstBox::new(nest_if_needed(right)),
-        })
-}
-
-/// Parenthesize a restriction before it is combined with another, so an `OR`
-/// inside a view body cannot swallow the conjunct next to it.
-fn nest_if_needed(expr: SQLExpr) -> SQLExpr {
-    match expr {
-        expr @ (SQLExpr::Identifier(_)
-        | SQLExpr::CompoundIdentifier(_)
-        | SQLExpr::Value(_)
-        | SQLExpr::Nested(_)) => expr,
-        other => SQLExpr::Nested(AstBox::new(other)),
-    }
-}
-
 /// Rename the column a reference names, mapping the view's namespace onto the
 /// base relation's. `qualifiers` names the relation spellings a qualified
 /// reference may carry; a reference qualified by anything else belongs to
@@ -570,5 +543,5 @@ fn visit_expr_mut(expr: &mut SQLExpr, visit: &mut impl FnMut(&mut SQLExpr)) {
         }
     }
     let mut walk = Walk { visit };
-    let _ = expr.visit(&mut walk);
+    let _ = expr.walk_mut(&mut walk);
 }

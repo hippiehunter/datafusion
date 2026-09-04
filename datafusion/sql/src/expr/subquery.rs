@@ -15,14 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{
     Column, DFSchema, Diagnostic, Result, ScalarValue, Span, Spans, not_impl_err,
     plan_err,
 };
-use datafusion_expr::expr::{AllExpr, AnyExpr, Case, Exists, InSubquery, QuantifiedSource};
-use datafusion_expr::planner::PlannerResult;
+use datafusion_expr::expr::{
+    AllExpr, AnyExpr, Case, Exists, InSubquery, QuantifiedSource,
+};
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, lit};
 use sqlparser::ast::{
     BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
@@ -70,7 +71,7 @@ fn row_constructor_elements(expr: &SQLExpr) -> Option<Vec<&SQLExpr>> {
     }
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn parse_exists_subquery(
         &self,
         subquery: &Query,
@@ -111,7 +112,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let SetExpr::Select(select) = &subquery.body.as_ref() {
             for item in &select.projection {
                 if let SelectItem::UnnamedExpr(SQLExpr::Identifier(ident)) = item
-                    && let Some(span) = Span::try_from_sqlparser_span(ident.span)
+                    && let Some(span) = crate::utils::convert_parser_span(ident.span)
                 {
                     spans.add_span(span);
                 }
@@ -136,7 +137,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 input_schema,
                 planner_context,
             )?;
-            return Ok(if negated { Expr::Not(Box::new(any)) } else { any });
+            return Ok(if negated {
+                Expr::Not(Box::new(any))
+            } else {
+                any
+            });
         }
 
         self.validate_single_column(
@@ -173,7 +178,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let SetExpr::Select(select) = subquery.body.as_ref() {
             for item in &select.projection {
                 if let SelectItem::ExprWithAlias { alias, .. } = item
-                    && let Some(span) = Span::try_from_sqlparser_span(alias.span)
+                    && let Some(span) = crate::utils::convert_parser_span(alias.span)
                 {
                     spans.add_span(span);
                 }
@@ -236,7 +241,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let SetExpr::Select(select) = &subquery.body.as_ref() {
             for item in &select.projection {
                 if let SelectItem::UnnamedExpr(SQLExpr::Identifier(ident)) = item
-                    && let Some(span) = Span::try_from_sqlparser_span(ident.span)
+                    && let Some(span) = crate::utils::convert_parser_span(ident.span)
                 {
                     spans.add_span(span);
                 }
@@ -301,7 +306,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let SetExpr::Select(select) = &subquery.body.as_ref() {
             for item in &select.projection {
                 if let SelectItem::UnnamedExpr(SQLExpr::Identifier(ident)) = item
-                    && let Some(span) = Span::try_from_sqlparser_span(ident.span)
+                    && let Some(span) = crate::utils::convert_parser_span(ident.span)
                 {
                     spans.add_span(span);
                 }
@@ -381,16 +386,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let mut left_elements = Vec::with_capacity(row.len());
         for element in row {
             let planned = self.sql_to_expr_ref(element, input_schema, planner_context)?;
-            left_elements.push(planned.transform(|expr| match expr {
-                Expr::Column(column) => {
-                    let (_, field) = input_schema.qualified_field_from_column(&column)?;
-                    Ok(Transformed::yes(Expr::OuterReferenceColumn(
-                        Arc::clone(field),
-                        column,
-                    )))
-                }
-                other => Ok(Transformed::no(other)),
-            })?.data);
+            left_elements.push(
+                planned
+                    .transform(|expr| match expr {
+                        Expr::Column(column) => {
+                            let (_, field) =
+                                input_schema.qualified_field_from_column(&column)?;
+                            Ok(Transformed::yes(Expr::OuterReferenceColumn(
+                                Arc::clone(field),
+                                column,
+                            )))
+                        }
+                        other => Ok(Transformed::no(other)),
+                    })?
+                    .data,
+            );
         }
         let right_elements = sub_schema
             .iter()

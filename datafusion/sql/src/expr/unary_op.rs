@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 use datafusion_common::{DFSchema, Diagnostic, Result, not_impl_err, plan_err};
 use datafusion_expr::{
     Expr, ExprSchemable,
@@ -24,7 +24,7 @@ use datafusion_expr::{
 };
 use sqlparser::ast::{Expr as SQLExpr, UnaryOperator, Value, ValueWithSpan};
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(crate) fn parse_sql_unary_op(
         &self,
         op: &UnaryOperator,

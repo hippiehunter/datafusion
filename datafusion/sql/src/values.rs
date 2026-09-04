@@ -17,9 +17,7 @@
 
 use std::sync::Arc;
 
-use crate::planner::{
-    ContextProvider, PlannerContext, SqlToRel, ValuesAssembly, ValuesDefault,
-};
+use crate::planner::{PlannerContext, SqlToRel, ValuesAssembly, ValuesDefault};
 use arrow::datatypes::DataType;
 use datafusion_common::tree_node::TreeNode;
 use datafusion_common::{
@@ -41,7 +39,7 @@ struct ValuesRow {
     exprs: Vec<Expr>,
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn sql_values_to_plan_ref(
         &self,
         values: &SQLValues,
@@ -328,7 +326,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         rows: Vec<ValuesRow>,
         schema: &DFSchemaRef,
     ) -> Result<LogicalPlan> {
-        let target_fields = (!schema.fields().is_empty()).then(|| schema.fields().clone());
+        let target_fields =
+            (!schema.fields().is_empty()).then(|| schema.fields().clone());
         let mut columns: Vec<(String, DataType)> = schema
             .fields()
             .iter()
@@ -369,13 +368,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .zip(&columns)
                 .enumerate()
                 .map(|(index, (expr, (name, data_type)))| {
-                    let expr = match target_fields.as_ref().and_then(|fields| fields.get(index)) {
-                        Some(target) => self
-                            .context_provider
-                            .plan_assignment_coercion(&expr, target, input.schema())?
-                            .unwrap_or(expr),
-                        None => expr,
-                    };
+                    let expr =
+                        match target_fields.as_ref().and_then(|fields| fields.get(index))
+                        {
+                            Some(target) => self
+                                .context_provider
+                                .plan_assignment_coercion(&expr, target, input.schema())?
+                                .unwrap_or(expr),
+                            None => expr,
+                        };
                     let expr = if expr.get_type(input.schema())? == *data_type {
                         expr
                     } else {

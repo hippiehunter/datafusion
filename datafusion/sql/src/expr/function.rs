@@ -15,11 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{
+    ContextProvider, PlannerContext, PlannerResult, RawAggregateExpr, RawWindowExpr,
+    SqlToRel,
+};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
-    Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, ScalarValue, Span,
+    Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, ScalarValue,
     Spans, internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err,
     plan_err,
 };
@@ -30,7 +33,6 @@ use datafusion_expr::{
         BinaryExpr, Case, NullTreatment, ScalarFunction, Unnest, WildcardOptions,
         WindowFunction,
     },
-    planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
 };
 use sqlparser::ast::{
     AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
@@ -79,6 +81,13 @@ fn find_closest_match(candidates: Vec<String>, target: &str) -> Option<String> {
     })
 }
 
+fn convert_null_treatment(value: sqlparser::ast::NullTreatment) -> NullTreatment {
+    match value {
+        sqlparser::ast::NullTreatment::IgnoreNulls => NullTreatment::IgnoreNulls,
+        sqlparser::ast::NullTreatment::RespectNulls => NullTreatment::RespectNulls,
+    }
+}
+
 /// Arguments for a function call extracted from the SQL AST
 #[derive(Debug)]
 struct FunctionArgs<'a> {
@@ -119,7 +128,7 @@ impl<'a> FunctionArgs<'a> {
                 order_by: &[],
                 over,
                 filter,
-                null_treatment: null_treatment.cloned().map(Into::into),
+                null_treatment: null_treatment.cloned().map(convert_null_treatment),
                 distinct: false,
                 within_group,
                 function_without_parentheses: matches!(args, FunctionArguments::None),
@@ -241,7 +250,7 @@ impl<'a> FunctionArgs<'a> {
             order_by,
             over,
             filter,
-            null_treatment: null_treatment.cloned().map(Into::into),
+            null_treatment: null_treatment.cloned().map(convert_null_treatment),
             distinct,
             within_group,
             function_without_parentheses: false,
@@ -252,7 +261,7 @@ impl<'a> FunctionArgs<'a> {
 // Helper type for extracting WITHIN GROUP ordering and prepended args
 type WithinGroupExtraction = (Vec<SortExpr>, Vec<Expr>, Vec<Option<String>>);
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn sql_function_to_expr(
         &self,
         function: &SQLFunction,
@@ -609,7 +618,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 .window_frame
                 .as_ref()
                 .map(|window_frame| {
-                    let window_frame: WindowFrame = window_frame.clone().try_into()?;
+                    let window_frame =
+                        super::window_frame::convert_window_frame(window_frame.clone())?;
                     window_frame
                         .regularize_order_bys(&mut order_by)
                         .map(|_| window_frame)
@@ -917,7 +927,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         if let Some(suggested_func_name) =
             suggest_valid_function(&name, is_function_window, self.context_provider)
         {
-            let span = Span::try_from_sqlparser_span(sql_parser_span);
+            let span = crate::utils::convert_parser_span(sql_parser_span);
             let mut diagnostic =
                 Diagnostic::new_error(format!("Invalid function '{name}'"), span);
             diagnostic

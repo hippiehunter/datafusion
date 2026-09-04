@@ -15,24 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! [`ContextProvider`] and [`ExprPlanner`] APIs to customize SQL query planning
+//! Extension APIs for customizing SQL AST to logical-plan lowering.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::expr::NullTreatment;
-
-use crate::logical_plan::LogicalPlan;
-use crate::{
-    AggregateUDF, Expr, GetFieldAccess, ScalarUDF, SortExpr, TableSource, WindowFrame,
-    WindowFunctionDefinition, WindowUDF,
-};
 use arrow::datatypes::{DataType, Field, FieldRef, SchemaRef};
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::{
-    DFSchema, DataFusionError, Result, TableReference, config::ConfigOptions,
-    file_options::file_type::FileType, not_impl_err,
+    Constraints, DFSchema, DataFusionError, Result, TableReference,
+    config::ConfigOptions, file_options::file_type::FileType, not_impl_err,
+};
+use datafusion_expr::expr::NullTreatment;
+use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
+use datafusion_expr::expr_rewriter::NamePreserver;
+use datafusion_expr::logical_plan::LogicalPlan;
+use datafusion_expr::utils::COUNT_STAR_EXPANSION;
+use datafusion_expr::{
+    AggregateUDF, BoundSqlExpression, Expr, GetFieldAccess, ScalarUDF, SortExpr,
+    TableSource, WindowFrame, WindowFunctionDefinition, WindowUDF,
 };
 
 use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor};
@@ -55,6 +57,44 @@ pub enum TableSampleMethod {
     System,
 }
 
+/// Properties requested by one `CREATE TABLE ... LIKE` clause.
+///
+/// The SQL planner owns the clause syntax and collapses its ordered
+/// `INCLUDING` / `EXCLUDING` items into this semantic request before asking
+/// the provider for a source shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct CreateTableLikeOptions {
+    pub defaults: bool,
+    pub constraints: bool,
+    pub indexes: bool,
+    pub identity: bool,
+    pub generated: bool,
+    pub comments: bool,
+    pub storage: bool,
+}
+
+/// Provider-resolved input for one `CREATE TABLE ... LIKE` clause.
+///
+/// This deliberately contains only DataFusion and Arrow semantic values. An
+/// embedding catalog can retain richer, engine-specific column properties in
+/// Arrow field metadata without making either the SQL or expression crate
+/// depend on the embedding engine's types.
+#[derive(Debug, Clone)]
+pub struct CreateTableLikeSource {
+    /// Ordered columns contributed by the source relation or composite type.
+    pub schema: SchemaRef,
+    /// Included keys and checks, expressed against `schema`.
+    pub constraints: Constraints,
+    /// Included, already-planned defaults keyed by column name.
+    pub column_defaults: Vec<(String, Expr)>,
+    /// Included CHECK predicates, already bound against `schema`, in the same
+    /// order as the CHECK entries in [`Self::constraints`].
+    pub check_expressions: Vec<BoundSqlExpression>,
+    /// Included generated-column expressions, already bound against
+    /// `schema`, keyed by their copied column name.
+    pub generated_expressions: Vec<(String, BoundSqlExpression)>,
+}
+
 /// Provides the `SQL` query planner meta-data about tables and
 /// functions referenced in SQL statements, without a direct dependency on the
 /// `datafusion` Catalog structures such as [`TableProvider`]
@@ -72,6 +112,27 @@ pub trait ContextProvider {
 
     /// Returns a table by reference, if it exists
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
+
+    /// Resolve the semantic row shape and selected properties copied by one
+    /// `CREATE TABLE ... LIKE` clause.
+    ///
+    /// Keeping this at the provider boundary lets the SQL planner combine the
+    /// returned fields with user-authored columns before it resolves table
+    /// constraints, without reconstructing catalog state as parser AST.
+    fn get_create_table_like_source(
+        &self,
+        _name: TableReference,
+        _options: CreateTableLikeOptions,
+    ) -> Result<CreateTableLikeSource> {
+        not_impl_err!("CREATE TABLE LIKE is not supported by this table provider")
+    }
+
+    /// Provider-specific error identity for a duplicate column introduced by
+    /// `CREATE TABLE ... LIKE`. The default remains a normal planning error;
+    /// database embeddings can preserve their wire-level error classification.
+    fn create_table_like_duplicate_column_error(&self, name: &str) -> DataFusionError {
+        DataFusionError::Plan(format!("column \"{name}\" specified more than once"))
+    }
 
     /// Build the engine-owned predicate for a physical table sample. The SQL
     /// planner owns clause parsing and expression typing; the table provider
@@ -527,6 +588,89 @@ pub trait ExprPlanner: Debug + Send + Sync {
     }
 }
 
+/// Standard SQL lowering for aggregate-call syntax that is not representable
+/// as an ordinary argument list, such as `COUNT(*)` and `COUNT()`.
+#[derive(Debug)]
+pub struct AggregateFunctionPlanner;
+
+impl ExprPlanner for AggregateFunctionPlanner {
+    fn plan_aggregate(
+        &self,
+        raw_expr: RawAggregateExpr,
+    ) -> Result<PlannerResult<RawAggregateExpr>> {
+        let RawAggregateExpr {
+            func,
+            args,
+            distinct,
+            filter,
+            order_by,
+            null_treatment,
+        } = raw_expr;
+
+        let origin_expr = Expr::AggregateFunction(AggregateFunction {
+            func,
+            params: AggregateFunctionParams {
+                args,
+                distinct,
+                filter,
+                order_by,
+                null_treatment,
+            },
+        });
+        let saved_name = NamePreserver::new_for_projection().save(&origin_expr);
+
+        let Expr::AggregateFunction(AggregateFunction {
+            func,
+            params:
+                AggregateFunctionParams {
+                    args,
+                    distinct,
+                    filter,
+                    order_by,
+                    null_treatment,
+                },
+        }) = origin_expr
+        else {
+            unreachable!()
+        };
+        let raw_expr = RawAggregateExpr {
+            func,
+            args,
+            distinct,
+            filter,
+            order_by,
+            null_treatment,
+        };
+
+        #[expect(deprecated)]
+        if raw_expr.func.name() == "count"
+            && (raw_expr.args.len() == 1
+                && matches!(raw_expr.args[0], Expr::Wildcard { .. })
+                || raw_expr.args.is_empty())
+        {
+            let RawAggregateExpr {
+                func,
+                args: _,
+                distinct,
+                filter,
+                order_by,
+                null_treatment,
+            } = raw_expr;
+            let new_expr = Expr::AggregateFunction(AggregateFunction::new_udf(
+                func,
+                vec![Expr::Literal(COUNT_STAR_EXPANSION, None)],
+                distinct,
+                filter,
+                order_by,
+                null_treatment,
+            ));
+            return Ok(PlannerResult::Planned(saved_name.restore(new_expr)));
+        }
+
+        Ok(PlannerResult::Original(raw_expr))
+    }
+}
+
 /// An operator with two arguments to plan
 ///
 /// Note `left` and `right` are DataFusion [`Expr`]s but the `op` is the SQL AST
@@ -679,22 +823,25 @@ pub struct ViewDmlTarget {
     /// marks a computed column, which is readable but not writable.
     pub columns: Vec<(String, Option<String>)>,
     /// The view stack's row restrictions, written against the base
-    /// relation's namespace, outermost first. An UPDATE or DELETE through
-    /// the view may only touch rows the view shows.
-    pub row_restrictions: Vec<SQLExpr>,
+    /// relation's namespace, outermost first. These expressions were bound
+    /// when the view definition entered the catalog; an UPDATE or DELETE
+    /// through the view may only touch rows the view shows.
+    pub row_restrictions: Vec<BoundSqlExpression>,
     /// The outermost view whose check option the written row must satisfy,
     /// recorded on the DML plan node.
     pub check_option_view: Option<TableReference>,
+    /// The check-option subset of `row_restrictions`, already rewritten over
+    /// the final base relation. They are already bound semantic values; the
+    /// SQL planner only combines and stamps them on the DML plan.
+    pub check_option_restrictions: Vec<BoundSqlExpression>,
     /// The view's bare name, kept reachable as a qualifier where the
     /// statement uses it and named in errors.
     pub view_name: String,
     /// Column defaults attached to the view itself (`ALTER VIEW ... ALTER
-    /// COLUMN ... SET DEFAULT`), which override the base relation's. Each
-    /// expression is parsed under its owning grammar by the host. An INSERT
-    /// with an explicit column list materializes omitted view-default
-    /// columns; a column with no view default stays omitted so the base
-    /// relation's own default remains authoritative.
-    pub column_defaults: Vec<(String, SQLExpr)>,
+    /// COLUMN ... SET DEFAULT`), which override the base relation's. The host
+    /// returns already-bound semantics; INSERT planning applies them directly
+    /// to omitted columns without manufacturing or reparsing SQL syntax.
+    pub column_defaults: Vec<(String, BoundSqlExpression)>,
 }
 
 impl ViewDmlTarget {
@@ -727,9 +874,9 @@ pub struct DmlGeneratedColumns {
     /// Every generated column name; writing one with a non-DEFAULT value is
     /// refused.
     pub columns: Vec<String>,
-    /// For stored generated columns, the generation expression parsed under
-    /// its owning grammar by the host.
-    pub stored_expressions: Vec<(String, SQLExpr)>,
+    /// For stored generated columns, the parser-free expression bound by the
+    /// host at CREATE/ALTER or explicit catalog restoration.
+    pub stored_expressions: Vec<(String, BoundSqlExpression)>,
     /// The relation's full positional column list, for rejecting a
     /// positional VALUES row that reaches a generated column.
     pub positional_columns: Vec<String>,
@@ -741,10 +888,10 @@ pub struct DmlGeneratedColumns {
     /// Every identity column; `OVERRIDING USER VALUE` discards what the
     /// statement wrote for these in favor of the sequence's value.
     pub identity: Vec<String>,
-    /// For `SET col = DEFAULT` on a sequence-backed column, the expression
-    /// that draws the sequence, parsed under its owning grammar by the host —
-    /// the resolution the column's absent planner default cannot supply.
-    pub update_default_overrides: Vec<(String, SQLExpr)>,
+    /// For `SET col = DEFAULT` on a sequence-backed column, the already-bound
+    /// expression that draws the sequence — the resolution the column's
+    /// absent planner default cannot supply.
+    pub update_default_overrides: Vec<(String, BoundSqlExpression)>,
 }
 
 /// A view-write failure the SQL planner detects while retargeting; handed to

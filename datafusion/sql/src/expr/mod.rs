@@ -18,9 +18,6 @@
 use std::borrow::Borrow;
 
 use arrow::datatypes::{DataType, TimeUnit};
-use datafusion_expr::planner::{
-    PlannerResult, RawBinaryExpr, RawCastExpr, RawFieldAccessExpr,
-};
 use sqlparser::ast::{
     AccessExpr, AstBox as SQLBox, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
@@ -42,7 +39,10 @@ use datafusion_expr::{
     TryCast, lit,
 };
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{
+    PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawFieldAccessExpr,
+    SqlToRel,
+};
 
 mod binary_op;
 mod function;
@@ -54,8 +54,9 @@ mod subquery;
 mod substring;
 mod unary_op;
 mod value;
+mod window_frame;
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(crate) fn sql_expr_to_logical_expr_with_alias(
         &self,
         sql: SQLExprWithAlias,
@@ -607,14 +608,20 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     sqlparser::ast::XmlDocumentOrContent::Document => "xmlparse_document",
                     sqlparser::ast::XmlDocumentOrContent::Content => "xmlparse_content",
                 };
-                let value =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let value = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 self.xml_function_call(name, vec![value])
             }
 
             SQLExpr::XmlSerialize { expr, as_type, .. } => {
-                let value =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let value = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 let serialized = self.xml_function_call("xmlserialize", vec![value])?;
                 self.finish_cast_expr(serialized, as_type, CastKind::Cast, None, schema)
             }
@@ -630,7 +637,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     sqlparser::ast::XmlRootVersion::Version(value) => {
                         self.sql_expr_to_logical_expr(value, schema, planner_context)?
                     }
-                    sqlparser::ast::XmlRootVersion::NoValue => lit(ScalarValue::Utf8(None)),
+                    sqlparser::ast::XmlRootVersion::NoValue => {
+                        lit(ScalarValue::Utf8(None))
+                    }
                 };
                 let standalone = match standalone {
                     Some(sqlparser::ast::XmlRootStandalone::Yes) => lit("yes"),
@@ -700,8 +709,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             }
 
             SQLExpr::IsDocument { expr, negated } => {
-                let value =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let value = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 let predicate = self.xml_function_call("xml_is_document", vec![value])?;
                 if *negated {
                     Ok(Expr::Not(Box::new(predicate)))
@@ -871,13 +883,25 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 pattern,
                 escape,
             } => {
-                let value =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
-                let pattern =
-                    self.sql_expr_to_logical_expr(pattern.as_ref(), schema, planner_context)?;
-                let escape =
-                    self.sql_expr_to_logical_expr(escape.as_ref(), schema, planner_context)?;
-                self.similar_to_call("__dbl_substring_similar", vec![value, pattern, escape])
+                let value = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
+                let pattern = self.sql_expr_to_logical_expr(
+                    pattern.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
+                let escape = self.sql_expr_to_logical_expr(
+                    escape.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
+                self.similar_to_call(
+                    "__dbl_substring_similar",
+                    vec![value, pattern, escape],
+                )
             }
 
             SQLExpr::Trim {
@@ -988,7 +1012,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // `x AT TIME ZONE z` is `timezone(z, x)` when the catalog
                 // provides that function; otherwise a cast to a zoned
                 // timestamp type.
-                if let Some(timezone) = self.context_provider.get_function_meta("timezone")
+                if let Some(timezone) =
+                    self.context_provider.get_function_meta("timezone")
                 {
                     let zone = self.sql_expr_to_logical_expr_internal(
                         time_zone.as_ref(),
@@ -1144,8 +1169,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // call to it; otherwise the collation carries no meaning here and
             // the operand stands alone.
             SQLExpr::Collate { expr, collation } => {
-                let operand =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let operand = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 match self.context_provider.get_function_meta("pg_collate") {
                     Some(func) => {
                         let name = collation
@@ -1169,8 +1197,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
             SQLExpr::CollationFor(expr) => {
-                let operand =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let operand = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 match self.context_provider.get_function_meta("pg_collation_for") {
                     Some(func) => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
                         func,
@@ -1186,8 +1217,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 form,
                 negated,
             } => {
-                let arg =
-                    self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?;
+                let arg = self.sql_expr_to_logical_expr(
+                    expr.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 let form = form
                     .as_ref()
                     .map(ToString::to_string)
@@ -1196,10 +1230,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .context_provider
                     .get_function_meta("is_normalized")
                     .ok_or_else(|| {
-                        internal_datafusion_err!("Unable to find expected 'is_normalized' function")
+                        internal_datafusion_err!(
+                            "Unable to find expected 'is_normalized' function"
+                        )
                     })?;
-                let call =
-                    Expr::ScalarFunction(ScalarFunction::new_udf(fun, vec![arg, lit(form)]));
+                let call = Expr::ScalarFunction(ScalarFunction::new_udf(
+                    fun,
+                    vec![arg, lit(form)],
+                ));
                 Ok(if *negated {
                     Expr::Not(Box::new(call))
                 } else {
@@ -1454,7 +1492,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let value = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
         let pattern = self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
         let escape = similar_escape_expr(escape_char)?;
-        let matched = self.similar_to_call("__dbl_similar_to", vec![value, pattern, escape])?;
+        let matched =
+            self.similar_to_call("__dbl_similar_to", vec![value, pattern, escape])?;
         Ok(if negated {
             Expr::Not(Box::new(matched))
         } else {
@@ -1463,9 +1502,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     }
 
     fn similar_to_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
-        let func = self.context_provider.get_function_meta(name).ok_or_else(|| {
-            internal_datafusion_err!("Unable to find expected '{name}' function")
-        })?;
+        let func = self
+            .context_provider
+            .get_function_meta(name)
+            .ok_or_else(|| {
+                internal_datafusion_err!("Unable to find expected '{name}' function")
+            })?;
         Ok(Expr::ScalarFunction(ScalarFunction::new_udf(func, args)))
     }
 
@@ -1579,7 +1621,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// own, so each is planned as the function that implements it.
     fn xml_function_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
         let Some(func) = self.context_provider.get_function_meta(name) else {
-            return not_impl_err!("SQL/XML requires the '{name}' function to be registered");
+            return not_impl_err!(
+                "SQL/XML requires the '{name}' function to be registered"
+            );
         };
         Ok(Expr::ScalarFunction(ScalarFunction::new_udf(func, args)))
     }
@@ -1964,6 +2008,8 @@ mod tests {
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::logical_plan::builder::LogicalTableSource;
     use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
+
+    use crate::planner::ContextProvider;
 
     use super::*;
 

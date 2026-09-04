@@ -102,6 +102,9 @@ pub enum Constraint {
         name: Option<String>,
         /// The check expression as a string
         expr: String,
+        /// Column names referenced by the expression, lowered by the SQL
+        /// frontend so catalog and execution consumers never need to parse it.
+        referenced_columns: Vec<String>,
         /// Whether the constraint is enforced (optional, defaults to true)
         enforced: Option<bool>,
     },

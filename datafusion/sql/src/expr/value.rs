@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, RawIntervalExpr, SqlToRel};
 use arrow::compute::kernels::cast_utils::{
     IntervalParseConfig, IntervalUnit, parse_interval_month_day_nano_config,
 };
@@ -30,21 +30,23 @@ use datafusion_common::{
     not_impl_err, plan_err,
 };
 use datafusion_expr::expr::{BinaryExpr, Placeholder};
-use datafusion_expr::planner::{PlannerResult, RawIntervalExpr};
 use datafusion_expr::{Expr, Operator, lit};
 use log::debug;
 use sqlparser::ast::{
     BinaryOperator, DateTimeField, Expr as SQLExpr, Interval, UnaryOperator, Value,
     ValueWithSpan,
 };
-use sqlparser::parser::ParserError::ParserError;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::ops::Neg;
 use std::str::FromStr;
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+fn literal_syntax_error(message: String) -> DataFusionError {
+    DataFusionError::SQL(format!("ParserError({message:?})").into_boxed_str(), None)
+}
+
+impl SqlToRel<'_> {
     pub(crate) fn parse_value(
         &self,
         value: Value,
@@ -106,9 +108,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let unsigned_number: &str = &unsigned_number;
         if let Some((radix, digits)) = radix_integer_literal(unsigned_number) {
             let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
-                DataFusionError::from(ParserError(format!(
+                literal_syntax_error(format!(
                     "Cannot parse {unsigned_number} as an integer"
-                )))
+                ))
             })?;
             let value = if negative { -magnitude } else { magnitude };
             return Ok(if let Ok(n) = i32::try_from(value) {
@@ -147,9 +149,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             parse_decimal(unsigned_number, negative)
         } else {
             signed_number.parse::<f64>().map(lit).map_err(|_| {
-                DataFusionError::from(ParserError(format!(
-                    "Cannot parse {signed_number} as f64"
-                )))
+                literal_syntax_error(format!("Cannot parse {signed_number} as f64"))
             })
         }
     }
@@ -731,9 +731,7 @@ fn bigint_to_i256(v: &BigInt) -> Option<i256> {
 
 fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
     let mut dec = BigDecimal::from_str(unsigned_number).map_err(|e| {
-        DataFusionError::from(ParserError(format!(
-            "Cannot parse {unsigned_number} as BigDecimal: {e}"
-        )))
+        literal_syntax_error(format!("Cannot parse {unsigned_number} as BigDecimal: {e}"))
     })?;
     if negative {
         dec = dec.neg();

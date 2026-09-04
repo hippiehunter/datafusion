@@ -87,10 +87,14 @@ fn on_conflict_tuple_assignment_is_planned_as_scalar_assignments() {
     };
 
     assert_eq!(update.assignments.len(), 2);
-    assert!(update.assignments.iter().all(|assignment| matches!(
-        assignment.target,
-        sqlparser::ast::AssignmentTarget::ColumnName(_)
-    )));
+    assert_eq!(
+        update
+            .assignments
+            .iter()
+            .map(|assignment| assignment.target.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first_name", "last_name"]
+    );
 }
 
 #[test]
@@ -888,6 +892,138 @@ fn plan_inline_primary_key_preserves_quoted_column_identity() {
 }
 
 #[test]
+fn create_table_like_splices_fields_and_rebases_each_source_constraint() {
+    let plan = logical_plan(
+        "CREATE TABLE copied (\
+         head TEXT, \
+         LIKE like_left INCLUDING INDEXES, \
+         middle TEXT, \
+         LIKE like_right INCLUDING INDEXES, \
+         tail TEXT, \
+         UNIQUE (left_value, right_key))",
+    )
+    .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) = plan else {
+        panic!("expected CreateMemoryTable plan");
+    };
+
+    assert_eq!(
+        table.input.schema().field_names(),
+        vec![
+            "head",
+            "left_key",
+            "left_value",
+            "middle",
+            "right_value",
+            "right_key",
+            "tail",
+        ]
+    );
+    assert_eq!(
+        table.constraints.clone().into_iter().collect::<Vec<_>>(),
+        vec![
+            datafusion_common::Constraint::Unique {
+                columns: vec![2, 5],
+                nulls_distinct: datafusion_common::NullsDistinct::Distinct,
+            },
+            datafusion_common::Constraint::PrimaryKey(vec![1]),
+            datafusion_common::Constraint::Unique {
+                columns: vec![2],
+                nulls_distinct: datafusion_common::NullsDistinct::Distinct,
+            },
+            datafusion_common::Constraint::PrimaryKey(vec![4]),
+            datafusion_common::Constraint::Unique {
+                columns: vec![5],
+                nulls_distinct: datafusion_common::NullsDistinct::Distinct,
+            },
+        ]
+    );
+}
+
+#[test]
+fn create_table_like_options_collapse_in_sql_order_before_provider_resolution() {
+    let plan = logical_plan(
+        "CREATE TABLE copied (LIKE like_left \
+         INCLUDING ALL \
+         EXCLUDING DEFAULTS \
+         EXCLUDING INDEXES \
+         INCLUDING DEFAULTS \
+         EXCLUDING COMMENTS)",
+    )
+    .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) = plan else {
+        panic!("expected CreateMemoryTable plan");
+    };
+
+    let field = table.input.schema().field(0);
+    let metadata = field.metadata();
+    assert_eq!(
+        metadata.get("like.defaults").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        metadata.get("like.constraints").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        metadata.get("like.indexes").map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        metadata.get("like.identity").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        metadata.get("like.generated").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        metadata.get("like.comments").map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        metadata.get("like.storage").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(table.column_defaults.len(), 1);
+    assert!(table.constraints.iter().any(|constraint| {
+        matches!(constraint, datafusion_common::Constraint::Check { .. })
+    }));
+    assert!(!table.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            datafusion_common::Constraint::PrimaryKey(_)
+                | datafusion_common::Constraint::Unique { .. }
+        )
+    }));
+}
+
+#[test]
+fn create_table_like_ctas_keeps_the_declared_schema_and_provider_metadata() {
+    let plan = logical_plan(
+        "CREATE TABLE copied (LIKE like_left INCLUDING ALL) \
+         AS SELECT CAST(NULL AS INT), CAST(NULL AS TEXT)",
+    )
+    .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) = plan else {
+        panic!("expected CreateMemoryTable plan");
+    };
+
+    let schema = table.input.schema();
+    assert_eq!(schema.field_names(), vec!["left_key", "left_value"]);
+    assert!(!schema.field(0).is_nullable());
+    assert!(!schema.field(1).is_nullable());
+    assert_eq!(
+        schema
+            .field(0)
+            .metadata()
+            .get("like.generated")
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
 fn plan_oracle_data_types() {
     let sql = "CREATE TABLE oracle_types (
         n NCHAR(10),
@@ -1094,9 +1230,10 @@ fn plan_create_table_with_storage_parameters() {
     let plan = logical_plan(sql).unwrap();
     match plan {
         LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
-            storage_parameters,
+            spec,
             ..
         })) => {
+            let storage_parameters = spec.storage_parameters;
             assert_eq!(
                 storage_parameters.get("fillfactor").map(String::as_str),
                 Some("70")
@@ -5536,135 +5673,99 @@ fn test_using_join_wildcard_schema() {
     );
 }
 
-// ==================== SQL/MED (Management of External Data) Tests ====================
-
+// SQL/MED statements are parser-owned utility commands. Hosts execute them
+// directly; admitting them here would put the recursive parser AST inside
+// LogicalPlan and every derived plan operation.
 #[test]
-fn sqlmed_create_server() {
-    let sql = "CREATE SERVER myserver FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'localhost', port '5432')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateServer(_)) => {}
-        _ => panic!("Expected CreateServer DDL statement"),
+fn sqlmed_statements_stop_at_the_relational_planner_boundary() {
+    for sql in [
+        "CREATE SERVER myserver FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'localhost')",
+        "CREATE FOREIGN DATA WRAPPER postgres_fdw HANDLER postgres_fdw_handler",
+        "CREATE FOREIGN TABLE remote_users (id INT) SERVER myserver",
+        "CREATE USER MAPPING FOR current_user SERVER myserver",
+        "IMPORT FOREIGN SCHEMA public FROM SERVER myserver INTO local_schema",
+        "DROP SERVER IF EXISTS myserver CASCADE",
+        "DROP FOREIGN DATA WRAPPER IF EXISTS postgres_fdw CASCADE",
+        "DROP FOREIGN TABLE IF EXISTS remote_users",
+        "DROP USER MAPPING IF EXISTS FOR current_user SERVER myserver",
+        "ALTER SERVER myserver OPTIONS (SET host 'newhost')",
+        "ALTER FOREIGN DATA WRAPPER postgres_fdw OPTIONS (SET debug 'true')",
+        "ALTER FOREIGN TABLE remote_users OPTIONS (SET table_name 'new_users')",
+        "ALTER USER MAPPING FOR current_user SERVER myserver OPTIONS (SET password 'newsecret')",
+    ] {
+        let error =
+            logical_plan(sql).expect_err("utility statement must not become a plan");
+        assert!(
+            error
+                .to_string()
+                .contains("utility statements must bypass relational SQL planning"),
+            "unexpected error for {sql}: {error}"
+        );
     }
 }
 
 #[test]
-fn sqlmed_create_foreign_data_wrapper() {
-    let sql = "CREATE FOREIGN DATA WRAPPER postgres_fdw HANDLER postgres_fdw_handler VALIDATOR postgres_fdw_validator";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateForeignDataWrapper(_)) => {}
-        _ => panic!("Expected CreateForeignDataWrapper DDL statement"),
+fn catalog_utility_statements_stop_at_the_relational_planner_boundary() {
+    for sql in [
+        "CREATE MATERIALIZED VIEW mv_boundary AS SELECT 1 AS value",
+        "REFRESH MATERIALIZED VIEW mv_boundary",
+        "ALTER MATERIALIZED VIEW mv_boundary DISABLE REWRITE",
+        "DROP MATERIALIZED VIEW mv_boundary",
+        "ALTER TABLE utility_table ADD COLUMN value INT",
+        "CREATE DOMAIN utility_domain AS INT",
+        "DROP DOMAIN utility_domain",
+        "CREATE SEQUENCE utility_sequence",
+        "ALTER SEQUENCE utility_sequence RESTART WITH 10",
+        "DROP SEQUENCE utility_sequence",
+        "CREATE ASSERTION utility_assertion CHECK (1 = 1)",
+        "DROP ASSERTION utility_assertion",
+    ] {
+        let error =
+            logical_plan(sql).expect_err("utility statement must not become a plan");
+        assert!(
+            error.to_string().contains("bypass relational SQL planning"),
+            "unexpected error for {sql}: {error}"
+        );
     }
 }
 
 #[test]
-fn sqlmed_create_foreign_table() {
-    let sql = "CREATE FOREIGN TABLE remote_users (id INT, name VARCHAR(100)) SERVER myserver OPTIONS (table_name 'users')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateForeignTable(_)) => {}
-        _ => panic!("Expected CreateForeignTable DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_create_user_mapping() {
-    let sql = "CREATE USER MAPPING FOR current_user SERVER myserver OPTIONS (user 'remote_user', password 'secret')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateUserMapping(_)) => {}
-        _ => panic!("Expected CreateUserMapping DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_import_foreign_schema() {
-    let sql = "IMPORT FOREIGN SCHEMA public FROM SERVER myserver INTO local_schema";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::ImportForeignSchema(_)) => {}
-        _ => panic!("Expected ImportForeignSchema DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_drop_server() {
-    let sql = "DROP SERVER IF EXISTS myserver CASCADE";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::DropServer(_)) => {}
-        _ => panic!("Expected DropServer DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_drop_foreign_data_wrapper() {
-    let sql = "DROP FOREIGN DATA WRAPPER IF EXISTS postgres_fdw CASCADE";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::DropForeignDataWrapper(_)) => {}
-        _ => panic!("Expected DropForeignDataWrapper DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_drop_foreign_table() {
-    let sql = "DROP FOREIGN TABLE IF EXISTS remote_users";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::DropForeignTable(_)) => {}
-        _ => panic!("Expected DropForeignTable DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_drop_user_mapping() {
-    let sql = "DROP USER MAPPING IF EXISTS FOR current_user SERVER myserver";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::DropUserMapping(_)) => {}
-        _ => panic!("Expected DropUserMapping DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_alter_server() {
-    let sql = "ALTER SERVER myserver OPTIONS (SET host 'newhost')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::AlterServer(_)) => {}
-        _ => panic!("Expected AlterServer DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_alter_foreign_data_wrapper() {
-    let sql = "ALTER FOREIGN DATA WRAPPER postgres_fdw OPTIONS (SET debug 'true')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::AlterForeignDataWrapper(_)) => {}
-        _ => panic!("Expected AlterForeignDataWrapper DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_alter_foreign_table() {
-    let sql = "ALTER FOREIGN TABLE remote_users OPTIONS (SET table_name 'new_users')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::AlterForeignTable(_)) => {}
-        _ => panic!("Expected AlterForeignTable DDL statement"),
-    }
-}
-
-#[test]
-fn sqlmed_alter_user_mapping() {
-    let sql = "ALTER USER MAPPING FOR current_user SERVER myserver OPTIONS (SET password 'newsecret')";
-    let plan = logical_plan(sql).unwrap();
-    match plan {
-        LogicalPlan::Ddl(DdlStatement::AlterUserMapping(_)) => {}
-        _ => panic!("Expected AlterUserMapping DDL statement"),
+fn host_utility_statements_stop_before_relational_planning() {
+    for sql in [
+        "CREATE SCHEMA utility_schema",
+        "CREATE DATABASE utility_database",
+        "DROP TABLE utility_table",
+        "PREPARE utility_plan AS SELECT 1",
+        "EXECUTE utility_plan",
+        "DEALLOCATE utility_plan",
+        "GRANT SELECT ON utility_table TO utility_role",
+        "REVOKE SELECT ON utility_table FROM utility_role",
+        "GRANT utility_role TO utility_user",
+        "REVOKE utility_role FROM utility_user",
+        "BEGIN",
+        "COMMIT",
+        "SAVEPOINT utility_savepoint",
+        "RELEASE SAVEPOINT utility_savepoint",
+        "ROLLBACK",
+        "SET application_name = 'utility'",
+        "RESET application_name",
+        "CREATE FUNCTION utility_function() RETURNS INT LANGUAGE SQL RETURN 1",
+        "CREATE ROLE utility_role",
+        "ANALYZE utility_table",
+        "TRUNCATE utility_table",
+        "VACUUM utility_table",
+        "USE utility_database",
+        "CREATE PROCEDURE utility_procedure() BEGIN END",
+        "CALL utility_procedure()",
+    ] {
+        let error =
+            logical_plan(sql).expect_err("host utility statement must not become a plan");
+        assert!(
+            error
+                .to_string()
+                .contains("utility statements must bypass relational SQL planning"),
+            "unexpected error for {sql}: {error}"
+        );
     }
 }
 

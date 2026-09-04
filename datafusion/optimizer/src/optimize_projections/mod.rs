@@ -329,7 +329,6 @@ fn optimize_projections(
         | LogicalPlan::Explain(_)
         | LogicalPlan::Analyze(_)
         | LogicalPlan::Subquery(_)
-        | LogicalPlan::Statement(_)
         | LogicalPlan::Distinct(Distinct::All(_))
         | LogicalPlan::MatchRecognize(_) => {
             // These plans require all their fields, and their children should

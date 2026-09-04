@@ -26,7 +26,7 @@ use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion, TreeNodeRewriter,
 };
 use datafusion_common::{
-    Column, DFSchemaRef, Diagnostic, HashMap, Result, ScalarValue,
+    Column, DFSchemaRef, Diagnostic, HashMap, Location, Result, ScalarValue, Span,
     assert_or_internal_err, exec_datafusion_err, exec_err, internal_err, plan_err,
 };
 use datafusion_expr::builder::get_struct_unnested_columns;
@@ -40,6 +40,19 @@ use datafusion_expr::{
 
 use indexmap::IndexMap;
 use sqlparser::ast::{Ident, Value};
+
+/// Convert a parser source span at the SQL frontend boundary. Empty parser
+/// spans represent missing location information and are not propagated.
+pub(crate) fn convert_parser_span(span: sqlparser::tokenizer::Span) -> Option<Span> {
+    if span == sqlparser::tokenizer::Span::empty() {
+        None
+    } else {
+        Some(Span::new(
+            Location::new(span.start.line, span.start.column),
+            Location::new(span.end.line, span.end.column),
+        ))
+    }
+}
 
 /// Make a best-effort attempt at resolving all columns in the expression tree
 pub(crate) fn resolve_columns(expr: &Expr, plan: &LogicalPlan) -> Result<Expr> {

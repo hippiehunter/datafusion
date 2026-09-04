@@ -589,12 +589,6 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "Alias": alias.table(),
                 })
             }
-            LogicalPlan::Statement(statement) => {
-                json!({
-                    "Node Type": "Statement",
-                    "Statement": format!("{}", statement.display())
-                })
-            }
             LogicalPlan::Distinct(distinct) => match distinct {
                 Distinct::All(_) => {
                     json!({

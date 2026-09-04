@@ -2048,9 +2048,8 @@ fn temporal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataTyp
         // A date meets a timestamp in the timestamp's own unit and zone: a
         // nanosecond target would shrink the range to 1677..2262 and make
         // every microsecond timestamp outside it overflow.
-        (Timestamp(unit, tz), Date64 | Date32) | (Date64 | Date32, Timestamp(unit, tz)) => {
-            Some(Timestamp(*unit, tz.clone()))
-        }
+        (Timestamp(unit, tz), Date64 | Date32)
+        | (Date64 | Date32, Timestamp(unit, tz)) => Some(Timestamp(*unit, tz.clone())),
         _ => None,
     }
 }

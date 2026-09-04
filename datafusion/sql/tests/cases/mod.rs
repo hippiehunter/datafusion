@@ -17,5 +17,4 @@
 
 mod collection;
 mod diagnostic;
-mod params;
 mod plan_to_sql;

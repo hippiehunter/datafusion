@@ -22,10 +22,8 @@ pub mod dml;
 mod extension;
 pub(crate) mod invariants;
 mod merge;
-pub mod psm;
 pub use invariants::{InvariantLevel, assert_expected_schema, check_subquery_expr};
 mod plan;
-mod statement;
 pub mod tree_node;
 
 pub use builder::{
@@ -33,83 +31,21 @@ pub use builder::{
     build_join_schema, requalify_sides_if_needed, table_scan, union,
     wrap_projection_for_join_if_necessary,
 };
+pub use datafusion_common::format::ExplainFormat;
 pub use ddl::{
-    // SQL/MED (Management of External Data) types
-    AlterForeignDataWrapperOperation,
-    AlterForeignDataWrapperStatement,
-    AlterForeignTableOperation,
-    AlterForeignTableStatement,
-    AlterMaterializedView,
-    AlterMaterializedViewOperation,
-    AlterSequence,
-    AlterServerOperation,
-    AlterServerStatement,
-    AlterTable,
-    AlterUserMappingStatement,
-    CreateAssertion,
-    CreateCatalog,
-    CreateCatalogSchema,
-    CreateDomain,
-    CreateExternalTable,
-    CreateForeignDataWrapperStatement,
-    CreateForeignTableStatement,
-    CreateFunction,
-    CreateFunctionBody,
-    CreateIndex,
-    CreateMaterializedView,
-    CreateMemoryTable,
-    CreateTablePartitionBound,
-    CreateTablePartitionBoundValue,
-    CreateTablePartitionKey,
-    CreateTablePartitionOf,
-    CreateTablePartitioning,
-    CreateTablePartitioningStrategy,
-    CreateProcedure,
-    CreatePropertyGraph,
-    CreateRole,
-    CreateSequence,
-    CreateServerOption,
-    CreateServerStatement,
-    CreateUserMappingStatement,
-    CreateView,
-    DdlStatement,
-    DropAssertion,
-    DropBehavior,
-    DropCatalogSchema,
-    DropDomain,
-    DropForeignDataWrapperStatement,
-    DropForeignTableStatement,
-    DropFunction,
-    DropIndex,
-    DropMaterializedView,
-    DropProcedure,
-    DropPropertyGraph,
-    DropRole,
-    DropSequence,
-    DropServerStatement,
-    DropTable,
-    DropUserMappingStatement,
-    DropView,
-    GraphEdgeEndpoint,
-    GraphEdgeTableDefinition,
-    GraphKeyClause,
-    GraphPropertiesClause,
-    GraphPropertyDefinition,
-    GraphVertexTableDefinition,
-    ImportForeignSchemaLimitType,
-    ImportForeignSchemaStatement,
-    MaterializedViewRefreshMethod,
-    OperateFunctionArg,
-    RefreshMaterializedView,
-    SequenceOptions,
-    UserMappingUser,
+    CreateExternalTable, CreateIndex, CreateMemoryTable, CreateMemoryTableSpec,
+    CreateTablePartitionBound, CreateTablePartitionBoundValue, CreateTablePartitionKey,
+    CreateTablePartitionOf, CreateTablePartitioning, CreateTablePartitioningStrategy,
+    CreateView, CreateViewCheckOption, CreateViewColumn, CreateViewNotUpdatable, CreateViewSpec,
+    CreateViewUpdatability, DdlStatement,
 };
 pub use dml::{
-    ConflictAssignment, ConflictTarget, DmlStatement, DoUpdateAction, InsertOp,
-    OnConflict, OnConflictAction, WriteOp,
+    ConflictAssignment, ConflictTarget, DmlCheckOption, DmlStatement, DoUpdateAction,
+    InsertOp, OnConflict, OnConflictAction, ReturningContext, WriteOp,
 };
 pub use merge::{
-    Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr, MergeInsertKind,
+    Merge, MergeAction, MergeAssignment, MergeAssignmentTarget, MergeClause,
+    MergeClauseKind, MergeIdentityOverride, MergeInsertExpr, MergeInsertKind,
     MergeUpdateExpr,
 };
 pub use plan::{
@@ -119,27 +55,13 @@ pub use plan::{
     GraphPatternElement, GraphPatternExpr, GraphTable, Join, JoinConstraint, JoinType,
     JsonTable, JsonTableColumnDef, JsonTableErrorHandling, LabelExpression, Limit,
     LogicalPlan, MatchRecognize, MeasureExpr, NodePattern, Partitioning, PathFinding,
-    PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, RecursiveSearch,
-    RecursiveSearchOrder, Repartition, RepetitionQuantifier, RowLimiting,
-    RowsPerMatchOption, SkipType, Sort,
-    StringifiedPlan, Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan,
-    TableScanRowLock, TableScanRowLockMode, TableScanRowLockWaitPolicy,
-    ToStringifiedPlan, Union, Unnest, Values, Window, projection_schema,
+    PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery,
+    RecursiveSearch, RecursiveSearchOrder, Repartition, RepetitionQuantifier,
+    RowLimiting, RowsPerMatchOption, SkipType, Sort, StringifiedPlan, Subquery,
+    SubqueryAlias, SubsetDef, SymbolDef, TableScan, TableScanRowLock,
+    TableScanRowLockMode, TableScanRowLockWaitPolicy, ToStringifiedPlan, Union, Unnest,
+    Values, Window, projection_schema,
 };
-pub use psm::{
-    HandlerCondition, HandlerType, ParameterMode, ProcedureArg, PsmBlock, PsmCase,
-    PsmElseIf, PsmFor, PsmHandler, PsmIf, PsmLoop, PsmRepeat, PsmResignal, PsmReturn,
-    PsmSelectInto, PsmSetVariable, PsmSignal, PsmStatement, PsmStatementKind,
-    PsmVariable, PsmWhen, PsmWhile, RegionInfo,
-};
-pub use statement::{
-    AnalyzeTable, Call, Deallocate, Execute, Grant, GrantRole, Prepare, ReleaseSavepoint,
-    ResetVariable, Revoke, RevokeRole, RollbackToSavepoint, Savepoint, SetTransaction,
-    SetVariable, Statement, TransactionAccessMode, TransactionConclusion, TransactionEnd,
-    TransactionIsolationLevel, TransactionStart, TruncateTable, UseDatabase, Vacuum,
-};
-
-pub use datafusion_common::format::ExplainFormat;
 
 pub use display::display_schema;
 

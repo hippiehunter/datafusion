@@ -41,15 +41,15 @@ use crate::logical_plan::display::{GraphvizVisitor, IndentVisitor};
 use crate::logical_plan::extension::UserDefinedLogicalNode;
 use crate::logical_plan::{
     DmlStatement, Merge, MergeAction, MergeAssignment, MergeClause, MergeInsertExpr,
-    MergeInsertKind, MergeUpdateExpr, Statement,
+    MergeInsertKind, MergeUpdateExpr,
 };
 use crate::utils::{
     enumerate_grouping_sets, exprlist_to_fields, find_out_reference_exprs,
     grouping_set_expr_count, grouping_set_to_exprlist, split_conjunction,
 };
 use crate::{
-    BinaryExpr, CreateMemoryTable, CreateView, Execute, Expr, ExprSchemable,
-    LogicalPlanBuilder, Operator, Prepare, TableProviderFilterPushDown, TableSource,
+    BinaryExpr, BoundSqlExpression, CreateMemoryTable, CreateView, Expr, ExprSchemable,
+    LogicalPlanBuilder, Operator, TableProviderFilterPushDown, TableSource,
     WindowFunctionDefinition, build_join_schema, expr_vec_fmt, requalify_sides_if_needed,
 };
 
@@ -61,11 +61,10 @@ use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
 use datafusion_common::{
-    Column, Constraints, DFSchema, DFSchemaRef, DataFusionError, Dependency,
-    FunctionalDependence, FunctionalDependencies, NullEquality, ParamValues, Result,
-    ScalarValue, Spans, TableReference, UnnestOptions, UsingColumns,
-    aggregate_functional_dependencies, assert_eq_or_internal_err, assert_or_internal_err,
-    internal_err, plan_err,
+    Column, DFSchema, DFSchemaRef, DataFusionError, Dependency, FunctionalDependence,
+    FunctionalDependencies, NullEquality, ParamValues, Result, ScalarValue, Spans,
+    TableReference, UnnestOptions, UsingColumns, aggregate_functional_dependencies,
+    assert_eq_or_internal_err, assert_or_internal_err, internal_err, plan_err,
 };
 use indexmap::IndexSet;
 
@@ -964,8 +963,6 @@ pub enum LogicalPlan {
     SubqueryAlias(SubqueryAlias),
     /// Skip some number of rows, and then fetch some number of rows.
     Limit(Limit),
-    /// A DataFusion [`Statement`] such as `SET VARIABLE` or `START TRANSACTION`
-    Statement(Statement),
     /// Values expression. See
     /// [Postgres VALUES](https://www.postgresql.org/docs/current/queries-values.html)
     /// documentation for more details. This is used to implement SQL such as
@@ -1054,7 +1051,6 @@ impl LogicalPlan {
             LogicalPlan::Join(Join { schema, .. }) => schema,
             LogicalPlan::Repartition(Repartition { input, .. }) => input.schema(),
             LogicalPlan::Limit(Limit { input, .. }) => input.schema(),
-            LogicalPlan::Statement(statement) => statement.schema(),
             LogicalPlan::Subquery(Subquery { subquery, .. }) => subquery.schema(),
             LogicalPlan::SubqueryAlias(SubqueryAlias { schema, .. }) => schema,
             LogicalPlan::Explain(explain) => &explain.schema,
@@ -1199,7 +1195,6 @@ impl LogicalPlan {
                 recursive_term,
                 ..
             }) => vec![static_term, recursive_term],
-            LogicalPlan::Statement(stmt) => stmt.inputs(),
             LogicalPlan::MatchRecognize(MatchRecognize { input, .. }) => vec![input],
             // plans without inputs
             LogicalPlan::TableScan { .. }
@@ -1298,7 +1293,6 @@ impl LogicalPlan {
                 graph_table.schema.qualified_field(0),
             )))),
             LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Statement(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
@@ -1457,7 +1451,6 @@ impl LogicalPlan {
             LogicalPlan::Explain(_) => Ok(self),
             LogicalPlan::TableScan(_) => Ok(self),
             LogicalPlan::EmptyRelation(_) => Ok(self),
-            LogicalPlan::Statement(_) => Ok(self),
             LogicalPlan::DescribeTable(_) => Ok(self),
             LogicalPlan::Unnest(Unnest {
                 input,
@@ -1569,7 +1562,22 @@ impl LogicalPlan {
                 Projection::try_new(expr, Arc::new(input)).map(LogicalPlan::Projection)
             }
             LogicalPlan::Dml(dml) => {
-                self.assert_no_expressions(expr)?;
+                let check_option = match &dml.check_option {
+                    Some(check_option) => {
+                        if expr.len() != 1 {
+                            return internal_err!(
+                                "DML with a check option expects exactly one expression"
+                            );
+                        }
+                        let mut check_option = check_option.clone();
+                        check_option.predicate = BoundSqlExpression::new(expr.remove(0));
+                        Some(check_option)
+                    }
+                    None => {
+                        self.assert_no_expressions(expr)?;
+                        None
+                    }
+                };
                 let input = self.only_input(inputs)?;
                 let mut new_dml = DmlStatement::new(
                     dml.table_name.clone(),
@@ -1581,8 +1589,9 @@ impl LogicalPlan {
                 new_dml.target_columns = dml.target_columns.clone();
                 new_dml.returning_columns = dml.returning_columns.clone();
                 new_dml.returning_exprs = dml.returning_exprs.clone();
+                new_dml.returning_context = dml.returning_context.clone();
                 new_dml.overriding_system_value = dml.overriding_system_value;
-                new_dml.check_option_view = dml.check_option_view.clone();
+                new_dml.check_option = check_option;
                 Ok(LogicalPlan::Dml(new_dml))
             }
             LogicalPlan::Merge(merge) => {
@@ -1704,6 +1713,9 @@ impl LogicalPlan {
                     source: Arc::new(source),
                     on,
                     clauses,
+                    returning_columns: merge.returning_columns.clone(),
+                    returning_exprs: merge.returning_exprs.clone(),
+                    returning_context: merge.returning_context.clone(),
                     output_schema: Arc::clone(&merge.output_schema),
                 }))
             }
@@ -1909,53 +1921,24 @@ impl LogicalPlan {
                 }))
             }
             LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
-                name,
-                if_not_exists,
-                or_replace,
-                column_defaults,
-                temporary,
-                storage_parameters,
-                partitioning,
-                partition_of,
-                inherits,
+                spec,
                 ..
             })) => {
-                self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
                 Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
                     CreateMemoryTable {
                         input: Arc::new(input),
-                        constraints: Constraints::default(),
-                        name: name.clone(),
-                        if_not_exists: *if_not_exists,
-                        or_replace: *or_replace,
-                        column_defaults: column_defaults.clone(),
-                        temporary: *temporary,
-                        storage_parameters: storage_parameters.clone(),
-                        partitioning: partitioning.clone(),
-                        partition_of: partition_of.clone(),
-                        inherits: inherits.clone(),
+                        spec: spec.with_new_expressions(expr)?,
                     },
                 )))
             }
-            LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {
-                name,
-                or_replace,
-                if_not_exists,
-                definition,
-                temporary,
-                ..
-            })) => {
+            LogicalPlan::Ddl(DdlStatement::CreateView(CreateView { spec, .. })) => {
                 self.assert_no_expressions(expr)?;
                 let input = self.only_input(inputs)?;
-                Ok(LogicalPlan::Ddl(DdlStatement::CreateView(CreateView {
-                    input: Arc::new(input),
-                    name: name.clone(),
-                    or_replace: *or_replace,
-                    if_not_exists: *if_not_exists,
-                    temporary: *temporary,
-                    definition: definition.clone(),
-                })))
+                Ok(LogicalPlan::Ddl(DdlStatement::CreateView(CreateView::new(
+                    spec.clone(),
+                    Arc::new(input),
+                ))))
             }
             LogicalPlan::Ddl(ddl) => {
                 self.assert_no_expressions(expr)?;
@@ -2047,24 +2030,6 @@ impl LogicalPlan {
                     logical_optimization_succeeded: e.logical_optimization_succeeded,
                 }))
             }
-            LogicalPlan::Statement(Statement::Prepare(Prepare {
-                name, fields, ..
-            })) => {
-                self.assert_no_expressions(expr)?;
-                let input = self.only_input(inputs)?;
-                Ok(LogicalPlan::Statement(Statement::Prepare(Prepare {
-                    name: name.clone(),
-                    fields: fields.clone(),
-                    input: Arc::new(input),
-                })))
-            }
-            LogicalPlan::Statement(Statement::Execute(Execute { name, .. })) => {
-                self.assert_no_inputs(inputs)?;
-                Ok(LogicalPlan::Statement(Statement::Execute(Execute {
-                    name: name.clone(),
-                    parameters: expr,
-                })))
-            }
             LogicalPlan::TableScan(ts) => {
                 self.assert_no_inputs(inputs)?;
                 Ok(LogicalPlan::TableScan(TableScan {
@@ -2072,9 +2037,7 @@ impl LogicalPlan {
                     ..ts.clone()
                 }))
             }
-            LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Statement(_)
-            | LogicalPlan::DescribeTable(_) => {
+            LogicalPlan::EmptyRelation(_) | LogicalPlan::DescribeTable(_) => {
                 // All of these plan types have no inputs / exprs so should not be called
                 self.assert_no_expressions(expr)?;
                 self.assert_no_inputs(inputs)?;
@@ -2337,9 +2300,6 @@ impl LogicalPlan {
     /// Replaces placeholder param values (like `$1`, `$2`) in [`LogicalPlan`]
     /// with the specified `param_values`.
     ///
-    /// [`Prepare`] statements are converted to
-    /// their inner logical plan for execution.
-    ///
     /// # Example
     /// ```
     /// # use arrow::datatypes::{Field, Schema, DataType};
@@ -2390,21 +2350,7 @@ impl LogicalPlan {
         self,
         param_values: impl Into<ParamValues>,
     ) -> Result<LogicalPlan> {
-        let param_values = param_values.into();
-        let plan_with_values = self.replace_params_with_values(&param_values)?;
-
-        // unwrap Prepare
-        Ok(
-            if let LogicalPlan::Statement(Statement::Prepare(prepare_lp)) =
-                plan_with_values
-            {
-                param_values.verify_fields(&prepare_lp.fields)?;
-                // try and take ownership of the input if is not shared, clone otherwise
-                Arc::unwrap_or_clone(prepare_lp.input)
-            } else {
-                plan_with_values
-            },
-        )
+        self.replace_params_with_values(&param_values.into())
     }
 
     /// Returns the maximum number of rows that this plan can output, if known.
@@ -2499,7 +2445,6 @@ impl LogicalPlan {
             | LogicalPlan::Copy(_)
             | LogicalPlan::CopyFrom(_)
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::Statement(_)
             | LogicalPlan::Extension(_) => None,
         }
     }
@@ -3196,9 +3141,6 @@ impl LogicalPlan {
                     }
                     LogicalPlan::SubqueryAlias(SubqueryAlias { alias, .. }) => {
                         write!(f, "SubqueryAlias: {alias}")
-                    }
-                    LogicalPlan::Statement(statement) => {
-                        write!(f, "{}", statement.display())
                     }
                     LogicalPlan::Distinct(distinct) => match distinct {
                         Distinct::All(_) => write!(f, "Distinct:"),

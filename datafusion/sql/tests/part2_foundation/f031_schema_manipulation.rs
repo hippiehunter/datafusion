@@ -38,7 +38,9 @@
 //!
 //! F031 is a CORE feature (mandatory for SQL:2016 conformance).
 
-use crate::{assert_feature_supported, assert_plans};
+use crate::{
+    assert_feature_supported, assert_parses, assert_plans, assert_utility_boundary,
+};
 
 // ============================================================================
 // F031-01: CREATE TABLE statement to create persistent base tables
@@ -321,7 +323,7 @@ fn f031_03_grant_to_public() {
 /// F031-04: ALTER TABLE ADD COLUMN basic
 #[test]
 fn f031_04_alter_table_add_column_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD COLUMN new_col INT",
         "F031-04",
         "ALTER TABLE ADD COLUMN basic"
@@ -331,7 +333,7 @@ fn f031_04_alter_table_add_column_basic() {
 /// F031-04: ALTER TABLE ADD COLUMN with data type
 #[test]
 fn f031_04_alter_table_add_column_varchar() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE person ADD COLUMN email VARCHAR(100)",
         "F031-04",
         "ALTER TABLE ADD COLUMN VARCHAR"
@@ -341,7 +343,7 @@ fn f031_04_alter_table_add_column_varchar() {
 /// F031-04: ALTER TABLE ADD COLUMN with NOT NULL
 #[test]
 fn f031_04_alter_table_add_column_not_null() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD COLUMN new_col INT NOT NULL",
         "F031-04",
         "ALTER TABLE ADD COLUMN with NOT NULL"
@@ -351,7 +353,7 @@ fn f031_04_alter_table_add_column_not_null() {
 /// F031-04: ALTER TABLE ADD COLUMN with DEFAULT
 #[test]
 fn f031_04_alter_table_add_column_default() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD COLUMN status VARCHAR(20) DEFAULT 'active'",
         "F031-04",
         "ALTER TABLE ADD COLUMN with DEFAULT"
@@ -361,7 +363,7 @@ fn f031_04_alter_table_add_column_default() {
 /// F031-04: ALTER TABLE ADD COLUMN with CHECK
 #[test]
 fn f031_04_alter_table_add_column_check() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD COLUMN age INT CHECK (age >= 0)",
         "F031-04",
         "ALTER TABLE ADD COLUMN with CHECK"
@@ -371,7 +373,7 @@ fn f031_04_alter_table_add_column_check() {
 /// F031-04: ALTER TABLE ADD COLUMN with UNIQUE
 #[test]
 fn f031_04_alter_table_add_column_unique() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD COLUMN email VARCHAR(100) UNIQUE",
         "F031-04",
         "ALTER TABLE ADD COLUMN with UNIQUE"
@@ -381,7 +383,7 @@ fn f031_04_alter_table_add_column_unique() {
 /// F031-04: ALTER TABLE ADD COLUMN without COLUMN keyword
 #[test]
 fn f031_04_alter_table_add_without_column() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD new_col INT",
         "F031-04",
         "ALTER TABLE ADD without COLUMN keyword"
@@ -391,7 +393,7 @@ fn f031_04_alter_table_add_without_column() {
 /// F031-04: ALTER TABLE ADD IF NOT EXISTS
 #[test]
 fn f031_04_alter_table_add_if_not_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD COLUMN IF NOT EXISTS new_col INT",
         "F031-04",
         "ALTER TABLE ADD COLUMN IF NOT EXISTS"
@@ -690,7 +692,7 @@ fn f311_05_grant_statement() {
 /// F033: ALTER TABLE DROP COLUMN basic
 #[test]
 fn f033_alter_table_drop_column_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP COLUMN old_col",
         "F033",
         "ALTER TABLE DROP COLUMN basic"
@@ -700,7 +702,7 @@ fn f033_alter_table_drop_column_basic() {
 /// F033: ALTER TABLE DROP without COLUMN keyword
 #[test]
 fn f033_alter_table_drop_without_column() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP old_col",
         "F033",
         "ALTER TABLE DROP without COLUMN keyword"
@@ -710,7 +712,7 @@ fn f033_alter_table_drop_without_column() {
 /// F033: ALTER TABLE DROP COLUMN IF EXISTS
 #[test]
 fn f033_alter_table_drop_if_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP COLUMN IF EXISTS old_col",
         "F033",
         "ALTER TABLE DROP COLUMN IF EXISTS"
@@ -720,7 +722,7 @@ fn f033_alter_table_drop_if_exists() {
 /// F033: ALTER TABLE DROP COLUMN with RESTRICT
 #[test]
 fn f033_alter_table_drop_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP COLUMN old_col RESTRICT",
         "F033",
         "ALTER TABLE DROP COLUMN RESTRICT"
@@ -730,7 +732,7 @@ fn f033_alter_table_drop_restrict() {
 /// F033: ALTER TABLE DROP COLUMN with CASCADE
 #[test]
 fn f033_alter_table_drop_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP COLUMN old_col CASCADE",
         "F033",
         "ALTER TABLE DROP COLUMN CASCADE"
@@ -744,7 +746,7 @@ fn f033_alter_table_drop_cascade() {
 /// F381: ALTER TABLE ADD CONSTRAINT PRIMARY KEY
 #[test]
 fn f381_alter_table_add_primary_key() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD CONSTRAINT pk_t PRIMARY KEY (id)",
         "F381",
         "ALTER TABLE ADD CONSTRAINT PRIMARY KEY"
@@ -754,7 +756,7 @@ fn f381_alter_table_add_primary_key() {
 /// F381: ALTER TABLE ADD CONSTRAINT FOREIGN KEY
 #[test]
 fn f381_alter_table_add_foreign_key() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE orders ADD CONSTRAINT fk_customer
          FOREIGN KEY (customer_id) REFERENCES person(id)",
         "F381",
@@ -765,7 +767,7 @@ fn f381_alter_table_add_foreign_key() {
 /// F381: ALTER TABLE ADD CONSTRAINT UNIQUE
 #[test]
 fn f381_alter_table_add_unique() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD CONSTRAINT uq_email UNIQUE (c)",
         "F381",
         "ALTER TABLE ADD CONSTRAINT UNIQUE"
@@ -775,7 +777,7 @@ fn f381_alter_table_add_unique() {
 /// F381: ALTER TABLE ADD CONSTRAINT CHECK
 #[test]
 fn f381_alter_table_add_check() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ADD CONSTRAINT chk_age CHECK (age >= 0)",
         "F381",
         "ALTER TABLE ADD CONSTRAINT CHECK"
@@ -785,7 +787,7 @@ fn f381_alter_table_add_check() {
 /// F381: ALTER TABLE DROP CONSTRAINT
 #[test]
 fn f381_alter_table_drop_constraint() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP CONSTRAINT chk_age",
         "F381",
         "ALTER TABLE DROP CONSTRAINT"
@@ -795,7 +797,7 @@ fn f381_alter_table_drop_constraint() {
 /// F381: ALTER TABLE DROP CONSTRAINT IF EXISTS
 #[test]
 fn f381_alter_table_drop_constraint_if_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP CONSTRAINT IF EXISTS chk_age",
         "F381",
         "ALTER TABLE DROP CONSTRAINT IF EXISTS"
@@ -805,7 +807,7 @@ fn f381_alter_table_drop_constraint_if_exists() {
 /// F381: ALTER TABLE DROP CONSTRAINT with RESTRICT
 #[test]
 fn f381_alter_table_drop_constraint_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP CONSTRAINT chk_age RESTRICT",
         "F381",
         "ALTER TABLE DROP CONSTRAINT RESTRICT"
@@ -815,7 +817,7 @@ fn f381_alter_table_drop_constraint_restrict() {
 /// F381: ALTER TABLE DROP CONSTRAINT with CASCADE
 #[test]
 fn f381_alter_table_drop_constraint_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t DROP CONSTRAINT chk_age CASCADE",
         "F381",
         "ALTER TABLE DROP CONSTRAINT CASCADE"
@@ -962,7 +964,7 @@ fn create_table_if_not_exists_as_select() {
 /// ALTER TABLE RENAME TO
 #[test]
 fn alter_table_rename() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t RENAME TO new_table",
         "F031",
         "ALTER TABLE RENAME TO"
@@ -972,7 +974,7 @@ fn alter_table_rename() {
 /// ALTER TABLE RENAME COLUMN
 #[test]
 fn alter_table_rename_column() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t RENAME COLUMN old_name TO new_name",
         "F031",
         "ALTER TABLE RENAME COLUMN"
@@ -982,7 +984,7 @@ fn alter_table_rename_column() {
 /// ALTER TABLE ALTER COLUMN SET DEFAULT
 #[test]
 fn alter_table_alter_column_set_default() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ALTER COLUMN status SET DEFAULT 'active'",
         "F031",
         "ALTER TABLE ALTER COLUMN SET DEFAULT"
@@ -992,7 +994,7 @@ fn alter_table_alter_column_set_default() {
 /// ALTER TABLE ALTER COLUMN DROP DEFAULT
 #[test]
 fn alter_table_alter_column_drop_default() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ALTER COLUMN status DROP DEFAULT",
         "F031",
         "ALTER TABLE ALTER COLUMN DROP DEFAULT"
@@ -1002,7 +1004,7 @@ fn alter_table_alter_column_drop_default() {
 /// ALTER TABLE ALTER COLUMN SET NOT NULL
 #[test]
 fn alter_table_alter_column_set_not_null() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ALTER COLUMN name SET NOT NULL",
         "F031",
         "ALTER TABLE ALTER COLUMN SET NOT NULL"
@@ -1012,7 +1014,7 @@ fn alter_table_alter_column_set_not_null() {
 /// ALTER TABLE ALTER COLUMN DROP NOT NULL
 #[test]
 fn alter_table_alter_column_drop_not_null() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ALTER TABLE t ALTER COLUMN name DROP NOT NULL",
         "F031",
         "ALTER TABLE ALTER COLUMN DROP NOT NULL"
@@ -1065,11 +1067,11 @@ fn f031_f311_summary_ddl_workflow() {
                    GROUP BY p.id, p.first_name, p.last_name");
 
     // Alter table - add columns
-    assert_plans!("ALTER TABLE person ADD COLUMN phone VARCHAR(20)");
-    assert_plans!("ALTER TABLE orders ADD COLUMN notes TEXT");
+    assert_parses!("ALTER TABLE person ADD COLUMN phone VARCHAR(20)");
+    assert_parses!("ALTER TABLE orders ADD COLUMN notes TEXT");
 
     // Alter table - drop columns
-    assert_plans!("ALTER TABLE person DROP COLUMN phone");
+    assert_parses!("ALTER TABLE person DROP COLUMN phone");
 
     // Drop objects
     assert_plans!("DROP VIEW customer_order_summary");
@@ -1086,18 +1088,18 @@ fn f031_table_lifecycle() {
     assert_plans!("CREATE TABLE t (id INT, name VARCHAR(100))");
 
     // Add columns
-    assert_plans!("ALTER TABLE t ADD COLUMN age INT");
-    assert_plans!("ALTER TABLE t ADD COLUMN email VARCHAR(100) UNIQUE");
+    assert_parses!("ALTER TABLE t ADD COLUMN age INT");
+    assert_parses!("ALTER TABLE t ADD COLUMN email VARCHAR(100) UNIQUE");
 
     // Add constraints
-    assert_plans!("ALTER TABLE t ADD CONSTRAINT pk_t PRIMARY KEY (id)");
-    assert_plans!("ALTER TABLE t ADD CONSTRAINT chk_age CHECK (age >= 0)");
+    assert_parses!("ALTER TABLE t ADD CONSTRAINT pk_t PRIMARY KEY (id)");
+    assert_parses!("ALTER TABLE t ADD CONSTRAINT chk_age CHECK (age >= 0)");
 
     // Drop constraint
-    assert_plans!("ALTER TABLE t DROP CONSTRAINT chk_age");
+    assert_parses!("ALTER TABLE t DROP CONSTRAINT chk_age");
 
     // Drop column
-    assert_plans!("ALTER TABLE t DROP COLUMN age");
+    assert_parses!("ALTER TABLE t DROP COLUMN age");
 
     // Drop table
     assert_plans!("DROP TABLE t");

@@ -30,8 +30,8 @@ use regex::Regex;
 use sqlparser::tokenizer::Span;
 use sqlparser::{
     ast::{
-        self, helpers::attached_token::AttachedToken, AstBox as SQLBox, BinaryOperator, Function,
-        Ident, ObjectName, TimezoneInfo, WindowFrameBound,
+        self, AstBox as SQLBox, BinaryOperator, Function, Ident, ObjectName,
+        TimezoneInfo, WindowFrameBound, helpers::attached_token::AttachedToken,
     },
     keywords::ALL_KEYWORDS,
 };

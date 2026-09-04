@@ -38,11 +38,10 @@
 //! * [`LogicalPlan::expressions`]: Return a copy of the plan's expressions
 
 use crate::{
-    Aggregate, Analyze, CreateMaterializedView, CreateMemoryTable, CreateView,
-    DdlStatement, Distinct, DistinctOn, DmlStatement, Execute, Explain, Expr, Extension,
-    Filter, Join, Limit, LogicalPlan, MatchRecognize, Merge, MergeAction,
-    MergeInsertKind, Partitioning, Prepare, Projection, RecursiveQuery, Repartition,
-    Sort, Statement, Subquery, SubqueryAlias, TableScan, Union, Unnest,
+    Aggregate, Analyze, CreateMemoryTable, CreateView, DdlStatement, Distinct,
+    DistinctOn, DmlStatement, Explain, Expr, Extension, Filter, Join, Limit, LogicalPlan,
+    MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Projection,
+    RecursiveQuery, Repartition, Sort, Subquery, SubqueryAlias, TableScan, Union, Unnest,
     UserDefinedLogicalNode, Values, Window,
     dml::{CopyFrom, CopyTo},
     logical_plan::plan::{GraphTable, JsonTable},
@@ -57,6 +56,11 @@ use datafusion_common::tree_node::{
     TreeNodeRewriter, TreeNodeVisitor,
 };
 use datafusion_common::{Result, internal_err};
+
+type LogicalPlanApply<'a> =
+    dyn for<'plan> FnMut(&'plan LogicalPlan) -> Result<TreeNodeRecursion> + 'a;
+type LogicalPlanTransform<'a> =
+    dyn FnMut(LogicalPlan) -> Result<Transformed<LogicalPlan>> + 'a;
 
 impl TreeNode for LogicalPlan {
     fn apply_children<'n, F: FnMut(&'n Self) -> Result<TreeNodeRecursion>>(
@@ -246,8 +250,9 @@ impl TreeNode for LogicalPlan {
                 target_columns,
                 returning_columns,
                 returning_exprs,
+                returning_context,
                 overriding_system_value,
-                check_option_view,
+                check_option,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
                     table_name,
@@ -258,8 +263,9 @@ impl TreeNode for LogicalPlan {
                     target_columns,
                     returning_columns,
                     returning_exprs,
+                    returning_context,
                     overriding_system_value,
-                    check_option_view,
+                    check_option,
                 })
             }),
             LogicalPlan::Merge(Merge {
@@ -268,6 +274,9 @@ impl TreeNode for LogicalPlan {
                 source,
                 on,
                 clauses,
+                returning_columns,
+                returning_exprs,
+                returning_context,
                 output_schema,
             }) => (target, source)
                 .map_elements(f)?
@@ -278,6 +287,9 @@ impl TreeNode for LogicalPlan {
                         source,
                         on,
                         clauses,
+                        returning_columns,
+                        returning_exprs,
+                        returning_context,
                         output_schema,
                     })
                 }),
@@ -316,108 +328,19 @@ impl TreeNode for LogicalPlan {
             LogicalPlan::Ddl(ddl) => {
                 match ddl {
                     DdlStatement::CreateMemoryTable(CreateMemoryTable {
-                        name,
-                        constraints,
+                        spec,
                         input,
-                        if_not_exists,
-                        or_replace,
-                        column_defaults,
-                        temporary,
-                        storage_parameters,
-                        partitioning,
-                        partition_of,
-                        inherits,
                     }) => input.map_elements(f)?.update_data(|input| {
-                        DdlStatement::CreateMemoryTable(CreateMemoryTable {
-                            name,
-                            constraints,
-                            input,
-                            if_not_exists,
-                            or_replace,
-                            column_defaults,
-                            temporary,
-                            storage_parameters,
-                            partitioning,
-                            partition_of,
-                            inherits,
-                        })
+                        DdlStatement::CreateMemoryTable(CreateMemoryTable { spec, input })
                     }),
-                    DdlStatement::CreateView(CreateView {
-                        name,
-                        input,
-                        or_replace,
-                        if_not_exists,
-                        definition,
-                        temporary,
-                    }) => input.map_elements(f)?.update_data(|input| {
-                        DdlStatement::CreateView(CreateView {
-                            name,
-                            input,
-                            or_replace,
-                            if_not_exists,
-                            definition,
-                            temporary,
+                    DdlStatement::CreateView(CreateView { spec, input }) => {
+                        input.map_elements(f)?.update_data(|input| {
+                            DdlStatement::CreateView(CreateView { spec, input })
                         })
-                    }),
-                    DdlStatement::CreateMaterializedView(CreateMaterializedView {
-                        name,
-                        input,
-                        or_replace,
-                        if_not_exists,
-                        definition,
-                        with_options,
-                    }) => input.map_elements(f)?.update_data(|input| {
-                        DdlStatement::CreateMaterializedView(CreateMaterializedView {
-                            name,
-                            input,
-                            or_replace,
-                            if_not_exists,
-                            definition,
-                            with_options,
-                        })
-                    }),
+                    }
                     // no inputs in these statements
                     DdlStatement::CreateExternalTable(_)
-                    | DdlStatement::DropMaterializedView(_)
-                    | DdlStatement::RefreshMaterializedView(_)
-                    | DdlStatement::AlterMaterializedView(_)
-                    | DdlStatement::CreateCatalogSchema(_)
-                    | DdlStatement::CreateCatalog(_)
-                    | DdlStatement::CreateIndex(_)
-                    | DdlStatement::DropIndex(_)
-                    | DdlStatement::DropTable(_)
-                    | DdlStatement::DropView(_)
-                    | DdlStatement::DropCatalogSchema(_)
-                    | DdlStatement::CreateFunction(_)
-                    | DdlStatement::DropFunction(_)
-                    | DdlStatement::AlterTable(_)
-                    | DdlStatement::CreateDomain(_)
-                    | DdlStatement::DropDomain(_)
-                    | DdlStatement::DropSequence(_)
-                    | DdlStatement::CreateSequence(_)
-                    | DdlStatement::AlterSequence(_)
-                    | DdlStatement::CreateAssertion(_)
-                    | DdlStatement::DropAssertion(_)
-                    | DdlStatement::CreateProcedure(_)
-                    | DdlStatement::DropProcedure(_)
-                    | DdlStatement::CreateRole(_)
-                    | DdlStatement::DropRole(_)
-                    | DdlStatement::CreatePropertyGraph(_)
-                    | DdlStatement::DropPropertyGraph(_)
-                    // SQL/MED statements have no child plans to transform
-                    | DdlStatement::CreateServer(_)
-                    | DdlStatement::AlterServer(_)
-                    | DdlStatement::DropServer(_)
-                    | DdlStatement::CreateForeignDataWrapper(_)
-                    | DdlStatement::AlterForeignDataWrapper(_)
-                    | DdlStatement::DropForeignDataWrapper(_)
-                    | DdlStatement::CreateForeignTable(_)
-                    | DdlStatement::AlterForeignTable(_)
-                    | DdlStatement::DropForeignTable(_)
-                    | DdlStatement::CreateUserMapping(_)
-                    | DdlStatement::AlterUserMapping(_)
-                    | DdlStatement::DropUserMapping(_)
-                    | DdlStatement::ImportForeignSchema(_) => Transformed::no(ddl),
+                    | DdlStatement::CreateIndex(_) => Transformed::no(ddl),
                 }
                 .update_data(LogicalPlan::Ddl)
             }
@@ -459,14 +382,6 @@ impl TreeNode for LogicalPlan {
                     })
                 },
             ),
-            LogicalPlan::Statement(stmt) => match stmt {
-                Statement::Prepare(p) => p
-                    .input
-                    .map_elements(f)?
-                    .update_data(|input| Statement::Prepare(Prepare { input, ..p })),
-                _ => Transformed::no(stmt),
-            }
-            .update_data(LogicalPlan::Statement),
             LogicalPlan::MatchRecognize(MatchRecognize {
                 input,
                 partition_by,
@@ -539,6 +454,67 @@ macro_rules! handle_transform_recursion {
     }};
 }
 
+// Keep recursive plan traversal out of the generic public entry points below.
+// `LogicalPlan::map_children` is a large match and subquery traversal also walks
+// the expressions attached to every node. Making these functions generic over
+// the caller's closure emits that complete recursion once per analyzer rule.
+// Erasing only the callback keeps the traversal monomorphic while preserving
+// the allocation-free API and the closure's captured state.
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn apply_with_subqueries_impl(
+    node: &LogicalPlan,
+    f: &mut LogicalPlanApply<'_>,
+) -> Result<TreeNodeRecursion> {
+    f(node)?.visit_children(|| {
+        node.apply_subqueries(|child| apply_with_subqueries_impl(child, f))?
+            .visit_sibling(|| {
+                node.apply_children(|child| apply_with_subqueries_impl(child, f))
+            })
+    })
+}
+
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn transform_down_with_subqueries_impl(
+    node: LogicalPlan,
+    f: &mut LogicalPlanTransform<'_>,
+) -> Result<Transformed<LogicalPlan>> {
+    f(node)?.transform_children(|node| {
+        node.map_subqueries(|child| transform_down_with_subqueries_impl(child, f))?
+            .transform_sibling(|node| {
+                node.map_children(|child| transform_down_with_subqueries_impl(child, f))
+            })
+    })
+}
+
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn transform_up_with_subqueries_impl(
+    node: LogicalPlan,
+    f: &mut LogicalPlanTransform<'_>,
+) -> Result<Transformed<LogicalPlan>> {
+    node.map_subqueries(|child| transform_up_with_subqueries_impl(child, f))?
+        .transform_sibling(|node| {
+            node.map_children(|child| transform_up_with_subqueries_impl(child, f))
+        })?
+        .transform_parent(f)
+}
+
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn transform_down_up_with_subqueries_impl(
+    node: LogicalPlan,
+    f_down: &mut LogicalPlanTransform<'_>,
+    f_up: &mut LogicalPlanTransform<'_>,
+) -> Result<Transformed<LogicalPlan>> {
+    handle_transform_recursion!(
+        f_down(node),
+        |child| transform_down_up_with_subqueries_impl(child, f_down, f_up),
+        f_up
+    )
+}
+
 impl LogicalPlan {
     /// Calls `f` on all expressions in the current `LogicalPlan` node.
     ///
@@ -604,12 +580,6 @@ impl LogicalPlan {
             LogicalPlan::Limit(Limit { skip, fetch, .. }) => {
                 (skip, fetch).apply_ref_elements(f)
             }
-            LogicalPlan::Statement(stmt) => match stmt {
-                Statement::Execute(Execute { parameters, .. }) => {
-                    parameters.apply_elements(f)
-                }
-                _ => Ok(TreeNodeRecursion::Continue),
-            },
             LogicalPlan::Merge(merge) => {
                 f(&merge.on)?;
                 for clause in &merge.clauses {
@@ -646,6 +616,14 @@ impl LogicalPlan {
                 }
                 Ok(TreeNodeRecursion::Continue)
             }
+            LogicalPlan::Dml(dml) => match &dml.check_option {
+                Some(check_option) => f(check_option.predicate.expression()),
+                None => Ok(TreeNodeRecursion::Continue),
+            },
+            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+                spec,
+                ..
+            })) => spec.expressions().apply_ref_elements(f),
             LogicalPlan::MatchRecognize(MatchRecognize {
                 partition_by,
                 order_by,
@@ -700,7 +678,6 @@ impl LogicalPlan {
             | LogicalPlan::Explain(_)
             | LogicalPlan::Union(_)
             | LogicalPlan::Distinct(Distinct::All(_))
-            | LogicalPlan::Dml(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::CopyFrom(_)
@@ -874,15 +851,6 @@ impl LogicalPlan {
                     input,
                 })
             }),
-            LogicalPlan::Statement(stmt) => match stmt {
-                Statement::Execute(e) => {
-                    e.parameters.map_elements(f)?.update_data(|parameters| {
-                        Statement::Execute(Execute { parameters, ..e })
-                    })
-                }
-                _ => Transformed::no(stmt),
-            }
-            .update_data(LogicalPlan::Statement),
             LogicalPlan::Merge(merge) => {
                 let exprs = LogicalPlan::Merge(merge.clone()).expressions();
                 let exprs = exprs.map_elements(f)?;
@@ -893,6 +861,16 @@ impl LogicalPlan {
                 let plan =
                     LogicalPlan::Merge(merge).with_new_exprs(exprs.data, inputs)?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
+            }
+            LogicalPlan::Dml(mut dml) => {
+                let Some(mut check_option) = dml.check_option.take() else {
+                    return Ok(Transformed::no(LogicalPlan::Dml(dml)));
+                };
+                f(check_option.predicate.expression().clone())?.update_data(|predicate| {
+                    check_option.predicate = crate::BoundSqlExpression::new(predicate);
+                    dml.check_option = Some(check_option);
+                    LogicalPlan::Dml(dml)
+                })
             }
             LogicalPlan::MatchRecognize(mr) => {
                 let exprs = LogicalPlan::MatchRecognize(mr.clone()).expressions();
@@ -916,6 +894,23 @@ impl LogicalPlan {
                     LogicalPlan::GraphTable(gt).with_new_exprs(exprs.data, vec![])?;
                 Transformed::new(plan, exprs.transformed, exprs.tnr)
             }
+            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+                spec,
+                input,
+            })) => spec
+                .expressions()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .map_elements(f)?
+                .map_data(|expressions| {
+                    Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
+                        CreateMemoryTable {
+                            spec: spec.with_new_expressions(expressions)?,
+                            input,
+                        },
+                    )))
+                })?,
             // plans without expressions
             LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Unnest(_)
@@ -926,7 +921,6 @@ impl LogicalPlan {
             | LogicalPlan::Explain(_)
             | LogicalPlan::Union(_)
             | LogicalPlan::Distinct(Distinct::All(_))
-            | LogicalPlan::Dml(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::CopyFrom(_)
@@ -974,21 +968,6 @@ impl LogicalPlan {
         &self,
         mut f: F,
     ) -> Result<TreeNodeRecursion> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn apply_with_subqueries_impl<
-            F: FnMut(&LogicalPlan) -> Result<TreeNodeRecursion>,
-        >(
-            node: &LogicalPlan,
-            f: &mut F,
-        ) -> Result<TreeNodeRecursion> {
-            f(node)?.visit_children(|| {
-                node.apply_subqueries(|c| apply_with_subqueries_impl(c, f))?
-                    .visit_sibling(|| {
-                        node.apply_children(|c| apply_with_subqueries_impl(c, f))
-                    })
-            })
-        }
-
         apply_with_subqueries_impl(self, &mut f)
     }
 
@@ -1009,21 +988,6 @@ impl LogicalPlan {
         self,
         mut f: F,
     ) -> Result<Transformed<Self>> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_down_with_subqueries_impl<
-            F: FnMut(LogicalPlan) -> Result<Transformed<LogicalPlan>>,
-        >(
-            node: LogicalPlan,
-            f: &mut F,
-        ) -> Result<Transformed<LogicalPlan>> {
-            f(node)?.transform_children(|n| {
-                n.map_subqueries(|c| transform_down_with_subqueries_impl(c, f))?
-                    .transform_sibling(|n| {
-                        n.map_children(|c| transform_down_with_subqueries_impl(c, f))
-                    })
-            })
-        }
-
         transform_down_with_subqueries_impl(self, &mut f)
     }
 
@@ -1034,20 +998,6 @@ impl LogicalPlan {
         self,
         mut f: F,
     ) -> Result<Transformed<Self>> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_up_with_subqueries_impl<
-            F: FnMut(LogicalPlan) -> Result<Transformed<LogicalPlan>>,
-        >(
-            node: LogicalPlan,
-            f: &mut F,
-        ) -> Result<Transformed<LogicalPlan>> {
-            node.map_subqueries(|c| transform_up_with_subqueries_impl(c, f))?
-                .transform_sibling(|n| {
-                    n.map_children(|c| transform_up_with_subqueries_impl(c, f))
-                })?
-                .transform_parent(f)
-        }
-
         transform_up_with_subqueries_impl(self, &mut f)
     }
 
@@ -1062,22 +1012,6 @@ impl LogicalPlan {
         mut f_down: FD,
         mut f_up: FU,
     ) -> Result<Transformed<Self>> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_down_up_with_subqueries_impl<
-            FD: FnMut(LogicalPlan) -> Result<Transformed<LogicalPlan>>,
-            FU: FnMut(LogicalPlan) -> Result<Transformed<LogicalPlan>>,
-        >(
-            node: LogicalPlan,
-            f_down: &mut FD,
-            f_up: &mut FU,
-        ) -> Result<Transformed<LogicalPlan>> {
-            handle_transform_recursion!(
-                f_down(node),
-                |c| transform_down_up_with_subqueries_impl(c, f_down, f_up),
-                f_up
-            )
-        }
-
         transform_down_up_with_subqueries_impl(self, &mut f_down, &mut f_up)
     }
 

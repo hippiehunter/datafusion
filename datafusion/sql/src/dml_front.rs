@@ -20,17 +20,15 @@
 //! UPDATE-time recomputation, narrowing an INSERT to the columns its VALUES
 //! actually write, and per-value adaptation of INSERT source literals.
 //!
-//! [`ContextProvider`]: datafusion_expr::planner::ContextProvider
+//! [`ContextProvider`]: crate::planner::ContextProvider
 
-use std::collections::HashMap;
-
+use crate::planner::{ContextProvider, DmlGeneratedColumns};
 use arrow::datatypes::Fields;
 use datafusion_common::Result;
-use datafusion_expr::planner::{ContextProvider, DmlGeneratedColumns};
 use sqlparser::ast::{
     Assignment, AssignmentTarget, AstBox, Expr as SQLExpr, Ident, MergeAction,
-    MergeClause, MergeInsertKind, ObjectName, OnConflict, OnConflictAction,
-    OverridingKind, Query, SelectItem, SetExpr, Value,
+    MergeClause, MergeInsertKind, ObjectName, OverridingKind, Query, SelectItem, SetExpr,
+    Value,
 };
 
 use crate::values::is_default_identifier;
@@ -155,88 +153,18 @@ pub(crate) fn prepare_merge_insert_clauses(
     Ok(Some(generated))
 }
 
-/// Reject writes to generated columns in an UPDATE's assignment list, then
-/// recompute every stored generated column as part of the statement that
-/// changes its inputs — so the new row the plan produces, and every surface
-/// reading it (`RETURNING new.*` included), already carries their values.
-/// `SET col = DEFAULT` on a sequence-backed column takes the host's override
-/// expression, which draws the sequence. `None` leaves the caller's
-/// assignments authoritative.
-pub(crate) fn prepare_update_assignments(
+/// Reject writes to generated columns in an UPDATE's assignment list. Default
+/// substitution happens after expression binding in the UPDATE projection,
+/// where the host's parser-free semantics can be used directly.
+pub(crate) fn validate_update_assignments(
     provider: &dyn ContextProvider,
-    table: &ObjectName,
+    generated: Option<&DmlGeneratedColumns>,
     assignments: &[Assignment],
-) -> Result<Option<Vec<Assignment>>> {
-    let Some(generated) = provider.dml_generated_columns(table)? else {
-        return Ok(None);
+) -> Result<()> {
+    let Some(generated) = generated else {
+        return Ok(());
     };
-    reject_generated_assignments(provider, &generated, assignments)?;
-    let overridden = substitute_update_default_overrides(&generated, assignments);
-    let base = overridden.as_deref().unwrap_or(assignments);
-    match append_generated_assignments(&generated, base) {
-        Some(extended) => Ok(Some(extended)),
-        None => Ok(overridden),
-    }
-}
-
-/// Replace `SET col = DEFAULT` with the host's override expression for the
-/// sequence-backed columns that have one. `None` when nothing changes.
-fn substitute_update_default_overrides(
-    generated: &DmlGeneratedColumns,
-    assignments: &[Assignment],
-) -> Option<Vec<Assignment>> {
-    if generated.update_default_overrides.is_empty() {
-        return None;
-    }
-    let mut assignments = assignments.to_vec();
-    let mut changed = false;
-    for assignment in &mut assignments {
-        let AssignmentTarget::ColumnName(column) = &assignment.target else {
-            continue;
-        };
-        let Some(leaf) = column.0.last().and_then(|part| part.as_ident()) else {
-            continue;
-        };
-        if !is_default_identifier_expr(&assignment.value) {
-            continue;
-        }
-        if let Some((_, expression)) = generated
-            .update_default_overrides
-            .iter()
-            .find(|(name, _)| *name == leaf.value)
-        {
-            assignment.value = expression.clone();
-            changed = true;
-        }
-    }
-    changed.then_some(assignments)
-}
-
-/// The recompute pass for `INSERT ... ON CONFLICT DO UPDATE SET`. `None`
-/// leaves the caller's clause authoritative.
-pub(crate) fn prepare_on_conflict_assignments(
-    provider: &dyn ContextProvider,
-    table: &ObjectName,
-    on_conflict: Option<&OnConflict>,
-) -> Result<Option<OnConflict>> {
-    let Some(on_conflict) = on_conflict else {
-        return Ok(None);
-    };
-    let OnConflictAction::DoUpdate(do_update) = &on_conflict.action else {
-        return Ok(None);
-    };
-    let Some(generated) = provider.dml_generated_columns(table)? else {
-        return Ok(None);
-    };
-    let Some(extended) = append_generated_assignments(&generated, &do_update.assignments)
-    else {
-        return Ok(None);
-    };
-    let mut rewritten = on_conflict.clone();
-    if let OnConflictAction::DoUpdate(do_update) = &mut rewritten.action {
-        do_update.assignments = extended;
-    }
-    Ok(Some(rewritten))
+    reject_generated_assignments(provider, generated, assignments)
 }
 
 fn reject_generated_assignments(
@@ -269,114 +197,6 @@ fn reject_generated_assignments(
         }
     }
     Ok(())
-}
-
-/// Append recomputation assignments for stored generated columns. `None` when
-/// nothing needed appending.
-fn append_generated_assignments(
-    generated: &DmlGeneratedColumns,
-    assignments: &[Assignment],
-) -> Option<Vec<Assignment>> {
-    if generated.stored_expressions.is_empty() {
-        return None;
-    }
-    let assigned: HashMap<String, SQLExpr> = assignments
-        .iter()
-        .filter_map(|assignment| match &assignment.target {
-            AssignmentTarget::ColumnName(name) => Some((
-                name.0.last()?.as_ident()?.value.clone(),
-                assignment.value.clone(),
-            )),
-            _ => None,
-        })
-        .collect();
-    let mut extended = assignments.to_vec();
-    let before = extended.len();
-    for (column, expression) in &generated.stored_expressions {
-        // A generated column the statement already assigns is a write the
-        // caller is not allowed to make; that is reported by the rejection
-        // pass.
-        if assigned.contains_key(column) {
-            continue;
-        }
-        let mut value = expression.clone();
-        substitute_assigned_columns(&mut value, &assigned);
-        extended.push(Assignment {
-            target: AssignmentTarget::ColumnName(ObjectName::from(vec![Ident::new(
-                column.as_str(),
-            )])),
-            value,
-        });
-    }
-    (extended.len() != before).then_some(extended)
-}
-
-/// Replace every column reference the statement assigns with the value being
-/// assigned. The substituted value is the statement's own expression, naming
-/// the row's *old* columns, so it is never descended into — `SET a = a + 1`
-/// would otherwise substitute itself forever.
-fn substitute_assigned_columns(expr: &mut SQLExpr, assigned: &HashMap<String, SQLExpr>) {
-    let referenced = match expr {
-        SQLExpr::Identifier(identifier) => Some(identifier.value.clone()),
-        SQLExpr::CompoundIdentifier(parts) => match parts.as_slice() {
-            [_, leaf] => Some(leaf.value.clone()),
-            _ => None,
-        },
-        _ => None,
-    };
-    if let Some(referenced) = referenced {
-        if let Some(value) = assigned.get(&referenced) {
-            *expr = SQLExpr::Nested(AstBox::new(value.clone()));
-        }
-        return;
-    }
-    match expr {
-        SQLExpr::Nested(inner) => substitute_assigned_columns(inner, assigned),
-        SQLExpr::UnaryOp { expr, .. } => substitute_assigned_columns(expr, assigned),
-        SQLExpr::BinaryOp { left, right, .. } => {
-            substitute_assigned_columns(left, assigned);
-            substitute_assigned_columns(right, assigned);
-        }
-        SQLExpr::Cast { expr, .. } => substitute_assigned_columns(expr, assigned),
-        SQLExpr::IsNull { expr, .. } | SQLExpr::IsNotNull { expr, .. } => {
-            substitute_assigned_columns(expr, assigned);
-        }
-        SQLExpr::Function(function) => {
-            if let sqlparser::ast::FunctionArguments::List(arguments) = &mut function.args
-            {
-                for argument in &mut arguments.args {
-                    if let sqlparser::ast::FunctionArg::Unnamed(
-                        sqlparser::ast::FunctionArgExpr::Expr(argument),
-                    )
-                    | sqlparser::ast::FunctionArg::Named {
-                        arg: sqlparser::ast::FunctionArgExpr::Expr(argument),
-                        ..
-                    } = argument
-                    {
-                        substitute_assigned_columns(argument, assigned);
-                    }
-                }
-            }
-        }
-        SQLExpr::Case {
-            operand,
-            conditions,
-            else_result,
-            ..
-        } => {
-            if let Some(operand) = operand {
-                substitute_assigned_columns(operand, assigned);
-            }
-            for condition in conditions {
-                substitute_assigned_columns(&mut condition.condition, assigned);
-                substitute_assigned_columns(&mut condition.result, assigned);
-            }
-            if let Some(else_result) = else_result {
-                substitute_assigned_columns(else_result, assigned);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Return the typed set of columns an INSERT over a VALUES source actually
@@ -430,7 +250,7 @@ fn is_default_identifier_expr(expr: &SQLExpr) -> bool {
 /// projections positionally, set-operation arms recursively. `None` when
 /// nothing changes.
 ///
-/// [`ContextProvider::adapt_insert_value`]: datafusion_expr::planner::ContextProvider::adapt_insert_value
+/// [`ContextProvider::adapt_insert_value`]: crate::planner::ContextProvider::adapt_insert_value
 pub(crate) fn adapt_insert_source_values(
     provider: &dyn ContextProvider,
     source: &Query,

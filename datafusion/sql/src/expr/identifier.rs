@@ -21,15 +21,14 @@ use datafusion_common::{
     Column, DFSchema, Result, ScalarValue, Span, TableReference, assert_or_internal_err,
     exec_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
-use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{Case, Expr, expr::ScalarFunction};
 use sqlparser::ast::{AstBox as SQLBox, CaseWhen, Expr as SQLExpr, Ident};
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
 use datafusion_expr::UNNAMED_TABLE;
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn sql_identifier_to_expr(
         &self,
         id: &Ident,
@@ -68,7 +67,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     normalize_ident,
                 );
                 if self.options.collect_spans
-                    && let Some(span) = Span::try_from_sqlparser_span(id_span)
+                    && let Some(span) = crate::utils::convert_parser_span(id_span)
                 {
                     column.spans_mut().add_span(span);
                 }
@@ -88,7 +87,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         normalize_ident,
                     );
                     if self.options.collect_spans
-                        && let Some(span) = Span::try_from_sqlparser_span(id_span)
+                        && let Some(span) = crate::utils::convert_parser_span(id_span)
                     {
                         column.spans_mut().add_span(span);
                     }
@@ -123,7 +122,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             // Default case
             let mut column = Column::new_unqualified(normalize_ident);
             if self.options.collect_spans
-                && let Some(span) = Span::try_from_sqlparser_span(id_span)
+                && let Some(span) = crate::utils::convert_parser_span(id_span)
             {
                 column.spans_mut().add_span(span);
             }
@@ -173,7 +172,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         let ids_span = Span::union_iter(
             ids.iter()
-                .filter_map(|id| Span::try_from_sqlparser_span(id.span)),
+                .filter_map(|id| crate::utils::convert_parser_span(id.span)),
         );
 
         if ids[0].value.starts_with('@') {

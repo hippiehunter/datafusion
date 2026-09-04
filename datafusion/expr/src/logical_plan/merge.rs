@@ -16,15 +16,13 @@
 // under the License.
 
 use std::cmp::Ordering;
-use std::fmt::{self, Debug, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use datafusion_common::{DFSchemaRef, TableReference};
-use sqlparser::ast::{AssignmentTarget, MergeClauseKind, ObjectName, OverridingKind};
-
-use crate::logical_plan::dml::make_count_schema;
+use crate::logical_plan::dml::{ReturningContext, make_count_schema};
 use crate::{Expr, LogicalPlan};
+use datafusion_common::{DFSchemaRef, TableReference};
 
 /// MERGE logical plan node.
 #[derive(Clone)]
@@ -39,7 +37,13 @@ pub struct Merge {
     pub on: Expr,
     /// Merge clauses, in order.
     pub clauses: Vec<MergeClause>,
-    /// Output schema (single count column).
+    /// Columns requested by a RETURNING clause.
+    pub returning_columns: Option<Vec<String>>,
+    /// Expressions evaluated over the applied MERGE row image.
+    pub returning_exprs: Option<Vec<Expr>>,
+    /// Explicit evaluation-row semantics for RETURNING.
+    pub returning_context: Option<ReturningContext>,
+    /// Output schema (a count column without RETURNING).
     pub output_schema: DFSchemaRef,
 }
 
@@ -57,8 +61,26 @@ impl Merge {
             source,
             on,
             clauses,
+            returning_columns: None,
+            returning_exprs: None,
+            returning_context: None,
             output_schema: make_count_schema(),
         }
+    }
+
+    /// Attach a fully lowered, parser-independent RETURNING projection.
+    pub fn with_returning(
+        mut self,
+        columns: Vec<String>,
+        exprs: Option<Vec<Expr>>,
+        context: ReturningContext,
+        output_schema: DFSchemaRef,
+    ) -> Self {
+        self.returning_columns = Some(columns);
+        self.returning_exprs = exprs;
+        self.returning_context = Some(context);
+        self.output_schema = output_schema;
+        self
     }
 }
 
@@ -70,6 +92,9 @@ impl Debug for Merge {
             .field("source", &self.source)
             .field("on", &self.on)
             .field("clauses", &self.clauses)
+            .field("returning_columns", &self.returning_columns)
+            .field("returning_exprs", &self.returning_exprs)
+            .field("returning_context", &self.returning_context)
             .field("output_schema", &self.output_schema)
             .finish()
     }
@@ -82,6 +107,9 @@ impl PartialEq for Merge {
             && self.source == other.source
             && self.on == other.on
             && self.clauses == other.clauses
+            && self.returning_columns == other.returning_columns
+            && self.returning_exprs == other.returning_exprs
+            && self.returning_context == other.returning_context
             && self.output_schema == other.output_schema
     }
 }
@@ -95,6 +123,9 @@ impl Hash for Merge {
         self.source.hash(state);
         self.on.hash(state);
         self.clauses.hash(state);
+        self.returning_columns.hash(state);
+        self.returning_exprs.hash(state);
+        self.returning_context.hash(state);
         self.output_schema.hash(state);
     }
 }
@@ -128,6 +159,29 @@ pub struct MergeClause {
     pub action: MergeAction,
 }
 
+/// The row-presence condition for a MERGE arm.
+///
+/// This is a logical property of the arm, not parser state. It deliberately
+/// lives in `datafusion-expr` so MERGE plans do not retain SQL AST types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MergeClauseKind {
+    Matched,
+    NotMatched,
+    NotMatchedByTarget,
+    NotMatchedBySource,
+}
+
+impl Display for MergeClauseKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Matched => "MATCHED",
+            Self::NotMatched => "NOT MATCHED",
+            Self::NotMatchedByTarget => "NOT MATCHED BY TARGET",
+            Self::NotMatchedBySource => "NOT MATCHED BY SOURCE",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum MergeAction {
     Insert(MergeInsertExpr),
@@ -145,14 +199,30 @@ pub enum MergeInsertKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct MergeInsertExpr {
     /// Full target-row evaluation columns, in table order.
-    pub columns: Vec<ObjectName>,
+    pub columns: Vec<String>,
     /// Columns the statement actually provides to storage. Identity columns
     /// discarded by `OVERRIDING USER VALUE` are absent here.
-    pub provided_columns: Vec<ObjectName>,
+    pub provided_columns: Vec<String>,
     /// The statement's identity override contract.
-    pub overriding: Option<OverridingKind>,
+    pub overriding: Option<MergeIdentityOverride>,
     pub kind: MergeInsertKind,
     pub insert_predicate: Option<Expr>,
+}
+
+/// Identity-column behavior requested by a MERGE INSERT arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MergeIdentityOverride {
+    SystemValue,
+    UserValue,
+}
+
+impl Display for MergeIdentityOverride {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SystemValue => "OVERRIDING SYSTEM VALUE",
+            Self::UserValue => "OVERRIDING USER VALUE",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
@@ -164,6 +234,47 @@ pub struct MergeUpdateExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct MergeAssignment {
-    pub target: AssignmentTarget,
+    pub target: MergeAssignmentTarget,
     pub value: Expr,
+}
+
+/// Parser-free target of a MERGE UPDATE assignment.
+///
+/// Tuple and indirection forms are retained so downstream validation and
+/// persisted-plan compatibility remain explicit, but any expressions used to
+/// spell an indirection are reduced to a diagnostic string at SQL lowering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MergeAssignmentTarget {
+    ColumnName(Vec<String>),
+    Tuple(Vec<Vec<String>>),
+    Indirection(String),
+}
+
+impl MergeAssignmentTarget {
+    /// Return the final name component for a simple column target.
+    pub fn column_name(&self) -> Option<&str> {
+        match self {
+            Self::ColumnName(parts) => parts.last().map(String::as_str),
+            Self::Tuple(_) | Self::Indirection(_) => None,
+        }
+    }
+}
+
+impl Display for MergeAssignmentTarget {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ColumnName(parts) => f.write_str(&parts.join(".")),
+            Self::Tuple(columns) => {
+                f.write_str("(")?;
+                for (index, parts) in columns.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(&parts.join("."))?;
+                }
+                f.write_str(")")
+            }
+            Self::Indirection(target) => f.write_str(target),
+        }
+    }
 }

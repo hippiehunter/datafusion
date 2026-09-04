@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 use datafusion_common::{
     Column, DataFusionError, Diagnostic, JoinType, NullEquality, Result, Span,
     not_impl_err, plan_datafusion_err, plan_err,
@@ -30,7 +30,7 @@ use datafusion_expr::{
 };
 use sqlparser::ast::{SetExpr, SetOperator, SetQuantifier, Spanned};
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
     pub(super) fn set_expr_to_plan(
         &self,
@@ -46,7 +46,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         set_expr: &SetExpr,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        let set_expr_span = Span::try_from_sqlparser_span(set_expr.span());
+        let set_expr_span = crate::utils::convert_parser_span(set_expr.span());
         match set_expr {
             SetExpr::Select(s) => {
                 self.select_to_plan_ref(s.as_ref(), None, planner_context)
@@ -58,8 +58,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 right,
                 set_quantifier,
             } => {
-                let left_span = Span::try_from_sqlparser_span(left.span());
-                let right_span = Span::try_from_sqlparser_span(right.span());
+                let left_span = crate::utils::convert_parser_span(left.span());
+                let right_span = crate::utils::convert_parser_span(right.span());
                 let left_plan = self.set_expr_to_plan_ref(left.as_ref(), planner_context);
                 let right_plan =
                     self.set_expr_to_plan_ref(right.as_ref(), planner_context);

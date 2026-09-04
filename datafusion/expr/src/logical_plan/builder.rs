@@ -25,7 +25,7 @@ use std::iter::once;
 use std::sync::Arc;
 
 use crate::dml::CopyTo;
-use crate::expr::{Alias, GroupingSet, PlannedReplaceSelectItem, Sort as SortExpr};
+use crate::expr::{Alias, GroupingSet, Sort as SortExpr, WildcardReplace};
 use crate::expr_rewriter::{
     coerce_plan_expr_for_schema, normalize_col,
     normalize_col_with_schemas_and_ambiguity_check, normalize_cols, normalize_sorts,
@@ -33,9 +33,8 @@ use crate::expr_rewriter::{
 };
 use crate::logical_plan::{
     Aggregate, Analyze, Distinct, DistinctOn, EmptyRelation, Explain, Filter, Join,
-    JoinConstraint, JoinType, Limit, LogicalPlan, Partitioning, PlanType, Prepare,
-    Projection, Repartition, Sort, SubqueryAlias, TableScan, Union, Unnest, Values,
-    Window,
+    JoinConstraint, JoinType, Limit, LogicalPlan, Partitioning, PlanType, Projection,
+    Repartition, Sort, SubqueryAlias, TableScan, Union, Unnest, Values, Window,
 };
 use crate::select_expr::SelectExpr;
 use crate::utils::{
@@ -45,13 +44,13 @@ use crate::utils::{
 };
 use crate::{
     DmlStatement, ExplainOption, Expr, ExprSchemable, Operator, RecursiveQuery,
-    Statement, TableProviderFilterPushDown, TableSource, WriteOp, and, binary_expr, lit,
+    TableProviderFilterPushDown, TableSource, WriteOp, and, binary_expr, lit,
 };
 use datafusion_expr_common::type_coercion::binary::comparison_coercion;
 
 use super::dml::InsertOp;
 use arrow::compute::can_cast_types;
-use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_common::display::ToStringifiedPlan;
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::metadata::FieldMetadata;
@@ -695,17 +694,6 @@ impl LogicalPlanBuilder {
         Filter::try_new(expr, self.plan)
             .map(LogicalPlan::Filter)
             .map(Self::from)
-    }
-
-    /// Make a builder for a prepare logical plan from the builder's plan
-    pub fn prepare(self, name: String, fields: Vec<FieldRef>) -> Result<Self> {
-        Ok(Self::new(LogicalPlan::Statement(Statement::Prepare(
-            Prepare {
-                name,
-                fields,
-                input: self.plan,
-            },
-        ))))
     }
 
     /// Limit the number of rows returned
@@ -2098,10 +2086,10 @@ fn project_with_validation(
 
                 // If there is a REPLACE statement, replace that column with the given
                 // replace expression. Column name remains the same.
-                let expanded = if let Some(replace) = opt.replace {
-                    replace_columns(expanded, &replace)?
-                } else {
+                let expanded = if opt.replace.is_empty() {
                     expanded
+                } else {
+                    replace_columns(expanded, &opt.replace)?
                 };
 
                 for e in expanded {
@@ -2119,10 +2107,10 @@ fn project_with_validation(
 
                 // If there is a REPLACE statement, replace that column with the given
                 // replace expression. Column name remains the same.
-                let expanded = if let Some(replace) = opt.replace {
-                    replace_columns(expanded, &replace)?
-                } else {
+                let expanded = if opt.replace.is_empty() {
                     expanded
+                } else {
+                    replace_columns(expanded, &opt.replace)?
                 };
 
                 for e in expanded {
@@ -2154,17 +2142,15 @@ fn project_with_validation(
 /// Multiple REPLACEs are also possible with comma separations.
 fn replace_columns(
     mut exprs: Vec<Expr>,
-    replace: &PlannedReplaceSelectItem,
+    replacements: &[WildcardReplace],
 ) -> Result<Vec<Expr>> {
     for expr in exprs.iter_mut() {
         if let Expr::Column(Column { name, .. }) = expr
-            && let Some((_, new_expr)) = replace
-                .items()
+            && let Some(replacement) = replacements
                 .iter()
-                .zip(replace.expressions().iter())
-                .find(|(item, _)| item.column_name.value == *name)
+                .find(|replacement| replacement.column_name == *name)
         {
-            *expr = new_expr.clone().alias(name.clone())
+            *expr = replacement.expression.clone().alias(name.clone())
         }
     }
     Ok(exprs)

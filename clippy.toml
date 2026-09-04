@@ -1,4 +1,7 @@
-disallowed-methods = []
+disallowed-methods = [
+    { path = "sqlparser::ast::Visit::visit", reason = "Use datafusion-sql's ast_walk::Walk so AST drives retain the shared unit-break traversal policy." },
+    { path = "sqlparser::ast::VisitMut::visit", reason = "Use datafusion-sql's ast_walk::Walk so AST drives retain the shared unit-break traversal policy." },
+]
 
 disallowed-types = [
     { path = "std::time::Instant", reason = "Use `datafusion_common::instant::Instant` instead for WASM compatibility" },

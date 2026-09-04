@@ -22,14 +22,13 @@ use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{Result, TableReference, plan_err};
 use datafusion_expr::WindowUDF;
-use datafusion_expr::planner::ExprPlanner;
 use datafusion_expr::{
     AggregateUDF, ScalarUDF, TableSource, logical_plan::builder::LogicalTableSource,
 };
 use datafusion_functions_aggregate::count::count_udaf;
 use datafusion_functions_aggregate::sum::sum_udaf;
 use datafusion_sql::{
-    planner::{ContextProvider, SqlToRel},
+    planner::{ContextProvider, ExprPlanner, SqlToRel},
     sqlparser::{dialect::PostgreSqlDialect, parser::Parser},
 };
 

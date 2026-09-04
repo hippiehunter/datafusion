@@ -61,7 +61,11 @@ use datafusion_sql::unparser::extension_unparser::{
     UserDefinedLogicalNodeUnparser,
 };
 use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
-use sqlparser::parser::Parser;
+use sqlparser::parser::{Parser, ParserError};
+
+fn parser_test_error(error: ParserError) -> DataFusionError {
+    DataFusionError::SQL(format!("{error:?}").into_boxed_str(), None)
+}
 
 #[test]
 fn test_roundtrip_expr_1() {
@@ -90,7 +94,11 @@ fn test_roundtrip_expr_4() {
 
 fn roundtrip_expr(table: TableReference, sql: &str) -> Result<String> {
     let dialect = PostgreSqlDialect {};
-    let sql_expr = Parser::new(&dialect).try_with_sql(sql)?.parse_expr()?;
+    let sql_expr = Parser::new(&dialect)
+        .try_with_sql(sql)
+        .map_err(parser_test_error)?
+        .parse_expr()
+        .map_err(parser_test_error)?;
     let state = MockSessionState::default().with_aggregate_function(sum_udaf());
     let context = MockContextProvider { state };
     let schema = context.get_table_source(table)?.schema();
@@ -207,20 +215,8 @@ fn roundtrip_statement() -> Result<()> {
             SUM(id) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
             FROM person
             GROUP BY GROUPING SETS ((id, first_name, last_name), (first_name, last_name), (last_name))"#,
-            "ALTER TABLE j1 ADD COLUMN j1_extra INT",
-            "ALTER TABLE j1 DROP COLUMN j1_string",
-            "ALTER TABLE j1 ADD CONSTRAINT j1_positive CHECK (j1_id > 0)",
-            "ALTER TABLE j1 DROP CONSTRAINT j1_positive",
-            "ALTER TABLE j1 ALTER COLUMN j1_string SET DEFAULT 'x'",
-            "ALTER TABLE j1 ALTER COLUMN j1_string DROP DEFAULT",
-            "ALTER TABLE j1 ALTER COLUMN j1_string SET NOT NULL",
-            "ALTER TABLE j1 ALTER COLUMN j1_string DROP NOT NULL",
-            "ALTER TABLE j1 ALTER COLUMN j1_string TYPE VARCHAR",
-            "ALTER TABLE j1 RENAME COLUMN j1_string TO j1_text",
-            "ALTER TABLE j1 RENAME TO j1_renamed",
-            "CREATE DOMAIN dom_int AS INT",
-            "DROP DOMAIN IF EXISTS dom_int CASCADE",
-            "DROP SEQUENCE IF EXISTS seq1",
+            // Catalog utility statements deliberately stop before LogicalPlan;
+            // their host-owned commands are not part of relational plan-to-SQL.
             "MERGE INTO j1 USING j2 ON j1.j1_id = j2.j2_id WHEN MATCHED THEN UPDATE SET j1_string = j2.j2_string WHEN NOT MATCHED THEN INSERT (j1_id, j1_string) VALUES (j2.j2_id, j2.j2_string)",
             "GRANT SELECT ON TABLE j1 TO PUBLIC",
             "REVOKE SELECT ON TABLE j1 FROM PUBLIC",
@@ -247,8 +243,10 @@ fn roundtrip_statement() -> Result<()> {
     for query in tests {
         let dialect = PostgreSqlDialect {};
         let statement = Parser::new(&dialect)
-            .try_with_sql(query)?
-            .parse_statement()?;
+            .try_with_sql(query)
+            .map_err(parser_test_error)?
+            .parse_statement()
+            .map_err(parser_test_error)?;
         let state = MockSessionState::default()
             .with_aggregate_function(sum_udaf())
             .with_aggregate_function(count_udaf())
@@ -273,7 +271,11 @@ fn roundtrip_statement() -> Result<()> {
 fn plan_create_temporary_table() -> Result<()> {
     let sql = "CREATE TEMPORARY TABLE temp_table (id INT, name VARCHAR)";
     let dialect = PostgreSqlDialect {};
-    let statement = Parser::new(&dialect).try_with_sql(sql)?.parse_statement()?;
+    let statement = Parser::new(&dialect)
+        .try_with_sql(sql)
+        .map_err(parser_test_error)?
+        .parse_statement()
+        .map_err(parser_test_error)?;
     let state = MockSessionState::default();
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new(&context);
@@ -281,10 +283,10 @@ fn plan_create_temporary_table() -> Result<()> {
 
     match plan {
         LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
-            temporary,
+            spec,
             ..
         })) => {
-            assert!(temporary);
+            assert!(spec.temporary);
         }
         other => {
             return Err(DataFusionError::Internal(format!(
@@ -325,8 +327,10 @@ fn roundtrip_grant_revoke_role() -> Result<()> {
     for query in tests {
         let dialect = PostgreSqlDialect {};
         let statement = Parser::new(&dialect)
-            .try_with_sql(query)?
-            .parse_statement()?;
+            .try_with_sql(query)
+            .map_err(parser_test_error)?
+            .parse_statement()
+            .map_err(parser_test_error)?;
         let state = MockSessionState::default();
         let context = MockContextProvider { state };
         let sql_to_rel = SqlToRel::new(&context);
@@ -350,8 +354,10 @@ fn roundtrip_crossjoin() -> Result<()> {
 
     let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
-        .try_with_sql(query)?
-        .parse_statement()?;
+        .try_with_sql(query)
+        .map_err(parser_test_error)?
+        .parse_statement()
+        .map_err(parser_test_error)?;
 
     let state = MockSessionState::default();
 
@@ -390,8 +396,10 @@ macro_rules! roundtrip_statement_with_dialect_helper {
         expected: @ $expected:literal $(,)?
     ) => {{
         let statement = Parser::new(&$parser_dialect)
-            .try_with_sql($sql)?
-            .parse_statement()?;
+            .try_with_sql($sql)
+            .map_err(parser_test_error)?
+            .parse_statement()
+            .map_err(parser_test_error)?;
 
         let state = MockSessionState::default()
             .with_aggregate_function(max_udaf())
@@ -1062,8 +1070,10 @@ fn test_unnest_logical_plan() -> Result<()> {
 
     let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
-        .try_with_sql(query)?
-        .parse_statement()?;
+        .try_with_sql(query)
+        .map_err(parser_test_error)?
+        .parse_statement()
+        .map_err(parser_test_error)?;
 
     let context = MockContextProvider {
         state: MockSessionState::default(),
@@ -1394,8 +1404,10 @@ fn test_pretty_roundtrip() -> Result<()> {
 
     for (sql, pretty) in sql_to_pretty_unparse.iter() {
         let sql_expr = Parser::new(&PostgreSqlDialect {})
-            .try_with_sql(sql)?
-            .parse_expr()?;
+            .try_with_sql(sql)
+            .map_err(parser_test_error)?
+            .parse_expr()
+            .map_err(parser_test_error)?;
         let expr =
             sql_to_rel.sql_to_expr(sql_expr, &df_schema, &mut PlannerContext::new())?;
         let round_trip_sql = unparser.expr_to_sql(&expr)?.to_string();
@@ -1403,8 +1415,10 @@ fn test_pretty_roundtrip() -> Result<()> {
 
         // verify that the pretty string parses to the same underlying Expr
         let pretty_sql_expr = Parser::new(&PostgreSqlDialect {})
-            .try_with_sql(pretty)?
-            .parse_expr()?;
+            .try_with_sql(pretty)
+            .map_err(parser_test_error)?
+            .parse_expr()
+            .map_err(parser_test_error)?;
 
         let pretty_expr = sql_to_rel.sql_to_expr(
             pretty_sql_expr,
@@ -1972,8 +1986,10 @@ fn test_complex_order_by_with_grouping() -> Result<()> {
                 WHEN grouping(j1_id) + grouping(j1_string) = 0 THEN j1_id
             END
         LIMIT 100"#,
-        )?
-        .parse_statement()?;
+        )
+        .map_err(parser_test_error)?
+        .parse_statement()
+        .map_err(parser_test_error)?;
 
     let plan = sql_to_rel.sql_statement_to_plan(statement)?;
     let unparser = Unparser::default();
@@ -2104,8 +2120,10 @@ impl UserDefinedLogicalNodeUnparser for UnusedUnparser {
 fn test_unparse_extension_to_statement() -> Result<()> {
     let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
-        .try_with_sql("SELECT * FROM j1")?
-        .parse_statement()?;
+        .try_with_sql("SELECT * FROM j1")
+        .map_err(parser_test_error)?
+        .parse_statement()
+        .map_err(parser_test_error)?;
     let state = MockSessionState::default();
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new(&context);
@@ -2166,8 +2184,10 @@ impl UserDefinedLogicalNodeUnparser for MockSqlUnparser {
 fn test_unparse_extension_to_sql() -> Result<()> {
     let dialect = PostgreSqlDialect {};
     let statement = Parser::new(&dialect)
-        .try_with_sql("SELECT * FROM j1")?
-        .parse_statement()?;
+        .try_with_sql("SELECT * FROM j1")
+        .map_err(parser_test_error)?
+        .parse_statement()
+        .map_err(parser_test_error)?;
     let state = MockSessionState::default();
     let context = MockContextProvider { state };
     let sql_to_rel = SqlToRel::new(&context);

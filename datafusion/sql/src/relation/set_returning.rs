@@ -32,13 +32,13 @@
 
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 
 use arrow::datatypes::{DataType, FieldRef};
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     Column, DFSchema, Result, Spans, UnnestOptions, not_impl_err, plan_err,
 };
-use datafusion_common::metadata::FieldMetadata;
 use datafusion_expr::expr::WindowFunction;
 use datafusion_expr::{
     Cast, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Subquery,
@@ -96,7 +96,7 @@ impl SetReturningCall {
 const LIST_COLUMN_PREFIX: &str = "__srf_";
 const ORDINALITY_COLUMN: &str = "ordinality";
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     /// Plan the function calls of one FROM item.
     pub(super) fn plan_function_relations(
         &self,
@@ -393,10 +393,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     Expr::Cast(Cast::new(Box::new(expr), definition.data_type().clone()))
                 };
                 let mut metadata = definition.metadata().clone();
-                metadata.insert(
-                    "pg_column_definition_list".to_string(),
-                    "true".to_string(),
-                );
+                metadata
+                    .insert("pg_column_definition_list".to_string(), "true".to_string());
                 Ok(expr.alias_with_metadata(
                     definition.name(),
                     Some(FieldMetadata::from(metadata)),

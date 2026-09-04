@@ -40,16 +40,11 @@ use datafusion_common::{
 };
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 
-pub use sqlparser::ast::{
-    ExceptSelectItem, Ident, IlikeSelectItem, RenameSelectItem, ReplaceSelectElement,
-};
-
 // Moved in 51.0.0 to datafusion_common
 pub use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::metadata::ScalarAndMetadata;
 
-// This mirrors sqlparser::ast::NullTreatment but we need our own variant
-// for when the sql feature is disabled.
+/// Null handling carried by a logical aggregate or window expression.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum NullTreatment {
     IgnoreNulls,
@@ -62,15 +57,6 @@ impl Display for NullTreatment {
             NullTreatment::IgnoreNulls => "IGNORE NULLS",
             NullTreatment::RespectNulls => "RESPECT NULLS",
         })
-    }
-}
-
-impl From<sqlparser::ast::NullTreatment> for NullTreatment {
-    fn from(value: sqlparser::ast::NullTreatment) -> Self {
-        match value {
-            sqlparser::ast::NullTreatment::IgnoreNulls => Self::IgnoreNulls,
-            sqlparser::ast::NullTreatment::RespectNulls => Self::RespectNulls,
-        }
     }
 }
 
@@ -1287,74 +1273,70 @@ where
 pub struct WildcardOptions {
     /// `[ILIKE...]`.
     ///  Snowflake syntax: <https://docs.snowflake.com/en/sql-reference/sql/select#parameters>
-    pub ilike: Option<IlikeSelectItem>,
+    pub ilike: Option<String>,
     /// `[EXCEPT...]`.
     ///  BigQuery syntax: <https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_except>
     ///  Clickhouse syntax: <https://clickhouse.com/docs/en/sql-reference/statements/select#except>
-    pub except: Option<ExceptSelectItem>,
+    pub except: Vec<String>,
     /// `[REPLACE]`
     ///  BigQuery syntax: <https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace>
     ///  Clickhouse syntax: <https://clickhouse.com/docs/en/sql-reference/statements/select#replace>
     ///  Snowflake syntax: <https://docs.snowflake.com/en/sql-reference/sql/select#parameters>
-    pub replace: Option<PlannedReplaceSelectItem>,
+    pub replace: Vec<WildcardReplace>,
     /// `[RENAME ...]`.
     ///  Snowflake syntax: <https://docs.snowflake.com/en/sql-reference/sql/select#parameters>
-    pub rename: Option<RenameSelectItem>,
-}
-
-impl WildcardOptions {
-    pub fn with_replace(self, replace: PlannedReplaceSelectItem) -> Self {
-        WildcardOptions {
-            ilike: self.ilike,
-            except: self.except,
-            replace: Some(replace),
-            rename: self.rename,
-        }
-    }
+    pub rename: Vec<WildcardRename>,
 }
 
 impl Display for WildcardOptions {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if let Some(ilike) = &self.ilike {
-            write!(f, " {ilike}")?;
+        if let Some(pattern) = &self.ilike {
+            write!(f, " ILIKE '{}'", pattern.replace('\'', "''"))?;
         }
-        if let Some(except) = &self.except {
-            write!(f, " {except}")?;
+        if !self.except.is_empty() {
+            write!(f, " EXCEPT ({})", display_comma_separated(&self.except))?;
         }
-        if let Some(replace) = &self.replace {
-            write!(f, " {replace}")?;
+        if !self.replace.is_empty() {
+            write!(f, " REPLACE ({})", display_comma_separated(&self.replace))?;
         }
-        if let Some(rename) = &self.rename {
-            write!(f, " {rename}")?;
+        if !self.rename.is_empty() {
+            write!(f, " RENAME ({})", display_comma_separated(&self.rename))?;
         }
         Ok(())
     }
 }
 
-/// The planned expressions for `REPLACE`
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug, Default)]
-pub struct PlannedReplaceSelectItem {
-    /// The original ast nodes
-    pub items: Vec<ReplaceSelectElement>,
-    /// The expression planned from the ast nodes. They will be used when expanding the wildcard.
-    pub planned_expressions: Vec<Expr>,
+/// A planned wildcard `REPLACE` item.
+///
+/// The SQL expression has already been lowered to [`Expr`]. Keeping the parser
+/// node here would make every clone, hash, and debug operation on [`Expr`]
+/// recursively instantiate those operations for the complete SQL AST.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct WildcardReplace {
+    /// The target column whose value is replaced.
+    pub column_name: String,
+    /// The planned replacement expression.
+    pub expression: Expr,
 }
 
-impl Display for PlannedReplaceSelectItem {
+impl Display for WildcardReplace {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "REPLACE")?;
-        write!(f, " ({})", display_comma_separated(&self.items))?;
-        Ok(())
+        write!(f, "{} AS {}", self.expression, self.column_name)
     }
 }
 
-impl PlannedReplaceSelectItem {
-    pub fn items(&self) -> &[ReplaceSelectElement] {
-        &self.items
-    }
+/// A planned wildcard `RENAME` item.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub struct WildcardRename {
+    /// The selected column being renamed.
+    pub column_name: String,
+    /// The name exposed by the projection.
+    pub alias: String,
+}
 
-    pub fn expressions(&self) -> &[Expr] {
-        &self.planned_expressions
+impl Display for WildcardRename {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{} AS {}", self.column_name, self.alias)
     }
 }
 
@@ -3521,8 +3503,6 @@ mod test {
         lit, placeholder, qualified_wildcard, wildcard, wildcard_with_options,
     };
     use arrow::datatypes::{Field, Schema};
-    use sqlparser::ast;
-    use sqlparser::ast::{Ident, IdentWithAlias};
     use std::any::Any;
 
     #[test]
@@ -3842,12 +3822,10 @@ mod test {
             format!(
                 "{}",
                 wildcard_with_options(wildcard_options(
-                    Some(IlikeSelectItem {
-                        pattern: "c1".to_string()
-                    }),
-                    None,
-                    None,
-                    None
+                    Some("c1".to_string()),
+                    vec![],
+                    vec![],
+                    vec![]
                 ))
             ),
             "* ILIKE 'c1'"
@@ -3857,12 +3835,9 @@ mod test {
                 "{}",
                 wildcard_with_options(wildcard_options(
                     None,
-                    Some(ExceptSelectItem {
-                        first_element: Ident::from("c1"),
-                        additional_elements: vec![Ident::from("c2")]
-                    }),
-                    None,
-                    None
+                    vec!["c1".to_string(), "c2".to_string()],
+                    vec![],
+                    vec![]
                 ))
             ),
             "* EXCEPT (c1, c2)"
@@ -3872,31 +3847,27 @@ mod test {
                 "{}",
                 wildcard_with_options(wildcard_options(
                     None,
-                    None,
-                    Some(PlannedReplaceSelectItem {
-                        items: vec![ReplaceSelectElement {
-                            expr: ast::Expr::Identifier(Ident::from("c1")),
-                            column_name: Ident::from("a1"),
-                            as_keyword: false
-                        }],
-                        planned_expressions: vec![]
-                    }),
-                    None
+                    vec![],
+                    vec![WildcardReplace {
+                        column_name: "a1".to_string(),
+                        expression: col("c1"),
+                    }],
+                    vec![]
                 ))
             ),
-            "* REPLACE (c1 a1)"
+            "* REPLACE (c1 AS a1)"
         );
         assert_eq!(
             format!(
                 "{}",
                 wildcard_with_options(wildcard_options(
                     None,
-                    None,
-                    None,
-                    Some(RenameSelectItem::Multiple(vec![IdentWithAlias {
-                        ident: Ident::from("c1"),
-                        alias: Ident::from("a1")
-                    }]))
+                    vec![],
+                    vec![],
+                    vec![WildcardRename {
+                        column_name: "c1".to_string(),
+                        alias: "a1".to_string(),
+                    }]
                 ))
             ),
             "* RENAME (c1 AS a1)"
@@ -3928,16 +3899,16 @@ mod test {
     }
 
     fn wildcard_options(
-        opt_ilike: Option<IlikeSelectItem>,
-        opt_except: Option<ExceptSelectItem>,
-        opt_replace: Option<PlannedReplaceSelectItem>,
-        opt_rename: Option<RenameSelectItem>,
+        ilike: Option<String>,
+        except: Vec<String>,
+        replace: Vec<WildcardReplace>,
+        rename: Vec<WildcardRename>,
     ) -> WildcardOptions {
         WildcardOptions {
-            ilike: opt_ilike,
-            except: opt_except,
-            replace: opt_replace,
-            rename: opt_rename,
+            ilike,
+            except,
+            replace,
+            rename,
         }
     }
 

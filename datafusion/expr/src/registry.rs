@@ -18,7 +18,6 @@
 //! FunctionRegistry trait
 
 use crate::expr_rewriter::FunctionRewrite;
-use crate::planner::ExprPlanner;
 use crate::{AggregateUDF, ScalarUDF, UserDefinedLogicalNode, WindowUDF};
 use datafusion_common::{HashMap, Result, not_impl_err, plan_datafusion_err};
 use std::collections::HashSet;
@@ -116,17 +115,6 @@ pub trait FunctionRegistry {
     ) -> Result<()> {
         not_impl_err!("Registering FunctionRewrite")
     }
-
-    /// Set of all registered [`ExprPlanner`]s
-    fn expr_planners(&self) -> Vec<Arc<dyn ExprPlanner>>;
-
-    /// Registers a new [`ExprPlanner`] with the registry.
-    fn register_expr_planner(
-        &mut self,
-        _expr_planner: Arc<dyn ExprPlanner>,
-    ) -> Result<()> {
-        not_impl_err!("Registering ExprPlanner")
-    }
 }
 
 /// Serializer and deserializer registry for extensions like [UserDefinedLogicalNode].
@@ -201,10 +189,6 @@ impl FunctionRegistry for MemoryFunctionRegistry {
     }
     fn register_udwf(&mut self, udaf: Arc<WindowUDF>) -> Result<Option<Arc<WindowUDF>>> {
         Ok(self.udwfs.insert(udaf.name().into(), udaf))
-    }
-
-    fn expr_planners(&self) -> Vec<Arc<dyn ExprPlanner>> {
-        vec![]
     }
 
     fn udafs(&self) -> HashSet<String> {

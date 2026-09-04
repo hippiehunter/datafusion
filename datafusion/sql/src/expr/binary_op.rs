@@ -15,12 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, SqlToRel};
+use crate::planner::SqlToRel;
 use datafusion_common::{Result, not_impl_err, plan_err};
 use datafusion_expr::Operator;
 use sqlparser::ast::BinaryOperator;
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(crate) fn parse_sql_binary_op(&self, op: &BinaryOperator) -> Result<Operator> {
         match *op {
             BinaryOperator::Gt => Ok(Operator::Gt),
@@ -102,10 +102,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     "?" => Ok(Operator::Question),
                     "?&" => Ok(Operator::QuestionAnd),
                     "?|" => Ok(Operator::QuestionPipe),
-                    _ => plan_err!(
-                        "operator OPERATOR({}) does not exist",
-                        names.join(".")
-                    ),
+                    _ => {
+                        plan_err!("operator OPERATOR({}) does not exist", names.join("."))
+                    }
                 }
             }
             BinaryOperator::Custom(ref operator) => {

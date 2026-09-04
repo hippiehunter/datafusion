@@ -16,6 +16,7 @@
 // under the License.
 
 use crate::TableReference;
+use crate::ast_walk::Walk;
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
@@ -80,7 +81,7 @@ impl Visitor for RelationVisitor {
                 if !with.recursive {
                     // This is a bit hackish as the CTE will be visited again as part of visiting `q`,
                     // but thankfully `insert_relation` is idempotent.
-                    let _ = cte.visit(self);
+                    let _ = cte.walk(self);
                 }
                 self.ctes_in_scope
                     .push(ObjectName::from(vec![cte.alias.name.clone()]));
@@ -136,7 +137,7 @@ impl Visitor for RelationVisitor {
 fn visit_statement(statement: &DFStatement, visitor: &mut RelationVisitor) {
     match statement {
         DFStatement::Statement(s) => {
-            let _ = s.as_ref().visit(visitor);
+            let _ = s.as_ref().walk(visitor);
         }
         DFStatement::CreateExternalTable(table) => {
             visitor.relations.insert(table.name.clone());
@@ -146,7 +147,7 @@ fn visit_statement(statement: &DFStatement, visitor: &mut RelationVisitor) {
                 visitor.insert_relation(table_name);
             }
             CopyToSource::Query(query) => {
-                let _ = query.visit(visitor);
+                let _ = query.walk(visitor);
             }
         },
         DFStatement::CopyFrom(CopyFromStatement { table_name, .. }) => {

@@ -15,15 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
 use arrow::datatypes::DataType;
 use datafusion_common::{DFSchema, Result, ScalarValue};
 use datafusion_common::{not_impl_err, plan_err};
-use datafusion_expr::{Expr, ExprSchemable, planner::PlannerResult};
+use datafusion_expr::{Expr, ExprSchemable};
 
 use sqlparser::ast::{AstBox as SQLBox, Expr as SQLExpr};
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn sql_substring_to_expr(
         &self,
         expr: &SQLBox<SQLExpr>,

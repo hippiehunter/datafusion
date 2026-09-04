@@ -24,6 +24,7 @@
 // https://github.com/apache/datafusion/issues/11143
 #![deny(clippy::clone_on_ref_ptr)]
 #![deny(clippy::allow_attributes)]
+#![deny(clippy::disallowed_methods)]
 #![cfg_attr(test, allow(clippy::needless_pass_by_value))]
 
 //! This crate provides:
@@ -43,13 +44,14 @@
 //! [`LogicalPlan`]: datafusion_expr::logical_plan::LogicalPlan
 //! [`Expr`]: datafusion_expr::expr::Expr
 
+mod ast_walk;
 mod cte;
 mod dml_front;
 mod expr;
 mod outer_aggregates;
 pub mod parser;
 pub mod planner;
-mod psm;
+mod planner_extension;
 mod query;
 mod relation;
 pub mod resolve;
@@ -57,11 +59,12 @@ mod select;
 mod set_expr;
 mod stack;
 mod statement;
-mod view_dml;
 #[cfg(feature = "unparser")]
 pub mod unparser;
 pub mod utils;
 mod values;
+mod view_dml;
+pub mod view_analysis;
 #[deprecated(
     since = "46.0.0",
     note = "use datafusion_common::{ResolvedTableReference, TableReference}"

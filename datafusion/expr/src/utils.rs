@@ -38,7 +38,6 @@ use datafusion_common::{
     plan_err,
 };
 
-use crate::expr::ExceptSelectItem;
 use indexmap::IndexSet;
 
 pub use datafusion_functions_aggregate_common::order::AggregateOrderSensitivity;
@@ -324,27 +323,21 @@ pub fn expr_to_columns(expr: &Expr, accum: &mut HashSet<Column>) -> Result<()> {
 /// Find excluded columns in the schema, if any
 /// SELECT * EXCLUDE(col1, col2), would return `vec![col1, col2]`
 fn get_excluded_columns(
-    opt_except: Option<&ExceptSelectItem>,
+    excluded_names: &[String],
     schema: &DFSchema,
     qualifier: Option<&TableReference>,
 ) -> Result<Vec<Column>> {
-    let mut idents = vec![];
-    if let Some(excepts) = opt_except {
-        idents.push(&excepts.first_element);
-        idents.extend(&excepts.additional_elements);
-    }
     // Excluded columns should be unique
-    let n_elem = idents.len();
-    let unique_idents = idents.into_iter().collect::<HashSet<_>>();
+    let n_elem = excluded_names.len();
+    let unique_names = excluded_names.iter().collect::<HashSet<_>>();
     // If HashSet size, and vector length are different, this means that some of the excluded columns
     // are not unique. In this case return error.
-    if n_elem != unique_idents.len() {
+    if n_elem != unique_names.len() {
         return plan_err!("EXCLUDE or EXCEPT contains duplicate column names");
     }
 
     let mut result = vec![];
-    for ident in unique_idents.into_iter() {
-        let col_name = ident.value.as_str();
+    for col_name in unique_names {
         let (qualifier, field) = schema.qualified_field_with_name(qualifier, col_name)?;
         result.push(Column::from((qualifier, field)));
     }
@@ -394,14 +387,10 @@ pub fn expand_wildcard(
     wildcard_options: Option<&WildcardOptions>,
 ) -> Result<Vec<Expr>> {
     let mut columns_to_skip = exclude_using_columns(plan)?;
-    let excluded_columns = if let Some(WildcardOptions {
-        except: opt_except, ..
-    }) = wildcard_options
-    {
-        get_excluded_columns(opt_except.as_ref(), schema, None)?
-    } else {
-        vec![]
-    };
+    let excluded_columns = wildcard_options
+        .map(|options| get_excluded_columns(&options.except, schema, None))
+        .transpose()?
+        .unwrap_or_default();
     // Add each excluded `Column` to columns_to_skip
     columns_to_skip.extend(excluded_columns);
     Ok(get_exprs_except_skipped(schema, &columns_to_skip))
@@ -429,14 +418,10 @@ pub fn expand_qualified_wildcard(
     let qualified_dfschema =
         DFSchema::try_from_qualified_schema(qualifier.clone(), &qualified_schema)?
             .with_functional_dependencies(projected_func_dependencies)?;
-    let excluded_columns = if let Some(WildcardOptions {
-        except: opt_except, ..
-    }) = wildcard_options
-    {
-        get_excluded_columns(opt_except.as_ref(), schema, Some(qualifier))?
-    } else {
-        vec![]
-    };
+    let excluded_columns = wildcard_options
+        .map(|options| get_excluded_columns(&options.except, schema, Some(qualifier)))
+        .transpose()?
+        .unwrap_or_default();
     // Add each excluded `Column` to columns_to_skip
     let mut columns_to_skip = HashSet::new();
     columns_to_skip.extend(excluded_columns);

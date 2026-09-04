@@ -55,7 +55,6 @@ libc = "0.2.177"
 log = { workspace = true }
 paste = { workspace = true }
 recursive = { workspace = true, optional = true }
-sqlparser = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1.1.0"

@@ -22,7 +22,7 @@
 
 use datafusion_common::DataFusionError;
 use datafusion_common::config::SqlParserOptions;
-use datafusion_common::{Diagnostic, Span, sql_err};
+use datafusion_common::{Diagnostic, sql_err};
 use sqlparser::ast::{AstBox as SQLBox, ExprWithAlias, Ident, OrderByOptions};
 use sqlparser::tokenizer::TokenWithSpan;
 use sqlparser::{
@@ -37,11 +37,25 @@ use sqlparser::{
 use std::collections::VecDeque;
 use std::fmt;
 
+fn parser_error(error: ParserError) -> DataFusionError {
+    DataFusionError::SQL(format!("{error:?}").into_boxed_str(), None)
+}
+
+trait ParserResultExt<T> {
+    fn map_parser_err(self) -> Result<T, DataFusionError>;
+}
+
+impl<T> ParserResultExt<T> for Result<T, ParserError> {
+    fn map_parser_err(self) -> Result<T, DataFusionError> {
+        self.map_err(parser_error)
+    }
+}
+
 // Use `Parser::expected` instead, if possible
 macro_rules! parser_err {
     ($MSG:expr $(; diagnostic = $DIAG:expr)?) => {{
 
-        let err = DataFusionError::from(ParserError::ParserError($MSG.to_string()));
+        let err = parser_error(ParserError::ParserError($MSG.to_string()));
         $(
             let err = err.with_diagnostic($DIAG);
         )?
@@ -468,7 +482,8 @@ impl<'a> DFParserBuilder<'a> {
         // Convert TokenizerError -> ParserError
         let tokens = tokenizer
             .tokenize_with_location()
-            .map_err(ParserError::from)?;
+            .map_err(ParserError::from)
+            .map_parser_err()?;
 
         Ok(DFParser {
             parser: Parser::new(self.dialect)
@@ -574,7 +589,7 @@ impl<'a> DFParser<'a> {
         found: &TokenWithSpan,
     ) -> Result<T, DataFusionError> {
         let sql_parser_span = found.span;
-        let span = Span::try_from_sqlparser_span(sql_parser_span);
+        let span = crate::utils::convert_parser_span(sql_parser_span);
         let diagnostic = Diagnostic::new_error(
             format!("Expected: {expected}, found: {found}{}", found.span.start),
             span,
@@ -637,7 +652,7 @@ impl<'a> DFParser<'a> {
             return parser_err!("Unsupported command in expression")?;
         }
 
-        Ok(self.parser.parse_expr_with_alias()?)
+        Ok(self.parser.parse_expr_with_alias().map_parser_err()?)
     }
 
     /// Parses the entire SQL string into an expression.
@@ -657,13 +672,13 @@ impl<'a> DFParser<'a> {
             .map(|stmt| Statement::Statement(Box::from(stmt)))
             .map_err(|e| match e {
                 ParserError::RecursionLimitExceeded => DataFusionError::SQL(
-                    Box::new(ParserError::RecursionLimitExceeded),
+                    format!("{:?}", ParserError::RecursionLimitExceeded).into_boxed_str(),
                     Some(format!(
                         " (current limit: {})",
                         self.options.recursion_limit
                     )),
                 ),
-                other => DataFusionError::SQL(Box::new(other), None),
+                other => parser_error(other),
             })
     }
 
@@ -678,18 +693,19 @@ impl<'a> DFParser<'a> {
 
         let (table_or_query, columns) = if self.parser.consume_token(&Token::LParen) {
             // Could be a query for COPY TO
-            let query = self.parser.parse_query()?;
-            self.parser.expect_token(&Token::RParen)?;
+            let query = self.parser.parse_query().map_parser_err()?;
+            self.parser.expect_token(&Token::RParen).map_parser_err()?;
             (CopySource::Query(query), vec![])
         } else {
             // parse as table reference
-            let table_name = self.parser.parse_object_name(true)?;
+            let table_name = self.parser.parse_object_name(true).map_parser_err()?;
             // Check if there's a column list
             let columns = if self.parser.consume_token(&Token::LParen) {
                 let cols = self
                     .parser
-                    .parse_comma_separated(|p| Ok(p.parse_identifier()?.value))?;
-                self.parser.expect_token(&Token::RParen)?;
+                    .parse_comma_separated(|p| Ok(p.parse_identifier()?.value))
+                    .map_parser_err()?;
+                self.parser.expect_token(&Token::RParen).map_parser_err()?;
                 cols
             } else {
                 vec![]
@@ -736,13 +752,14 @@ impl<'a> DFParser<'a> {
             ]) {
                 match keyword {
                     Keyword::STORED => {
-                        self.parser.expect_keyword(Keyword::AS)?;
+                        self.parser.expect_keyword(Keyword::AS).map_parser_err()?;
                         ensure_not_set(&builder.stored_as, "STORED AS")?;
                         builder.stored_as = Some(self.parse_file_format()?);
                     }
                     Keyword::TO => {
                         ensure_not_set(&builder.target, "TO")?;
-                        builder.target = Some(self.parser.parse_literal_string()?);
+                        builder.target =
+                            Some(self.parser.parse_literal_string().map_parser_err()?);
 
                         // Check for inline options: COPY t TO 'file.csv' (FORMAT CSV)
                         if self.parser.peek_token() == Token::LParen {
@@ -751,14 +768,16 @@ impl<'a> DFParser<'a> {
                         }
                     }
                     Keyword::WITH => {
-                        self.parser.expect_keyword(Keyword::HEADER)?;
-                        self.parser.expect_keyword(Keyword::ROW)?;
+                        self.parser
+                            .expect_keyword(Keyword::HEADER)
+                            .map_parser_err()?;
+                        self.parser.expect_keyword(Keyword::ROW).map_parser_err()?;
                         return parser_err!(
                             "WITH HEADER ROW clause is no longer in use. Please use the OPTIONS clause with 'format.has_header' set appropriately, e.g., OPTIONS ('format.has_header' 'true')"
                         )?;
                     }
                     Keyword::PARTITIONED => {
-                        self.parser.expect_keyword(Keyword::BY)?;
+                        self.parser.expect_keyword(Keyword::BY).map_parser_err()?;
                         ensure_not_set(&builder.partitioned_by, "PARTITIONED BY")?;
                         builder.partitioned_by = Some(self.parse_partitions()?);
                     }
@@ -808,7 +827,7 @@ impl<'a> DFParser<'a> {
         };
 
         // Parse the source file
-        let source = self.parser.parse_literal_string()?;
+        let source = self.parser.parse_literal_string().map_parser_err()?;
 
         // Check for inline options: COPY t FROM 'file.csv' (FORMAT CSV)
         let mut stored_as = None;
@@ -827,7 +846,7 @@ impl<'a> DFParser<'a> {
             {
                 match keyword {
                     Keyword::STORED => {
-                        self.parser.expect_keyword(Keyword::AS)?;
+                        self.parser.expect_keyword(Keyword::AS).map_parser_err()?;
                         ensure_not_set(&stored_as, "STORED AS")?;
                         stored_as = Some(self.parse_file_format()?);
                     }
@@ -997,7 +1016,9 @@ impl<'a> DFParser<'a> {
         // Parse optional AND [NO] CHAIN
         let chain = if self.parser.parse_keyword(Keyword::AND) {
             let no = self.parser.parse_keyword(Keyword::NO);
-            self.parser.expect_keyword(Keyword::CHAIN)?;
+            self.parser
+                .expect_keyword(Keyword::CHAIN)
+                .map_parser_err()?;
             !no // chain = true if AND CHAIN, false if AND NO CHAIN
         } else {
             false // no AND clause means chain = false (default)
@@ -1052,7 +1073,9 @@ impl<'a> DFParser<'a> {
         {
             self.parse_create_external_table(true, false)
         } else {
-            Ok(Statement::Statement(Box::from(self.parser.parse_create()?)))
+            Ok(Statement::Statement(Box::from(
+                self.parser.parse_create().map_parser_err()?,
+            )))
         }
     }
 
@@ -1068,7 +1091,7 @@ impl<'a> DFParser<'a> {
             // Use to_static() to convert Token<'a> to Token<'static>
             let static_token = self.parser.peek_token().clone().to_static();
             if let Token::Word(_) = static_token.token {
-                let identifier = self.parser.parse_identifier()?;
+                let identifier = self.parser.parse_identifier().map_parser_err()?;
                 partitions.push(identifier.to_string());
             } else {
                 return self.expected("partition name", &static_token);
@@ -1089,11 +1112,11 @@ impl<'a> DFParser<'a> {
     /// Parse the ordering clause of a `CREATE EXTERNAL TABLE` SQL statement
     pub fn parse_order_by_exprs(&mut self) -> Result<Vec<OrderByExpr>, DataFusionError> {
         let mut values = vec![];
-        self.parser.expect_token(&Token::LParen)?;
+        self.parser.expect_token(&Token::LParen).map_parser_err()?;
         loop {
             values.push(self.parse_order_by_expr()?);
             if !self.parser.consume_token(&Token::Comma) {
-                self.parser.expect_token(&Token::RParen)?;
+                self.parser.expect_token(&Token::RParen).map_parser_err()?;
                 return Ok(values);
             }
         }
@@ -1101,7 +1124,7 @@ impl<'a> DFParser<'a> {
 
     /// Parse an ORDER BY sub-expression optionally followed by ASC or DESC.
     pub fn parse_order_by_expr(&mut self) -> Result<OrderByExpr, DataFusionError> {
-        let expr = self.parser.parse_expr()?;
+        let expr = self.parser.parse_expr().map_parser_err()?;
 
         let asc = if self.parser.parse_keyword(Keyword::ASC) {
             Some(true)
@@ -1143,7 +1166,11 @@ impl<'a> DFParser<'a> {
         }
 
         loop {
-            if let Some(constraint) = self.parser.parse_optional_table_constraint()? {
+            if let Some(constraint) = self
+                .parser
+                .parse_optional_table_constraint()
+                .map_parser_err()?
+            {
                 constraints.push(constraint);
             } else {
                 // Use to_static() to convert Token<'a> to Token<'static>
@@ -1170,13 +1197,17 @@ impl<'a> DFParser<'a> {
     }
 
     fn parse_column_def(&mut self) -> Result<ColumnDef, DataFusionError> {
-        let name = self.parser.parse_identifier()?;
-        let data_type = self.parser.parse_data_type()?;
+        let name = self.parser.parse_identifier().map_parser_err()?;
+        let data_type = self.parser.parse_data_type().map_parser_err()?;
         let mut options = vec![];
         loop {
             if self.parser.parse_keyword(Keyword::CONSTRAINT) {
-                let name = Some(self.parser.parse_identifier()?);
-                if let Some(option) = self.parser.parse_optional_column_option()? {
+                let name = Some(self.parser.parse_identifier().map_parser_err()?);
+                if let Some(option) = self
+                    .parser
+                    .parse_optional_column_option()
+                    .map_parser_err()?
+                {
                     options.push(ColumnOptionDef { name, option });
                 } else {
                     return self.expected(
@@ -1184,7 +1215,11 @@ impl<'a> DFParser<'a> {
                         &self.parser.peek_token(),
                     );
                 }
-            } else if let Some(option) = self.parser.parse_optional_column_option()? {
+            } else if let Some(option) = self
+                .parser
+                .parse_optional_column_option()
+                .map_parser_err()?
+            {
                 options.push(ColumnOptionDef { name: None, option });
             } else {
                 break;
@@ -1207,7 +1242,9 @@ impl<'a> DFParser<'a> {
             .parse_one_of_keywords(&[Keyword::TEMP, Keyword::TEMPORARY])
             .is_some();
 
-        self.parser.expect_keyword(Keyword::TABLE)?;
+        self.parser
+            .expect_keyword(Keyword::TABLE)
+            .map_parser_err()?;
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
@@ -1216,7 +1253,7 @@ impl<'a> DFParser<'a> {
             return parser_err!("'IF NOT EXISTS' cannot coexist with 'REPLACE'");
         }
 
-        let table_name = self.parser.parse_object_name(true)?;
+        let table_name = self.parser.parse_object_name(true).map_parser_err()?;
         let (mut columns, constraints) = self.parse_columns()?;
 
         #[derive(Default)]
@@ -1241,20 +1278,23 @@ impl<'a> DFParser<'a> {
             ]) {
                 match keyword {
                     Keyword::STORED => {
-                        self.parser.expect_keyword(Keyword::AS)?;
+                        self.parser.expect_keyword(Keyword::AS).map_parser_err()?;
                         ensure_not_set(&builder.file_type, "STORED AS")?;
                         builder.file_type = Some(self.parse_file_format()?);
                     }
                     Keyword::LOCATION => {
                         ensure_not_set(&builder.location, "LOCATION")?;
-                        builder.location = Some(self.parser.parse_literal_string()?);
+                        builder.location =
+                            Some(self.parser.parse_literal_string().map_parser_err()?);
                     }
                     Keyword::WITH => {
                         if self.parser.parse_keyword(Keyword::ORDER) {
                             builder.order_exprs.push(self.parse_order_by_exprs()?);
                         } else {
-                            self.parser.expect_keyword(Keyword::HEADER)?;
-                            self.parser.expect_keyword(Keyword::ROW)?;
+                            self.parser
+                                .expect_keyword(Keyword::HEADER)
+                                .map_parser_err()?;
+                            self.parser.expect_keyword(Keyword::ROW).map_parser_err()?;
                             return parser_err!(
                                 "WITH HEADER ROW clause is no longer in use. Please use the OPTIONS clause with 'format.has_header' set appropriately, e.g., OPTIONS (format.has_header true)"
                             )?;
@@ -1266,13 +1306,13 @@ impl<'a> DFParser<'a> {
                         )?;
                     }
                     Keyword::COMPRESSION => {
-                        self.parser.expect_keyword(Keyword::TYPE)?;
+                        self.parser.expect_keyword(Keyword::TYPE).map_parser_err()?;
                         return parser_err!(
                             "COMPRESSION TYPE clause is no longer in use. Please use the OPTIONS clause with 'format.compression' set appropriately, e.g., OPTIONS (format.compression gzip)"
                         )?;
                     }
                     Keyword::PARTITIONED => {
-                        self.parser.expect_keyword(Keyword::BY)?;
+                        self.parser.expect_keyword(Keyword::BY).map_parser_err()?;
                         ensure_not_set(&builder.table_partition_cols, "PARTITIONED BY")?;
                         // Expects either list of column names (col_name [, col_name]*)
                         // or list of column definitions (col_name datatype [, col_name datatype]* )
@@ -1362,7 +1402,7 @@ impl<'a> DFParser<'a> {
     /// value types such as Numbers as well as Strings.
     fn parse_value_options(&mut self) -> Result<Vec<(String, Value)>, DataFusionError> {
         let mut options = vec![];
-        self.parser.expect_token(&Token::LParen)?;
+        self.parser.expect_token(&Token::LParen).map_parser_err()?;
 
         loop {
             let key = self.parse_option_key()?;

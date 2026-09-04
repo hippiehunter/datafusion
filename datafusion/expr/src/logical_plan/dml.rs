@@ -24,8 +24,6 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::{DFSchemaRef, TableReference};
-use sqlparser::ast::AssignmentTarget;
-
 /// Target specification for ON CONFLICT clauses.
 ///
 /// Identifies which unique constraint should trigger the conflict handling.
@@ -40,7 +38,51 @@ pub enum ConflictTarget {
     Index(String),
 }
 
-use crate::{Expr, LogicalPlan, TableSource};
+use crate::{BoundSqlExpression, Expr, LogicalPlan, TableSource};
+
+/// A row-visibility predicate imposed by an automatically updatable view.
+///
+/// The SQL frontend binds the predicate while the view AST and catalog
+/// provider are available. Logical optimizers and execution lowerers receive
+/// only this parser-independent semantic value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct DmlCheckOption {
+    /// The view named in a constraint-violation diagnostic.
+    pub view_name: TableReference,
+    /// The view-stack restriction expressed over the final base relation.
+    pub predicate: BoundSqlExpression,
+}
+
+/// Non-default, parser-independent evaluation context for a `RETURNING`
+/// projection.
+///
+/// Ordinary INSERT/UPDATE/DELETE projections need no context: the operation
+/// identifies their row image. The enum deliberately represents only the two
+/// exceptional layouts so a logical plan cannot carry a context with no
+/// schema, a dual-image MERGE action column, or another meaningless
+/// combination.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReturningContext {
+    /// PostgreSQL OLD/NEW evaluation. The schema contains the target row
+    /// twice, before-image fields followed by after-image fields.
+    DualImage { eval_schema: DFSchemaRef },
+    /// MERGE evaluates against whichever image its applied action produced.
+    /// `action_column` identifies the synthetic `merge_action` text field.
+    MergeApplied {
+        eval_schema: DFSchemaRef,
+        action_column: usize,
+    },
+}
+
+impl ReturningContext {
+    pub fn eval_schema(&self) -> &DFSchemaRef {
+        match self {
+            Self::DualImage { eval_schema } | Self::MergeApplied { eval_schema, .. } => {
+                eval_schema
+            }
+        }
+    }
+}
 
 /// Operator that copies the contents of a database to file(s)
 #[derive(Clone)]
@@ -169,13 +211,13 @@ pub struct DmlStatement {
     pub returning_columns: Option<Vec<String>>,
     /// Expressions requested by a RETURNING clause
     pub returning_exprs: Option<Vec<Expr>>,
+    /// Non-default row-image/evaluation semantics for `RETURNING`.
+    pub returning_context: Option<ReturningContext>,
     /// OVERRIDING SYSTEM VALUE was specified (PostgreSQL identity columns)
     pub overriding_system_value: bool,
-    /// The automatically updatable view this write was retargeted from, when
-    /// that view (or one it is stacked on) carries a check option. The row this
-    /// statement produces must be visible through the view, so the write's
-    /// constraint set gains the view's row restriction.
-    pub check_option_view: Option<TableReference>,
+    /// Parser-free check-option obligation inherited while retargeting a write
+    /// through an automatically updatable view.
+    pub check_option: Option<DmlCheckOption>,
 }
 impl Eq for DmlStatement {}
 impl Hash for DmlStatement {
@@ -188,8 +230,9 @@ impl Hash for DmlStatement {
         self.target_columns.hash(state);
         self.returning_columns.hash(state);
         self.returning_exprs.hash(state);
+        self.returning_context.hash(state);
         self.overriding_system_value.hash(state);
-        self.check_option_view.hash(state);
+        self.check_option.hash(state);
     }
 }
 
@@ -203,8 +246,9 @@ impl PartialEq for DmlStatement {
             && self.target_columns == other.target_columns
             && self.returning_columns == other.returning_columns
             && self.returning_exprs == other.returning_exprs
+            && self.returning_context == other.returning_context
             && self.overriding_system_value == other.overriding_system_value
-            && self.check_option_view == other.check_option_view
+            && self.check_option == other.check_option
     }
 }
 
@@ -220,6 +264,8 @@ impl Debug for DmlStatement {
             .field("target_columns", &self.target_columns)
             .field("returning_columns", &self.returning_columns)
             .field("returning_exprs", &self.returning_exprs)
+            .field("returning_context", &self.returning_context)
+            .field("check_option", &self.check_option)
             .finish()
     }
 }
@@ -241,8 +287,9 @@ impl DmlStatement {
             target_columns: None,
             returning_columns: None,
             returning_exprs: None,
+            returning_context: None,
             overriding_system_value: false,
-            check_option_view: None,
+            check_option: None,
         }
     }
 
@@ -268,6 +315,12 @@ impl DmlStatement {
         self
     }
 
+    /// Set the explicit row-image/evaluation contract for `RETURNING`.
+    pub fn with_returning_context(mut self, context: ReturningContext) -> Self {
+        self.returning_context = Some(context);
+        self
+    }
+
     /// Override the output schema.
     pub fn with_output_schema(mut self, output_schema: DFSchemaRef) -> Self {
         self.output_schema = output_schema;
@@ -280,9 +333,9 @@ impl DmlStatement {
         self
     }
 
-    /// Record the updatable view whose check option this write must satisfy.
-    pub fn with_check_option_view(mut self, view: TableReference) -> Self {
-        self.check_option_view = Some(view);
+    /// Record a bound updatable-view check option.
+    pub fn with_check_option(mut self, check_option: DmlCheckOption) -> Self {
+        self.check_option = Some(check_option);
         self
     }
 
@@ -518,7 +571,11 @@ impl DoUpdateAction {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct ConflictAssignment {
     /// The target column to update.
-    pub target: AssignmentTarget,
+    ///
+    /// Tuple assignments are expanded into one assignment per column while
+    /// lowering SQL, so retaining the parser's assignment-target enum here
+    /// adds syntax without adding semantics.
+    pub target: String,
     /// The value expression (may reference EXCLUDED.column).
     pub value: Expr,
 }

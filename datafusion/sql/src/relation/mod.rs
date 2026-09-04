@@ -18,20 +18,19 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{
+    ContextProvider, PlannedRelation, PlannerContext, RelationPlannerContext,
+    RelationPlanning, SqlToRel, TableSampleMethod as LogicalTableSampleMethod,
+};
 
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, DataFusionError, Diagnostic, Result, ScalarValue, Span, Spans,
+    Column, DFSchema, DataFusionError, Diagnostic, Result, ScalarValue, Spans,
     TableReference, UnnestOptions, not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
-use datafusion_expr::planner::{
-    PlannedRelation, RelationPlannerContext, RelationPlanning,
-    TableSampleMethod as LogicalTableSampleMethod,
-};
 use datafusion_expr::{
     EdgeDirection, EdgePattern, GraphColumn, GraphPattern, GraphPatternElement,
     GraphPatternExpr, GraphTable, JsonTable, JsonTableColumnDef, JsonTableErrorHandling,
@@ -101,15 +100,13 @@ fn validate_sql_json_table_names(
     visit(columns, &mut seen)
 }
 
-struct SqlToRelRelationContext<'a, 'b, S: ContextProvider> {
-    planner: &'a SqlToRel<'b, S>,
+struct SqlToRelRelationContext<'a, 'b> {
+    planner: &'a SqlToRel<'b>,
     planner_context: &'a mut PlannerContext,
 }
 
 // Implement RelationPlannerContext
-impl<'a, 'b, S: ContextProvider> RelationPlannerContext
-    for SqlToRelRelationContext<'a, 'b, S>
-{
+impl RelationPlannerContext for SqlToRelRelationContext<'_, '_> {
     fn context_provider(&self) -> &dyn ContextProvider {
         self.planner.context_provider
     }
@@ -224,7 +221,7 @@ fn extract_pattern_symbols_recursive(
     }
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     /// Plan the arguments of a table function.
     ///
     /// A set-returning function takes the same named parameters as the scalar
@@ -486,7 +483,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     (None, Err(error)) => {
                         Err(error.with_diagnostic(Diagnostic::new_error(
                             format!("table '{table_ref}' not found"),
-                            Span::try_from_sqlparser_span(relation_span),
+                            crate::utils::convert_parser_span(relation_span),
                         )))
                     }
                 }?;
@@ -783,7 +780,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     (None, Err(e)) => {
                         let e = e.with_diagnostic(Diagnostic::new_error(
                             format!("table '{table_ref}' not found"),
-                            Span::try_from_sqlparser_span(relation_span),
+                            crate::utils::convert_parser_span(relation_span),
                         ));
                         Err(e)
                     }
@@ -1212,7 +1209,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
     /// The FROM items that are function calls, planned by
     /// [`Self::plan_function_relations`] whichever way the factor is spelled.
-    fn is_function_relation(relation: &TableFactor, provider: &S) -> bool {
+    fn is_function_relation(
+        relation: &TableFactor,
+        provider: &dyn ContextProvider,
+    ) -> bool {
         match relation {
             TableFactor::Table { args: Some(_), .. }
             | TableFactor::Function { .. }
@@ -1333,7 +1333,7 @@ fn optimize_subquery_sort(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>>
     })
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     /// Plan JSON_TABLE table factor.
     ///
     /// JSON_TABLE transforms JSON data into a relational table format.

@@ -45,6 +45,7 @@ mod table_source;
 mod udaf;
 mod udf;
 mod udwf;
+mod bound_sql;
 
 pub mod arguments;
 pub mod conditional_expressions;
@@ -62,7 +63,6 @@ pub mod interval_arithmetic {
     pub use datafusion_expr_common::interval_arithmetic::*;
 }
 pub mod logical_plan;
-pub mod planner;
 pub mod registry;
 pub mod session;
 pub mod simplify;
@@ -88,6 +88,7 @@ pub use datafusion_doc::{
     DocSection, Documentation, DocumentationBuilder, aggregate_doc_sections,
     scalar_doc_sections, window_doc_sections,
 };
+pub use bound_sql::BoundSqlExpression;
 pub use datafusion_expr_common::accumulator::Accumulator;
 pub use datafusion_expr_common::columnar_value::ColumnarValue;
 pub use datafusion_expr_common::groups_accumulator::{EmitTo, GroupsAccumulator};
@@ -114,7 +115,6 @@ pub use logical_plan::*;
 pub use partition_evaluator::PartitionEvaluator;
 
 pub use session::{NoSession, SessionProvider, no_session};
-pub use sqlparser;
 pub use table_source::{
     TableProviderFilterPushDown, TableSource, TableType, UniqueIndexArbiter,
 };

@@ -19,7 +19,8 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, IdentNormalizer, PlannerContext, SqlToRel};
+use crate::ast_walk::Walk;
+use crate::planner::{IdentNormalizer, PlannerContext, SqlToRel};
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion_common::{
@@ -31,10 +32,10 @@ use datafusion_expr::{
 };
 use sqlparser::ast::{
     Cte, Ident, ObjectName, Query, SearchClause, SearchOrder, SelectItem, SetExpr,
-    SetOperator, Visit, Visitor, With,
+    SetOperator, Visitor, With,
 };
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn plan_with_clause_ref(
         &self,
         with: &With,
@@ -156,12 +157,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             } => (left.as_ref(), right.as_ref(), set_quantifier),
             _ => {
                 // If the query is not a UNION, then it is not a recursive CTE
-            let plan = self.non_recursive_cte_ref(cte_query, planner_context)?;
-            return if search.is_some() {
-                plan_err!("SEARCH clause requires a recursive query")
-            } else {
-                Ok(plan)
-            };
+                let plan = self.non_recursive_cte_ref(cte_query, planner_context)?;
+                return if search.is_some() {
+                    plan_err!("SEARCH clause requires a recursive query")
+                } else {
+                    Ok(plan)
+                };
             }
         };
 
@@ -437,7 +438,7 @@ fn with_list_dependency_order(
                 shadowed: Vec::new(),
                 referenced: HashSet::new(),
             };
-            let _ = cte.query.visit(&mut referenced);
+            let _ = cte.query.walk(&mut referenced);
             referenced.referenced.remove(&idx);
             referenced.referenced
         })

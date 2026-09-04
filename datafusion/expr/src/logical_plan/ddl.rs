@@ -15,40 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan::psm::{ProcedureArg, PsmBlock};
-use crate::{Expr, LogicalPlan, SortExpr, Volatility};
+use crate::{BoundSqlExpression, Expr, LogicalPlan, SortExpr};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::{
     fmt::{self, Display},
     hash::{Hash, Hasher},
+    ops::{Deref, DerefMut},
 };
 
 use crate::expr::Sort;
 use arrow::datatypes::DataType;
-use datafusion_common::tree_node::{Transformed, TreeNodeContainer, TreeNodeRecursion};
-use datafusion_common::{
-    Constraints, DFSchema, DFSchemaRef, Result, SchemaReference, TableReference,
-};
-pub use sqlparser::ast::{
-    AlterMaterializedViewOperation, AlterTable, CreateDomain, DropBehavior, DropDomain,
-    MaterializedViewRefreshMethod, SequenceOptions,
-};
-// SQL/MED (Management of External Data) statement types - ISO/IEC 9075-9
-pub use sqlparser::ast::{
-    AlterForeignDataWrapperOperation, AlterForeignDataWrapperStatement,
-    AlterForeignTableOperation, AlterForeignTableStatement, AlterServerOperation,
-    AlterServerStatement, AlterUserMappingStatement, CreateForeignDataWrapperStatement,
-    CreateForeignTableStatement, CreateServerOption, CreateServerStatement,
-    CreateUserMappingStatement, DropForeignDataWrapperStatement,
-    DropForeignTableStatement, DropServerStatement, DropUserMappingStatement,
-    ImportForeignSchemaLimitType, ImportForeignSchemaStatement, UserMappingUser,
-};
-use sqlparser::ast::{DataType as SqlDataType, Expr as SqlExpr, Ident, ObjectName};
-
-static DDL_EMPTY_SCHEMA: LazyLock<DFSchemaRef> =
-    LazyLock::new(|| Arc::new(DFSchema::empty()));
+use datafusion_common::{Constraints, DFSchemaRef, DataFusionError, Result, TableReference};
 
 /// Various types of DDL  (CREATE / DROP) catalog manipulation
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
@@ -59,87 +38,8 @@ pub enum DdlStatement {
     CreateMemoryTable(CreateMemoryTable),
     /// Creates a new view.
     CreateView(CreateView),
-    /// Creates a new materialized view.
-    CreateMaterializedView(CreateMaterializedView),
-    /// Drops a materialized view.
-    DropMaterializedView(DropMaterializedView),
-    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [FAST | COMPLETE]`.
-    RefreshMaterializedView(RefreshMaterializedView),
-    /// `ALTER MATERIALIZED VIEW name {ENABLE REWRITE | DISABLE REWRITE | OWNER TO ...}`.
-    AlterMaterializedView(AlterMaterializedView),
-    /// Creates a new catalog schema.
-    CreateCatalogSchema(CreateCatalogSchema),
-    /// Creates a new catalog (aka "Database").
-    CreateCatalog(CreateCatalog),
     /// Creates a new index.
     CreateIndex(CreateIndex),
-    /// Drops an index.
-    DropIndex(DropIndex),
-    /// Drops a table.
-    DropTable(DropTable),
-    /// Drops a view.
-    DropView(DropView),
-    /// Drops a catalog schema
-    DropCatalogSchema(DropCatalogSchema),
-    /// Create function statement
-    CreateFunction(CreateFunction),
-    /// Drop function statement
-    DropFunction(DropFunction),
-    /// ALTER TABLE
-    AlterTable(AlterTable),
-    /// CREATE DOMAIN
-    CreateDomain(CreateDomain),
-    /// DROP DOMAIN
-    DropDomain(DropDomain),
-    /// DROP SEQUENCE
-    DropSequence(DropSequence),
-    /// CREATE SEQUENCE (SQL:2016 T174)
-    CreateSequence(CreateSequence),
-    /// ALTER SEQUENCE (SQL:2016 T174)
-    AlterSequence(AlterSequence),
-    /// CREATE ASSERTION (SQL:2016 F491)
-    CreateAssertion(CreateAssertion),
-    /// DROP ASSERTION (SQL:2016 F491)
-    DropAssertion(DropAssertion),
-    /// CREATE PROCEDURE (SQL:2016 Part 4 - PSM)
-    CreateProcedure(CreateProcedure),
-    /// DROP PROCEDURE (SQL:2016 Part 4 - PSM)
-    DropProcedure(DropProcedure),
-    /// CREATE ROLE
-    CreateRole(CreateRole),
-    /// DROP ROLE
-    DropRole(DropRole),
-    /// CREATE PROPERTY GRAPH (SQL/PGQ)
-    CreatePropertyGraph(CreatePropertyGraph),
-    /// DROP PROPERTY GRAPH (SQL/PGQ)
-    DropPropertyGraph(DropPropertyGraph),
-    // SQL/MED (Management of External Data) - ISO/IEC 9075-9
-    /// CREATE SERVER
-    CreateServer(CreateServerStatement),
-    /// ALTER SERVER
-    AlterServer(AlterServerStatement),
-    /// DROP SERVER
-    DropServer(DropServerStatement),
-    /// CREATE FOREIGN DATA WRAPPER
-    CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
-    /// ALTER FOREIGN DATA WRAPPER
-    AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
-    /// DROP FOREIGN DATA WRAPPER
-    DropForeignDataWrapper(DropForeignDataWrapperStatement),
-    /// CREATE FOREIGN TABLE
-    CreateForeignTable(CreateForeignTableStatement),
-    /// ALTER FOREIGN TABLE
-    AlterForeignTable(AlterForeignTableStatement),
-    /// DROP FOREIGN TABLE
-    DropForeignTable(DropForeignTableStatement),
-    /// CREATE USER MAPPING
-    CreateUserMapping(CreateUserMappingStatement),
-    /// ALTER USER MAPPING
-    AlterUserMapping(AlterUserMappingStatement),
-    /// DROP USER MAPPING
-    DropUserMapping(DropUserMappingStatement),
-    /// IMPORT FOREIGN SCHEMA
-    ImportForeignSchema(ImportForeignSchemaStatement),
 }
 
 impl DdlStatement {
@@ -151,55 +51,7 @@ impl DdlStatement {
             }
             DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. })
             | DdlStatement::CreateView(CreateView { input, .. }) => input.schema(),
-            DdlStatement::CreateMaterializedView(CreateMaterializedView {
-                input, ..
-            }) => input.schema(),
-            DdlStatement::CreateCatalogSchema(CreateCatalogSchema { schema, .. }) => {
-                schema
-            }
-            DdlStatement::CreateCatalog(CreateCatalog { schema, .. }) => schema,
             DdlStatement::CreateIndex(CreateIndex { schema, .. }) => schema,
-            DdlStatement::DropIndex(DropIndex { schema, .. }) => schema,
-            DdlStatement::DropTable(DropTable { schema, .. }) => schema,
-            DdlStatement::DropView(DropView { schema, .. }) => schema,
-            DdlStatement::DropCatalogSchema(DropCatalogSchema { schema, .. }) => schema,
-            DdlStatement::CreateFunction(CreateFunction { schema, .. }) => schema,
-            DdlStatement::DropFunction(DropFunction { schema, .. }) => schema,
-            DdlStatement::DropMaterializedView(DropMaterializedView { schema, .. }) => schema,
-            DdlStatement::RefreshMaterializedView(RefreshMaterializedView {
-                schema, ..
-            }) => schema,
-            DdlStatement::AlterMaterializedView(AlterMaterializedView { schema, .. }) => {
-                schema
-            }
-            DdlStatement::AlterTable(_)
-            | DdlStatement::CreateDomain(_)
-            | DdlStatement::DropDomain(_)
-            | DdlStatement::DropSequence(_)
-            | DdlStatement::CreateSequence(_)
-            | DdlStatement::AlterSequence(_)
-            | DdlStatement::CreateAssertion(_)
-            | DdlStatement::DropAssertion(_)
-            | DdlStatement::CreateProcedure(_)
-            | DdlStatement::DropProcedure(_)
-            | DdlStatement::CreateRole(_)
-            | DdlStatement::DropRole(_)
-            | DdlStatement::CreatePropertyGraph(_)
-            | DdlStatement::DropPropertyGraph(_)
-            // SQL/MED statements return empty schema
-            | DdlStatement::CreateServer(_)
-            | DdlStatement::AlterServer(_)
-            | DdlStatement::DropServer(_)
-            | DdlStatement::CreateForeignDataWrapper(_)
-            | DdlStatement::AlterForeignDataWrapper(_)
-            | DdlStatement::DropForeignDataWrapper(_)
-            | DdlStatement::CreateForeignTable(_)
-            | DdlStatement::AlterForeignTable(_)
-            | DdlStatement::DropForeignTable(_)
-            | DdlStatement::CreateUserMapping(_)
-            | DdlStatement::AlterUserMapping(_)
-            | DdlStatement::DropUserMapping(_)
-            | DdlStatement::ImportForeignSchema(_) => &DDL_EMPTY_SCHEMA,
         }
     }
 
@@ -210,47 +62,7 @@ impl DdlStatement {
             DdlStatement::CreateExternalTable(_) => "CreateExternalTable",
             DdlStatement::CreateMemoryTable(_) => "CreateMemoryTable",
             DdlStatement::CreateView(_) => "CreateView",
-            DdlStatement::CreateMaterializedView(_) => "CreateMaterializedView",
-            DdlStatement::DropMaterializedView(_) => "DropMaterializedView",
-            DdlStatement::RefreshMaterializedView(_) => "RefreshMaterializedView",
-            DdlStatement::AlterMaterializedView(_) => "AlterMaterializedView",
-            DdlStatement::CreateCatalogSchema(_) => "CreateCatalogSchema",
-            DdlStatement::CreateCatalog(_) => "CreateCatalog",
             DdlStatement::CreateIndex(_) => "CreateIndex",
-            DdlStatement::DropIndex(_) => "DropIndex",
-            DdlStatement::DropTable(_) => "DropTable",
-            DdlStatement::DropView(_) => "DropView",
-            DdlStatement::DropCatalogSchema(_) => "DropCatalogSchema",
-            DdlStatement::CreateFunction(_) => "CreateFunction",
-            DdlStatement::DropFunction(_) => "DropFunction",
-            DdlStatement::AlterTable(_) => "AlterTable",
-            DdlStatement::CreateDomain(_) => "CreateDomain",
-            DdlStatement::DropDomain(_) => "DropDomain",
-            DdlStatement::DropSequence(_) => "DropSequence",
-            DdlStatement::CreateSequence(_) => "CreateSequence",
-            DdlStatement::AlterSequence(_) => "AlterSequence",
-            DdlStatement::CreateAssertion(_) => "CreateAssertion",
-            DdlStatement::DropAssertion(_) => "DropAssertion",
-            DdlStatement::CreateProcedure(_) => "CreateProcedure",
-            DdlStatement::DropProcedure(_) => "DropProcedure",
-            DdlStatement::CreateRole(_) => "CreateRole",
-            DdlStatement::DropRole(_) => "DropRole",
-            DdlStatement::CreatePropertyGraph(_) => "CreatePropertyGraph",
-            DdlStatement::DropPropertyGraph(_) => "DropPropertyGraph",
-            // SQL/MED statements
-            DdlStatement::CreateServer(_) => "CreateServer",
-            DdlStatement::AlterServer(_) => "AlterServer",
-            DdlStatement::DropServer(_) => "DropServer",
-            DdlStatement::CreateForeignDataWrapper(_) => "CreateForeignDataWrapper",
-            DdlStatement::AlterForeignDataWrapper(_) => "AlterForeignDataWrapper",
-            DdlStatement::DropForeignDataWrapper(_) => "DropForeignDataWrapper",
-            DdlStatement::CreateForeignTable(_) => "CreateForeignTable",
-            DdlStatement::AlterForeignTable(_) => "AlterForeignTable",
-            DdlStatement::DropForeignTable(_) => "DropForeignTable",
-            DdlStatement::CreateUserMapping(_) => "CreateUserMapping",
-            DdlStatement::AlterUserMapping(_) => "AlterUserMapping",
-            DdlStatement::DropUserMapping(_) => "DropUserMapping",
-            DdlStatement::ImportForeignSchema(_) => "ImportForeignSchema",
         }
     }
 
@@ -258,54 +70,11 @@ impl DdlStatement {
     pub fn inputs(&self) -> Vec<&LogicalPlan> {
         match self {
             DdlStatement::CreateExternalTable(_) => vec![],
-            DdlStatement::CreateCatalogSchema(_) => vec![],
-            DdlStatement::CreateCatalog(_) => vec![],
             DdlStatement::CreateMemoryTable(CreateMemoryTable { input, .. }) => {
                 vec![input]
             }
             DdlStatement::CreateView(CreateView { input, .. }) => vec![input],
-            DdlStatement::CreateMaterializedView(CreateMaterializedView {
-                input,
-                ..
-            }) => vec![input],
-            DdlStatement::DropMaterializedView(_) => vec![],
-            DdlStatement::RefreshMaterializedView(_) => vec![],
-            DdlStatement::AlterMaterializedView(_) => vec![],
             DdlStatement::CreateIndex(_) => vec![],
-            DdlStatement::DropIndex(_) => vec![],
-            DdlStatement::DropTable(_) => vec![],
-            DdlStatement::DropView(_) => vec![],
-            DdlStatement::DropCatalogSchema(_) => vec![],
-            DdlStatement::CreateFunction(_) => vec![],
-            DdlStatement::DropFunction(_) => vec![],
-            DdlStatement::AlterTable(_) => vec![],
-            DdlStatement::CreateDomain(_) => vec![],
-            DdlStatement::DropDomain(_) => vec![],
-            DdlStatement::DropSequence(_) => vec![],
-            DdlStatement::CreateSequence(_) => vec![],
-            DdlStatement::AlterSequence(_) => vec![],
-            DdlStatement::CreateAssertion(_) => vec![],
-            DdlStatement::DropAssertion(_) => vec![],
-            DdlStatement::CreateProcedure(_) => vec![],
-            DdlStatement::DropProcedure(_) => vec![],
-            DdlStatement::CreateRole(_) => vec![],
-            DdlStatement::DropRole(_) => vec![],
-            DdlStatement::CreatePropertyGraph(_) => vec![],
-            DdlStatement::DropPropertyGraph(_) => vec![],
-            // SQL/MED statements have no inputs
-            DdlStatement::CreateServer(_) => vec![],
-            DdlStatement::AlterServer(_) => vec![],
-            DdlStatement::DropServer(_) => vec![],
-            DdlStatement::CreateForeignDataWrapper(_) => vec![],
-            DdlStatement::AlterForeignDataWrapper(_) => vec![],
-            DdlStatement::DropForeignDataWrapper(_) => vec![],
-            DdlStatement::CreateForeignTable(_) => vec![],
-            DdlStatement::AlterForeignTable(_) => vec![],
-            DdlStatement::DropForeignTable(_) => vec![],
-            DdlStatement::CreateUserMapping(_) => vec![],
-            DdlStatement::AlterUserMapping(_) => vec![],
-            DdlStatement::DropUserMapping(_) => vec![],
-            DdlStatement::ImportForeignSchema(_) => vec![],
         }
     }
 
@@ -331,240 +100,23 @@ impl DdlStatement {
                         }
                     }
                     DdlStatement::CreateMemoryTable(CreateMemoryTable {
-                        name,
-                        constraints,
-                        ..
+                        spec, ..
                     }) => {
+                        let CreateMemoryTableSpec {
+                            name, constraints, ..
+                        } = spec;
                         if constraints.is_empty() {
                             write!(f, "CreateMemoryTable: {name:?}")
                         } else {
                             write!(f, "CreateMemoryTable: {name:?} {constraints}")
                         }
                     }
-                    DdlStatement::CreateView(CreateView { name, .. }) => {
+                    DdlStatement::CreateView(CreateView { spec, .. }) => {
+                        let CreateViewSpec { name, .. } = spec;
                         write!(f, "CreateView: {name:?}")
-                    }
-                    DdlStatement::CreateMaterializedView(CreateMaterializedView {
-                        name,
-                        or_replace,
-                        if_not_exists,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "CreateMaterializedView: {name:?} or_replace:={or_replace} if_not_exists:={if_not_exists}"
-                        )
-                    }
-                    DdlStatement::DropMaterializedView(DropMaterializedView {
-                        name,
-                        if_exists,
-                        cascade,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "DropMaterializedView: {name:?} if_exists:={if_exists} cascade:={cascade}"
-                        )
-                    }
-                    DdlStatement::RefreshMaterializedView(RefreshMaterializedView {
-                        name,
-                        concurrently,
-                        method,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "RefreshMaterializedView: {name:?} concurrently:={concurrently} method:={method:?}"
-                        )
-                    }
-                    DdlStatement::AlterMaterializedView(AlterMaterializedView {
-                        name,
-                        operation,
-                        ..
-                    }) => {
-                        write!(f, "AlterMaterializedView: {name:?} {operation}")
-                    }
-                    DdlStatement::CreateCatalogSchema(CreateCatalogSchema {
-                        schema_name,
-                        ..
-                    }) => {
-                        write!(f, "CreateCatalogSchema: {schema_name:?}")
-                    }
-                    DdlStatement::CreateCatalog(CreateCatalog {
-                        catalog_name, ..
-                    }) => {
-                        write!(f, "CreateCatalog: {catalog_name:?}")
                     }
                     DdlStatement::CreateIndex(CreateIndex { name, .. }) => {
                         write!(f, "CreateIndex: {name:?}")
-                    }
-                    DdlStatement::DropIndex(DropIndex {
-                        name, if_exists, ..
-                    }) => {
-                        write!(f, "DropIndex: {name:?} if exists:={if_exists}")
-                    }
-                    DdlStatement::DropTable(DropTable {
-                        name, if_exists, ..
-                    }) => {
-                        write!(f, "DropTable: {name:?} if not exist:={if_exists}")
-                    }
-                    DdlStatement::DropView(DropView {
-                        name, if_exists, ..
-                    }) => {
-                        write!(f, "DropView: {name:?} if not exist:={if_exists}")
-                    }
-                    DdlStatement::DropCatalogSchema(DropCatalogSchema {
-                        name,
-                        if_exists,
-                        cascade,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "DropCatalogSchema: {name:?} if not exist:={if_exists} cascade:={cascade}"
-                        )
-                    }
-                    DdlStatement::CreateFunction(CreateFunction { name, .. }) => {
-                        write!(f, "CreateFunction: name {name:?}")
-                    }
-                    DdlStatement::DropFunction(DropFunction { name, .. }) => {
-                        write!(f, "DropFunction: name {name:?}")
-                    }
-                    DdlStatement::AlterTable(alter_table) => {
-                        write!(f, "AlterTable: {alter_table}")
-                    }
-                    DdlStatement::CreateDomain(create_domain) => {
-                        write!(f, "CreateDomain: {create_domain}")
-                    }
-                    DdlStatement::DropDomain(DropDomain {
-                        if_exists,
-                        name,
-                        drop_behavior,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "DropDomain: {name:?} if not exist:={if_exists} drop_behavior:={drop_behavior:?}"
-                        )
-                    }
-                    DdlStatement::DropSequence(DropSequence {
-                        name, if_exists, ..
-                    }) => {
-                        write!(f, "DropSequence: {name:?} if not exist:={if_exists}")
-                    }
-                    DdlStatement::CreateSequence(CreateSequence {
-                        name,
-                        if_not_exists,
-                        temporary,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "CreateSequence: {name:?} if_not_exists:={if_not_exists} temporary:={temporary}"
-                        )
-                    }
-                    DdlStatement::AlterSequence(AlterSequence {
-                        name,
-                        if_exists,
-                        ..
-                    }) => {
-                        write!(f, "AlterSequence: {name:?} if_exists:={if_exists}")
-                    }
-                    DdlStatement::CreateAssertion(CreateAssertion { name, .. }) => {
-                        write!(f, "CreateAssertion: {name:?}")
-                    }
-                    DdlStatement::DropAssertion(DropAssertion { name, if_exists }) => {
-                        write!(f, "DropAssertion: {name:?} if_exists:={if_exists}")
-                    }
-                    DdlStatement::CreateProcedure(CreateProcedure { name, .. }) => {
-                        write!(f, "CreateProcedure: name {name:?}")
-                    }
-                    DdlStatement::DropProcedure(DropProcedure {
-                        name,
-                        if_exists,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "DropProcedure: name {name:?} if not exist:={if_exists}"
-                        )
-                    }
-                    DdlStatement::CreateRole(CreateRole {
-                        name,
-                        if_not_exists,
-                    }) => {
-                        write!(f, "CreateRole: {name:?} if not exist:={if_not_exists}")
-                    }
-                    DdlStatement::DropRole(DropRole {
-                        name,
-                        if_exists,
-                        cascade,
-                    }) => {
-                        write!(
-                            f,
-                            "DropRole: {name:?} if not exist:={if_exists} cascade:={cascade}"
-                        )
-                    }
-                    DdlStatement::CreatePropertyGraph(CreatePropertyGraph {
-                        name,
-                        or_replace,
-                        if_not_exists,
-                        ..
-                    }) => {
-                        write!(
-                            f,
-                            "CreatePropertyGraph: {name:?} or_replace:={or_replace} if_not_exists:={if_not_exists}"
-                        )
-                    }
-                    DdlStatement::DropPropertyGraph(DropPropertyGraph {
-                        name,
-                        if_exists,
-                        drop_behavior,
-                    }) => {
-                        write!(
-                            f,
-                            "DropPropertyGraph: {name:?} if_exists:={if_exists} drop_behavior:={drop_behavior:?}"
-                        )
-                    }
-                    // SQL/MED statements - use the Display impl from sqlparser
-                    DdlStatement::CreateServer(stmt) => {
-                        write!(f, "CreateServer: {stmt}")
-                    }
-                    DdlStatement::AlterServer(stmt) => {
-                        write!(f, "AlterServer: {stmt}")
-                    }
-                    DdlStatement::DropServer(stmt) => {
-                        write!(f, "DropServer: {stmt}")
-                    }
-                    DdlStatement::CreateForeignDataWrapper(stmt) => {
-                        write!(f, "CreateForeignDataWrapper: {stmt}")
-                    }
-                    DdlStatement::AlterForeignDataWrapper(stmt) => {
-                        write!(f, "AlterForeignDataWrapper: {stmt}")
-                    }
-                    DdlStatement::DropForeignDataWrapper(stmt) => {
-                        write!(f, "DropForeignDataWrapper: {stmt}")
-                    }
-                    DdlStatement::CreateForeignTable(stmt) => {
-                        write!(f, "CreateForeignTable: {stmt}")
-                    }
-                    DdlStatement::AlterForeignTable(stmt) => {
-                        write!(f, "AlterForeignTable: {stmt}")
-                    }
-                    DdlStatement::DropForeignTable(stmt) => {
-                        write!(f, "DropForeignTable: {stmt}")
-                    }
-                    DdlStatement::CreateUserMapping(stmt) => {
-                        write!(f, "CreateUserMapping: {stmt}")
-                    }
-                    DdlStatement::AlterUserMapping(stmt) => {
-                        write!(f, "AlterUserMapping: {stmt}")
-                    }
-                    DdlStatement::DropUserMapping(stmt) => {
-                        write!(f, "DropUserMapping: {stmt}")
-                    }
-                    DdlStatement::ImportForeignSchema(stmt) => {
-                        write!(f, "ImportForeignSchema: {stmt}")
                     }
                 }
             }
@@ -828,21 +380,35 @@ impl PartialOrd for CreateExternalTable {
     }
 }
 
-/// Creates an in memory table.
+/// Parser-free catalog portion of a `CREATE TABLE` plan.
+///
+/// The relational input is intentionally not part of this value. Consumers
+/// that compile CTAS can move this header into a command or physical factory
+/// while carrying the SELECT plan as a separate child. This is also the
+/// neutral hand-off point for downstream engines: it contains only DataFusion
+/// semantic values and does not reference a downstream crate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct CreateMemoryTable {
+pub struct CreateMemoryTableSpec {
     /// The table name
     pub name: TableReference,
     /// The list of constraints in the schema, such as primary key, unique, etc.
     pub constraints: Constraints,
-    /// The logical plan
-    pub input: Arc<LogicalPlan>,
     /// Option to not error if table already exists
     pub if_not_exists: bool,
     /// Option to replace table content if table already exists
     pub or_replace: bool,
     /// Default values for columns
     pub column_defaults: Vec<(String, Expr)>,
+    /// Bound CHECK predicates, in the same order as the CHECK entries in
+    /// [`Self::constraints`]. The durable constraint source remains useful
+    /// for catalog display, but downstream planners and executors must consume
+    /// these semantic expressions instead of parsing that source again.
+    pub check_expressions: Vec<BoundSqlExpression>,
+    /// Generated-column expressions bound while the CREATE statement's AST
+    /// and final table schema are both in scope. Durable SQL spelling remains
+    /// catalog metadata, but later planners and executors consume this
+    /// semantic form and never reparse that metadata.
+    pub generated_expressions: Vec<(String, BoundSqlExpression)>,
     /// Whether the table is `TableType::Temporary`
     pub temporary: bool,
     /// Storage parameters supplied via CREATE TABLE WITH (...)
@@ -856,6 +422,152 @@ pub struct CreateMemoryTable {
     pub partition_of: Option<CreateTablePartitionOf>,
     /// Parent relations named by `INHERITS`, in declaration order.
     pub inherits: Vec<TableReference>,
+}
+
+impl CreateMemoryTableSpec {
+    /// Every semantic expression owned directly by this DDL header, in the
+    /// stable order used by [`Self::with_new_expressions`]. Exposing these to
+    /// normal logical-plan expression traversal is important: analyzer rules
+    /// must see catalog expressions just as they see predicates and
+    /// projections in the relational child.
+    pub(crate) fn expressions(&self) -> Vec<&Expr> {
+        fn collect_bound<'a>(bound: &'a CreateTablePartitionBound, out: &mut Vec<&'a Expr>) {
+            match bound {
+                CreateTablePartitionBound::Range { lower, upper } => {
+                    for value in lower.iter().chain(upper) {
+                        if let CreateTablePartitionBoundValue::Expr(expression) = value {
+                            out.push(expression);
+                        }
+                    }
+                }
+                CreateTablePartitionBound::List { values } => {
+                    out.extend(values.iter().flatten());
+                }
+                CreateTablePartitionBound::Hash { .. }
+                | CreateTablePartitionBound::Default => {}
+            }
+        }
+
+        let mut expressions = Vec::new();
+        expressions.extend(self.column_defaults.iter().map(|(_, expression)| expression));
+        expressions.extend(
+            self.check_expressions
+                .iter()
+                .map(BoundSqlExpression::expression),
+        );
+        expressions.extend(
+            self.generated_expressions
+                .iter()
+                .map(|(_, expression)| expression.expression()),
+        );
+        if let Some(partitioning) = &self.partitioning {
+            expressions.extend(partitioning.keys.iter().map(|key| &key.expr));
+        }
+        if let Some(partition_of) = &self.partition_of {
+            collect_bound(&partition_of.bound, &mut expressions);
+        }
+        expressions
+    }
+
+    /// Rebuild this header with the expressions returned by
+    /// [`Self::expressions`]. This keeps analyzer rewrites inside the semantic
+    /// plan rather than forcing a later catalog consumer to rebind SQL text.
+    pub(crate) fn with_new_expressions(&self, expressions: Vec<Expr>) -> Result<Self> {
+        fn missing() -> DataFusionError {
+            DataFusionError::Internal(
+                "CreateMemoryTableSpec expression rewrite supplied too few expressions"
+                    .to_string(),
+            )
+        }
+
+        fn rewrite_bound(
+            bound: &mut CreateTablePartitionBound,
+            expressions: &mut impl Iterator<Item = Expr>,
+        ) -> Result<()> {
+            match bound {
+                CreateTablePartitionBound::Range { lower, upper } => {
+                    for value in lower.iter_mut().chain(upper) {
+                        if let CreateTablePartitionBoundValue::Expr(expression) = value {
+                            *expression = expressions.next().ok_or_else(missing)?;
+                        }
+                    }
+                }
+                CreateTablePartitionBound::List { values } => {
+                    for expression in values.iter_mut().flatten() {
+                        *expression = expressions.next().ok_or_else(missing)?;
+                    }
+                }
+                CreateTablePartitionBound::Hash { .. }
+                | CreateTablePartitionBound::Default => {}
+            }
+            Ok(())
+        }
+
+        let mut rewritten = self.clone();
+        let mut expressions = expressions.into_iter();
+        for (_, expression) in &mut rewritten.column_defaults {
+            *expression = expressions.next().ok_or_else(missing)?;
+        }
+        for expression in &mut rewritten.check_expressions {
+            *expression = BoundSqlExpression::new(expressions.next().ok_or_else(missing)?);
+        }
+        for (_, expression) in &mut rewritten.generated_expressions {
+            *expression = BoundSqlExpression::new(expressions.next().ok_or_else(missing)?);
+        }
+        if let Some(partitioning) = &mut rewritten.partitioning {
+            for key in &mut partitioning.keys {
+                key.expr = expressions.next().ok_or_else(missing)?;
+            }
+        }
+        if let Some(partition_of) = &mut rewritten.partition_of {
+            rewrite_bound(&mut partition_of.bound, &mut expressions)?;
+        }
+        if expressions.next().is_some() {
+            return Err(DataFusionError::Internal(
+                "CreateMemoryTableSpec expression rewrite supplied too many expressions"
+                    .to_string(),
+            ));
+        }
+        Ok(rewritten)
+    }
+}
+
+/// Creates an in memory table.
+///
+/// SQL lowering returns the catalog header and relational input together as a
+/// `LogicalPlan` node so ordinary DataFusion tree transforms remain usable.
+/// Runtime consumers should split it with [`CreateMemoryTable::into_parts`]
+/// at their logical-plan boundary rather than retaining this wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateMemoryTable {
+    /// Parser-free catalog command header.
+    pub spec: CreateMemoryTableSpec,
+    /// Relational child. `EmptyRelation` represents a CREATE without AS.
+    pub input: Arc<LogicalPlan>,
+}
+
+impl CreateMemoryTable {
+    pub fn new(spec: CreateMemoryTableSpec, input: Arc<LogicalPlan>) -> Self {
+        Self { spec, input }
+    }
+
+    pub fn into_parts(self) -> (CreateMemoryTableSpec, Arc<LogicalPlan>) {
+        (self.spec, self.input)
+    }
+}
+
+impl Deref for CreateMemoryTable {
+    type Target = CreateMemoryTableSpec;
+
+    fn deref(&self) -> &Self::Target {
+        &self.spec
+    }
+}
+
+impl DerefMut for CreateMemoryTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.spec
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
@@ -872,8 +584,13 @@ pub enum CreateTablePartitionBound {
     },
     /// Each entry is one partition key row. A scalar list item has one
     /// expression; a tuple item has one expression per partition key column.
-    List { values: Vec<Vec<Expr>> },
-    Hash { modulus: u64, remainder: u64 },
+    List {
+        values: Vec<Vec<Expr>>,
+    },
+    Hash {
+        modulus: u64,
+        remainder: u64,
+    },
     Default,
 }
 
@@ -909,537 +626,122 @@ pub struct CreateTablePartitionKey {
 }
 
 /// Creates a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CreateViewCheckOption {
+    #[default]
+    None,
+    Local,
+    Cascaded,
+}
+
+/// Why a defining query cannot be represented as an automatically updatable
+/// single-relation view. The SQL crate derives this while parser syntax is in
+/// scope; downstream catalog and DML code retain only this shallow semantic
+/// result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CreateViewNotUpdatable {
+    UnreadableDefinition,
+    WithClause,
+    SetOperation,
+    Distinct,
+    Grouping,
+    WindowFunction,
+    LimitOffset,
+    Join,
+    NotARelation,
+    NoUpdatableColumn,
+}
+
+/// One output column of an automatically updatable view.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct CreateViewColumn {
+    /// Catalog-visible output name.
+    pub name: String,
+    /// Direct source column accepting writes, or `None` for a computed output.
+    pub write_source: Option<String>,
+    /// The value shown by the view, bound against the immediately underlying
+    /// relation. Keeping this for computed columns lets stacked-view filters
+    /// substitute their real expression instead of treating them as NULL.
+    pub read_expression: BoundSqlExpression,
+}
+
+/// Parser-free meaning of the part of a view definition needed by automatic
+/// DML retargeting and information-schema updatability reporting.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum CreateViewUpdatability {
+    Updatable {
+        source: TableReference,
+        columns: Vec<CreateViewColumn>,
+        restriction: Option<BoundSqlExpression>,
+    },
+    NotUpdatable(CreateViewNotUpdatable),
+}
+
+/// Parser-free catalog portion of a `CREATE VIEW` plan.
+///
+/// The defining query is deliberately excluded. SQL lowering can pair this
+/// neutral header with a relational input, while downstream consumers split
+/// the two at their logical-plan boundary and retain only the semantic facts
+/// they need from that input.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
-pub struct CreateView {
+pub struct CreateViewSpec {
     /// The table name
     pub name: TableReference,
-    /// The logical plan
-    pub input: Arc<LogicalPlan>,
     /// Option to not error if table already exists
     pub or_replace: bool,
     /// Option to not error if view already exists (IF NOT EXISTS clause)
     pub if_not_exists: bool,
     /// SQL used to create the view, if available
     pub definition: Option<String>,
+    /// SQL for the defining query only, without the surrounding `CREATE VIEW`
+    /// statement. Catalog consumers need this representation, but must not
+    /// recover it later by reparsing `definition`.
+    pub query_definition: Option<String>,
     /// Whether the view is ephemeral
     pub temporary: bool,
+    /// Semantic scope of `WITH CHECK OPTION`, lowered at the SQL boundary.
+    pub check_option: CreateViewCheckOption,
+    /// Automatic-update analysis captured while the defining query's AST and
+    /// the full catalog/type/function provider are still available.
+    pub updatability: CreateViewUpdatability,
 }
 
-/// Creates a materialized view.
+/// Creates a view.
 ///
-/// The inner `SELECT` is planned by the SQL planner so type checking,
-/// schema resolution, and downstream rewrites all happen against the
-/// real query before the dialect-specific MV admin layer takes over.
-/// `definition` carries the original `CREATE MATERIALIZED VIEW` SQL
-/// text so the engine layer can persist it for later refresh planning.
+/// This wrapper exists inside DataFusion's logical-plan layer so ordinary tree
+/// transforms can still visit the defining query. Runtime consumers should
+/// split it with [`CreateView::into_parts`] rather than treating DDL as a leaf
+/// that secretly retains a relational tree.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
-pub struct CreateMaterializedView {
-    /// The materialized view name.
-    pub name: TableReference,
-    /// The logical plan of the inner `SELECT`.
+pub struct CreateView {
+    /// Parser-free catalog command header.
+    pub spec: CreateViewSpec,
+    /// Defining relational query.
     pub input: Arc<LogicalPlan>,
-    /// `OR REPLACE` clause.
-    pub or_replace: bool,
-    /// `IF NOT EXISTS` clause.
-    pub if_not_exists: bool,
-    /// Original `CREATE MATERIALIZED VIEW` SQL text, for catalog persistence.
-    pub definition: Option<String>,
-    /// `WITH (...)` options as ordered key/value strings. The engine
-    /// layer interprets these (`maintenance`, `refresh_policy`, …).
-    pub with_options: BTreeMap<String, String>,
 }
 
-/// Drops a materialized view.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DropMaterializedView {
-    /// The materialized view name.
-    pub name: TableReference,
-    /// `IF EXISTS` clause.
-    pub if_exists: bool,
-    /// `CASCADE` clause.
-    pub cascade: bool,
-    /// Dummy schema (DDL has no result columns).
-    pub schema: DFSchemaRef,
-}
+impl CreateView {
+    pub fn new(spec: CreateViewSpec, input: Arc<LogicalPlan>) -> Self {
+        Self { spec, input }
+    }
 
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for DropMaterializedView {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => match self.if_exists.partial_cmp(&other.if_exists) {
-                Some(Ordering::Equal) => self.cascade.partial_cmp(&other.cascade),
-                cmp => cmp,
-            },
-            cmp => cmp,
-        }
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    pub fn into_parts(self) -> (CreateViewSpec, Arc<LogicalPlan>) {
+        (self.spec, self.input)
     }
 }
 
-/// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [FAST | COMPLETE]`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RefreshMaterializedView {
-    /// The materialized view name.
-    pub name: TableReference,
-    /// `CONCURRENTLY` flag.
-    pub concurrently: bool,
-    /// Optional refresh method.
-    pub method: Option<MaterializedViewRefreshMethod>,
-    /// Dummy schema (DDL has no result columns).
-    pub schema: DFSchemaRef,
-}
+impl Deref for CreateView {
+    type Target = CreateViewSpec;
 
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for RefreshMaterializedView {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => {
-                match self.concurrently.partial_cmp(&other.concurrently) {
-                    Some(Ordering::Equal) => self.method.partial_cmp(&other.method),
-                    cmp => cmp,
-                }
-            }
-            cmp => cmp,
-        }
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    fn deref(&self) -> &Self::Target {
+        &self.spec
     }
 }
 
-/// `ALTER MATERIALIZED VIEW name {ENABLE REWRITE | DISABLE REWRITE | OWNER TO ...}`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AlterMaterializedView {
-    /// The materialized view name.
-    pub name: TableReference,
-    /// The alter operation.
-    pub operation: AlterMaterializedViewOperation,
-    /// Dummy schema (DDL has no result columns).
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for AlterMaterializedView {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => self.operation.partial_cmp(&other.operation),
-            cmp => cmp,
-        }
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
+impl DerefMut for CreateView {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.spec
     }
-}
-
-/// Creates a catalog (aka "Database").
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CreateCatalog {
-    /// The catalog name
-    pub catalog_name: String,
-    /// Do nothing (except issuing a notice) if a schema with the same name already exists
-    pub if_not_exists: bool,
-    /// Empty schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for CreateCatalog {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.catalog_name.partial_cmp(&other.catalog_name) {
-            Some(Ordering::Equal) => self.if_not_exists.partial_cmp(&other.if_not_exists),
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Creates a schema.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CreateCatalogSchema {
-    /// The table schema
-    pub schema_name: String,
-    /// Do nothing (except issuing a notice) if a schema with the same name already exists
-    pub if_not_exists: bool,
-    /// Empty schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for CreateCatalogSchema {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.schema_name.partial_cmp(&other.schema_name) {
-            Some(Ordering::Equal) => self.if_not_exists.partial_cmp(&other.if_not_exists),
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Drops a table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DropTable {
-    /// The table name
-    pub name: TableReference,
-    /// If the table exists
-    pub if_exists: bool,
-    /// Dummy schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for DropTable {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => self.if_exists.partial_cmp(&other.if_exists),
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Drops a view.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DropView {
-    /// The view name
-    pub name: TableReference,
-    /// If the view exists
-    pub if_exists: bool,
-    /// Dummy schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for DropView {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => self.if_exists.partial_cmp(&other.if_exists),
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Drops a sequence.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct DropSequence {
-    /// The sequence name
-    pub name: ObjectName,
-    /// If the sequence exists
-    pub if_exists: bool,
-    /// Whether drop should cascade
-    pub cascade: bool,
-    /// Whether drop should restrict
-    pub restrict: bool,
-    /// Whether drop should purge
-    pub purge: bool,
-    /// Whether drop should use TEMPORARY
-    pub temporary: bool,
-    /// Optional table qualifier (dialect-specific)
-    pub table: Option<ObjectName>,
-}
-
-/// Creates a sequence (SQL:2016 T174: Sequence generator support).
-///
-/// Example:
-/// ```sql
-/// CREATE SEQUENCE seq_core INCREMENT 1 START WITH 1
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct CreateSequence {
-    /// The sequence name
-    pub name: ObjectName,
-    /// Whether to create as temporary sequence
-    pub temporary: bool,
-    /// IF NOT EXISTS clause
-    pub if_not_exists: bool,
-    /// Optional data type for the sequence
-    pub data_type: Option<SqlDataType>,
-    /// Sequence options (INCREMENT, START, etc.)
-    pub sequence_options: Vec<SequenceOptions>,
-    /// OWNED BY clause
-    pub owned_by: Option<ObjectName>,
-}
-
-/// Alters a sequence (SQL:2016 T174: Sequence generator support).
-///
-/// Example:
-/// ```sql
-/// ALTER SEQUENCE seq_core RESTART WITH 100
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct AlterSequence {
-    /// The sequence name
-    pub name: ObjectName,
-    /// IF EXISTS clause
-    pub if_exists: bool,
-    /// Sequence options to alter
-    pub sequence_options: Vec<SequenceOptions>,
-    /// OWNED BY clause
-    pub owned_by: Option<ObjectName>,
-}
-
-/// Creates an assertion (SQL:2016 F491: Schema-level CHECK constraint).
-///
-/// Example:
-/// ```sql
-/// CREATE ASSERTION salary_check CHECK (NOT EXISTS (SELECT 1 FROM employees WHERE salary < 0))
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct CreateAssertion {
-    /// The assertion name
-    pub name: ObjectName,
-    /// The CHECK constraint expression
-    pub expr: Box<SqlExpr>,
-}
-
-/// Drops an assertion (SQL:2016 F491: Schema-level CHECK constraint).
-///
-/// Example:
-/// ```sql
-/// DROP ASSERTION salary_check
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
-pub struct DropAssertion {
-    /// The assertion name
-    pub name: ObjectName,
-    /// IF EXISTS clause
-    pub if_exists: bool,
-}
-
-/// Drops a schema
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DropCatalogSchema {
-    /// The schema name
-    pub name: SchemaReference,
-    /// If the schema exists
-    pub if_exists: bool,
-    /// Whether drop should cascade
-    pub cascade: bool,
-    /// Dummy schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for DropCatalogSchema {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => match self.if_exists.partial_cmp(&other.if_exists) {
-                Some(Ordering::Equal) => self.cascade.partial_cmp(&other.cascade),
-                cmp => cmp,
-            },
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Arguments passed to the `CREATE FUNCTION` statement
-///
-/// These statements are turned into executable functions using [`FunctionFactory`]
-///
-/// # Notes
-///
-/// This structure purposely mirrors the structure in sqlparser's
-/// [`sqlparser::ast::Statement::CreateFunction`], but does not use it directly
-/// to avoid a dependency on sqlparser in the core crate.
-///
-///
-/// [`FunctionFactory`]: https://docs.rs/datafusion/latest/datafusion/execution/context/trait.FunctionFactory.html
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct CreateFunction {
-    pub or_replace: bool,
-    pub temporary: bool,
-    pub name: String,
-    pub args: Option<Vec<OperateFunctionArg>>,
-    pub return_type: Option<DataType>,
-    pub params: CreateFunctionBody,
-    /// PSM body (BEGIN/END block) for SQL:2016 procedural functions.
-    /// Mutually exclusive with `params.function_body`.
-    pub psm_body: Option<PsmBlock>,
-    /// Dummy schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for CreateFunction {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        #[derive(PartialEq, PartialOrd)]
-        struct ComparableCreateFunction<'a> {
-            pub or_replace: &'a bool,
-            pub temporary: &'a bool,
-            pub name: &'a String,
-            pub args: &'a Option<Vec<OperateFunctionArg>>,
-            pub return_type: &'a Option<DataType>,
-            pub params: &'a CreateFunctionBody,
-        }
-        let comparable_self = ComparableCreateFunction {
-            or_replace: &self.or_replace,
-            temporary: &self.temporary,
-            name: &self.name,
-            args: &self.args,
-            return_type: &self.return_type,
-            params: &self.params,
-        };
-        let comparable_other = ComparableCreateFunction {
-            or_replace: &other.or_replace,
-            temporary: &other.temporary,
-            name: &other.name,
-            args: &other.args,
-            return_type: &other.return_type,
-            params: &other.params,
-        };
-        comparable_self
-            .partial_cmp(&comparable_other)
-            // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-            .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Part of the `CREATE FUNCTION` statement
-///
-/// See [`CreateFunction`] for details
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct OperateFunctionArg {
-    // TODO: figure out how to support mode
-    // pub mode: Option<ArgMode>,
-    pub name: Option<Ident>,
-    pub data_type: DataType,
-    pub default_expr: Option<Expr>,
-}
-
-impl<'a> TreeNodeContainer<'a, Expr> for OperateFunctionArg {
-    fn apply_elements<F: FnMut(&'a Expr) -> Result<TreeNodeRecursion>>(
-        &'a self,
-        f: F,
-    ) -> Result<TreeNodeRecursion> {
-        self.default_expr.apply_elements(f)
-    }
-
-    fn map_elements<F: FnMut(Expr) -> Result<Transformed<Expr>>>(
-        self,
-        f: F,
-    ) -> Result<Transformed<Self>> {
-        self.default_expr.map_elements(f)?.map_data(|default_expr| {
-            Ok(Self {
-                default_expr,
-                ..self
-            })
-        })
-    }
-}
-
-/// Part of the `CREATE FUNCTION` statement
-///
-/// See [`CreateFunction`] for details
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct CreateFunctionBody {
-    /// LANGUAGE lang_name
-    pub language: Option<Ident>,
-    /// IMMUTABLE | STABLE | VOLATILE
-    pub behavior: Option<Volatility>,
-    /// RETURN or AS function body
-    pub function_body: Option<Expr>,
-}
-
-impl<'a> TreeNodeContainer<'a, Expr> for CreateFunctionBody {
-    fn apply_elements<F: FnMut(&'a Expr) -> Result<TreeNodeRecursion>>(
-        &'a self,
-        f: F,
-    ) -> Result<TreeNodeRecursion> {
-        self.function_body.apply_elements(f)
-    }
-
-    fn map_elements<F: FnMut(Expr) -> Result<Transformed<Expr>>>(
-        self,
-        f: F,
-    ) -> Result<Transformed<Self>> {
-        self.function_body
-            .map_elements(f)?
-            .map_data(|function_body| {
-                Ok(Self {
-                    function_body,
-                    ..self
-                })
-            })
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct DropFunction {
-    pub name: String,
-    pub if_exists: bool,
-    pub schema: DFSchemaRef,
-}
-
-impl PartialOrd for DropFunction {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => self.if_exists.partial_cmp(&other.if_exists),
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// CREATE PROCEDURE statement (SQL:2016 Part 4 - PSM).
-///
-/// Procedures differ from functions in that:
-/// - They do not have a return type (but may have OUT/INOUT parameters)
-/// - They are invoked with CALL, not in expressions
-/// - They may modify database state via DML
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct CreateProcedure {
-    /// Whether to replace an existing procedure with the same name.
-    pub or_replace: bool,
-    /// The procedure name.
-    pub name: String,
-    /// The procedure arguments (may include IN, OUT, INOUT parameters).
-    pub args: Option<Vec<ProcedureArg>>,
-    /// The procedure body as a PSM block.
-    pub body: PsmBlock,
-}
-
-// Manual implementation needed because PsmBlock doesn't implement PartialOrd.
-// Comparison is based on name and or_replace only.
-impl PartialOrd for CreateProcedure {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => self.or_replace.partial_cmp(&other.or_replace),
-            cmp => cmp,
-        }
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// DROP PROCEDURE statement (SQL:2016 Part 4 - PSM).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct DropProcedure {
-    /// The procedure name.
-    pub name: String,
-    /// IF EXISTS clause.
-    pub if_exists: bool,
-}
-
-/// CREATE ROLE statement.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct CreateRole {
-    /// The role name.
-    pub name: String,
-    /// IF NOT EXISTS clause.
-    pub if_not_exists: bool,
-}
-
-/// DROP ROLE statement.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct DropRole {
-    /// The role name.
-    pub name: String,
-    /// IF EXISTS clause.
-    pub if_exists: bool,
-    /// CASCADE option.
-    pub cascade: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -1485,180 +787,5 @@ impl PartialOrd for CreateIndex {
             .partial_cmp(&comparable_other)
             // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
             .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-/// Drops an index.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DropIndex {
-    /// The index name
-    pub name: String,
-    /// If the index exists
-    pub if_exists: bool,
-    /// Dummy schema
-    pub schema: DFSchemaRef,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for DropIndex {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.name.partial_cmp(&other.name) {
-            Some(Ordering::Equal) => self.if_exists.partial_cmp(&other.if_exists),
-            cmp => cmp,
-        }
-        // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-        .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-// =============================================================================
-// SQL/PGQ (Property Graph Query) Support - ISO/IEC 9075-16:2023
-// =============================================================================
-
-/// A key clause in a property graph vertex or edge table definition.
-/// Example: `KEY (id)`
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct GraphKeyClause {
-    /// The columns that form the key
-    pub columns: Vec<String>,
-}
-
-/// One property backed by a column in a property graph element table.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct GraphPropertyDefinition {
-    /// Underlying table column.
-    pub column: String,
-    /// Optional exposed property name.
-    pub alias: Option<String>,
-}
-
-/// Typed property exposure mode for a graph element table.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub enum GraphPropertiesClause {
-    /// Expose every column except the explicitly named columns.
-    AllColumns { except: Vec<String> },
-    /// Expose only the listed column/property mappings.
-    Named(Vec<GraphPropertyDefinition>),
-    /// Expose no properties.
-    NoProperties,
-}
-
-/// An endpoint definition for an edge in a property graph.
-/// Example: `KEY (src_id) REFERENCES Person`
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct GraphEdgeEndpoint {
-    /// Optional key columns for this endpoint
-    pub key: Option<GraphKeyClause>,
-    /// The vertex table this endpoint references
-    pub references: TableReference,
-    /// Optional referenced vertex-key columns.
-    pub referenced_columns: Option<Vec<String>>,
-}
-
-/// A vertex table definition in CREATE PROPERTY GRAPH.
-/// Example: `Person KEY (id) LABEL Person PROPERTIES (name, age)`
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct GraphVertexTableDefinition {
-    /// The underlying table name
-    pub table: TableReference,
-    /// Optional key clause
-    pub key: Option<GraphKeyClause>,
-    /// Optional label for the vertex type
-    pub label: Option<String>,
-    /// Optional properties clause
-    pub properties: Option<GraphPropertiesClause>,
-}
-
-/// An edge table definition in CREATE PROPERTY GRAPH.
-/// Example: `Knows SOURCE KEY (src_id) REFERENCES Person DESTINATION KEY (dst_id) REFERENCES Person`
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct GraphEdgeTableDefinition {
-    /// The underlying table name
-    pub table: TableReference,
-    /// Source endpoint definition
-    pub source: GraphEdgeEndpoint,
-    /// Destination endpoint definition
-    pub destination: GraphEdgeEndpoint,
-    /// Optional key clause
-    pub key: Option<GraphKeyClause>,
-    /// Optional label for the edge type
-    pub label: Option<String>,
-    /// Optional properties clause
-    pub properties: Option<GraphPropertiesClause>,
-}
-
-/// CREATE PROPERTY GRAPH statement (SQL/PGQ).
-///
-/// Creates a property graph from vertex and edge tables.
-///
-/// Example:
-/// ```sql
-/// CREATE PROPERTY GRAPH social_network
-///   VERTEX TABLES (
-///     Person KEY (id) PROPERTIES (name, age)
-///   )
-///   EDGE TABLES (
-///     Knows SOURCE KEY (src_id) REFERENCES Person
-///           DESTINATION KEY (dst_id) REFERENCES Person
-///   )
-/// ```
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct CreatePropertyGraph {
-    /// The name of the property graph
-    pub name: TableReference,
-    /// Whether to replace an existing graph with the same name
-    pub or_replace: bool,
-    /// Whether to skip if the graph already exists
-    pub if_not_exists: bool,
-    /// Vertex table definitions
-    pub vertex_tables: Vec<GraphVertexTableDefinition>,
-    /// Edge table definitions
-    pub edge_tables: Vec<GraphEdgeTableDefinition>,
-}
-
-/// DROP PROPERTY GRAPH statement (SQL/PGQ).
-///
-/// Example:
-/// ```sql
-/// DROP PROPERTY GRAPH IF EXISTS social_network CASCADE
-/// ```
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
-pub struct DropPropertyGraph {
-    /// The name of the property graph to drop
-    pub name: TableReference,
-    /// Whether to skip if the graph doesn't exist
-    pub if_exists: bool,
-    /// Drop behavior (CASCADE or RESTRICT)
-    pub drop_behavior: Option<DropBehavior>,
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{CreateCatalog, DdlStatement, DropView};
-    use datafusion_common::{DFSchema, DFSchemaRef, TableReference};
-    use std::cmp::Ordering;
-
-    #[test]
-    fn test_partial_ord() {
-        let catalog = DdlStatement::CreateCatalog(CreateCatalog {
-            catalog_name: "name".to_string(),
-            if_not_exists: false,
-            schema: DFSchemaRef::new(DFSchema::empty()),
-        });
-        let catalog_2 = DdlStatement::CreateCatalog(CreateCatalog {
-            catalog_name: "name".to_string(),
-            if_not_exists: true,
-            schema: DFSchemaRef::new(DFSchema::empty()),
-        });
-
-        assert_eq!(catalog.partial_cmp(&catalog_2), Some(Ordering::Less));
-
-        let drop_view = DdlStatement::DropView(DropView {
-            name: TableReference::from("table"),
-            if_exists: false,
-            schema: DFSchemaRef::new(DFSchema::empty()),
-        });
-
-        assert_eq!(drop_view.partial_cmp(&catalog), Some(Ordering::Greater));
     }
 }

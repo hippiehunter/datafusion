@@ -52,8 +52,8 @@ use datafusion_expr::type_coercion::{is_datetime, is_utf8_or_utf8view_or_large_u
 use datafusion_expr::utils::merge_schema;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable, Join, Limit, LogicalPlan, Operator, Projection,
-    ScalarUDF, Union, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowUDF, is_false,
-    is_not_false, is_not_true, is_not_unknown, is_true, is_unknown, not,
+    ScalarUDF, Union, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowUDF,
+    is_false, is_not_false, is_not_true, is_not_unknown, is_true, is_unknown, not,
 };
 
 /// Performs type coercion by determining the schema
@@ -837,7 +837,8 @@ fn coerce_window_frame(
                         if !v.is_null()
                 )
             };
-            if (is_offset(&window_frame.start_bound) || is_offset(&window_frame.end_bound))
+            if (is_offset(&window_frame.start_bound)
+                || is_offset(&window_frame.end_bound))
                 && expressions.len() != 1
             {
                 return plan_err!(

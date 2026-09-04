@@ -32,7 +32,6 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::{SortColumn, SortOptions, partition};
 use arrow::datatypes::{DataType, Field, SchemaRef};
-use sqlparser::{ast::Ident, dialect::PostgreSqlDialect, parser::Parser};
 use std::borrow::{Borrow, Cow};
 use std::cmp::{Ordering, min};
 use std::collections::HashSet;
@@ -274,31 +273,79 @@ fn needs_quotes(s: &str) -> bool {
     !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<Ident>> {
-    let dialect = PostgreSqlDialect {};
-    let parser = Parser::new(&dialect).try_with_sql(s)?;
-    let idents = parser.parse_multipart_identifier()?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedIdentifier {
+    value: String,
+    quoted: bool,
+}
 
-    // Validate that parsing didn't incorrectly split on dots inside parentheses.
-    // If any identifier has unbalanced parentheses, the parsing was incorrect.
-    for ident in &idents {
-        let mut paren_depth = 0i32;
-        for ch in ident.value.chars() {
-            match ch {
-                '(' => paren_depth += 1,
-                ')' => paren_depth -= 1,
-                _ => {}
-            }
+fn is_identifier_start(ch: char) -> bool {
+    ch.is_alphabetic() || ch == '_' || !ch.is_ascii()
+}
+
+fn is_identifier_part(ch: char) -> bool {
+    is_identifier_start(ch) || ch.is_ascii_digit() || ch == '$'
+}
+
+/// Parse the small identifier grammar needed by [`crate::TableReference`] and
+/// [`crate::Column`]. Keeping this context-free operation local prevents the
+/// runtime-facing common crate from depending on the full SQL parser.
+pub(crate) fn parse_identifiers(s: &str) -> Option<Vec<ParsedIdentifier>> {
+    let mut chars = s.char_indices().peekable();
+    let mut identifiers = Vec::with_capacity(4);
+
+    loop {
+        while chars.peek().is_some_and(|(_, ch)| ch.is_whitespace()) {
+            chars.next();
         }
-        if paren_depth != 0 {
-            return Err(crate::DataFusionError::Internal(format!(
-                "Invalid identifier with unbalanced parentheses: {}",
-                s
-            )));
+
+        let (_, first) = chars.next()?;
+        let (value, quoted) = if first == '"' {
+            let mut value = String::new();
+            let mut closed = false;
+            while let Some((_, ch)) = chars.next() {
+                if ch != '"' {
+                    value.push(ch);
+                    continue;
+                }
+
+                if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                    value.push('"');
+                } else {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed || value.is_empty() {
+                return None;
+            }
+            (value, true)
+        } else {
+            if !is_identifier_start(first) {
+                return None;
+            }
+            let mut value = String::from(first);
+            while let Some((_, ch)) = chars.peek() {
+                if !is_identifier_part(*ch) {
+                    break;
+                }
+                value.push(*ch);
+                chars.next();
+            }
+            (value, false)
+        };
+        identifiers.push(ParsedIdentifier { value, quoted });
+
+        while chars.peek().is_some_and(|(_, ch)| ch.is_whitespace()) {
+            chars.next();
+        }
+        match chars.next() {
+            None => return Some(identifiers),
+            Some((_, '.')) => {}
+            Some(_) => return None,
         }
     }
-
-    Ok(idents)
 }
 
 /// Parse a string into a vector of identifiers.
@@ -308,9 +355,9 @@ pub(crate) fn parse_identifiers_normalized(s: &str, ignore_case: bool) -> Vec<St
     parse_identifiers(s)
         .unwrap_or_default()
         .into_iter()
-        .map(|id| match id.quote_style {
-            Some(_) => id.value,
-            None if ignore_case => id.value,
+        .map(|id| match id.quoted {
+            true => id.value,
+            false if ignore_case => id.value,
             _ => id.value.to_ascii_lowercase(),
         })
         .collect::<Vec<_>>()
@@ -1125,16 +1172,9 @@ mod tests {
 
             // When parsing the quoted identifier, it should be a
             // a single identifier without normalization, and not in multiple parts
-            let quote_style = if quoted_identifier.starts_with('"') {
-                Some('"')
-            } else {
-                None
-            };
-
-            let expected_parsed = vec![Ident {
+            let expected_parsed = vec![ParsedIdentifier {
                 value: identifier.to_string(),
-                quote_style,
-                span: sqlparser::tokenizer::Span::empty(),
+                quoted: quoted_identifier.starts_with('"'),
             }];
 
             assert_eq!(
@@ -1144,6 +1184,24 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_identifiers_without_sqlparser() {
+        assert_eq!(
+            parse_identifiers_normalized(r#"catalog."FOO"".bar".TABLE"#, false),
+            vec!["catalog", "FOO\".bar", "table"]
+        );
+        assert_eq!(
+            parse_identifiers_normalized(" Catalog . TABLE ", true),
+            vec!["Catalog", "TABLE"]
+        );
+        assert!(parse_identifiers("").is_none());
+        assert!(parse_identifiers(r#"""#).is_none());
+        assert!(parse_identifiers(r#""unterminated"#).is_none());
+        assert!(parse_identifiers("schema.").is_none());
+        assert!(parse_identifiers("schema..table").is_none());
+        assert!(parse_identifiers("TABLE()").is_none());
     }
 
     #[test]

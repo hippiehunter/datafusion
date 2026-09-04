@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 use datafusion_common::plan_err;
 use datafusion_common::{DFSchema, Result};
 use datafusion_expr::{Expr, GroupingSet};
@@ -27,7 +27,7 @@ pub(crate) fn is_empty_grouping_element(element: &SQLExpr) -> bool {
     matches!(element, SQLExpr::Tuple(exprs) if exprs.is_empty())
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(super) fn sql_grouping_sets_to_expr(
         &self,
         exprs: &[Vec<SQLExpr>],

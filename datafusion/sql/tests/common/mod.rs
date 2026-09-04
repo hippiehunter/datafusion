@@ -24,10 +24,15 @@ use std::{sync::Arc, vec};
 use arrow::datatypes::*;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{GetExt, Result, ScalarValue, TableReference, plan_err};
-use datafusion_expr::planner::{ExprPlanner, TypePlanner};
+use datafusion_common::{
+    Constraint, Constraints, GetExt, NullsDistinct, Result, ScalarValue, TableReference,
+    plan_err,
+};
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_sql::planner::ContextProvider;
+use datafusion_sql::planner::{
+    ContextProvider, CreateTableLikeOptions, CreateTableLikeSource, ExprPlanner,
+    TypePlanner,
+};
 
 // Note: make_array from datafusion_functions_nested was removed
 
@@ -238,6 +243,93 @@ impl ContextProvider for MockContextProvider {
             )),
             Err(e) => Err(e),
         }
+    }
+
+    fn get_create_table_like_source(
+        &self,
+        name: TableReference,
+        options: CreateTableLikeOptions,
+    ) -> Result<CreateTableLikeSource> {
+        let names: &[(&str, DataType)] = match name.table() {
+            "like_left" => &[
+                ("left_key", DataType::Int32),
+                ("left_value", DataType::Utf8),
+            ],
+            "like_right" => &[
+                ("right_value", DataType::Boolean),
+                ("right_key", DataType::Int64),
+            ],
+            _ => return plan_err!("No CREATE TABLE LIKE source named: {}", name.table()),
+        };
+
+        // Encode the received option set into otherwise opaque Arrow metadata.
+        // The integration tests can then prove that ordered SQL options were
+        // collapsed before the provider call without exposing parser types in
+        // this interface.
+        let option_metadata = [
+            ("like.defaults", options.defaults),
+            ("like.constraints", options.constraints),
+            ("like.indexes", options.indexes),
+            ("like.identity", options.identity),
+            ("like.generated", options.generated),
+            ("like.comments", options.comments),
+            ("like.storage", options.storage),
+        ]
+        .into_iter()
+        .map(|(name, enabled)| (name.to_string(), enabled.to_string()))
+        .collect::<HashMap<_, _>>();
+        let fields = names
+            .iter()
+            .map(|(name, data_type)| {
+                Arc::new(
+                    Field::new(*name, data_type.clone(), false)
+                        .with_metadata(option_metadata.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut constraints = Vec::new();
+        if options.constraints {
+            constraints.push(Constraint::Check {
+                name: Some(format!("{}_check", name.table())),
+                expr: format!("{} IS NOT NULL", names[0].0),
+                referenced_columns: vec![names[0].0.to_string()],
+                enforced: Some(true),
+            });
+        }
+        if options.indexes {
+            constraints.push(Constraint::PrimaryKey(vec![0]));
+            constraints.push(Constraint::Unique {
+                columns: vec![1],
+                nulls_distinct: NullsDistinct::Distinct,
+            });
+        }
+        let default_value = match names[1].1 {
+            DataType::Utf8 => ScalarValue::Utf8(Some("copied".to_string())),
+            DataType::Int64 => ScalarValue::Int64(Some(42)),
+            ref data_type => {
+                unreachable!("test LIKE source has no default for {data_type}")
+            }
+        };
+        let column_defaults = options
+            .defaults
+            .then(|| vec![(names[1].0.to_string(), Expr::Literal(default_value, None))])
+            .unwrap_or_default();
+
+        Ok(CreateTableLikeSource {
+            schema: Arc::new(Schema::new(fields)),
+            constraints: Constraints::new_unverified(constraints),
+            column_defaults,
+            check_expressions: options
+                .constraints
+                .then(|| {
+                    vec![datafusion_expr::BoundSqlExpression::new(
+                        datafusion_expr::col(names[0].0).is_not_null(),
+                    )]
+                })
+                .unwrap_or_default(),
+            generated_expressions: Vec::new(),
+        })
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

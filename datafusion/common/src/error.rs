@@ -50,8 +50,6 @@ use crate::utils::quote_identifier;
 use crate::{Column, DFSchema, Diagnostic, TableReference};
 use arrow::error::ArrowError;
 
-use sqlparser::parser::ParserError;
-
 /// Result type for operations that could result in an [DataFusionError]
 pub type Result<T, E = DataFusionError> = result::Result<T, E>;
 
@@ -102,7 +100,7 @@ pub enum DataFusionError {
     /// Error when SQL is syntactically incorrect.
     ///
     /// 2nd argument is for optional backtrace
-    SQL(Box<ParserError>, Option<String>),
+    SQL(Box<str>, Option<String>),
     /// Error when a feature is not yet implemented.
     ///
     /// These errors are sometimes returned for features that are still in
@@ -335,12 +333,6 @@ impl From<&Arc<DataFusionError>> for DataFusionError {
     }
 }
 
-impl From<ParserError> for DataFusionError {
-    fn from(e: ParserError) -> Self {
-        DataFusionError::SQL(Box::new(e), None)
-    }
-}
-
 impl From<GenericError> for DataFusionError {
     fn from(err: GenericError) -> Self {
         // If the error is already a DataFusionError, not wrapping it.
@@ -370,7 +362,7 @@ impl Error for DataFusionError {
             DataFusionError::ArrowError(e, _) => Some(e.as_ref()),
             DataFusionError::IoError(e) => Some(e),
 
-            DataFusionError::SQL(e, _) => Some(e.as_ref()),
+            DataFusionError::SQL(_, _) => None,
             DataFusionError::NotImplemented(_) => None,
             DataFusionError::Internal(_) => None,
             DataFusionError::Configuration(_) => None,
@@ -531,7 +523,7 @@ impl DataFusionError {
             DataFusionError::SQL(ref desc, ref backtrace) => {
                 let backtrace: String =
                     backtrace.clone().unwrap_or_else(|| "".to_owned());
-                Cow::Owned(format!("{desc:?}{backtrace}"))
+                Cow::Owned(format!("{desc}{backtrace}"))
             }
             DataFusionError::Configuration(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::NotImplemented(ref desc) => Cow::Owned(desc.to_string()),
@@ -938,7 +930,7 @@ make_error!(ffi_err, ffi_datafusion_err, Ffi);
 #[macro_export]
 macro_rules! sql_datafusion_err {
     ($ERR:expr $(; diagnostic = $DIAG:expr)?) => {{
-        let err = $crate::DataFusionError::SQL(Box::new($ERR), Some($crate::DataFusionError::get_back_trace()));
+        let err = $crate::DataFusionError::SQL(format!("{:?}", $ERR).into_boxed_str(), Some($crate::DataFusionError::get_back_trace()));
         $(
             let err = err.with_diagnostic($DIAG);
         )?

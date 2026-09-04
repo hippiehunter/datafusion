@@ -35,7 +35,7 @@ use sqlparser::ast::{
     JsonQueryWrapper, JsonQuotesBehavior, JsonQuotesClause, OrderByExpr,
 };
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 
 /// The clauses a SQL/JSON call carries.
 #[derive(Default)]
@@ -197,7 +197,7 @@ fn strip_format(expr: &SQLExpr, encoding: &mut bool) -> SQLExpr {
     }
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     /// Plan a SQL/JSON function form, or return `None` when the call is not
     /// one — including the PostgreSQL `json_object(text[])` function, which
     /// only shares the constructor's name.

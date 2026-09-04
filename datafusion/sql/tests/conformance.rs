@@ -58,14 +58,13 @@ use datafusion_common::{
     DFSchema, GetExt, Result, TableReference, not_impl_err, plan_err,
 };
 use datafusion_expr::function::PartitionEvaluatorArgs;
-use datafusion_expr::planner::ExprPlanner;
 use datafusion_expr::{
     AggregateUDF, ColumnarValue, PartitionEvaluator, ScalarFunctionArgs, ScalarUDF,
     ScalarUDFImpl, Signature, TableSource, TypeSignature, Volatility, WindowUDF,
     WindowUDFImpl,
 };
 use datafusion_sql::parser::DFParser;
-use datafusion_sql::planner::{ContextProvider, ParserOptions, SqlToRel};
+use datafusion_sql::planner::{ContextProvider, ExprPlanner, ParserOptions, SqlToRel};
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 
 // Import aggregate function stubs from datafusion_expr::test::function_stub
@@ -1773,8 +1772,8 @@ pub fn default_function_provider() -> DataFusionFunctionProvider {
 // ConformanceExprPlanner - Handle SQL Standard Syntax
 // ============================================================================
 
-use datafusion_expr::planner::{PlannerResult, RawFieldAccessExpr};
 use datafusion_expr::{Expr, GetFieldAccess};
+use datafusion_sql::planner::{PlannerResult, RawFieldAccessExpr};
 
 /// Expression planner for SQL:2016 standard syntax.
 ///
@@ -2093,6 +2092,36 @@ macro_rules! assert_plan_error {
             $expected_error,
             err,
             $sql
+        );
+    }};
+}
+
+/// Assert that SQL is accepted by the parser but intentionally rejected by
+/// the relational planner because the host owns its utility execution path.
+#[macro_export]
+macro_rules! assert_utility_boundary {
+    ($sql:expr, $feature_id:expr, $description:expr) => {{
+        let parse_result = crate::parse_sql($sql);
+        assert!(
+            parse_result.is_ok(),
+            "Utility feature {} ({}) should parse.\nSQL: {}\nError: {:?}",
+            $feature_id,
+            $description,
+            $sql,
+            parse_result.unwrap_err()
+        );
+
+        let plan_error = crate::logical_plan($sql)
+            .expect_err("utility statement must not enter the relational plan");
+        assert!(
+            plan_error
+                .to_string()
+                .contains("bypass relational SQL planning"),
+            "Utility feature {} ({}) crossed the wrong boundary.\nSQL: {}\nError: {}",
+            $feature_id,
+            $description,
+            $sql,
+            plan_error
         );
     }};
 }
@@ -2900,7 +2929,7 @@ impl FeatureInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion_expr::planner::{PlannerResult, RawCastExpr};
+    use datafusion_sql::planner::{PlannerResult, RawCastExpr};
     use sqlparser::ast::{CastKind, DataType as SQLDataType};
 
     #[derive(Debug)]

@@ -39,12 +39,15 @@ impl fmt::Debug for Location {
     }
 }
 
-impl From<sqlparser::tokenizer::Location> for Location {
-    fn from(value: sqlparser::tokenizer::Location) -> Self {
-        Self {
-            line: value.line,
-            column: value.column,
-        }
+impl Location {
+    /// Return an empty or unknown source location.
+    pub const fn empty() -> Self {
+        Self { line: 0, column: 0 }
+    }
+
+    /// Create a source location from one-based line and column numbers.
+    pub const fn new(line: u64, column: u64) -> Self {
+        Self { line, column }
     }
 }
 
@@ -63,22 +66,15 @@ impl fmt::Debug for Span {
 
 impl Span {
     /// Creates a new [`Span`] from a start and an end [`Location`].
-    pub fn new(start: Location, end: Location) -> Self {
+    pub const fn new(start: Location, end: Location) -> Self {
         Self { start, end }
     }
 
-    /// Convert a [`Span`](sqlparser::tokenizer::Span) from the parser, into a
-    /// DataFusion [`Span`]. If the input span is empty (line 0 column 0, to
-    /// line 0 column 0), then [`None`] is returned.
-
-    pub fn try_from_sqlparser_span(span: sqlparser::tokenizer::Span) -> Option<Span> {
-        if span == sqlparser::tokenizer::Span::empty() {
-            None
-        } else {
-            Some(Span {
-                start: span.start.into(),
-                end: span.end.into(),
-            })
+    /// Return an empty span representing an unknown source interval.
+    pub const fn empty() -> Self {
+        Self {
+            start: Location::empty(),
+            end: Location::empty(),
         }
     }
 
@@ -86,7 +82,7 @@ impl Span {
     ///
     /// # Examples
     /// ```
-    /// # use sqlparser::tokenizer::{Span, Location};
+    /// # use datafusion_common::{Span, Location};
     /// // line 1, column1 -> line 2, column 5
     /// let span1 = Span::new(Location::new(1, 1), Location::new(2, 5));
     /// // line 2, column 3 -> line 3, column 7
@@ -119,7 +115,7 @@ impl Span {
     ///
     /// # Example
     /// ```
-    /// # use sqlparser::tokenizer::{Span, Location};
+    /// # use datafusion_common::{Span, Location};
     /// let spans = vec![
     ///     Span::new(Location::new(1, 1), Location::new(2, 5)),
     ///     Span::new(Location::new(2, 3), Location::new(3, 7)),

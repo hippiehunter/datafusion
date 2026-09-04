@@ -212,7 +212,7 @@ impl ContextProvider for BenchProvider {
     }
 }
 
-fn planner<'a>(provider: &'a BenchProvider) -> SqlToRel<'a, BenchProvider> {
+fn planner<'a>(provider: &'a BenchProvider) -> SqlToRel<'a> {
     SqlToRel::new_with_options(
         provider,
         ParserOptions::default()

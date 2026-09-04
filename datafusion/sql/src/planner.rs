@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::vec;
 
+pub use crate::planner_extension::*;
 use crate::utils::make_decimal_type;
 use arrow::datatypes::*;
 use datafusion_common::TableReference;
@@ -37,7 +38,6 @@ use datafusion_common::{
 };
 use datafusion_expr::Expr;
 use datafusion_expr::logical_plan::{LogicalPlan, LogicalPlanBuilder};
-pub use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::utils::find_column_exprs;
 use sqlparser::ast::{AccessExpr, ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
 use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption, ColumnOptionDef};
@@ -316,9 +316,6 @@ pub struct PlannerContext {
     values_defaults: Option<ValuesDefaults>,
     /// Row assembly for VALUES planning under indirect INSERT targets.
     values_assembly: Option<ValuesAssembly>,
-    /// Schema for PSM (Persistent Stored Modules) variables and parameters.
-    /// Used to resolve variable references in procedure/function bodies.
-    psm_schema: Option<DFSchemaRef>,
     /// Counter for generating unique IDs for anonymous placeholders (?)
     /// Each ? is converted to $1, $2, etc.
     next_anonymous_placeholder: Cell<usize>,
@@ -346,7 +343,6 @@ impl PlannerContext {
             create_table_schema: None,
             values_defaults: None,
             values_assembly: None,
-            psm_schema: None,
             next_anonymous_placeholder: Cell::new(1),
             outer_level_aggregates: Vec::new(),
         }
@@ -514,33 +510,6 @@ impl PlannerContext {
         self.ctes.remove(cte_name);
     }
 
-    /// Returns the PSM schema for variable resolution, or empty schema if not set.
-    pub fn psm_schema(&self) -> DFSchemaRef {
-        self.psm_schema
-            .clone()
-            .unwrap_or_else(|| Arc::new(DFSchema::empty()))
-    }
-
-    /// Sets the PSM schema for variable resolution.
-    pub fn set_psm_schema(&mut self, schema: DFSchemaRef) {
-        self.psm_schema = Some(schema);
-    }
-
-    /// Adds a variable to the PSM schema (used for DECLARE statements).
-    pub fn add_psm_variable(&mut self, name: &str, data_type: DataType) -> Result<()> {
-        let field = Arc::new(Field::new(name, data_type, true));
-        let new_schema = Arc::new(DFSchema::from_unqualified_fields(
-            vec![field].into(),
-            HashMap::new(),
-        )?);
-
-        match self.psm_schema.as_mut() {
-            Some(schema) => Arc::make_mut(schema).merge(&new_schema),
-            None => self.psm_schema = Some(new_schema),
-        }
-        Ok(())
-    }
-
     /// Get the next anonymous placeholder number and increment the counter.
     /// Used to convert `?` placeholders to unique `$N` format.
     pub fn next_anonymous_placeholder_number(&self) -> usize {
@@ -569,17 +538,17 @@ impl PlannerContext {
 /// * [`Self::sql_statement_to_plan`]: Convert a statement
 ///   (e.g. `SELECT ...`) into a [`LogicalPlan`]
 /// * [`Self::sql_to_expr`]: Convert an expression (e.g. `1 + 2`) into an [`Expr`]
-pub struct SqlToRel<'a, S: ContextProvider> {
-    pub(crate) context_provider: &'a S,
+pub struct SqlToRel<'a> {
+    pub(crate) context_provider: &'a dyn ContextProvider,
     pub(crate) options: ParserOptions,
     pub(crate) ident_normalizer: IdentNormalizer,
 }
 
-impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+impl<'a> SqlToRel<'a> {
     /// Create a new query planner.
     ///
     /// The query planner derives the parser options from the context provider.
-    pub fn new(context_provider: &'a S) -> Self {
+    pub fn new(context_provider: &'a dyn ContextProvider) -> Self {
         let parser_options = ParserOptions::from(&context_provider.options().sql_parser);
         Self::new_with_options(context_provider, parser_options)
     }
@@ -588,7 +557,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     ///
     /// The query planner ignores the parser options from the context provider
     /// and uses the given parser options instead.
-    pub fn new_with_options(context_provider: &'a S, options: ParserOptions) -> Self {
+    pub fn new_with_options(
+        context_provider: &'a dyn ContextProvider,
+        options: ParserOptions,
+    ) -> Self {
         let ident_normalize = options.enable_ident_normalization;
 
         SqlToRel {
@@ -598,7 +570,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         }
     }
 
-    pub fn build_schema(&self, columns: Vec<SQLColumnDef>) -> Result<Schema> {
+    pub fn build_schema(&self, columns: &[SQLColumnDef]) -> Result<Schema> {
         let mut fields = Vec::with_capacity(columns.len());
 
         for column in columns {
@@ -611,10 +583,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             let mut field = data_type
                 .as_ref()
                 .clone()
-                .with_name(self.ident_normalizer.normalize(column.name))
+                .with_name(self.ident_normalizer.normalize(column.name.clone()))
                 .with_nullable(!not_nullable);
 
-            let identity_meta = extract_identity_metadata(&column.options, &column.data_type);
+            let identity_meta =
+                extract_identity_metadata(&column.options, &column.data_type);
             if !identity_meta.is_empty() {
                 let mut metadata = field.metadata().clone();
                 metadata.extend(identity_meta);
@@ -814,10 +787,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             })
     }
 
-    pub(crate) fn convert_data_type_to_field(
-        &self,
-        sql_type: &SQLDataType,
-    ) -> Result<FieldRef> {
+    /// Lower SQL type syntax into a semantic Arrow field using the configured
+    /// provider type planner. Catalog-backed frontend extensions use this at
+    /// the same AST-to-logical-plan boundary as ordinary column definitions.
+    pub fn convert_data_type_to_field(&self, sql_type: &SQLDataType) -> Result<FieldRef> {
         // First check if any of the registered type_planner can handle this type
         if let Some(type_planner) = self.context_provider.get_type_planner()
             && let Some(data_type) = type_planner.plan_type(sql_type)?
@@ -1340,7 +1313,8 @@ fn extract_identity_metadata(
     data_type: &SQLDataType,
 ) -> HashMap<String, String> {
     use sqlparser::ast::{
-        GeneratedAs, GeneratedExpressionMode, IdentityPropertyFormatKind, IdentityPropertyKind,
+        GeneratedAs, GeneratedExpressionMode, IdentityPropertyFormatKind,
+        IdentityPropertyKind,
     };
 
     let mut meta = HashMap::new();

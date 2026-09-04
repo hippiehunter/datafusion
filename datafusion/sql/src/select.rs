@@ -20,10 +20,10 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
-use crate::query::to_order_by_exprs_with_select;
 use crate::expr::grouping_set::is_empty_grouping_element;
 use crate::outer_aggregates::hoist_outer_level_aggregates;
+use crate::planner::{PlannerContext, SqlToRel};
+use crate::query::to_order_by_exprs_with_select;
 use crate::utils::{
     CheckColumnsMustReferenceAggregatePurpose, CheckColumnsSatisfyExprsPurpose,
     check_columns_satisfy_exprs, extract_aliases, rebase_expr, resolve_aliases_to_exprs,
@@ -36,7 +36,9 @@ use datafusion_common::{Column, RecursionUnnestOption, UnnestOptions};
 use datafusion_common::{
     Result, ScalarValue, not_impl_err, plan_datafusion_err, plan_err,
 };
-use datafusion_expr::expr::{self, Alias, PlannedReplaceSelectItem, WildcardOptions};
+use datafusion_expr::expr::{
+    self, Alias, WildcardOptions, WildcardRename, WildcardReplace,
+};
 use datafusion_expr::expr_rewriter::{
     normalize_col, normalize_col_with_schemas_and_ambiguity_check, normalize_sorts,
 };
@@ -54,10 +56,10 @@ use indexmap::IndexMap;
 use sqlparser::ast::{
     AstBox as SQLBox, AttachedToken, Distinct, Expr as SQLExpr, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, GroupBySetQuantifier, Ident, Join,
-    JoinConstraint,
-    JoinOperator, NamedWindowExpr, ObjectName, OrderBy, Query as SQLQuery, SelectFlavor,
-    SelectItemQualifiedWildcardKind, SetExpr, TableAlias, TableFactor,
-    WildcardAdditionalOptions, WindowType, visit_expressions_mut,
+    JoinConstraint, JoinOperator, NamedWindowExpr, ObjectName, OrderBy,
+    Query as SQLQuery, SelectFlavor, SelectItemQualifiedWildcardKind, SetExpr,
+    TableAlias, TableFactor, WildcardAdditionalOptions, WindowType,
+    visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
 
@@ -80,7 +82,8 @@ struct AggregatePlanResult {
 /// grouping element is grouped once, not once per way of naming it.
 fn deduplicate_grouping_sets(group_expr: Vec<Expr>) -> Result<Vec<Expr>> {
     let enumerated = enumerate_grouping_sets(group_expr)?;
-    let [Expr::GroupingSet(GroupingSet::GroupingSets(sets))] = enumerated.as_slice() else {
+    let [Expr::GroupingSet(GroupingSet::GroupingSets(sets))] = enumerated.as_slice()
+    else {
         return Ok(enumerated);
     };
     let mut seen = HashSet::new();
@@ -95,7 +98,10 @@ fn deduplicate_grouping_sets(group_expr: Vec<Expr>) -> Result<Vec<Expr>> {
             .filter(|expr| set_seen.insert(expr.to_string()))
             .cloned()
             .collect::<Vec<_>>();
-        let key = collapsed.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let key = collapsed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         if seen.insert(key) {
             distinct.push(collapsed);
         }
@@ -103,7 +109,7 @@ fn deduplicate_grouping_sets(group_expr: Vec<Expr>) -> Result<Vec<Expr>> {
     Ok(vec![Expr::GroupingSet(GroupingSet::GroupingSets(distinct))])
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     fn relation_name_from_wildcard_expr(expr: &SQLExpr) -> Option<ObjectName> {
         match expr {
             SQLExpr::Nested(inner) => Self::relation_name_from_wildcard_expr(inner),
@@ -132,7 +138,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         Self::rewrite_projection_tvf_star(&mut select);
-        self.select_to_plan_ref_prepared(&select, query_order_by.as_ref(), planner_context)
+        self.select_to_plan_ref_prepared(
+            &select,
+            query_order_by.as_ref(),
+            planner_context,
+        )
     }
 
     pub(super) fn select_to_plan_ref(
@@ -539,11 +549,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // DISTRIBUTE BY - removed from sqlparser Select struct (non-PG syntax)
 
-        let order_by_rex = bind_unnest_order_by_to_output(
-            &plan,
-            &unnest_output_exprs,
-            order_by_rex,
-        )?;
+        let order_by_rex =
+            bind_unnest_order_by_to_output(&plan, &unnest_output_exprs, order_by_rex)?;
         let plan = self.order_by(plan, order_by_rex)?;
         Ok(plan)
     }
@@ -995,7 +1002,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let aggregate_exprs =
                     find_aggregate_exprs(std::slice::from_ref(&filter_expr));
                 if !aggregate_exprs.is_empty()
-                    || !planner_context.take_outer_level_aggregates(level).is_empty()
+                    || !planner_context
+                        .take_outer_level_aggregates(level)
+                        .is_empty()
                 {
                     return plan_err!(
                         "Aggregate functions are not allowed in the WHERE clause. Consider using HAVING instead"
@@ -1207,12 +1216,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 if empty_from {
                     return plan_err!("SELECT * with no tables specified is not valid");
                 }
-                let planned_options = self.plan_wildcard_options(
-                    plan,
-                    empty_from,
-                    planner_context,
-                    options,
-                )?;
+                let planned_options =
+                    self.plan_wildcard_options(plan, planner_context, options)?;
 
                 Ok(SelectExpr::Wildcard(planned_options))
             }
@@ -1234,12 +1239,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     }
                 };
                 let qualifier = self.object_name_to_table_reference(object_name)?;
-                let planned_options = self.plan_wildcard_options(
-                    plan,
-                    empty_from,
-                    planner_context,
-                    options,
-                )?;
+                let planned_options =
+                    self.plan_wildcard_options(plan, planner_context, options)?;
 
                 Ok(SelectExpr::QualifiedWildcard(qualifier, planned_options))
             }
@@ -1268,48 +1269,66 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     fn plan_wildcard_options(
         &self,
         plan: &LogicalPlan,
-        empty_from: bool,
         planner_context: &mut PlannerContext,
         options: &WildcardAdditionalOptions,
     ) -> Result<WildcardOptions> {
-        let planned_option = WildcardOptions {
-            ilike: options.opt_ilike.clone(),
-            except: options.opt_except.clone(),
-            replace: None,
-            rename: options.opt_rename.clone(),
-        };
-        if let Some(replace) = &options.opt_replace {
-            let replace_expr = replace
-                .items
-                .iter()
-                .map(|item| {
-                    self.sql_select_to_rex_ref(
-                        &SelectItem::UnnamedExpr(item.expr.clone()),
-                        plan,
-                        empty_from,
-                        planner_context,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter_map(|expr| match expr {
-                    SelectExpr::Expression(expr) => Some(expr),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+        let except = options
+            .opt_except
+            .iter()
+            .flat_map(|except| {
+                std::iter::once(&except.first_element).chain(&except.additional_elements)
+            })
+            .map(|ident| self.ident_normalizer.normalize(ident.clone()))
+            .collect();
 
-            let planned_replace = PlannedReplaceSelectItem {
-                items: replace
-                    .items
-                    .iter()
-                    .map(|item| item.as_ref().clone())
-                    .collect(),
-                planned_expressions: replace_expr,
-            };
-            Ok(planned_option.with_replace(planned_replace))
-        } else {
-            Ok(planned_option)
+        let rename_items = |items: &[sqlparser::ast::IdentWithAlias]| {
+            items
+                .iter()
+                .map(|item| WildcardRename {
+                    column_name: self.ident_normalizer.normalize(item.ident.clone()),
+                    alias: self.ident_normalizer.normalize(item.alias.clone()),
+                })
+                .collect::<Vec<_>>()
+        };
+        let rename = match &options.opt_rename {
+            Some(sqlparser::ast::RenameSelectItem::Single(item)) => {
+                rename_items(std::slice::from_ref(item))
+            }
+            Some(sqlparser::ast::RenameSelectItem::Multiple(items)) => {
+                rename_items(items)
+            }
+            None => Vec::new(),
+        };
+
+        let mut replacements = Vec::new();
+        if let Some(replace) = &options.opt_replace {
+            replacements.reserve(replace.items.len());
+            for item in &replace.items {
+                let expression =
+                    self.sql_to_expr_ref(&item.expr, plan.schema(), planner_context)?;
+                let expression = normalize_col_with_schemas_and_ambiguity_check(
+                    expression,
+                    &[&[plan.schema()]],
+                    &plan.using_columns()?,
+                )?;
+                replacements.push(WildcardReplace {
+                    column_name: self
+                        .ident_normalizer
+                        .normalize(item.column_name.clone()),
+                    expression,
+                });
+            }
         }
+
+        Ok(WildcardOptions {
+            ilike: options
+                .opt_ilike
+                .as_ref()
+                .map(|ilike| ilike.pattern.clone()),
+            except,
+            replace: replacements,
+            rename,
+        })
     }
 
     /// Wrap a plan in a projection
@@ -1690,31 +1709,30 @@ fn bind_unnest_order_by_to_output(
         .into_iter()
         .map(|sort| {
             let order_expr = sort.expr.clone().unalias();
-            let Some(output_index) = select_exprs
-                .iter()
-                .position(|select_expr| match &order_expr {
-                    // ORDER BY aliases and ordinals are resolved against
-                    // the provisional select projection before relational
-                    // UNNEST expansion. Every provisional output column
-                    // can acquire a different qualifier when that expansion
-                    // rebuilds the projection, not only the SRF's own slot.
-                    // Bind the typed output identity to the same final slot.
-                    Expr::Column(order_column) => {
-                        select_expr.qualified_name().1 == order_column.name
-                    }
-                    _ => {
-                        has_unnest_expr_recursively(select_expr)
-                            && select_expr.clone().unalias() == order_expr
-                    }
-                })
+            let Some(output_index) =
+                select_exprs
+                    .iter()
+                    .position(|select_expr| match &order_expr {
+                        // ORDER BY aliases and ordinals are resolved against
+                        // the provisional select projection before relational
+                        // UNNEST expansion. Every provisional output column
+                        // can acquire a different qualifier when that expansion
+                        // rebuilds the projection, not only the SRF's own slot.
+                        // Bind the typed output identity to the same final slot.
+                        Expr::Column(order_column) => {
+                            select_expr.qualified_name().1 == order_column.name
+                        }
+                        _ => {
+                            has_unnest_expr_recursively(select_expr)
+                                && select_expr.clone().unalias() == order_expr
+                        }
+                    })
             else {
                 return Ok(sort);
             };
             let (qualifier, field) = plan.schema().qualified_field(output_index);
-            Ok(sort.with_expr(Expr::Column(Column::new(
-                qualifier.cloned(),
-                field.name(),
-            ))))
+            Ok(sort
+                .with_expr(Expr::Column(Column::new(qualifier.cloned(), field.name()))))
         })
         .collect()
 }

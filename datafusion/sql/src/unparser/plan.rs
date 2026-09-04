@@ -46,9 +46,10 @@ use datafusion_common::{
 use datafusion_expr::expr::OUTER_REFERENCE_COLUMN_PREFIX;
 use datafusion_expr::{
     BinaryExpr, Distinct, Expr, JoinConstraint, JoinType, LogicalPlan,
-    LogicalPlanBuilder, Merge, MergeAction, MergeInsertKind, Operator, Projection,
-    RecursiveQuery, SortExpr, TableScan, Unnest, UserDefinedLogicalNode, expr::Alias,
-    logical_plan::DdlStatement, logical_plan::Statement as PlanStatement,
+    LogicalPlanBuilder, Merge, MergeAction, MergeAssignmentTarget, MergeClauseKind,
+    MergeIdentityOverride, MergeInsertKind, Operator, Projection, RecursiveQuery,
+    SortExpr, TableScan, Unnest, UserDefinedLogicalNode, expr::Alias,
+    logical_plan::DdlStatement,
 };
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
@@ -153,7 +154,6 @@ impl Unparser<'_> {
             | LogicalPlan::Limit(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Distinct(_) => self.select_to_sql_statement(&plan),
-            LogicalPlan::Statement(statement) => self.statement_to_sql(&statement),
             LogicalPlan::Dml(_) => self.dml_to_sql(&plan),
             LogicalPlan::Merge(merge) => self.merge_to_sql(&merge),
             LogicalPlan::Ddl(ddl) => self.ddl_to_sql(&ddl),
@@ -1613,159 +1613,8 @@ impl Unparser<'_> {
         }
     }
 
-    fn statement_to_sql(&self, statement: &PlanStatement) -> Result<ast::Statement> {
-        match statement {
-            PlanStatement::Savepoint(savepoint) => Ok(ast::Statement::Savepoint {
-                name: savepoint.name.clone(),
-                savepoint_token: AttachedToken::empty(),
-            }),
-            PlanStatement::ReleaseSavepoint(release) => {
-                Ok(ast::Statement::ReleaseSavepoint {
-                    name: release.name.clone(),
-                    release_token: AttachedToken::empty(),
-                })
-            }
-            PlanStatement::RollbackToSavepoint(rollback) => {
-                Ok(ast::Statement::Rollback {
-                    chain: rollback.chain,
-                    savepoint: Some(rollback.name.clone()),
-                    rollback_token: AttachedToken::empty(),
-                })
-            }
-            PlanStatement::SetTransaction(set_txn) => {
-                Ok(ast::Statement::Set(ast::SetStatement {
-                    token: AttachedToken::empty(),
-                    inner: ast::Set::SetTransaction {
-                        modes: set_txn.modes.clone(),
-                        snapshot: set_txn.snapshot.clone(),
-                        session: set_txn.session,
-                    },
-                }))
-            }
-            PlanStatement::Grant(grant) => Ok(ast::Statement::Grant {
-                privileges: grant.privileges.clone(),
-                objects: grant.objects.clone(),
-                grantees: grant.grantees.clone(),
-                with_grant_option: grant.with_grant_option,
-                as_grantor: grant.as_grantor.clone(),
-                granted_by: grant.granted_by.clone(),
-                grant_token: AttachedToken::empty(),
-            }),
-            PlanStatement::Revoke(revoke) => Ok(ast::Statement::Revoke {
-                privileges: revoke.privileges.clone(),
-                objects: revoke.objects.clone(),
-                grantees: revoke.grantees.clone(),
-                granted_by: revoke.granted_by.clone(),
-                cascade: revoke.cascade.clone(),
-                grant_option_for: false,
-                revoke_token: AttachedToken::empty(),
-            }),
-            PlanStatement::GrantRole(grant_role) => Ok(ast::Statement::GrantRole {
-                roles: grant_role.roles.clone(),
-                grantees: grant_role.grantees.clone(),
-                with_admin_option: grant_role.with_admin_option,
-                role_options: vec![],
-                granted_by: grant_role.granted_by.clone(),
-                grant_token: AttachedToken::empty(),
-            }),
-            PlanStatement::RevokeRole(revoke_role) => Ok(ast::Statement::RevokeRole {
-                roles: revoke_role.roles.clone(),
-                grantees: revoke_role.grantees.clone(),
-                granted_by: revoke_role.granted_by.clone(),
-                cascade: revoke_role.cascade.clone(),
-                admin_option_for: revoke_role.admin_option_for,
-                option_for: None,
-                revoke_token: AttachedToken::empty(),
-            }),
-            PlanStatement::TransactionStart(start) => {
-                let isolation_level = match start.isolation_level {
-                    datafusion_expr::TransactionIsolationLevel::ReadUncommitted => {
-                        ast::TransactionIsolationLevel::ReadUncommitted
-                    }
-                    datafusion_expr::TransactionIsolationLevel::ReadCommitted => {
-                        ast::TransactionIsolationLevel::ReadCommitted
-                    }
-                    datafusion_expr::TransactionIsolationLevel::RepeatableRead => {
-                        ast::TransactionIsolationLevel::RepeatableRead
-                    }
-                    datafusion_expr::TransactionIsolationLevel::Serializable => {
-                        ast::TransactionIsolationLevel::Serializable
-                    }
-                    datafusion_expr::TransactionIsolationLevel::Snapshot => {
-                        ast::TransactionIsolationLevel::Snapshot
-                    }
-                };
-                let access_mode = match start.access_mode {
-                    datafusion_expr::TransactionAccessMode::ReadOnly => {
-                        ast::TransactionAccessMode::ReadOnly
-                    }
-                    datafusion_expr::TransactionAccessMode::ReadWrite => {
-                        ast::TransactionAccessMode::ReadWrite
-                    }
-                };
-                Ok(ast::Statement::StartTransaction {
-                    modes: vec![
-                        ast::TransactionMode::IsolationLevel(isolation_level),
-                        ast::TransactionMode::AccessMode(access_mode),
-                    ],
-                    begin: false,
-                    transaction: None,
-                    modifier: None,
-                    statements: vec![],
-                    exception: None,
-                    has_end_keyword: false,
-                    start_token: AttachedToken::empty(),
-                })
-            }
-            PlanStatement::TransactionEnd(end) => match end.conclusion {
-                datafusion_expr::TransactionConclusion::Commit => {
-                    Ok(ast::Statement::Commit {
-                        chain: end.chain,
-                        end: false,
-                        modifier: None,
-                        oracle: None,
-                        commit_token: AttachedToken::empty(),
-                    })
-                }
-                datafusion_expr::TransactionConclusion::Rollback => {
-                    Ok(ast::Statement::Rollback {
-                        chain: end.chain,
-                        savepoint: None,
-                        rollback_token: AttachedToken::empty(),
-                    })
-                }
-            },
-            _ => not_impl_err!("Unsupported statement: {statement:?}"),
-        }
-    }
-
     fn ddl_to_sql(&self, ddl: &DdlStatement) -> Result<ast::Statement> {
-        match ddl {
-            DdlStatement::AlterTable(alter_table) => {
-                Ok(ast::Statement::AlterTable(alter_table.clone()))
-            }
-            DdlStatement::CreateDomain(create_domain) => {
-                Ok(ast::Statement::CreateDomain(create_domain.clone()))
-            }
-            DdlStatement::DropDomain(drop_domain) => {
-                Ok(ast::Statement::DropDomain(drop_domain.clone()))
-            }
-            DdlStatement::DropSequence(drop_sequence) => Ok(ast::Statement::Drop {
-                object_type: ast::ObjectType::Sequence,
-                if_exists: drop_sequence.if_exists,
-                names: vec![drop_sequence.name.clone()],
-                cascade: drop_sequence.cascade,
-                restrict: drop_sequence.restrict,
-                purge: drop_sequence.purge,
-                temporary: drop_sequence.temporary,
-                table: drop_sequence.table.clone(),
-                concurrently: false,
-                force: false,
-                oracle: None,
-                drop_token: AttachedToken::empty(),
-            }),
-            other => not_impl_err!("Unsupported DDL plan: {other:?}"),
-        }
+        not_impl_err!("Unsupported relational DDL plan: {ddl:?}")
     }
 
     fn merge_to_sql(&self, merge: &Merge) -> Result<ast::Statement> {
@@ -1801,18 +1650,10 @@ impl Unparser<'_> {
                         MergeInsertKind::Row => ast::MergeInsertKind::Row,
                     };
 
-                    // Convert ObjectName columns to Ident columns
                     let columns: Vec<Ident> = insert
                         .columns
                         .iter()
-                        .flat_map(|obj_name| {
-                            obj_name.0.iter().filter_map(|part| match part {
-                                ast::ObjectNamePart::Identifier(ident) => {
-                                    Some(ident.clone())
-                                }
-                                _ => None,
-                            })
-                        })
+                        .map(|name| Ident::new(name.clone()))
                         .collect();
 
                     let where_clause = insert
@@ -1824,14 +1665,47 @@ impl Unparser<'_> {
                         columns,
                         kind,
                         where_clause,
-                        overriding: insert.overriding.clone(),
+                        overriding: insert.overriding.map(|kind| match kind {
+                            MergeIdentityOverride::SystemValue => {
+                                ast::OverridingKind::SystemValue
+                            }
+                            MergeIdentityOverride::UserValue => {
+                                ast::OverridingKind::UserValue
+                            }
+                        }),
                     })
                 }
                 MergeAction::Update(update) => {
                     let mut assignments = Vec::with_capacity(update.assignments.len());
                     for assignment in &update.assignments {
+                        let object_name = |parts: &[String]| {
+                            ast::ObjectName::from(
+                                parts
+                                    .iter()
+                                    .map(|part| Ident::new(part.clone()))
+                                    .collect::<Vec<_>>(),
+                            )
+                        };
+                        let target = match &assignment.target {
+                            MergeAssignmentTarget::ColumnName(parts) => {
+                                ast::AssignmentTarget::ColumnName(object_name(parts))
+                            }
+                            MergeAssignmentTarget::Tuple(columns) => {
+                                ast::AssignmentTarget::Tuple(
+                                    columns
+                                        .iter()
+                                        .map(|parts| object_name(parts))
+                                        .collect(),
+                                )
+                            }
+                            MergeAssignmentTarget::Indirection(target) => {
+                                return not_impl_err!(
+                                    "Cannot unparse lowered MERGE assignment indirection: {target}"
+                                );
+                            }
+                        };
                         assignments.push(ast::Assignment {
-                            target: assignment.target.clone(),
+                            target,
                             value: self.expr_to_sql(&assignment.value)?,
                         });
                     }
@@ -1856,7 +1730,16 @@ impl Unparser<'_> {
             };
 
             clauses.push(ast::MergeClause {
-                clause_kind: clause.clause_kind.clone(),
+                clause_kind: match clause.clause_kind {
+                    MergeClauseKind::Matched => ast::MergeClauseKind::Matched,
+                    MergeClauseKind::NotMatched => ast::MergeClauseKind::NotMatched,
+                    MergeClauseKind::NotMatchedByTarget => {
+                        ast::MergeClauseKind::NotMatchedByTarget
+                    }
+                    MergeClauseKind::NotMatchedBySource => {
+                        ast::MergeClauseKind::NotMatchedBySource
+                    }
+                },
                 predicate,
                 action,
             });

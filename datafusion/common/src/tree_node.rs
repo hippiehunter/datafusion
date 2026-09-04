@@ -31,6 +31,58 @@ macro_rules! handle_transform_recursion {
     }};
 }
 
+type ApplyCallback<'node, 'callback, N> =
+    dyn FnMut(&'node N) -> Result<TreeNodeRecursion> + 'callback;
+type TransformCallback<'callback, N> = dyn FnMut(N) -> Result<Transformed<N>> + 'callback;
+
+// Keep recursive traversal independent of each caller's closure type. The
+// public TreeNode methods below remain generic, allocation-free adapters, but
+// every concrete node type now emits one recursive walk per traversal order
+// instead of one walk for every closure passed by downstream crates.
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn apply_impl<'node, 'callback, N: TreeNode>(
+    node: &'node N,
+    f: &mut ApplyCallback<'node, 'callback, N>,
+) -> Result<TreeNodeRecursion> {
+    f(node)?.visit_children(|| node.apply_children(|child| apply_impl(child, f)))
+}
+
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn transform_down_impl<'callback, N: TreeNode>(
+    node: N,
+    f: &mut TransformCallback<'callback, N>,
+) -> Result<Transformed<N>> {
+    f(node)?.transform_children(|node| {
+        node.map_children(|child| transform_down_impl(child, f))
+    })
+}
+
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn transform_up_impl<'callback, N: TreeNode>(
+    node: N,
+    f: &mut TransformCallback<'callback, N>,
+) -> Result<Transformed<N>> {
+    node.map_children(|child| transform_up_impl(child, f))?
+        .transform_parent(f)
+}
+
+#[inline(never)]
+#[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+fn transform_down_up_impl<'down, 'up, N: TreeNode>(
+    node: N,
+    f_down: &mut TransformCallback<'down, N>,
+    f_up: &mut TransformCallback<'up, N>,
+) -> Result<Transformed<N>> {
+    handle_transform_recursion!(
+        f_down(node),
+        |child| transform_down_up_impl(child, f_down, f_up),
+        f_up
+    )
+}
+
 /// API for inspecting and rewriting tree data structures.
 ///
 /// The `TreeNode` API is used to express algorithms separately from traversing
@@ -197,14 +249,6 @@ pub trait TreeNode: Sized {
         &'n self,
         mut f: F,
     ) -> Result<TreeNodeRecursion> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn apply_impl<'n, N: TreeNode, F: FnMut(&'n N) -> Result<TreeNodeRecursion>>(
-            node: &'n N,
-            f: &mut F,
-        ) -> Result<TreeNodeRecursion> {
-            f(node)?.visit_children(|| node.apply_children(|c| apply_impl(c, f)))
-        }
-
         apply_impl(self, &mut f)
     }
 
@@ -232,14 +276,6 @@ pub trait TreeNode: Sized {
         self,
         mut f: F,
     ) -> Result<Transformed<Self>> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_down_impl<N: TreeNode, F: FnMut(N) -> Result<Transformed<N>>>(
-            node: N,
-            f: &mut F,
-        ) -> Result<Transformed<N>> {
-            f(node)?.transform_children(|n| n.map_children(|c| transform_down_impl(c, f)))
-        }
-
         transform_down_impl(self, &mut f)
     }
 
@@ -256,15 +292,6 @@ pub trait TreeNode: Sized {
         self,
         mut f: F,
     ) -> Result<Transformed<Self>> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_up_impl<N: TreeNode, F: FnMut(N) -> Result<Transformed<N>>>(
-            node: N,
-            f: &mut F,
-        ) -> Result<Transformed<N>> {
-            node.map_children(|c| transform_up_impl(c, f))?
-                .transform_parent(f)
-        }
-
         transform_up_impl(self, &mut f)
     }
 
@@ -371,23 +398,6 @@ pub trait TreeNode: Sized {
         mut f_down: FD,
         mut f_up: FU,
     ) -> Result<Transformed<Self>> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_down_up_impl<
-            N: TreeNode,
-            FD: FnMut(N) -> Result<Transformed<N>>,
-            FU: FnMut(N) -> Result<Transformed<N>>,
-        >(
-            node: N,
-            f_down: &mut FD,
-            f_up: &mut FU,
-        ) -> Result<Transformed<N>> {
-            handle_transform_recursion!(
-                f_down(node),
-                |c| transform_down_up_impl(c, f_down, f_up),
-                f_up
-            )
-        }
-
         transform_down_up_impl(self, &mut f_down, &mut f_up)
     }
 

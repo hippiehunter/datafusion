@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 use datafusion_common::{
     Column, DFSchema, Result, not_impl_err, plan_datafusion_err, plan_err,
 };
@@ -25,7 +25,7 @@ use sqlparser::ast::{
     BinaryOperator, Expr as SQLExpr, OrderByExpr, OrderByOptions, Value, ValueWithSpan,
 };
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     /// Convert sql [OrderByExpr] to `Vec<Expr>`.
     ///
     /// `input_schema` and `additional_schema` are used to resolve column references in the order-by expressions.

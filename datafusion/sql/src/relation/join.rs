@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 use arrow::datatypes::DataType;
 use datafusion_common::{
     Column, Result, TableReference, not_impl_err, plan_datafusion_err,
@@ -28,7 +28,7 @@ use sqlparser::ast::{
 };
 use std::collections::HashSet;
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     pub(crate) fn plan_table_with_joins(
         &self,
         t: TableWithJoins,

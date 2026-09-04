@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SqlToRel};
 
 use crate::stack::StackGuard;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -29,8 +29,9 @@ use datafusion_common::{
 use datafusion_expr::expr::Sort;
 
 use datafusion_expr::{
-    CreateMemoryTable, DdlStatement, Distinct, Expr, LogicalPlan, LogicalPlanBuilder,
-    SubqueryAlias, TableScanRowLock, TableScanRowLockMode, TableScanRowLockWaitPolicy,
+    CreateMemoryTable, CreateMemoryTableSpec, DdlStatement, Distinct, Expr, LogicalPlan,
+    LogicalPlanBuilder, SubqueryAlias, TableScanRowLock, TableScanRowLockMode,
+    TableScanRowLockWaitPolicy,
 };
 use sqlparser::ast::{
     Expr as SQLExpr, Fetch, Ident, LimitClause, LockClause, LockType, NonBlock, OrderBy,
@@ -58,7 +59,7 @@ struct PlannedLockClause {
     target: Option<TableReference>,
 }
 
-impl<S: ContextProvider> SqlToRel<'_, S> {
+impl SqlToRel<'_> {
     /// Generate a logical plan from an SQL query/subquery
     pub(crate) fn query_to_plan(
         &self,
@@ -301,7 +302,11 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             return plan_err!("FETCH WITH TIES requires an ORDER BY clause");
         }
 
-        if limit.is_none() && !implicit_single_row && offset.is_none() && limit_by.is_empty() {
+        if limit.is_none()
+            && !implicit_single_row
+            && offset.is_none()
+            && limit_by.is_empty()
+        {
             return Ok(input);
         }
 
@@ -312,7 +317,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .transpose()?;
 
         let fetch = match limit {
-            Some(expr) => Some(self.sql_to_expr_ref(expr, &empty_schema, planner_context)?),
+            Some(expr) => {
+                Some(self.sql_to_expr_ref(expr, &empty_schema, planner_context)?)
+            }
             // `FETCH FIRST ROW ONLY` spells a row count of one.
             None if implicit_single_row => {
                 Some(Expr::Literal(ScalarValue::Int64(Some(1)), None))
@@ -370,19 +377,23 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ) -> Result<LogicalPlan> {
         match select_into {
             Some(into) => Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
-                CreateMemoryTable {
-                    name: self.object_name_to_table_reference(into.name.clone())?,
-                    constraints: Constraints::default(),
-                    input: Arc::new(plan),
-                    if_not_exists: false,
-                    or_replace: false,
-                    temporary: false,
-                    column_defaults: vec![],
-                    storage_parameters: BTreeMap::new(),
-                    partitioning: None,
-                    partition_of: None,
-                    inherits: Vec::new(),
-                },
+                CreateMemoryTable::new(
+                    CreateMemoryTableSpec {
+                        name: self.object_name_to_table_reference(into.name.clone())?,
+                        constraints: Constraints::default(),
+                        if_not_exists: false,
+                        or_replace: false,
+                        temporary: false,
+                        column_defaults: vec![],
+                        check_expressions: vec![],
+                        generated_expressions: vec![],
+                        storage_parameters: BTreeMap::new(),
+                        partitioning: None,
+                        partition_of: None,
+                        inherits: Vec::new(),
+                    },
+                    Arc::new(plan),
+                ),
             ))),
             _ => Ok(plan),
         }
