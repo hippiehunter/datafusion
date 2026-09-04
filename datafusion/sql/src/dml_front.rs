@@ -200,10 +200,10 @@ fn reject_generated_assignments(
 }
 
 /// Return the typed set of columns an INSERT over a VALUES source actually
-/// provides. A position every row leaves to the column's default — a short
-/// row's missing tail included — is omitted from the storage write contract.
-/// The parsed VALUES rows remain untouched and are still planned in their
-/// declared target shape. `None` means every target position is provided.
+/// provides. A position every row explicitly leaves to the column's default
+/// is omitted from the storage write contract. The parsed VALUES rows remain
+/// untouched and are still planned in their declared target shape. `None`
+/// means every target position is provided.
 pub(crate) fn insert_written_columns(
     columns: &[Ident],
     source: &Query,

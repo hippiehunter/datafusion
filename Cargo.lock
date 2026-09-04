@@ -2193,6 +2193,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.59.0"
+source = "git+https://github.com/hippiehunter/datafusion-sqlparser-rs.git?branch=main#ba93de696f90a231e9d6b8b5e122a15d4362e5e6"
 dependencies = [
  "log",
  "recursive",
@@ -2204,6 +2205,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.4.0"
+source = "git+https://github.com/hippiehunter/datafusion-sqlparser-rs.git?branch=main#ba93de696f90a231e9d6b8b5e122a15d4362e5e6"
 dependencies = [
  "proc-macro2",
  "quote",

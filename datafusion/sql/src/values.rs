@@ -89,22 +89,6 @@ impl SqlToRel<'_> {
                 }
                 exprs.push(self.sql_to_expr_ref(value, &row_schema, planner_context)?);
             }
-            if let Some(defaults) = defaults
-                .as_ref()
-                .filter(|defaults| defaults.fill_omitted_trailing)
-            {
-                for default in defaults.slots.iter().skip(exprs.len()) {
-                    exprs.push(match default {
-                        ValuesDefault::Refused(message) => {
-                            return not_impl_err!("{message}");
-                        }
-                        ValuesDefault::Column(Some(default)) => default.clone(),
-                        ValuesDefault::Column(None) => {
-                            Expr::Literal(ScalarValue::Null, None)
-                        }
-                    });
-                }
-            }
             let exprs = match &assembly {
                 Some(assembly) => self.assemble_values_row(
                     exprs,

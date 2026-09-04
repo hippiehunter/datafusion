@@ -261,9 +261,6 @@ pub enum ValuesDefault {
 pub struct ValuesDefaults {
     /// Default expression for each declared target slot.
     pub slots: Vec<ValuesDefault>,
-    /// A positional INSERT without a column list may omit a trailing suffix;
-    /// those slots have exactly the same semantics as writing `DEFAULT`.
-    pub fill_omitted_trailing: bool,
 }
 
 /// How an INSERT's values list assembles the target table's rows when a
