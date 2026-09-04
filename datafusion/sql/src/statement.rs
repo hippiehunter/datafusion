@@ -37,6 +37,7 @@ use crate::values::is_default_identifier;
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema};
 use datafusion_common::error::_plan_err;
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{
@@ -1614,6 +1615,11 @@ impl SqlToRel<'_> {
                                 );
                             }
                             let input_fields = input_schema.fields();
+                            // The declared CREATE schema is authoritative for
+                            // provider-owned metadata such as LIKE properties.
+                            // Each alias carries its field's metadata so an
+                            // optimizer pass that rebuilds the projection from
+                            // its expressions re-derives the same metadata.
                             let project_exprs = schema
                                 .fields()
                                 .iter()
@@ -1623,15 +1629,16 @@ impl SqlToRel<'_> {
                                         col(input_field.name()),
                                         field.data_type().clone(),
                                     )
-                                    .alias(field.name())
+                                    .alias_with_metadata(
+                                        field.name(),
+                                        Some(FieldMetadata::from(field.metadata())),
+                                    )
                                 })
                                 .collect::<Vec<_>>();
 
-                            // The declared CREATE schema is authoritative for
-                            // both nullability and provider-owned metadata.
-                            // Re-deriving the projection schema from its cast
-                            // expressions would discard LIKE properties and
-                            // could weaken a copied NOT NULL column for CTAS.
+                            // The declared schema also fixes nullability,
+                            // which a re-derived projection schema would take
+                            // from the cast expressions instead.
                             LogicalPlan::Projection(Projection::try_new_with_schema(
                                 project_exprs,
                                 Arc::new(plan),
@@ -4450,6 +4457,37 @@ impl SqlToRel<'_> {
         let table_name = self.object_name_to_table_reference(table_name.clone())?;
         let table_source = self.context_provider.get_table_source(table_name.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
+        let positional_columns: Vec<String> = table_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        // A positional VALUES list shorter than the table writes its leading
+        // columns and leaves the rest to their defaults, exactly as a column
+        // list naming those columns would, so it is planned as that list.
+        // Rows of unequal width are refused by the values relation itself.
+        let implied_columns: Vec<Ident> = match source.body.as_ref() {
+            SetExpr::Values(values) if columns.is_empty() && column_targets.is_none() => {
+                values
+                    .rows
+                    .first()
+                    .map(Vec::len)
+                    .filter(|&width| width < positional_columns.len())
+                    .map(|width| {
+                        positional_columns[..width]
+                            .iter()
+                            .map(|name| Ident::with_quote('"', name.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let columns: &[Ident] = if implied_columns.is_empty() {
+            columns
+        } else {
+            &implied_columns
+        };
         let column_default = |name: &str| {
             view_column_defaults
                 .iter()
@@ -4462,11 +4500,6 @@ impl SqlToRel<'_> {
         // storage-provided column. Keep that typed contract separately from
         // the parsed source; planning still sees the statement's declared
         // target shape unchanged.
-        let positional_columns: Vec<String> = table_schema
-            .fields()
-            .iter()
-            .map(|field| field.name().clone())
-            .collect();
         // A subscript or field target (`f2[1]`, `f3.if1`) never resolves to
         // the column's default: the planner refuses `DEFAULT` in such a slot.
         let written_columns = if column_targets.is_some() {
