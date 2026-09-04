@@ -90,10 +90,37 @@ use sqlparser::ast::{
 /// the relational planner. Keeping this check at the borrowed front door is
 /// important: a utility command must not be cloned merely to discover that it
 /// has no relational plan representation.
-fn is_host_utility_statement(statement: &Statement) -> bool {
+/// Statements the host executes itself rather than through relational
+/// planning: session and transaction control, catalog DDL, privileges,
+/// prepared-statement control, and SQL/MED objects. Relational planning
+/// refuses them; a host that dispatches its own utility statements checks
+/// this before handing a statement to the planner.
+pub fn is_host_utility_statement(statement: &Statement) -> bool {
     matches!(
         statement,
         Statement::Set(_)
+            | Statement::RefreshMaterializedView { .. }
+            | Statement::AlterMaterializedView { .. }
+            | Statement::AlterTable(_)
+            | Statement::CreateDomain(_)
+            | Statement::DropDomain(_)
+            | Statement::CreateSequence { .. }
+            | Statement::AlterSequence { .. }
+            | Statement::CreateAssertion(_)
+            | Statement::DropAssertion(_)
+            | Statement::CreateServer(_)
+            | Statement::AlterServer(_)
+            | Statement::DropServer(_)
+            | Statement::CreateForeignDataWrapper(_)
+            | Statement::AlterForeignDataWrapper(_)
+            | Statement::DropForeignDataWrapper(_)
+            | Statement::CreateForeignTable(_)
+            | Statement::AlterForeignTable(_)
+            | Statement::DropForeignTable(_)
+            | Statement::CreateUserMapping(_)
+            | Statement::AlterUserMapping(_)
+            | Statement::DropUserMapping(_)
+            | Statement::ImportForeignSchema(_)
             | Statement::CreateSchema { .. }
             | Statement::CreateDatabase { .. }
             | Statement::Drop { .. }
@@ -1745,30 +1772,6 @@ impl SqlToRel<'_> {
                     },
                     Arc::new(plan),
                 ))))
-            }
-            Statement::RefreshMaterializedView { .. }
-            | Statement::AlterMaterializedView { .. }
-            | Statement::AlterTable(_)
-            | Statement::CreateDomain(_)
-            | Statement::DropDomain(_)
-            | Statement::CreateSequence { .. }
-            | Statement::AlterSequence { .. }
-            | Statement::CreateAssertion(_)
-            | Statement::DropAssertion(_)
-            | Statement::CreateServer(_)
-            | Statement::AlterServer(_)
-            | Statement::DropServer(_)
-            | Statement::CreateForeignDataWrapper(_)
-            | Statement::AlterForeignDataWrapper(_)
-            | Statement::DropForeignDataWrapper(_)
-            | Statement::CreateForeignTable(_)
-            | Statement::AlterForeignTable(_)
-            | Statement::DropForeignTable(_)
-            | Statement::CreateUserMapping(_)
-            | Statement::AlterUserMapping(_)
-            | Statement::DropUserMapping(_)
-            | Statement::ImportForeignSchema(_) => {
-                not_impl_err!("utility statements must bypass relational SQL planning")
             }
             Statement::ShowCreate {
                 obj_type, obj_name, ..
