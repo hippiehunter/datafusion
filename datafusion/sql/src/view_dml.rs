@@ -21,11 +21,12 @@
 //!
 //! The host resolves whether a DML target is an automatically updatable view
 //! through [`ContextProvider::resolve_dml_view_target`]; these helpers apply
-//! the retarget to the statement pieces each DML planner holds — the target
-//! name, column lists, assignments, predicates and RETURNING items — so the
-//! planner then plans an ordinary base-relation write. Column defaults, the
-//! hidden row identity and RETURNING all resolve against the base relation
-//! with no view-shaped special case downstream.
+//! only the structural write retarget: relation names, INSERT column lists,
+//! and UPDATE assignment targets. Predicates, assignment values, and RETURNING
+//! remain user syntax until the statement planner binds them against the
+//! view's semantic read scope and substitutes those bound expressions onto the
+//! base row. Column defaults and hidden row identity then resolve through the
+//! ordinary base-relation write path.
 //!
 //! [`ContextProvider::resolve_dml_view_target`]: crate::planner::ContextProvider::resolve_dml_view_target
 
@@ -36,13 +37,15 @@ use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{BoundSqlExpression, DmlCheckOption, LogicalPlan};
 use sqlparser::ast::{
     Assignment, AssignmentTarget, Expr as SQLExpr, Ident, ObjectName, ObjectNamePart,
-    Query, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visitor, VisitorMut,
+    Query, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visitor,
 };
 use std::ops::ControlFlow;
 
 /// Combine the already-bound check-option restrictions retained by the
 /// catalog. View source is never reopened during DML planning.
-pub(crate) fn bind_check_option(target: &ViewDmlTarget) -> Result<Option<DmlCheckOption>> {
+pub(crate) fn bind_check_option(
+    target: &ViewDmlTarget,
+) -> Result<Option<DmlCheckOption>> {
     let Some(view_name) = target.check_option_view.clone() else {
         return Ok(None);
     };
@@ -52,10 +55,10 @@ pub(crate) fn bind_check_option(target: &ViewDmlTarget) -> Result<Option<DmlChec
         .map(|restriction| restriction.expression().clone())
         .reduce(|left, right| left.and(right))
         .ok_or_else(|| {
-        DataFusionError::Internal(format!(
-            "view {view_name} has a check-option marker without a row restriction"
-        ))
-    })?;
+            DataFusionError::Internal(format!(
+                "view {view_name} has a check-option marker without a row restriction"
+            ))
+        })?;
     Ok(Some(DmlCheckOption {
         view_name,
         predicate: BoundSqlExpression::new(predicate),
@@ -132,7 +135,7 @@ pub(crate) struct RewrittenInsert {
 /// the rest.
 pub(crate) fn rewrite_insert(
     target: &ViewDmlTarget,
-    written_table: &ObjectName,
+    _written_table: &ObjectName,
     columns: &[Ident],
     source: Option<&Query>,
     returning: Option<&[SelectItem]>,
@@ -182,22 +185,20 @@ pub(crate) fn rewrite_insert(
             {
                 continue;
             }
-            let base_column = target
-                .base_column(view_column)
-                .flatten()
-                .ok_or_else(|| RewriteFailure {
-                    verb: "insert into",
-                    column: view_column.clone(),
+            let base_column =
+                target.base_column(view_column).flatten().ok_or_else(|| {
+                    RewriteFailure {
+                        verb: "insert into",
+                        column: view_column.clone(),
+                    }
                 })?;
             column_defaults.push((base_column.to_string(), expression.clone()));
         }
     }
 
-    // The written row's own column list already names base columns, so a
-    // RETURNING item only has to be re-labelled where the view renames.
-    let qualifiers = view_reference_qualifiers(target, written_table);
-    let returning =
-        returning.map(|items| rewrite_returning_items(items, target, &qualifiers, true));
+    // RETURNING remains in the view namespace. After binding, the DML planner
+    // substitutes the view's semantic read expressions over the base row.
+    let returning = returning.map(<[SelectItem]>::to_vec);
     Ok(RewrittenInsert {
         table: target.base_relation.clone(),
         columns: rewritten_columns,
@@ -267,16 +268,11 @@ pub(crate) fn rewrite_update(
     for assignment in assignments {
         let mut assignment = assignment.clone();
         rewrite_assignment_target(&mut assignment, target)?;
-        rewrite_expr(&mut assignment.value, target, &qualifiers, "update")?;
         rewritten_assignments.push(assignment);
     }
 
-    let mut rewritten_predicate = predicate.cloned();
-    if let Some(predicate) = rewritten_predicate.as_mut() {
-        rewrite_expr(predicate, target, &qualifiers, "update")?;
-    }
-    let returning =
-        returning.map(|items| rewrite_returning_items(items, target, &qualifiers, true));
+    let rewritten_predicate = predicate.cloned();
+    let returning = returning.map(<[SelectItem]>::to_vec);
     Ok(RewrittenUpdate {
         table: rewritten_table,
         assignments: rewritten_assignments,
@@ -320,15 +316,8 @@ pub(crate) fn rewrite_delete(
         }
     }
 
-    // The predicate rewrite cannot fail for a DELETE: reading a non-updatable
-    // view column in the predicate is legal, and the host's analysis already
-    // replaced it with the value the view shows.
-    let mut rewritten_predicate = predicate.cloned();
-    if let Some(predicate) = rewritten_predicate.as_mut() {
-        rewrite_predicate(predicate, target, &qualifiers);
-    }
-    let returning =
-        returning.map(|items| rewrite_returning_items(items, target, &qualifiers, false));
+    let rewritten_predicate = predicate.cloned();
+    let returning = returning.map(<[SelectItem]>::to_vec);
     RewrittenDelete {
         table: rewritten_table,
         predicate: rewritten_predicate,
@@ -413,135 +402,4 @@ fn references_qualifier(expr: &SQLExpr, qualifiers: &[String]) -> bool {
     };
     let _ = expr.walk(&mut search);
     search.found
-}
-
-/// Move an expression from the view's namespace into the base relation's,
-/// refusing a write that reads a column the view computes.
-fn rewrite_expr(
-    expr: &mut SQLExpr,
-    target: &ViewDmlTarget,
-    qualifiers: &[String],
-    verb: &'static str,
-) -> Result<(), RewriteFailure> {
-    rewrite_view_column_references(expr, target, qualifiers)
-        .map_err(|column| RewriteFailure { verb, column })
-}
-
-/// Move a read-only expression into the base relation's namespace. A reference
-/// to a computed view column is left as written: it is not a write target, and
-/// the base relation has no column for it.
-fn rewrite_predicate(expr: &mut SQLExpr, target: &ViewDmlTarget, qualifiers: &[String]) {
-    let _ = rewrite_view_column_references(expr, target, qualifiers);
-}
-
-fn rewrite_returning_items(
-    items: &[SelectItem],
-    target: &ViewDmlTarget,
-    qualifiers: &[String],
-    label_with_view_names: bool,
-) -> Vec<SelectItem> {
-    items
-        .iter()
-        .map(|item| match item {
-            SelectItem::UnnamedExpr(expr) => {
-                let view_label = label_with_view_names
-                    .then(|| returned_column_label(expr, target))
-                    .flatten();
-                let mut expr = expr.clone();
-                rewrite_predicate(&mut expr, target, qualifiers);
-                match view_label {
-                    Some(label) => SelectItem::ExprWithAlias {
-                        expr,
-                        alias: Ident::new(label),
-                    },
-                    None => SelectItem::UnnamedExpr(expr),
-                }
-            }
-            SelectItem::ExprWithAlias { expr, alias } => {
-                let mut expr = expr.clone();
-                rewrite_predicate(&mut expr, target, qualifiers);
-                SelectItem::ExprWithAlias {
-                    expr,
-                    alias: alias.clone(),
-                }
-            }
-            other => other.clone(),
-        })
-        .collect()
-}
-
-/// The label `RETURNING <column>` carries on a view: the view's own column
-/// name, which the base relation may spell differently. `None` when the item
-/// is not a plain column or the name does not change.
-fn returned_column_label(expr: &SQLExpr, target: &ViewDmlTarget) -> Option<String> {
-    let name = match expr {
-        SQLExpr::Identifier(ident) => ident.value.clone(),
-        SQLExpr::CompoundIdentifier(parts) => parts.last()?.value.clone(),
-        _ => return None,
-    };
-    let base = target.base_column(&name)??;
-    (!base.eq_ignore_ascii_case(&name)).then_some(name)
-}
-
-/// Rename the column a reference names, mapping the view's namespace onto the
-/// base relation's. `qualifiers` names the relation spellings a qualified
-/// reference may carry; a reference qualified by anything else belongs to
-/// another relation and is left alone. `Err` carries the computed view column
-/// the expression tried to write through.
-fn rewrite_view_column_references(
-    expr: &mut SQLExpr,
-    target: &ViewDmlTarget,
-    qualifiers: &[String],
-) -> Result<(), String> {
-    let mut failed = None;
-    visit_expr_mut(expr, &mut |expr| {
-        if failed.is_some() {
-            return;
-        }
-        let name = match expr {
-            SQLExpr::Identifier(ident) => ident.value.clone(),
-            SQLExpr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                if !qualifiers
-                    .iter()
-                    .any(|qualifier| parts[0].value.eq_ignore_ascii_case(qualifier))
-                {
-                    return;
-                }
-                parts[1].value.clone()
-            }
-            _ => return,
-        };
-        match target.base_column(&name) {
-            None => {}
-            Some(None) => failed = Some(name),
-            Some(Some(base)) => {
-                let base = Ident::new(base.to_string());
-                *expr = match expr {
-                    SQLExpr::CompoundIdentifier(parts) => {
-                        SQLExpr::CompoundIdentifier(vec![parts[0].clone(), base])
-                    }
-                    _ => SQLExpr::Identifier(base),
-                };
-            }
-        }
-    });
-    match failed {
-        Some(column) => Err(column),
-        None => Ok(()),
-    }
-}
-
-fn visit_expr_mut(expr: &mut SQLExpr, visit: &mut impl FnMut(&mut SQLExpr)) {
-    struct Walk<'a, F: FnMut(&mut SQLExpr)> {
-        visit: &'a mut F,
-    }
-    impl<F: FnMut(&mut SQLExpr)> VisitorMut for Walk<'_, F> {
-        type Break = ();
-        fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<Self::Break> {
-            (self.visit)(expr);
-            ControlFlow::Continue(())
-        }
-    }
-    let mut walk = Walk { visit };
-    let _ = expr.walk_mut(&mut walk);
 }

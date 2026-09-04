@@ -28,9 +28,9 @@ use crate::parser::{
     ExplainStatement, LexOrdering, Statement as DFStatement,
 };
 use crate::planner::{
-    AssignmentStep, CreateTableLikeOptions, DmlGeneratedColumns, DmlViewEvent, PlannerContext,
-    PlannerResult, RawAssignmentTarget, SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlError,
-    object_name_to_qualifier,
+    AssignmentStep, CreateTableLikeOptions, DmlGeneratedColumns, DmlViewEvent,
+    PlannerContext, PlannerResult, RawAssignmentTarget, SqlToRel, ValuesAssembly,
+    ValuesDefault, ViewDmlError, ViewDmlTarget, object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
@@ -329,6 +329,154 @@ fn apply_bound_view_row_restrictions(
         predicate,
         Arc::new(plan),
     )?))
+}
+
+/// Build a temporary read-only row shape for expressions written against a
+/// view. The projection is used only while binding SQL syntax: the resulting
+/// expression is substituted back onto the base plan before the DML plan is
+/// constructed, so no view-shaped plan or parser value crosses the frontend
+/// boundary.
+fn view_expression_scope(
+    plan: &LogicalPlan,
+    target_width: usize,
+    target: &ViewDmlTarget,
+) -> Result<LogicalPlan> {
+    let view_qualifier = TableReference::bare(target.view_name.clone());
+    let target_schema = schema_prefix(plan.schema(), target_width)?;
+    let mut expressions = Vec::with_capacity(
+        target.read_expressions.len()
+            + plan.schema().fields().len().saturating_sub(target_width),
+    );
+    for (name, expression) in &target.read_expressions {
+        let expression = normalize_bound_view_expression(
+            expression.expression().clone(),
+            &target_schema,
+        )?;
+        expressions.push(expression.alias_qualified(Some(view_qualifier.clone()), name));
+    }
+    // UPDATE FROM and DELETE USING introduce additional relations. Retain
+    // those fields in the binding-only scope after replacing the target
+    // relation's fields with the view's public row.
+    expressions.extend(
+        plan.schema()
+            .iter()
+            .skip(target_width)
+            .map(|(qualifier, field)| Expr::Column(Column::from((qualifier, field)))),
+    );
+    project(plan.clone(), expressions)
+}
+
+fn schema_prefix(schema: &DFSchema, width: usize) -> Result<DFSchema> {
+    DFSchema::new_with_metadata(
+        schema
+            .iter()
+            .take(width)
+            .map(|(qualifier, field)| (qualifier.cloned(), Arc::clone(field)))
+            .collect(),
+        schema.metadata().clone(),
+    )
+}
+
+fn view_public_schema(scope: &LogicalPlan, target: &ViewDmlTarget) -> Result<DFSchema> {
+    DFSchema::new_with_metadata(
+        scope
+            .schema()
+            .iter()
+            .take(target.read_expressions.len())
+            .map(|(qualifier, field)| (qualifier.cloned(), Arc::clone(field)))
+            .collect(),
+        scope.schema().metadata().clone(),
+    )
+}
+
+fn normalize_bound_view_expression(expression: Expr, schema: &DFSchema) -> Result<Expr> {
+    let mut using_columns = HashSet::new();
+    expr_to_columns(&expression, &mut using_columns)?;
+    normalize_col_with_schemas_and_ambiguity_check(
+        expression,
+        &[&[schema]],
+        &[using_columns.into()],
+    )
+}
+
+/// Replace columns bound against [`view_expression_scope`] with the catalog's
+/// semantic read expressions over the real base plan.
+fn substitute_bound_view_reads(
+    expression: Expr,
+    target: &ViewDmlTarget,
+    base_schema: &DFSchema,
+    target_width: usize,
+) -> Result<Expr> {
+    let target_schema = schema_prefix(base_schema, target_width)?;
+    let replacements = target
+        .read_expressions
+        .iter()
+        .map(|(name, expression)| {
+            normalize_bound_view_expression(
+                expression.expression().clone(),
+                &target_schema,
+            )
+            .map(|expression| (name.to_ascii_lowercase(), expression))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    expression
+        .transform_down(|expression| match expression {
+            Expr::Column(column)
+                if column.relation.is_none()
+                    || column.relation.as_ref().is_some_and(|relation| {
+                        relation.table().eq_ignore_ascii_case(&target.view_name)
+                    }) =>
+            {
+                replacements
+                    .get(&column.name.to_ascii_lowercase())
+                    .cloned()
+                    .map_or_else(
+                        || Ok(Transformed::no(Expr::Column(column))),
+                        |replacement| {
+                            Ok(Transformed::new(
+                                replacement,
+                                true,
+                                TreeNodeRecursion::Jump,
+                            ))
+                        },
+                    )
+            }
+            other => Ok(Transformed::no(other)),
+        })
+        .map(|transformed| transformed.data)
+}
+
+/// Substitute a RETURNING list while preserving the names derived in the
+/// public view scope. A plain `RETURNING alias` must not acquire the base
+/// column's spelling merely because its semantic expression is a base column.
+fn substitute_bound_view_returning(
+    expressions: Vec<Expr>,
+    binding_source: &LogicalPlan,
+    target: &ViewDmlTarget,
+    base_schema: &DFSchema,
+    target_width: usize,
+) -> Result<Vec<Expr>> {
+    let output_fields = exprlist_to_fields(expressions.iter(), binding_source)?;
+    let expressions = expressions
+        .into_iter()
+        .zip(output_fields)
+        .map(|(expression, (_, field))| {
+            let expression = substitute_bound_view_reads(
+                expression,
+                target,
+                base_schema,
+                target_width,
+            )?;
+            Ok(match expression {
+                Expr::Alias(alias) => Expr::Alias(alias),
+                other if other.schema_name().to_string() == field.name().as_str() => {
+                    other
+                }
+                other => other.alias(field.name()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(expressions)
 }
 
 /// A quoted reference to `field` of the relation `qualifier`, as the
@@ -1116,7 +1264,7 @@ impl SqlToRel<'_> {
                     using.as_deref(),
                     selection.as_ref(),
                     returning_clause_items(returning.as_ref())?,
-                    &[],
+                    None,
                     planner_context,
                 )
             }
@@ -1143,7 +1291,7 @@ impl SqlToRel<'_> {
                     from_clauses.and_then(|from| from.first()),
                     update.selection.as_ref(),
                     returning_clause_items(update.returning.as_ref())?,
-                    &[],
+                    None,
                     planner_context,
                 )
             }
@@ -1574,10 +1722,8 @@ impl SqlToRel<'_> {
 
                 let query_definition = view.query.to_string();
                 let query = SQLBox::into_owned(view.query);
-                let mut plan = self.query_to_plan(
-                    query.clone(),
-                    &mut PlannerContext::new(),
-                )?;
+                let mut plan =
+                    self.query_to_plan(query.clone(), &mut PlannerContext::new())?;
                 plan = self.apply_expr_alias(plan, columns.clone())?;
                 let updatability = crate::view_analysis::analyze_updatable_view(
                     self,
@@ -2509,7 +2655,9 @@ impl SqlToRel<'_> {
         let mut planner_context = PlannerContext::new();
         let mut generated = Vec::new();
         for column in columns {
-            let Some(expression) = column.options.iter().find_map(|option| match &option.option {
+            let Some(expression) = column.options.iter().find_map(|option| match &option
+                .option
+            {
                 ast::ColumnOption::Generated {
                     generation_expr: Some(expression),
                     ..
@@ -2737,7 +2885,7 @@ impl SqlToRel<'_> {
             using.as_deref(),
             predicate_expr.as_ref(),
             returning.as_deref(),
-            &[],
+            None,
             outer_planner_context,
         )
     }
@@ -2748,7 +2896,7 @@ impl SqlToRel<'_> {
         using: Option<&[TableWithJoins]>,
         predicate_expr: Option<&SQLExpr>,
         returning: Option<&[SelectItem]>,
-        view_row_restrictions: &[BoundSqlExpression],
+        view_target: Option<&ViewDmlTarget>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // A delete through an automatically updatable view retargets onto its
@@ -2769,7 +2917,7 @@ impl SqlToRel<'_> {
                 using,
                 rewritten.predicate.as_ref(),
                 rewritten.returning.as_deref(),
-                &view_target.row_restrictions,
+                Some(&view_target),
                 outer_planner_context,
             )?;
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
@@ -2795,7 +2943,10 @@ impl SqlToRel<'_> {
         let mut scan = lock_dml_target_scan(
             self.plan_table_with_joins_ref(table, &mut planner_context)?,
         )?;
-        scan = apply_bound_view_row_restrictions(scan, view_row_restrictions)?;
+        scan = apply_bound_view_row_restrictions(
+            scan,
+            view_target.map_or(&[], |target| target.row_restrictions.as_slice()),
+        )?;
         if let Some(using_tables) = using {
             let old_outer_from_schema =
                 planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
@@ -2811,11 +2962,27 @@ impl SqlToRel<'_> {
         let source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
-                let filter_expr = self.sql_to_expr_ref(
+                let binding_scope = view_target
+                    .map(|target| {
+                        view_expression_scope(&scan, table_schema.fields().len(), target)
+                    })
+                    .transpose()?;
+                let binding_schema = binding_scope
+                    .as_ref()
+                    .map_or(scan.schema(), LogicalPlan::schema);
+                let mut filter_expr = self.sql_to_expr_ref(
                     predicate_expr,
-                    scan.schema(),
+                    binding_schema,
                     &mut planner_context,
                 )?;
+                if let Some(target) = view_target {
+                    filter_expr = substitute_bound_view_reads(
+                        filter_expr,
+                        target,
+                        scan.schema(),
+                        table_schema.fields().len(),
+                    )?;
+                }
                 let mut using_columns = HashSet::new();
                 expr_to_columns(&filter_expr, &mut using_columns)?;
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
@@ -2832,14 +2999,15 @@ impl SqlToRel<'_> {
         let mut returning_col_names = None;
         let mut returning_output_schema = None;
         if let Some(returning_items) = returning {
-            let plain_columns = returning_items.iter().all(|item| {
-                matches!(
-                    item,
-                    SelectItem::UnnamedExpr(SQLExpr::Identifier(_))
-                        | SelectItem::Wildcard(_)
-                        | SelectItem::QualifiedWildcard(_, _)
-                )
-            });
+            let plain_columns = view_target.is_none()
+                && returning_items.iter().all(|item| {
+                    matches!(
+                        item,
+                        SelectItem::UnnamedExpr(SQLExpr::Identifier(_))
+                            | SelectItem::Wildcard(_)
+                            | SelectItem::QualifiedWildcard(_, _)
+                    )
+                });
             if plain_columns {
                 let cols = select_items_to_column_names(returning_items);
                 returning_output_schema = returning_columns_to_output_schema(
@@ -2875,14 +3043,38 @@ impl SqlToRel<'_> {
                         column.alias(field.name())
                     })
                     .collect::<Vec<_>>();
+                let binding_scope = view_target
+                    .map(|target| {
+                        view_expression_scope(
+                            &source,
+                            table_schema.fields().len(),
+                            target,
+                        )
+                    })
+                    .transpose()?;
+                let binding_source = binding_scope.as_ref().unwrap_or(&source);
                 let prepared = self.prepare_select_exprs_ref(
-                    &source,
+                    binding_source,
                     returning_items,
                     false,
                     &mut planner_context,
                 )?;
-                let logical_exprs =
-                    expand_returning_select_exprs(prepared, &table_schema)?;
+                let returning_target_schema = view_target
+                    .map(|target| view_public_schema(binding_source, target))
+                    .transpose()?;
+                let mut logical_exprs = expand_returning_select_exprs(
+                    prepared,
+                    returning_target_schema.as_ref().unwrap_or(&table_schema),
+                )?;
+                if let Some(target) = view_target {
+                    logical_exprs = substitute_bound_view_returning(
+                        logical_exprs,
+                        binding_source,
+                        target,
+                        source.schema(),
+                        table_schema.fields().len(),
+                    )?;
+                }
                 let target_column_names = table_schema
                     .fields()
                     .iter()
@@ -3466,7 +3658,7 @@ impl SqlToRel<'_> {
             from.as_ref(),
             predicate_expr.as_ref(),
             returning.as_deref(),
-            &[],
+            None,
             outer_planner_context,
         )
     }
@@ -3478,7 +3670,7 @@ impl SqlToRel<'_> {
         from: Option<&TableWithJoins>,
         predicate_expr: Option<&SQLExpr>,
         returning: Option<&[SelectItem]>,
-        view_row_restrictions: &[BoundSqlExpression],
+        view_target: Option<&ViewDmlTarget>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // A write on an automatically updatable view retargets onto its base
@@ -3507,7 +3699,7 @@ impl SqlToRel<'_> {
                 from,
                 rewritten.predicate.as_ref(),
                 rewritten.returning.as_deref(),
-                &view_target.row_restrictions,
+                Some(&view_target),
                 outer_planner_context,
             )?;
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
@@ -3604,7 +3796,10 @@ impl SqlToRel<'_> {
         let mut scan = lock_dml_target_scan(
             self.plan_table_with_joins_ref(table, &mut planner_context)?,
         )?;
-        scan = apply_bound_view_row_restrictions(scan, view_row_restrictions)?;
+        scan = apply_bound_view_row_restrictions(
+            scan,
+            view_target.map_or(&[], |target| target.row_restrictions.as_slice()),
+        )?;
         if let Some(from) = from {
             let old_outer_from_schema =
                 planner_context.set_outer_from_schema(Some(Arc::clone(scan.schema())));
@@ -3764,11 +3959,27 @@ impl SqlToRel<'_> {
         let mut source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
-                let filter_expr = self.sql_to_expr_ref(
+                let binding_scope = view_target
+                    .map(|target| {
+                        view_expression_scope(&scan, table_schema.fields().len(), target)
+                    })
+                    .transpose()?;
+                let binding_schema = binding_scope
+                    .as_ref()
+                    .map_or(scan.schema(), LogicalPlan::schema);
+                let mut filter_expr = self.sql_to_expr_ref(
                     predicate_expr,
-                    scan.schema(),
+                    binding_schema,
                     &mut planner_context,
                 )?;
+                if let Some(target) = view_target {
+                    filter_expr = substitute_bound_view_reads(
+                        filter_expr,
+                        target,
+                        scan.schema(),
+                        table_schema.fields().len(),
+                    )?;
+                }
                 let mut using_columns = HashSet::new();
                 expr_to_columns(&filter_expr, &mut using_columns)?;
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
@@ -3779,6 +3990,15 @@ impl SqlToRel<'_> {
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
         };
+
+        let assignment_scope = view_target
+            .map(|target| {
+                view_expression_scope(&source, table_schema.fields().len(), target)
+            })
+            .transpose()?;
+        let assignment_schema = assignment_scope
+            .as_ref()
+            .map_or(source.schema(), LogicalPlan::schema);
 
         // Build updated values for each column, using the previous value if not modified
         let mut projected_exprs = table_schema
@@ -3798,11 +4018,19 @@ impl SqlToRel<'_> {
                 if let Some(path_assignments) = path_assign_map.remove(field.name()) {
                     let mut base = stored_column();
                     for (path, value) in path_assignments {
-                        let value = self.sql_to_expr_ref(
+                        let mut value = self.sql_to_expr_ref(
                             value,
-                            source.schema(),
+                            assignment_schema,
                             &mut planner_context,
                         )?;
+                        if let Some(target) = view_target {
+                            value = substitute_bound_view_reads(
+                                value,
+                                target,
+                                source.schema(),
+                                table_schema.fields().len(),
+                            )?;
+                        }
                         base = self.plan_assignment_target(
                             base,
                             Arc::clone(field),
@@ -3836,16 +4064,26 @@ impl SqlToRel<'_> {
                                     },
                                 )
                             })
-                            .or_else(|| table_source.get_column_default(field.name()).cloned())
+                            .or_else(|| {
+                                table_source.get_column_default(field.name()).cloned()
+                            })
                             .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
                             .cast_to(field.data_type(), &DFSchema::empty())?
                     }
                     Some(new_value) => {
                         let mut expr = self.sql_to_expr_ref(
                             new_value.as_ref(),
-                            source.schema(),
+                            assignment_schema,
                             &mut planner_context,
                         )?;
+                        if let Some(target) = view_target {
+                            expr = substitute_bound_view_reads(
+                                expr,
+                                target,
+                                source.schema(),
+                                table_schema.fields().len(),
+                            )?;
+                        }
                         // Update placeholder's datatype to the type of the target column
                         if let Expr::Placeholder(placeholder) = &mut expr {
                             placeholder.field = placeholder
@@ -3921,13 +4159,36 @@ impl SqlToRel<'_> {
         let mut returning_col_names = None;
         let mut output_schema = None;
         if let Some(returning_items) = returning {
+            let returning_scope = view_target
+                .map(|target| {
+                    view_expression_scope(&source, table_schema.fields().len(), target)
+                })
+                .transpose()?;
+            let returning_source = returning_scope.as_ref().unwrap_or(&source);
             let prepared = self.prepare_select_exprs_ref(
-                &source,
+                returning_source,
                 returning_items,
                 false,
                 &mut planner_context,
             )?;
-            let logical_exprs = expand_returning_select_exprs(prepared, &table_schema)?;
+            let returning_target_schema = view_target
+                .map(|target| view_public_schema(returning_source, target))
+                .transpose()?;
+            let mut logical_exprs = expand_returning_select_exprs(
+                prepared,
+                returning_target_schema
+                    .as_ref()
+                    .unwrap_or(table_schema.as_ref()),
+            )?;
+            if let Some(target) = view_target {
+                logical_exprs = substitute_bound_view_returning(
+                    logical_exprs,
+                    returning_source,
+                    target,
+                    source.schema(),
+                    table_schema.fields().len(),
+                )?;
+            }
 
             let target_column_names = table_schema
                 .fields()
@@ -4053,6 +4314,7 @@ impl SqlToRel<'_> {
                 insert.table_alias.as_ref(),
                 insert.overriding.as_ref(),
                 &[],
+                None,
                 planner_context,
             )?
         } else {
@@ -4100,6 +4362,7 @@ impl SqlToRel<'_> {
             table_alias,
             overriding,
             &[],
+            None,
             outer_planner_context,
         )
     }
@@ -4118,6 +4381,7 @@ impl SqlToRel<'_> {
         table_alias: Option<&Ident>,
         overriding: Option<&OverridingKind>,
         view_column_defaults: &[(String, BoundSqlExpression)],
+        view_target: Option<&ViewDmlTarget>,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         // An insert into an automatically updatable view retargets onto its
@@ -4150,6 +4414,7 @@ impl SqlToRel<'_> {
                 table_alias,
                 overriding,
                 &rewritten.column_defaults,
+                Some(&view_target),
                 outer_planner_context,
             )?;
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
@@ -4167,7 +4432,8 @@ impl SqlToRel<'_> {
             Some(source),
             overriding,
         )?;
-        let generated_columns = self.context_provider.dml_generated_columns(table_name)?;
+        let generated_columns =
+            self.context_provider.dml_generated_columns(table_name)?;
         let overriding_user_value = matches!(overriding, Some(OverridingKind::UserValue));
         let overriding_user_identity_columns = if overriding_user_value {
             generated_columns
@@ -4225,6 +4491,18 @@ impl SqlToRel<'_> {
             let name = self.ident_normalizer.normalize(column.clone());
             if !target_col_names.contains(&name) {
                 target_col_names.push(name);
+            }
+        }
+        // A view-level default is materialized by the projection below and is
+        // therefore a supplied base-row value. If it remained absent from the
+        // write contract, the mutation adapter would replace it with the base
+        // table's own default.
+        for (column, _) in view_column_defaults {
+            if !target_col_names
+                .iter()
+                .any(|written| written.eq_ignore_ascii_case(column))
+            {
+                target_col_names.push(column.clone());
             }
         }
         if overriding_user_value {
@@ -4393,9 +4671,9 @@ impl SqlToRel<'_> {
             for (column_index, sources) in value_sources.iter().enumerate() {
                 for (slot, path) in sources {
                     defaults[*slot] = match path.last() {
-                        None => ValuesDefault::Column(
-                            column_default(table_schema.field(column_index).name()),
-                        ),
+                        None => ValuesDefault::Column(column_default(
+                            table_schema.field(column_index).name(),
+                        )),
                         Some(AccessExpr::Subscript(_)) => ValuesDefault::Refused(
                             "cannot set an array element to DEFAULT",
                         ),
@@ -4541,18 +4819,58 @@ impl SqlToRel<'_> {
             )?,
         };
 
-        let returning_col_names = returning.map(select_items_to_column_names);
-        let returning_output_schema = returning_col_names
-            .as_ref()
-            .map(|cols| {
-                returning_columns_to_output_schema(
-                    &table_schema,
-                    cols,
-                    source.schema().metadata(),
-                )
-            })
-            .transpose()?
-            .flatten();
+        let mut returning_exprs = None;
+        let (returning_col_names, returning_output_schema) =
+            if let (Some(returning_items), Some(target)) = (returning, view_target) {
+                let scope =
+                    view_expression_scope(&source, table_schema.fields().len(), target)?;
+                let public_schema = view_public_schema(&scope, target)?;
+                let prepared = self.prepare_select_exprs_ref(
+                    &scope,
+                    returning_items,
+                    false,
+                    &mut planner_context,
+                )?;
+                let expressions = substitute_bound_view_returning(
+                    expand_returning_select_exprs(prepared, &public_schema)?,
+                    &scope,
+                    target,
+                    source.schema(),
+                    table_schema.fields().len(),
+                )?;
+                let fields =
+                    exprlist_to_fields(expressions.iter(), &source).map_err(|error| {
+                        DataFusionError::Context(
+                            "derive INSERT-through-view RETURNING fields".to_string(),
+                            Box::new(error),
+                        )
+                    })?;
+                let output_schema = Arc::new(DFSchema::new_with_metadata(
+                    fields,
+                    source.schema().metadata().clone(),
+                )?);
+                let names = output_schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect();
+                returning_exprs = Some(expressions);
+                (Some(names), Some(output_schema))
+            } else {
+                let names = returning.map(select_items_to_column_names);
+                let schema = names
+                    .as_ref()
+                    .map(|cols| {
+                        returning_columns_to_output_schema(
+                            &table_schema,
+                            cols,
+                            source.schema().metadata(),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                (names, schema)
+            };
 
         let mut dml = DmlStatement::new(
             table_name,
@@ -4565,6 +4883,9 @@ impl SqlToRel<'_> {
         }
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
+        }
+        if let Some(ret_exprs) = returning_exprs {
+            dml = dml.with_returning_exprs(ret_exprs);
         }
         if let Some(output_schema) = returning_output_schema {
             dml = dml.with_output_schema(output_schema);
@@ -4710,10 +5031,12 @@ impl SqlToRel<'_> {
                                 // supplies that value directly.
                                 continue;
                             }
-                            return Err(self.context_provider.generated_column_write_error(
-                                table_name.table(),
-                                &target,
-                            ));
+                            return Err(self
+                                .context_provider
+                                .generated_column_write_error(
+                                    table_name.table(),
+                                    &target,
+                                ));
                         }
                         let value = if matches!(
                             sql_value.as_ref(),
@@ -4730,7 +5053,9 @@ impl SqlToRel<'_> {
                                         },
                                     )
                                 })
-                                .or_else(|| table_source.get_column_default(&target).cloned())
+                                .or_else(|| {
+                                    table_source.get_column_default(&target).cloned()
+                                })
                                 .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
                         } else {
                             self.sql_to_expr_ref(
@@ -4765,12 +5090,15 @@ impl SqlToRel<'_> {
                         .fields()
                         .iter()
                         .map(|field| {
-                            let value = assigned.get(field.name()).cloned().unwrap_or_else(|| {
-                                Expr::Column(Column::new(
-                                    Some(table_ref.clone()),
-                                    field.name(),
-                                ))
-                            });
+                            let value = assigned
+                                .get(field.name())
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    Expr::Column(Column::new(
+                                        Some(table_ref.clone()),
+                                        field.name(),
+                                    ))
+                                });
                             (field.name().clone(), value)
                         })
                         .collect::<HashMap<_, _>>();
@@ -4782,7 +5110,8 @@ impl SqlToRel<'_> {
                                     "stored generated expression targets unknown column {column}"
                                 )
                             })?;
-                        let value = substitute_bound_row_columns(expression, &row_values)?;
+                        let value =
+                            substitute_bound_row_columns(expression, &row_values)?;
                         let value = match self.context_provider.plan_assignment_coercion(
                             &value,
                             field,

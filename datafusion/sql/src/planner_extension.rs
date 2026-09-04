@@ -822,6 +822,10 @@ pub struct ViewDmlTarget {
     /// Per view output column in order, the base column backing it. `None`
     /// marks a computed column, which is readable but not writable.
     pub columns: Vec<(String, Option<String>)>,
+    /// Every view output expressed over the final base relation. Unlike the
+    /// write mapping, this includes computed columns and is consumed after
+    /// SQL name binding when DML expressions read the view row.
+    pub read_expressions: Vec<(String, BoundSqlExpression)>,
     /// The view stack's row restrictions, written against the base
     /// relation's namespace, outermost first. These expressions were bound
     /// when the view definition entered the catalog; an UPDATE or DELETE
