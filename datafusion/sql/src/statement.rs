@@ -5262,14 +5262,28 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         }
                     }
                     // The value is not specified. Fill in the default value for the column.
-                    [] => table_source
-                        .get_column_default(target_field.name())
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            // If there is no default for the column, then the default is NULL
-                            Expr::Literal(ScalarValue::Null, None)
-                        })
-                        .cast_to(target_field.data_type(), &DFSchema::empty())?,
+                    [] => {
+                        let default = table_source
+                            .get_column_default(target_field.name())
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                // If there is no default for the column, then the default is NULL
+                                Expr::Literal(ScalarValue::Null, None)
+                            });
+                        // A default reaches the column by assignment, exactly as
+                        // a written value does, so it takes the same coercion: a
+                        // dialect whose column carrier has no Arrow cast from the
+                        // default expression's type resolves the pair here.
+                        match self.context_provider.plan_assignment_coercion(
+                            &default,
+                            target_field,
+                            &DFSchema::empty(),
+                        )? {
+                            Some(coerced) => coerced,
+                            None => default
+                                .cast_to(target_field.data_type(), &DFSchema::empty())?,
+                        }
+                    }
                     // Written through paths: each applies to the result of the
                     // previous one, starting from a NULL of the column's type.
                     paths => {
