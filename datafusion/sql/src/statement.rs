@@ -4074,7 +4074,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     } else {
                         named_columns.clone()
                     };
-                    if matches!(overriding, Some(ast::OverridingKind::UserValue))
+                    if matches!(overriding, Some(OverridingKind::UserValue))
                         && let Some(generated) = &generated_columns
                     {
                         provided_column_names.retain(|column| {
@@ -4959,8 +4959,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             Some(source),
             overriding,
         )?;
-        let overriding_user_value =
-            matches!(overriding, Some(OverridingKind::UserValue));
+        let overriding_user_value = matches!(overriding, Some(OverridingKind::UserValue));
         let overriding_user_identity_columns = if overriding_user_value {
             self.context_provider
                 .dml_generated_columns(table_name)?
@@ -5009,14 +5008,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         // not provided, and should be filled with a default value later.
         // A column written through several paths is one target column.
         let provided_columns = written_columns.as_deref().unwrap_or(columns);
-        let mut target_col_names: Vec<String> = if overriding_user_value
-            && written_columns.is_none()
-            && columns.is_empty()
-        {
-            positional_columns.clone()
-        } else {
-            Vec::with_capacity(provided_columns.len())
-        };
+        let mut target_col_names: Vec<String> =
+            if overriding_user_value && written_columns.is_none() && columns.is_empty() {
+                positional_columns.clone()
+            } else {
+                Vec::with_capacity(provided_columns.len())
+            };
         for column in provided_columns {
             let name = self.ident_normalizer.normalize(column.clone());
             if !target_col_names.contains(&name) {
@@ -5140,13 +5137,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 }
             }
         }
-        let prepare_param_data_types = prepare_param_data_types.into_values().collect();
+        let prepare_param_data_types: Vec<_> =
+            prepare_param_data_types.into_values().collect();
 
         // Projection
         // Create a new context with INSERT-specific settings, starting from the outer context to inherit CTEs
-        let mut planner_context = outer_planner_context
-            .clone()
-            .with_prepare_param_data_types(prepare_param_data_types);
+        let mut planner_context = outer_planner_context.clone();
+        // Only a VALUES source types its placeholders from the target columns
+        // above. A query source resolves them the ordinary way, and the types
+        // the caller already resolved -- an extended-protocol Parse, say --
+        // are the only ones it has: replacing them with an empty list leaves
+        // every placeholder in the select list untyped.
+        if !prepare_param_data_types.is_empty() {
+            planner_context =
+                planner_context.with_prepare_param_data_types(prepare_param_data_types);
+        }
         // A source row is a row of the inserted relation, not of the target
         // table: several of its fields may write parts of one column, so they
         // are named by position, the way a values list names its columns.

@@ -468,7 +468,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let accepts = match probe_args
                     .iter()
                     .map(|arg| arg.get_type(schema))
-                    .collect::<datafusion_common::Result<Vec<_>>>()
+                    .collect::<Result<Vec<_>>>()
                 {
                     Ok(types) => {
                         datafusion_expr::type_coercion::functions::data_types_with_scalar_udf(
