@@ -4117,7 +4117,7 @@ impl SqlToRel<'_> {
             })
             .collect::<Result<Vec<_>>>()?;
         if let Some(generated) = &generated_columns
-            && !generated.stored_expressions.is_empty()
+            && !generated.generated_expressions.is_empty()
         {
             let row_values = table_schema
                 .fields()
@@ -4127,7 +4127,7 @@ impl SqlToRel<'_> {
                     (field.name().clone(), expression_without_alias(expression))
                 })
                 .collect::<HashMap<_, _>>();
-            for (column, expression) in &generated.stored_expressions {
+            for (column, expression) in &generated.generated_expressions {
                 let Some((position, field)) = table_schema
                     .fields()
                     .iter()
@@ -5113,7 +5113,7 @@ impl SqlToRel<'_> {
                 }
 
                 if let Some(generated) = generated_columns
-                    && !generated.stored_expressions.is_empty()
+                    && !generated.generated_expressions.is_empty()
                 {
                     let assigned = assignments
                         .iter()
@@ -5137,7 +5137,7 @@ impl SqlToRel<'_> {
                             (field.name().clone(), value)
                         })
                         .collect::<HashMap<_, _>>();
-                    for (column, expression) in &generated.stored_expressions {
+                    for (column, expression) in &generated.generated_expressions {
                         let field = table_schema
                             .field_with_unqualified_name(column)
                             .map_err(|_| {

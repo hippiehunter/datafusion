@@ -878,9 +878,11 @@ pub struct DmlGeneratedColumns {
     /// Every generated column name; writing one with a non-DEFAULT value is
     /// refused.
     pub columns: Vec<String>,
-    /// For stored generated columns, the parser-free expression bound by the
-    /// host at CREATE/ALTER or explicit catalog restoration.
-    pub stored_expressions: Vec<(String, BoundSqlExpression)>,
+    /// For every generated column whose value the host keeps in the row,
+    /// the parser-free expression bound at CREATE/ALTER or catalog
+    /// restoration. A write that changes the column's inputs recomputes it
+    /// through this expression.
+    pub generated_expressions: Vec<(String, BoundSqlExpression)>,
     /// The relation's full positional column list, for rejecting a
     /// positional VALUES row that reaches a generated column.
     pub positional_columns: Vec<String>,
