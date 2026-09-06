@@ -106,11 +106,10 @@ pub fn analyze_updatable_view(
             CreateViewNotUpdatable::UnreadableDefinition,
         ));
     }
-    if !columns.iter().any(|column| column.write_source.is_some()) {
-        return Ok(CreateViewUpdatability::NotUpdatable(
-            CreateViewNotUpdatable::NoUpdatableColumn,
-        ));
-    }
+    // Whether any column can be written is not a property of the view's
+    // shape: DELETE reaches the base rows through the view's restriction
+    // alone, while INSERT and UPDATE need a column to travel through. The
+    // consumer applies that per-command rule against `columns`.
 
     let restriction = select
         .selection
