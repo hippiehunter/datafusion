@@ -59,6 +59,7 @@ mod select;
 mod set_expr;
 mod stack;
 mod statement;
+pub use expr::sql_number_literal;
 pub use statement::is_host_utility_statement;
 #[cfg(feature = "unparser")]
 pub mod unparser;

@@ -54,6 +54,7 @@ mod subquery;
 mod substring;
 mod unary_op;
 mod value;
+pub use value::sql_number_literal;
 mod window_frame;
 
 impl SqlToRel<'_> {

@@ -98,60 +98,14 @@ impl SqlToRel<'_> {
         unsigned_number: &str,
         negative: bool,
     ) -> Result<Expr> {
-        // PostgreSQL allows `_` digit separators and the `0x`/`0o`/`0b`
-        // integer prefixes; both are stripped here so the literal text parses.
-        let unsigned_number: Cow<str> = if unsigned_number.contains('_') {
-            Cow::Owned(unsigned_number.replace('_', ""))
-        } else {
-            Cow::Borrowed(unsigned_number)
-        };
-        let unsigned_number: &str = &unsigned_number;
-        if let Some((radix, digits)) = radix_integer_literal(unsigned_number) {
-            let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
-                literal_syntax_error(format!(
-                    "Cannot parse {unsigned_number} as an integer"
-                ))
-            })?;
-            let value = if negative { -magnitude } else { magnitude };
-            return Ok(if let Ok(n) = i32::try_from(value) {
-                lit(n)
-            } else if let Ok(n) = i64::try_from(value) {
-                lit(n)
-            } else if let Ok(n) = u64::try_from(value) {
-                lit(n)
-            } else {
-                Expr::Literal(ScalarValue::Decimal128(Some(value), 38, 0), None)
-            });
-        }
-
-        let signed_number: Cow<str> = if negative {
-            Cow::Owned(format!("-{unsigned_number}"))
-        } else {
-            Cow::Borrowed(unsigned_number)
-        };
-
-        // PostgreSQL treats small integer literals as INT4 by default.
-        // Parse i32 first, then widen to i64 when needed.
-        if let Ok(n) = signed_number.parse::<i32>() {
-            return Ok(lit(n));
-        }
-
-        // Try to parse as i64 next, then u64 if negative is false, then decimal or f64
-        if let Ok(n) = signed_number.parse::<i64>() {
-            return Ok(lit(n));
-        }
-
-        if !negative && let Ok(n) = unsigned_number.parse::<u64>() {
-            return Ok(lit(n));
-        }
-
-        if self.options.parse_float_as_decimal {
-            parse_decimal(unsigned_number, negative)
-        } else {
-            signed_number.parse::<f64>().map(lit).map_err(|_| {
-                literal_syntax_error(format!("Cannot parse {signed_number} as f64"))
-            })
-        }
+        Ok(Expr::Literal(
+            sql_number_literal(
+                unsigned_number,
+                negative,
+                self.options.parse_float_as_decimal,
+            )?,
+            None,
+        ))
     }
 
     /// Create a placeholder expression
@@ -729,7 +683,73 @@ fn bigint_to_i256(v: &BigInt) -> Option<i256> {
     }
 }
 
-fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
+/// The value PostgreSQL gives a numeric literal's text: `integer` when the
+/// digits fit, then `bigint`, then an unsigned 64-bit integer, and otherwise
+/// `numeric` (or `double precision` when `parse_float_as_decimal` is off).
+/// PostgreSQL's `_` digit separators and `0x`/`0o`/`0b` integer prefixes are
+/// accepted. Code that evaluates SQL text without planning it types its
+/// literals through this, so the two agree.
+pub fn sql_number_literal(
+    unsigned_number: &str,
+    negative: bool,
+    parse_float_as_decimal: bool,
+) -> Result<ScalarValue> {
+    let unsigned_number: Cow<str> = if unsigned_number.contains('_') {
+        Cow::Owned(unsigned_number.replace('_', ""))
+    } else {
+        Cow::Borrowed(unsigned_number)
+    };
+    let unsigned_number: &str = &unsigned_number;
+    if let Some((radix, digits)) = radix_integer_literal(unsigned_number) {
+        let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
+            literal_syntax_error(format!("Cannot parse {unsigned_number} as an integer"))
+        })?;
+        let value = if negative { -magnitude } else { magnitude };
+        return Ok(if let Ok(n) = i32::try_from(value) {
+            ScalarValue::Int32(Some(n))
+        } else if let Ok(n) = i64::try_from(value) {
+            ScalarValue::Int64(Some(n))
+        } else if let Ok(n) = u64::try_from(value) {
+            ScalarValue::UInt64(Some(n))
+        } else {
+            ScalarValue::Decimal128(Some(value), 38, 0)
+        });
+    }
+
+    let signed_number: Cow<str> = if negative {
+        Cow::Owned(format!("-{unsigned_number}"))
+    } else {
+        Cow::Borrowed(unsigned_number)
+    };
+
+    // PostgreSQL treats small integer literals as INT4 by default.
+    // Parse i32 first, then widen to i64 when needed.
+    if let Ok(n) = signed_number.parse::<i32>() {
+        return Ok(ScalarValue::Int32(Some(n)));
+    }
+
+    // Try to parse as i64 next, then u64 if negative is false, then decimal or f64
+    if let Ok(n) = signed_number.parse::<i64>() {
+        return Ok(ScalarValue::Int64(Some(n)));
+    }
+
+    if !negative && let Ok(n) = unsigned_number.parse::<u64>() {
+        return Ok(ScalarValue::UInt64(Some(n)));
+    }
+
+    if parse_float_as_decimal {
+        parse_decimal(unsigned_number, negative)
+    } else {
+        signed_number
+            .parse::<f64>()
+            .map(|value| ScalarValue::Float64(Some(value)))
+            .map_err(|_| {
+                literal_syntax_error(format!("Cannot parse {signed_number} as f64"))
+            })
+    }
+}
+
+fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<ScalarValue> {
     let mut dec = BigDecimal::from_str(unsigned_number).map_err(|e| {
         literal_syntax_error(format!("Cannot parse {unsigned_number} as BigDecimal: {e}"))
     })?;
@@ -746,7 +766,7 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
         return match unsigned_number.parse::<f64>() {
             Ok(parsed) if parsed.is_finite() => {
                 let float_val = if negative { -parsed } else { parsed };
-                Ok(Expr::Literal(ScalarValue::Float64(Some(float_val)), None))
+                Ok(ScalarValue::Float64(Some(float_val)))
             }
             _ => not_impl_err!(
                 "Decimal scale {} exceeds the minimum supported scale: {}",
@@ -770,9 +790,10 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
                 int_val
             )
         })?;
-        Ok(Expr::Literal(
-            ScalarValue::Decimal128(Some(val), precision as u8, scale as i8),
-            None,
+        Ok(ScalarValue::Decimal128(
+            Some(val),
+            precision as u8,
+            scale as i8,
         ))
     } else if precision <= DECIMAL256_MAX_PRECISION as u64 {
         let val = bigint_to_i256(&int_val).ok_or_else(|| {
@@ -782,9 +803,10 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
                 int_val
             )
         })?;
-        Ok(Expr::Literal(
-            ScalarValue::Decimal256(Some(val), precision as u8, scale as i8),
-            None,
+        Ok(ScalarValue::Decimal256(
+            Some(val),
+            precision as u8,
+            scale as i8,
         ))
     } else {
         // A numeric literal too large for Decimal256 (e.g. scientific-notation
@@ -793,7 +815,7 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<Expr> {
         match unsigned_number.parse::<f64>() {
             Ok(parsed) if parsed.is_finite() => {
                 let float_val = if negative { -parsed } else { parsed };
-                Ok(Expr::Literal(ScalarValue::Float64(Some(float_val)), None))
+                Ok(ScalarValue::Float64(Some(float_val)))
             }
             _ => not_impl_err!(
                 "Decimal precision {} exceeds the maximum supported precision: {}",
@@ -880,35 +902,57 @@ mod tests {
         ];
         for (input, expect) in cases {
             let output = parse_decimal(input, true).unwrap();
-            assert_eq!(
-                output,
-                Expr::Literal(expect.arithmetic_negate().unwrap(), None)
-            );
+            assert_eq!(output, expect.arithmetic_negate().unwrap());
 
             let output = parse_decimal(input, false).unwrap();
-            assert_eq!(output, Expr::Literal(expect, None));
+            assert_eq!(output, expect);
         }
 
         // scale < i8::MIN but finite as f64 -> Float64 (not rejected)
         assert_eq!(
             parse_decimal("1e129", false).unwrap(),
-            Expr::Literal(
-                ScalarValue::Float64(Some("1e129".parse::<f64>().unwrap())),
-                None
-            )
+            ScalarValue::Float64(Some("1e129".parse::<f64>().unwrap()))
         );
 
         // precision > DECIMAL256_MAX_PRECISION but finite as f64 -> Float64
         assert_eq!(
             parse_decimal(&"1".repeat(77), false).unwrap(),
-            Expr::Literal(
-                ScalarValue::Float64(Some("1".repeat(77).parse::<f64>().unwrap())),
-                None
-            )
+            ScalarValue::Float64(Some("1".repeat(77).parse::<f64>().unwrap()))
         );
 
         // Non-finite as f64 (overflows) -> still rejected
         assert!(parse_decimal("1e400", false).is_err());
+    }
+
+    #[test]
+    fn sql_number_literal_takes_postgres_default_types() {
+        let cases = [
+            ("1", ScalarValue::Int32(Some(1))),
+            ("2147483647", ScalarValue::Int32(Some(i32::MAX))),
+            ("2147483648", ScalarValue::Int64(Some(2_147_483_648))),
+            ("18446744073709551615", ScalarValue::UInt64(Some(u64::MAX))),
+            ("1_000", ScalarValue::Int32(Some(1000))),
+            ("0x1F", ScalarValue::Int32(Some(31))),
+            ("0o17", ScalarValue::Int32(Some(15))),
+            ("0b101", ScalarValue::Int32(Some(5))),
+            ("1.5", ScalarValue::Decimal128(Some(15), 2, 1)),
+            ("1e5", ScalarValue::Decimal128(Some(1), 1, -5)),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                sql_number_literal(text, false, true).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            sql_number_literal("2147483648", true, true).unwrap(),
+            ScalarValue::Int32(Some(i32::MIN))
+        );
+        assert_eq!(
+            sql_number_literal("1.5", false, false).unwrap(),
+            ScalarValue::Float64(Some(1.5))
+        );
     }
 
     #[test]
