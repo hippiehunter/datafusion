@@ -259,9 +259,10 @@ pub trait ContextProvider {
     /// automatically updatable view whose write retargets onto its base
     /// relation. `Ok(None)` when the target is not such a view — including
     /// when an INSTEAD OF trigger or an INSTEAD rule owns the write, in
-    /// which case the view stays the target. `Err` when the target is a
-    /// view that cannot carry the write at all; the provider owns that
-    /// error's identity.
+    /// which case the view stays the target. For a MERGE the view stays the
+    /// target when a trigger owns every row action the arms declare. `Err`
+    /// when the target is a view that cannot carry the write at all; the
+    /// provider owns that error's identity.
     fn resolve_dml_view_target(
         &self,
         _table: &ObjectName,
@@ -806,8 +807,59 @@ pub enum DmlViewEvent {
     Update,
     /// `DELETE FROM view ...`
     Delete,
-    /// `MERGE INTO view ...`
-    Merge,
+    /// `MERGE INTO view ...` with the row actions its WHEN arms declare.
+    Merge(MergeRowActions),
+}
+
+/// One row action a MERGE arm can take. `DO NOTHING` arms take none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeRowAction {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// The row actions a MERGE statement's WHEN arms declare, in arm order. A
+/// view carries the statement only when a trigger owns every one of them, so
+/// the set is what the view-write resolution is asked about, and the first
+/// action names the statement when the view cannot carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MergeRowActions {
+    /// The action of the first arm that writes a row.
+    pub first: Option<MergeRowAction>,
+    pub insert: bool,
+    pub update: bool,
+    pub delete: bool,
+}
+
+impl MergeRowActions {
+    /// Record one arm's action in statement order.
+    pub fn declare(&mut self, action: MergeRowAction) {
+        if self.first.is_none() {
+            self.first = Some(action);
+        }
+        match action {
+            MergeRowAction::Insert => self.insert = true,
+            MergeRowAction::Update => self.update = true,
+            MergeRowAction::Delete => self.delete = true,
+        }
+    }
+
+    /// Whether any arm writes a row.
+    pub fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+
+    /// The declared actions, in `INSERT`, `UPDATE`, `DELETE` order.
+    pub fn iter(&self) -> impl Iterator<Item = MergeRowAction> {
+        [
+            (self.insert, MergeRowAction::Insert),
+            (self.update, MergeRowAction::Update),
+            (self.delete, MergeRowAction::Delete),
+        ]
+        .into_iter()
+        .filter_map(|(declared, action)| declared.then_some(action))
+    }
 }
 
 /// How a write against an automatically updatable view retargets onto the

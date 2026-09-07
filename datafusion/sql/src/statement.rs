@@ -29,8 +29,9 @@ use crate::parser::{
 };
 use crate::planner::{
     AssignmentStep, CreateTableLikeOptions, DmlGeneratedColumns, DmlViewEvent,
-    PlannerContext, PlannerResult, RawAssignmentTarget, SqlToRel, ValuesAssembly,
-    ValuesDefault, ViewDmlError, ViewDmlTarget, object_name_to_qualifier,
+    MergeRowAction, MergeRowActions, PlannerContext, PlannerResult, RawAssignmentTarget,
+    SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlError, ViewDmlTarget,
+    object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
@@ -3262,11 +3263,22 @@ impl SqlToRel<'_> {
         // identical to its base relation's may retarget; anything else is
         // refused rather than rewritten wrong. A passthrough view stack has
         // no row restriction, so there is no check-option obligation to
-        // record.
+        // record. The arms' row actions decide whether the view's INSTEAD OF
+        // triggers own the statement instead, in which case it is not
+        // retargeted at all.
+        let mut row_actions = MergeRowActions::default();
+        for clause in &clauses {
+            match &clause.action {
+                ast::MergeAction::Insert(_) => row_actions.declare(MergeRowAction::Insert),
+                ast::MergeAction::Update { .. } => row_actions.declare(MergeRowAction::Update),
+                ast::MergeAction::Delete { .. } => row_actions.declare(MergeRowAction::Delete),
+                ast::MergeAction::DoNothing => {}
+            }
+        }
         let view_target = match &table {
             TableFactor::Table { name, .. } => self
                 .context_provider
-                .resolve_dml_view_target(name, DmlViewEvent::Merge)?,
+                .resolve_dml_view_target(name, DmlViewEvent::Merge(row_actions))?,
             _ => None,
         };
         let mut table = table;
