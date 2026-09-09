@@ -190,6 +190,15 @@ impl SqlToRel<'_> {
         for call in calls {
             let reference = self.object_name_to_table_reference(call.name)?;
             let name = reference.table();
+            // A schema-qualified call such as `m_fn.series(3)` must resolve
+            // against that schema. Resolving the bare name alone only succeeds
+            // when the schema happens to sit on the search path. The relation
+            // itself is still named for the function's bare name, the way
+            // PostgreSQL names it.
+            let resolved_name = match reference.schema() {
+                Some(schema) => format!("{schema}.{name}"),
+                None => name.to_string(),
+            };
             relation_name.get_or_insert_with(|| name.to_string());
             let args = self.plan_table_function_args(
                 name,
@@ -213,7 +222,7 @@ impl SqlToRel<'_> {
                 })
                 .collect::<Result<Vec<FieldRef>>>()?;
             match self.context_provider.plan_set_returning_function(
-                name,
+                &resolved_name,
                 &args,
                 argument_schema,
                 Some(&column_definitions),
@@ -227,6 +236,7 @@ impl SqlToRel<'_> {
                 }
                 None if single_call => {
                     return self.plan_table_source_relation(
+                        &resolved_name,
                         name,
                         args,
                         &column_definitions,
@@ -309,6 +319,7 @@ impl SqlToRel<'_> {
     /// A function the provider plans as a table source of its own.
     fn plan_table_source_relation(
         &self,
+        resolved_name: &str,
         name: &str,
         args: Vec<Expr>,
         column_definitions: &[FieldRef],
@@ -317,7 +328,7 @@ impl SqlToRel<'_> {
     ) -> Result<(LogicalPlan, Option<TableAlias>)> {
         let provider = self
             .context_provider
-            .get_table_function_source_with_columns(name, args, column_definitions)?;
+            .get_table_function_source_with_columns(resolved_name, args, column_definitions)?;
         let mut plan = if let Some(inline_plan) = provider.get_logical_plan() {
             let inline_plan = inline_plan.into_owned();
             if inline_plan.all_out_ref_exprs().is_empty() {
