@@ -256,6 +256,7 @@ impl SelectBuilder {
     }
     pub fn build(&self) -> Result<ast::Select, BuilderError> {
         Ok(ast::Select {
+            hints: vec![],
             distinct: self.distinct.clone(),
             top_before_distinct: false,
             top: self.top.clone().map(SQLBox::new),

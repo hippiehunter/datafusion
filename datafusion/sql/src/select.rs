@@ -904,6 +904,7 @@ impl SqlToRel<'_> {
         let opts = opts.clone();
 
         let inner_select = Select {
+            hints: vec![],
             select_token: AttachedToken::empty(),
             distinct: None,
             top: None,

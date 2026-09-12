@@ -318,6 +318,7 @@ impl Unparser<'_> {
 
         // Create outer SELECT * FROM <name>
         let outer_select = ast::Select {
+            hints: vec![],
             select_token: AttachedToken::empty(),
             distinct: None,
             top: None,
@@ -1746,6 +1747,7 @@ impl Unparser<'_> {
         }
 
         Ok(ast::Statement::Merge {
+            hints: vec![],
             into: true,
             table,
             source,
