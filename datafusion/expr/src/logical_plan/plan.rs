@@ -5633,7 +5633,7 @@ mod tests {
     use datafusion_common::tree_node::{
         TransformedResult, TreeNodeRewriter, TreeNodeVisitor,
     };
-    use datafusion_common::{Constraint, NullsDistinct, ScalarValue, not_impl_err};
+    use datafusion_common::{Constraint, Constraints, NullsDistinct, ScalarValue, not_impl_err};
     use insta::{assert_debug_snapshot, assert_snapshot};
     use std::hash::DefaultHasher;
 
@@ -6171,22 +6171,10 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_placeholder_mismatched_metadata() {
-        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
-
-        // Create a prepared statement with explicit fields that do not have metadata
-        let plan = table_scan(TableReference::none(), &schema, None)
-            .unwrap()
-            .filter(col("id").eq(placeholder("$1")))
-            .unwrap()
-            .build()
-            .unwrap();
-        let prepared_builder = LogicalPlanBuilder::new(plan)
-            .prepare(
-                "".to_string(),
-                vec![Field::new("", DataType::Int32, true).into()],
-            )
-            .unwrap();
+    fn test_verify_prepared_fields_mismatched_metadata() {
+        // Prepared statements validate the declared parameter fields before
+        // substituting values into their plans.
+        let fields = vec![Field::new("", DataType::Int32, true).into()];
 
         // Attempt to bind a parameter with metadata
         let mut scalar_meta = HashMap::new();
@@ -6195,10 +6183,7 @@ mod tests {
             ScalarValue::Int32(Some(42)),
             Some(scalar_meta.into()),
         )]);
-        prepared_builder
-            .plan()
-            .clone()
-            .with_param_values(param_values)
+        param_values.verify_fields(&fields)
             .expect_err("prepared field metadata mismatch unexpectedly succeeded");
     }
 
