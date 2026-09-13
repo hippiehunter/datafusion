@@ -60,6 +60,32 @@ mod cases;
 mod common;
 
 #[test]
+fn values_semantic_coercion_precedes_carrier_schema_inference() {
+    use datafusion_expr::Expr;
+    use datafusion_common::ScalarValue;
+
+    let sql = "VALUES (X'61'), ('b')";
+    assert!(logical_plan(sql).is_err());
+    let mut context = MockContextProvider { state: MockSessionState::default() };
+    context.state.values_coercion = Some(|mut rows| {
+        for row in &mut rows {
+            for expr in row {
+                if let Expr::Literal(ScalarValue::Utf8(Some(value)), metadata) = expr {
+                    *expr = Expr::Literal(ScalarValue::Binary(Some(value.as_bytes().to_vec())), metadata.clone());
+                }
+            }
+        }
+        Ok(rows)
+    });
+    let statement = DFParser::parse_sql(sql).unwrap().pop_front().unwrap();
+    let plan = SqlToRel::new(&context).statement_to_plan(statement).unwrap();
+    assert_eq!(plan.schema().field(0).data_type(), &DataType::Binary);
+    let LogicalPlan::Values(values) = plan else { panic!("expected VALUES") };
+    assert_eq!(values.values.len(), 2);
+    assert!(matches!(&values.values[1][0], Expr::Literal(ScalarValue::Binary(Some(bytes)), _) if bytes == b"b"));
+}
+
+#[test]
 fn postgres_bit_string_literal_plans_as_text() {
     let plan = logical_plan("SELECT B'1010'").unwrap();
     assert_contains!(format!("{plan:?}"), "Utf8(\"1010\")");

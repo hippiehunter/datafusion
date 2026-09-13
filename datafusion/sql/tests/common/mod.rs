@@ -64,6 +64,7 @@ pub(crate) struct MockSessionState {
     type_planner: Option<Arc<dyn TypePlanner>>,
     window_functions: HashMap<String, Arc<WindowUDF>>,
     pub config_options: ConfigOptions,
+    pub values_coercion: Option<fn(Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>>>,
 }
 
 impl MockSessionState {
@@ -98,6 +99,13 @@ pub(crate) struct MockContextProvider {
 }
 
 impl ContextProvider for MockContextProvider {
+    fn plan_values_coercion(&self, rows: Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>> {
+        match self.state.values_coercion {
+            Some(coerce) => coerce(rows),
+            None => Ok(rows),
+        }
+    }
+
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {
         let schema = match name.table() {
             "test" => Ok(Schema::new(vec![

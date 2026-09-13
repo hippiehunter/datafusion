@@ -305,6 +305,14 @@ pub trait ContextProvider {
         Ok(None)
     }
 
+    /// Resolve provider-owned semantic types across a non-relational VALUES
+    /// list before the Arrow carrier types establish its schema. An embedding
+    /// can coerce unknown literals to a nominal type carried by another row.
+    /// The default preserves ordinary DataFusion VALUES inference.
+    fn plan_values_coercion(&self, rows: Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>> {
+        Ok(rows)
+    }
+
     /// Gantry: construct the host's error for a statement that supplies a
     /// non-DEFAULT value for a generated column.
     fn generated_column_write_error(
