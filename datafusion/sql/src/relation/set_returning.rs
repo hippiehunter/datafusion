@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use crate::planner::{PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, SetReturningColumns, SqlToRel};
 
 use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::metadata::FieldMetadata;
@@ -180,6 +180,7 @@ impl SqlToRel<'_> {
             })
             .unwrap_or_default();
         let mut columns: Vec<(String, Expr)> = Vec::new();
+        let mut record_columns = Vec::new();
         let mut relation_name = None;
         // Earlier FROM items are correlated inputs, not columns of the
         // function relation's own one-row input. They are on the outer-query
@@ -227,7 +228,11 @@ impl SqlToRel<'_> {
                 argument_schema,
                 Some(&column_definitions),
             )? {
-                Some(expansion) => columns.extend(expansion.columns),
+                Some(SetReturningColumns::Lists(output)) => columns.extend(output),
+                Some(SetReturningColumns::Rows(rows)) => {
+                    record_columns.push(columns.len());
+                    columns.push((name.to_owned(), rows));
+                }
                 None if name == "unnest" => {
                     for arg in args {
                         Self::check_unnest_arg(&arg, argument_schema)?;
@@ -266,7 +271,7 @@ impl SqlToRel<'_> {
             .zip(&internal)
             .map(|((_, expr), name)| expr.clone().alias(name))
             .collect::<Vec<_>>();
-        let unnested = LogicalPlanBuilder::empty(true)
+        let mut unnested = LogicalPlanBuilder::empty(true)
             .project(lists)?
             .unnest_columns_with_options(
                 internal.iter().map(Column::from_name).collect(),
@@ -275,22 +280,37 @@ impl SqlToRel<'_> {
                     .with_ordinality(with_ordinality),
             )?;
 
-        let mut names: Vec<String> = columns.into_iter().map(|(name, _)| name).collect();
+        let mut names = Vec::new();
+        let mut output_columns = Vec::new();
+        for (index, ((name, _), internal)) in columns.into_iter().zip(&internal).enumerate() {
+            if record_columns.contains(&index) {
+                let field = unnested.schema().field_with_unqualified_name(internal)?;
+                let DataType::Struct(fields) = field.data_type() else {
+                    return plan_err!("{name} must return a list of records");
+                };
+                for field in fields {
+                    names.push(field.name().clone());
+                    output_columns.push(Column::from_name(format!("{internal}.{}", field.name())));
+                }
+            } else {
+                names.push(name);
+                output_columns.push(Column::from_name(internal));
+            }
+        }
+        if !record_columns.is_empty() {
+            unnested = unnested.unnest_columns_with_options(record_columns.iter()
+                .map(|index| Column::from_name(&internal[*index])).collect(), UnnestOptions::new())?;
+        }
         let mut alias = alias;
-        // A function returning a base type takes a bare table alias as the
-        // name of its one column.
-        if single_call
-            && names.len() == 1
+        // A base-type result takes a bare table alias as its column name.
+        if single_call && record_columns.is_empty() && names.len() == 1
             && let Some(table_alias) = &alias
             && table_alias.columns.is_empty()
         {
             names[0] = self.ident_normalizer.normalize(table_alias.name.clone());
         }
-        let mut output: Vec<Expr> = internal
-            .iter()
-            .zip(&names)
-            .map(|(internal, name)| Expr::Column(Column::from_name(internal)).alias(name))
-            .collect();
+        let mut output: Vec<Expr> = output_columns.into_iter().zip(&names)
+            .map(|(column, name)| Expr::Column(column).alias(name)).collect();
         if with_ordinality {
             output.push(Expr::Column(Column::from_name(ORDINALITY_COLUMN)));
         }

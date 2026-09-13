@@ -66,6 +66,7 @@ pub(crate) struct MockSessionState {
     pub config_options: ConfigOptions,
     pub values_coercion: Option<fn(Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>>>,
     pub literal_planner: Option<fn(Expr, sqlparser::tokenizer::Span) -> Result<Expr>>,
+    pub row_stream_function: Option<Arc<ScalarUDF>>,
 }
 
 impl MockSessionState {
@@ -100,6 +101,17 @@ pub(crate) struct MockContextProvider {
 }
 
 impl ContextProvider for MockContextProvider {
+    fn is_set_returning_function(&self, name: &str) -> bool {
+        self.state.row_stream_function.as_ref().is_some_and(|udf| udf.name() == name)
+    }
+
+    fn plan_set_returning_function(&self, name: &str, args: &[Expr],
+        _schema: &datafusion_common::DFSchema, _definitions: Option<&[FieldRef]>,
+    ) -> Result<Option<datafusion_sql::planner::SetReturningColumns>> {
+        Ok(self.state.row_stream_function.as_ref().filter(|udf| udf.name() == name)
+            .map(|udf| datafusion_sql::planner::SetReturningColumns::Rows(udf.call(args.to_vec()))))
+    }
+
     fn plan_literal(&self, expr: Expr, span: sqlparser::tokenizer::Span) -> Result<Expr> {
         match self.state.literal_planner {
             Some(plan) => plan(expr, span),
