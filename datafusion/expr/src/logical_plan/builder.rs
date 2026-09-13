@@ -355,7 +355,14 @@ impl LogicalPlanBuilder {
                     );
                 }
             }
-            fields.push(field_type.to_owned(), field_nullable);
+            // A declared schema also supplies the field's semantic identity.
+            // Dropping its metadata makes a previously coerced extension value
+            // indistinguishable from an untyped value with the same carrier.
+            fields.push_with_metadata(
+                field_type.to_owned(),
+                field_nullable,
+                Some(FieldMetadata::from(schema.field(j).metadata().clone())),
+            );
         }
 
         Self::infer_inner(values, fields, schema)
@@ -1611,10 +1618,6 @@ struct ValuesFields {
 impl ValuesFields {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn push(&mut self, data_type: DataType, nullable: bool) {
-        self.push_with_metadata(data_type, nullable, None);
     }
 
     pub fn push_with_metadata(
@@ -3060,6 +3063,30 @@ mod tests {
         .build()?;
         assert!(values.schema().field(0).metadata().is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_values_with_schema_retains_declared_field_metadata() -> Result<()> {
+        let metadata = HashMap::from([
+            ("ARROW:extension:name".to_string(), "opaque_value".to_string()),
+            ("units".to_string(), "meters".to_string()),
+        ]);
+        let schema = Arc::new(DFSchema::from_unqualified_fields(
+            vec![Field::new("target", DataType::Binary, true)
+                .with_metadata(metadata.clone())].into(),
+            HashMap::new(),
+        )?);
+        let values = LogicalPlanBuilder::values_with_schema(
+            vec![vec![lit(ScalarValue::Binary(Some(vec![1, 2, 3])))],
+                 vec![lit(ScalarValue::Binary(None))]],
+            &schema,
+        )?.build()?;
+        let field = values.schema().field(0);
+        assert_eq!(field.metadata(), &metadata);
+        assert_eq!(field.name(), "column1");
+        assert_eq!(field.data_type(), &DataType::Binary);
+        assert!(field.is_nullable());
         Ok(())
     }
 
