@@ -7679,6 +7679,25 @@ mod tests {
     }
 
     #[test]
+    fn list_scalar_extraction_preserves_element_metadata() {
+        let field = Field::new("element", DataType::Int32, true).with_metadata(
+            std::collections::HashMap::from([("semantic_type".into(), "path".into())]),
+        );
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![Some(1), None, Some(3)]));
+        let builder = SingleRowListArrayBuilder::new(values).with_field(&field);
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(builder.clone().build_list_array()),
+            Arc::new(builder.clone().build_large_list_array()),
+            Arc::new(builder.build_fixed_size_list_array(3)),
+        ];
+        for array in arrays {
+            let scalar = ScalarValue::try_from_array(array.as_ref(), 0).unwrap();
+            assert_eq!(&scalar.data_type(), array.data_type());
+            assert_eq!(scalar.to_array().unwrap().as_ref(), array.as_ref());
+        }
+    }
+
+    #[test]
     fn cast_round_trip() {
         check_scalar_cast(ScalarValue::Int8(Some(5)), DataType::Int16);
         check_scalar_cast(ScalarValue::Int8(None), DataType::Int16);
