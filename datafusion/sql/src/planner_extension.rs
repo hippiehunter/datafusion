@@ -42,15 +42,14 @@ use datafusion_expr::{
 
 use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor};
 
-/// The output of a set-returning function call as lists: one list-valued
-/// expression per output column, holding the call's `n`th row at position `n`
-/// of every column. Unnesting the columns together yields the call's rows;
-/// a column that runs short pads with NULL, which is what lets `ROWS FROM`
-/// zip several calls into one row set.
+/// Row expansion supplied by an embedding. List columns zip by position;
+/// a list of records evaluates a multi-column function and its arguments once.
 #[derive(Debug, Clone)]
-pub struct SetReturningColumns {
-    /// `(output column name, list-valued expression)` in output order.
-    pub columns: Vec<(String, Expr)>,
+pub enum SetReturningColumns {
+    /// One list expression per named output column. Short lists pad with NULL.
+    Lists(Vec<(String, Expr)>),
+    /// One list expression whose element is a Struct with named output fields.
+    Rows(Expr),
 }
 
 /// Physical sampling strategy requested by a SQL `TABLESAMPLE` clause.

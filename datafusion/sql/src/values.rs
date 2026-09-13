@@ -218,17 +218,33 @@ impl SqlToRel<'_> {
                 .context_provider
                 .plan_set_returning_function(&name, &args, &schema, None)?
         {
-            let internal = (0..expansion.columns.len())
+            let columns = match expansion {
+                crate::planner::SetReturningColumns::Lists(columns) => columns,
+                crate::planner::SetReturningColumns::Rows(rows) => {
+                    let mut plan = LogicalPlanBuilder::empty(true)
+                        .project(vec![rows.alias("__values_srf_row")])?
+                        .unnest_columns_with_options(vec![Column::from_name("__values_srf_row")],
+                            UnnestOptions::new().with_preserve_nulls(false))?;
+                    let DataType::Struct(fields) = plan.schema().field(0).data_type() else {
+                        return plan_err!("{name} must return a list of records");
+                    };
+                    let output = fields.iter().map(|field| {
+                        Expr::Column(Column::from_name(format!("__values_srf_row.{}", field.name())))
+                            .alias(field.name())
+                    }).collect::<Vec<_>>();
+                    plan = plan.unnest_column("__values_srf_row")?;
+                    return Ok(Some(plan.project(output)?.build()?));
+                }
+            };
+            let internal = (0..columns.len())
                 .map(|index| format!("__values_srf_{index}"))
                 .collect::<Vec<_>>();
-            let lists = expansion
-                .columns
+            let lists = columns
                 .iter()
                 .zip(&internal)
                 .map(|((_, expr), internal)| expr.clone().alias(internal))
                 .collect::<Vec<_>>();
-            let output = expansion
-                .columns
+            let output = columns
                 .iter()
                 .zip(&internal)
                 .map(|((name, _), internal)| {

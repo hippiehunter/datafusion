@@ -120,6 +120,46 @@ fn literal_provider_receives_original_unicode_and_multiline_spans() {
 }
 
 #[test]
+fn record_stream_expands_fields_without_duplicating_its_call() {
+    let fields = Fields::from(vec![Field::new("id", DataType::Int32, false),
+        Field::new("label", DataType::Utf8, true).with_metadata(std::collections::HashMap::from([
+            ("test.identity".to_owned(), "label_type".to_owned()),
+        ]))]);
+    let rows_type = DataType::new_list(DataType::Struct(fields.clone()), false);
+    let mut context = MockContextProvider { state: MockSessionState::default() };
+    context.state.row_stream_function = Some(Arc::new(make_udf("row_stream", vec![DataType::Int64], rows_type)));
+    for (sql, names, calls) in [
+        ("SELECT * FROM row_stream(1) WITH ORDINALITY", vec!["id", "label", "ordinality"], 1),
+        ("SELECT * FROM ROWS FROM (row_stream(1),row_stream(2)) AS t(a,b,c,d)", vec!["a", "b", "c", "d"], 2),
+        ("SELECT r.id,r.label FROM person,LATERAL row_stream(person.age) AS r", vec!["id", "label"], 1),
+    ] {
+        let stmt = DFParser::parse_sql(sql).unwrap().pop_front().unwrap();
+        let plan = SqlToRel::new(&context).statement_to_plan(stmt).unwrap();
+        assert_eq!(plan.schema().fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>(), names);
+        assert_eq!(row_stream_calls(&plan), calls, "{sql}");
+        assert_eq!(plan.schema().field(1).metadata().get("test.identity").map(String::as_str), Some("label_type"));
+    }
+    let stmt = DFParser::parse_sql("SELECT row_stream(1)").unwrap().pop_front().unwrap();
+    let plan = SqlToRel::new(&context).statement_to_plan(stmt).unwrap();
+    assert_eq!(plan.schema().field(0).data_type(), &DataType::Struct(fields));
+    assert_eq!(row_stream_calls(&plan), 1);
+
+    fn row_stream_calls(plan: &LogicalPlan) -> usize {
+        let mut count = 0;
+        plan.apply(|node| {
+            for expr in node.expressions() {
+                expr.apply(|expr| {
+                    if matches!(expr, datafusion_expr::Expr::ScalarFunction(f) if f.func.name() == "row_stream") { count += 1; }
+                    Ok(TreeNodeRecursion::Continue)
+                })?;
+            }
+            Ok(TreeNodeRecursion::Continue)
+        }).unwrap();
+        count
+    }
+}
+
+#[test]
 fn on_conflict_tuple_assignment_is_planned_as_scalar_assignments() {
     let plan = logical_plan(
         "INSERT INTO person (id, first_name, last_name) VALUES (1, 'A', 'B') \

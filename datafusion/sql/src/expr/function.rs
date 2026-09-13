@@ -459,7 +459,8 @@ impl SqlToRel<'_> {
                 .context_provider
                 .plan_set_returning_function(&name, &srf_args, schema, None)?
             {
-                Some(expansion) => self.set_returning_expr(&name, expansion.columns),
+                Some(crate::planner::SetReturningColumns::Lists(columns)) => self.set_returning_expr(&name, columns),
+                Some(crate::planner::SetReturningColumns::Rows(rows)) => Ok(Expr::Unnest(Unnest::new(rows))),
                 None => self.set_returning_source_expr(&name, srf_args),
             };
         }
