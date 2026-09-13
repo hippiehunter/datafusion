@@ -103,6 +103,23 @@ fn postgres_bit_string_literal_plans_as_text() {
 }
 
 #[test]
+fn literal_provider_receives_original_unicode_and_multiline_spans() {
+    use datafusion_common::metadata::FieldMetadata;
+    use datafusion_expr::Expr;
+    let mut context = MockContextProvider { state: MockSessionState::default() };
+    context.state.literal_planner = Some(|expr, span| {
+        let Expr::Literal(value, _) = expr else { return Ok(expr); };
+        Ok(Expr::Literal(value, Some(FieldMetadata::from(std::collections::HashMap::from([
+            ("test.origin".to_owned(), format!("{}:{}", span.start.line, span.start.column)),
+        ])))))
+    });
+    let statement = DFParser::parse_sql("SELECT 'é',\n  'second'").unwrap().pop_front().unwrap();
+    let plan = SqlToRel::new(&context).statement_to_plan(statement).unwrap();
+    assert_eq!(plan.schema().field(0).metadata().get("test.origin").map(String::as_str), Some("1:8"));
+    assert_eq!(plan.schema().field(1).metadata().get("test.origin").map(String::as_str), Some("2:3"));
+}
+
+#[test]
 fn on_conflict_tuple_assignment_is_planned_as_scalar_assignments() {
     let plan = logical_plan(
         "INSERT INTO person (id, first_name, last_name) VALUES (1, 'A', 'B') \

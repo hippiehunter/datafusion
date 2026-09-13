@@ -104,6 +104,13 @@ pub struct CreateTableLikeSource {
 ///
 /// [`TableProvider`]: https://docs.rs/datafusion/latest/datafusion/catalog/trait.TableProvider.html
 pub trait ContextProvider {
+    /// Attach embedding-owned literal metadata while its original parser span
+    /// is available. The default preserves the ordinary literal expression.
+    /// Metadata can carry source provenance independently of its carrier type.
+    fn plan_literal(&self, expr: Expr, _span: sqlparser::tokenizer::Span) -> Result<Expr> {
+        Ok(expr)
+    }
+
     /// Resolve the durable identity of a relation before the planner records
     /// it in a [`TableScan`]. Most providers use the SQL-written reference
     /// verbatim. Providers that plan stored objects can qualify a bare name

@@ -65,6 +65,7 @@ pub(crate) struct MockSessionState {
     window_functions: HashMap<String, Arc<WindowUDF>>,
     pub config_options: ConfigOptions,
     pub values_coercion: Option<fn(Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>>>,
+    pub literal_planner: Option<fn(Expr, sqlparser::tokenizer::Span) -> Result<Expr>>,
 }
 
 impl MockSessionState {
@@ -104,6 +105,13 @@ pub(crate) struct MockContextProvider {
 }
 
 impl ContextProvider for MockContextProvider {
+    fn plan_literal(&self, expr: Expr, span: sqlparser::tokenizer::Span) -> Result<Expr> {
+        match self.state.literal_planner {
+            Some(plan) => plan(expr, span),
+            None => Ok(expr),
+        }
+    }
+
     fn plan_values_coercion(&self, rows: Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>> {
         match self.state.values_coercion {
             Some(coerce) => coerce(rows),

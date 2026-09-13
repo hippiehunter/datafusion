@@ -431,11 +431,14 @@ impl SqlToRel<'_> {
         //       non-trivial arms. See https://github.com/apache/datafusion/pull/12384 for
         //       more context.
         match sql {
-            SQLExpr::Value(value) => self.parse_value(
-                value.clone().into(),
-                planner_context.prepare_param_data_types(),
-                planner_context,
-            ),
+            SQLExpr::Value(value) => {
+                let expr = self.parse_value(
+                    value.clone().into(),
+                    planner_context.prepare_param_data_types(),
+                    planner_context,
+                )?;
+                self.context_provider.plan_literal(expr, value.span)
+            }
             SQLExpr::Extract { field, expr, .. } => {
                 let mut extract_args = vec![
                     Expr::Literal(ScalarValue::from(format!("{field}")), None),
