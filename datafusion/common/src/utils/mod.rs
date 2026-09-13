@@ -34,7 +34,7 @@ use arrow::compute::{SortColumn, SortOptions, partition};
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use std::borrow::{Borrow, Cow};
 use std::cmp::{Ordering, min};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZero;
 use std::ops::Range;
 use std::sync::Arc;
@@ -425,6 +425,8 @@ pub struct SingleRowListArrayBuilder {
     /// Specify the field name for the resulting array. Defaults to value used in
     /// [`Field::new_list_field`]
     field_name: Option<String>,
+    /// Semantic metadata belongs to the element field and survives extraction.
+    field_metadata: HashMap<String, String>,
 }
 
 impl SingleRowListArrayBuilder {
@@ -434,6 +436,7 @@ impl SingleRowListArrayBuilder {
             arr,
             nullable: true,
             field_name: None,
+            field_metadata: HashMap::new(),
         }
     }
 
@@ -449,8 +452,9 @@ impl SingleRowListArrayBuilder {
         self
     }
 
-    /// Copies field name and nullable from the specified field
-    pub fn with_field(self, field: &Field) -> Self {
+    /// Copies the name, nullability and metadata from the specified field.
+    pub fn with_field(mut self, field: &Field) -> Self {
+        self.field_metadata = field.metadata().clone();
         self.with_field_name(Some(field.name().to_owned()))
             .with_nullable(field.is_nullable())
     }
@@ -496,13 +500,14 @@ impl SingleRowListArrayBuilder {
             arr,
             nullable,
             field_name,
+            field_metadata,
         } = self;
         let data_type = arr.data_type().to_owned();
         let field = match field_name {
             Some(name) => Field::new(name, data_type, nullable),
             None => Field::new_list_field(data_type, nullable),
         };
-        (Arc::new(field), arr)
+        (Arc::new(field.with_metadata(field_metadata)), arr)
     }
 }
 
