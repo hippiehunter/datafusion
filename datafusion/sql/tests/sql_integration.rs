@@ -1854,7 +1854,7 @@ fn select_with_having_refers_to_invalid_column() {
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.id, max(person.age)" appears in the SELECT clause satisfies this requirement
+        External error: Column inHAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.id, max(person.age)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -1883,7 +1883,7 @@ fn select_with_having_with_aggregate_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "max(person.age)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "max(person.age)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -1931,7 +1931,7 @@ fn select_aggregate_with_having_referencing_column_not_in_select() {
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(*)" appears in the SELECT clause satisfies this requirement
+        External error: Column inHAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(*)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -2095,7 +2095,7 @@ fn select_aggregate_with_group_by_with_having_referencing_column_not_in_group_by
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.last_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.first_name, max(person.age)" appears in the SELECT clause satisfies this requirement
+        External error: Column inHAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.last_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.first_name, max(person.age)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -2600,7 +2600,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_nested_and_not_res
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
+        External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -2613,7 +2613,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_and_its_column_sel
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
+        External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -2987,7 +2987,7 @@ fn select_7480_2() {
     assert_snapshot!(
         err.strip_backtrace(),
         @r#"
-        Error during planning: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "aggregate_test_100.c13" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "aggregate_test_100.c1, min(aggregate_test_100.c12)" appears in the SELECT clause satisfies this requirement
+        External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "aggregate_test_100.c13" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "aggregate_test_100.c1, min(aggregate_test_100.c12)" appears in the SELECT clause satisfies this requirement
         "#
     );
 }
@@ -4116,6 +4116,392 @@ fn for_update_of_unknown_relation_errors() {
 
 fn logical_plan(sql: &str) -> Result<LogicalPlan> {
     logical_plan_with_options(sql, ParserOptions::default())
+}
+
+mod postgres_planning_semantics {
+    use std::sync::Arc;
+
+    use arrow::datatypes::DataType;
+    use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion_common::{
+        Constraint, DFSchema, DataFusionError, DataFusionSqlStateError, Result,
+        ScalarValue,
+    };
+    use datafusion_expr::dml::ConflictTarget;
+    use datafusion_expr::{
+        CreateMemoryTable, DdlStatement, Distinct, DistinctOn, Expr, GetFieldAccess,
+        InsertOp, LogicalPlan, ScalarUDF, WriteOp, col, lit,
+    };
+    use datafusion_functions_aggregate::count::count_udaf;
+    use datafusion_sql::parser::DFParser;
+    use datafusion_sql::planner::{
+        ExprPlanner, PlannerResult, RawFieldAccessExpr, SqlToRel,
+    };
+    use sqlparser::dialect::PostgreSqlDialect;
+
+    use super::{logical_plan, make_udf};
+    use crate::common::{MockContextProvider, MockSessionState};
+
+    /// Shows that each planner hook ran: a condition written as the text
+    /// `'true'` becomes the boolean `true`, the arguments of `sqrt` become the
+    /// constant 4, and an array slice plans as its lower bound.
+    #[derive(Debug)]
+    struct HookProbePlanner;
+
+    impl ExprPlanner for HookProbePlanner {
+        fn plan_condition(
+            &self,
+            expr: Expr,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<Expr>> {
+            Ok(PlannerResult::Original(match expr {
+                Expr::Literal(ScalarValue::Utf8(Some(text)), _) if text == "true" => {
+                    lit(true)
+                }
+                other => other,
+            }))
+        }
+
+        fn plan_function_arguments(
+            &self,
+            function: &Arc<ScalarUDF>,
+            args: Vec<Expr>,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<Vec<Expr>>> {
+            Ok(PlannerResult::Original(if function.name() == "sqrt" {
+                vec![lit(4i64)]
+            } else {
+                args
+            }))
+        }
+
+        fn plan_field_access(
+            &self,
+            expr: RawFieldAccessExpr,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<RawFieldAccessExpr>> {
+            match expr.field_access {
+                GetFieldAccess::ListRange { start, .. } => {
+                    Ok(PlannerResult::Planned(*start))
+                }
+                field_access => Ok(PlannerResult::Original(RawFieldAccessExpr {
+                    field_access,
+                    expr: expr.expr,
+                })),
+            }
+        }
+    }
+
+    fn plan_with_hook_probe(sql: &str) -> Result<LogicalPlan> {
+        let state = MockSessionState::default()
+            .with_scalar_function(Arc::new(make_udf(
+                "sqrt",
+                vec![DataType::Int64],
+                DataType::Int64,
+            )))
+            .with_scalar_function(Arc::new(make_udf(
+                "substr",
+                vec![DataType::Utf8, DataType::Int32, DataType::Int32],
+                DataType::Utf8,
+            )))
+            .with_scalar_function(Arc::new(make_udf(
+                "pg_collate",
+                vec![DataType::Utf8, DataType::Utf8],
+                DataType::Utf8,
+            )))
+            .with_aggregate_function(count_udaf())
+            .with_expr_planner(Arc::new(HookProbePlanner));
+        let context = MockContextProvider { state };
+        let planner = SqlToRel::new(&context);
+        let mut statements = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let statement = statements.pop_front().expect("one statement");
+        planner.statement_to_plan(statement)
+    }
+
+    fn sqlstate(err: &DataFusionError) -> Option<&str> {
+        match err.find_root() {
+            DataFusionError::External(external) => external
+                .downcast_ref::<DataFusionSqlStateError>()
+                .map(|error| error.sqlstate.as_str()),
+            _ => None,
+        }
+    }
+
+    fn plan_has(plan: &LogicalPlan, predicate: impl Fn(&LogicalPlan) -> bool) -> bool {
+        let mut found = false;
+        plan.apply(|node| {
+            if predicate(node) {
+                found = true;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        found
+    }
+
+    /// The arguments of the first call to the scalar function `name` in `plan`.
+    fn scalar_call_args(plan: &LogicalPlan, name: &str) -> Option<Vec<Expr>> {
+        let mut args = None;
+        plan.apply(|node| {
+            node.apply_expressions(|expr| {
+                expr.apply(|nested| {
+                    if let Expr::ScalarFunction(function) = nested
+                        && function.name() == name
+                    {
+                        args = Some(function.args.clone());
+                        return Ok(TreeNodeRecursion::Stop);
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+            })
+        })
+        .expect("walking the plan cannot fail");
+        args
+    }
+
+    fn distinct_on(plan: &LogicalPlan) -> Option<DistinctOn> {
+        let mut found = None;
+        plan.apply(|node| {
+            if let LogicalPlan::Distinct(Distinct::On(distinct_on)) = node {
+                found = Some(distinct_on.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        found
+    }
+
+    #[test]
+    fn where_having_and_join_on_conditions_run_through_plan_condition() {
+        let is_true_filter = |node: &LogicalPlan| {
+            matches!(node, LogicalPlan::Filter(filter) if filter.predicate == lit(true))
+        };
+
+        let plan = plan_with_hook_probe("SELECT id FROM person WHERE 'true'").unwrap();
+        assert!(plan_has(&plan, is_true_filter));
+
+        let plan =
+            plan_with_hook_probe("SELECT state FROM person GROUP BY state HAVING 'true'")
+                .unwrap();
+        assert!(plan_has(&plan, is_true_filter));
+
+        let plan =
+            plan_with_hook_probe("SELECT id FROM person JOIN orders ON 'true'").unwrap();
+        assert!(plan_has(&plan, |node| {
+            matches!(node, LogicalPlan::Join(join) if join.filter == Some(lit(true)))
+        }));
+    }
+
+    #[test]
+    fn scalar_call_arguments_run_through_plan_function_arguments() {
+        let plan = plan_with_hook_probe("SELECT sqrt(age) FROM person").unwrap();
+        assert_eq!(scalar_call_args(&plan, "sqrt"), Some(vec![lit(4i64)]));
+    }
+
+    #[test]
+    fn substr_is_an_ordinary_function_call() {
+        let plan =
+            plan_with_hook_probe("SELECT SUBSTR(first_name, age, age) FROM person").unwrap();
+        assert_eq!(
+            scalar_call_args(&plan, "substr"),
+            Some(vec![
+                col("person.first_name"),
+                col("person.age"),
+                col("person.age"),
+            ])
+        );
+    }
+
+    #[test]
+    fn substr_with_from_or_for_is_a_syntax_error() {
+        for sql in [
+            "SELECT SUBSTR(first_name FROM age) FROM person",
+            "SELECT SUBSTR(first_name FOR age) FROM person",
+        ] {
+            let err = plan_with_hook_probe(sql).unwrap_err();
+            assert_eq!(sqlstate(&err), Some("42601"), "{sql}: {err}");
+        }
+    }
+
+    #[test]
+    fn slice_without_lower_bound_starts_at_the_array_lower_bound() {
+        let plan = plan_with_hook_probe("SELECT \"left\"[:2] FROM \"array\"").unwrap();
+        assert!(plan_has(&plan, |node| {
+            matches!(node, LogicalPlan::Projection(projection)
+                if projection.expr.iter().any(|expr| expr.clone().unalias() == lit(i64::MIN)))
+        }));
+    }
+
+    #[test]
+    fn collate_passes_the_collation_name_without_recasing() {
+        let plan =
+            plan_with_hook_probe("SELECT first_name COLLATE \"C\" FROM person").unwrap();
+        assert_eq!(
+            scalar_call_args(&plan, "pg_collate").and_then(|args| args.get(1).cloned()),
+            Some(lit("C"))
+        );
+
+        let plan = plan_with_hook_probe(
+            "SELECT first_name COLLATE pg_catalog.\"POSIX\" FROM person",
+        )
+        .unwrap();
+        assert_eq!(
+            scalar_call_args(&plan, "pg_collate").and_then(|args| args.get(1).cloned()),
+            Some(lit("pg_catalog.\"POSIX\""))
+        );
+    }
+
+    #[test]
+    fn on_conflict_on_constraint_names_the_constraint_as_catalogued() {
+        let plan = logical_plan(
+            "INSERT INTO person (id, first_name, last_name) VALUES (1, 'A', 'B') \
+             ON CONFLICT ON CONSTRAINT \"PersonKey\" DO NOTHING",
+        )
+        .unwrap();
+        let LogicalPlan::Dml(dml) = plan else {
+            panic!("expected DML plan");
+        };
+        let WriteOp::Insert(InsertOp::WithConflictClause(conflict)) = &dml.op else {
+            panic!("expected INSERT with ON CONFLICT");
+        };
+        assert_eq!(
+            conflict.conflict_target,
+            Some(ConflictTarget::OnConstraint("PersonKey".to_string()))
+        );
+    }
+
+    #[test]
+    fn on_conflict_on_qualified_constraint_is_a_syntax_error() {
+        let err = logical_plan(
+            "INSERT INTO person (id, first_name, last_name) VALUES (1, 'A', 'B') \
+             ON CONFLICT ON CONSTRAINT public.person_pkey DO NOTHING",
+        )
+        .unwrap_err();
+        assert_eq!(sqlstate(&err), Some("42601"), "{err}");
+    }
+
+    #[test]
+    fn foreign_key_target_is_the_identifier_values_of_its_name() {
+        let plan = logical_plan(
+            "CREATE TABLE child (id INT, parent_id INT REFERENCES app.\"Parent\" (id))",
+        )
+        .unwrap();
+        let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            spec,
+            ..
+        })) = plan
+        else {
+            panic!("expected CreateMemoryTable plan");
+        };
+        let referenced = spec.constraints.iter().find_map(|constraint| match constraint {
+            Constraint::ForeignKey {
+                referenced_table, ..
+            } => Some(referenced_table.clone()),
+            _ => None,
+        });
+        assert_eq!(referenced.as_deref(), Some("app.Parent"));
+    }
+
+    #[test]
+    fn partition_key_opclass_and_collation_are_identifier_values() {
+        let plan = logical_plan(
+            "CREATE TABLE measurements (city TEXT) \
+             PARTITION BY RANGE (city COLLATE \"C\" pg_catalog.\"text_pattern_ops\")",
+        )
+        .unwrap();
+        let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+            spec,
+            ..
+        })) = plan
+        else {
+            panic!("expected CreateMemoryTable plan");
+        };
+        let partitioning = spec.partitioning.expect("partitioned table");
+        assert_eq!(partitioning.keys[0].collation.as_deref(), Some("C"));
+        assert_eq!(
+            partitioning.keys[0].opclass.as_deref(),
+            Some("pg_catalog.text_pattern_ops")
+        );
+    }
+
+    #[test]
+    fn distinct_on_over_grouped_rows_is_planned_after_aggregation() {
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (state) state, count(*) FROM person \
+             GROUP BY state ORDER BY state, count(*) DESC",
+        )
+        .unwrap();
+        let distinct_on = distinct_on(&plan).expect("DISTINCT ON node");
+        assert!(matches!(distinct_on.input.as_ref(), LogicalPlan::Aggregate(_)));
+        assert_eq!(distinct_on.sort_expr.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn aggregate_written_only_in_distinct_on_is_aggregated() {
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (count(*)) state FROM person GROUP BY state",
+        )
+        .unwrap();
+        let distinct_on = distinct_on(&plan).expect("DISTINCT ON node");
+        let LogicalPlan::Aggregate(aggregate) = distinct_on.input.as_ref() else {
+            panic!("DISTINCT ON must read the aggregated rows");
+        };
+        assert_eq!(aggregate.aggr_expr.len(), 1);
+    }
+
+    #[test]
+    fn distinct_on_over_windowed_rows_is_planned_after_the_window() {
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (sum(age) OVER (PARTITION BY state)) id FROM person",
+        )
+        .unwrap();
+        let distinct_on = distinct_on(&plan).expect("DISTINCT ON node");
+        assert!(matches!(distinct_on.input.as_ref(), LogicalPlan::Window(_)));
+    }
+
+    #[test]
+    fn distinct_on_reads_an_output_alias_as_its_expression() {
+        let plan =
+            logical_plan("SELECT DISTINCT ON (s) state AS s, id FROM person ORDER BY s, id")
+                .unwrap();
+        let distinct_on = distinct_on(&plan).expect("DISTINCT ON node");
+        assert_eq!(distinct_on.on_expr, vec![col("person.state")]);
+    }
+
+    #[test]
+    fn distinct_on_accepts_its_expressions_leading_order_by_in_any_order() {
+        logical_plan(
+            "SELECT DISTINCT ON (id, state) id, state FROM person ORDER BY state, id, age",
+        )
+        .unwrap();
+        logical_plan("SELECT DISTINCT ON (id, state) id, state FROM person ORDER BY id")
+            .unwrap();
+    }
+
+    #[test]
+    fn distinct_on_not_leading_order_by_is_42p10() {
+        for sql in [
+            "SELECT DISTINCT ON (state) id, state FROM person ORDER BY id",
+            "SELECT DISTINCT ON (state) id, state FROM person ORDER BY id, state",
+        ] {
+            let err = logical_plan(sql).unwrap_err();
+            assert_eq!(sqlstate(&err), Some("42P10"), "{sql}: {err}");
+        }
+    }
+
+    #[test]
+    fn ungrouped_columns_are_grouping_errors() {
+        for sql in [
+            "SELECT first_name, count(*) FROM person GROUP BY state",
+            "SELECT DISTINCT ON (count(*)) state FROM person",
+            "SELECT DISTINCT ON (state) count(*) FROM person",
+        ] {
+            let err = logical_plan(sql).unwrap_err();
+            assert_eq!(sqlstate(&err), Some("42803"), "{sql}: {err}");
+        }
+    }
 }
 
 #[test]

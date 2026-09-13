@@ -543,6 +543,13 @@ impl SqlToRel<'_> {
             };
 
             // After resolution, all arguments are positional
+            let mut resolved_args = resolved_args;
+            for planner in self.context_provider.get_expr_planners() {
+                match planner.plan_function_arguments(&fm, resolved_args, schema)? {
+                    PlannerResult::Planned(expr) => return Ok(expr),
+                    PlannerResult::Original(args) => resolved_args = args,
+                }
+            }
             let inner = ScalarFunction::new_udf(fm, resolved_args);
 
             if name.eq_ignore_ascii_case(inner.name()) {

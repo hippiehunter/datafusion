@@ -66,6 +66,7 @@ use datafusion_common::{
     TableReference, UnnestOptions, UsingColumns, aggregate_functional_dependencies,
     assert_eq_or_internal_err, assert_or_internal_err, internal_err, plan_err,
 };
+use datafusion_common::error::sqlstate_datafusion_err;
 use indexmap::IndexSet;
 
 // backwards compatibility
@@ -4669,28 +4670,41 @@ impl DistinctOn {
 
     /// Try to update `self` with a new sort expressions.
     ///
-    /// Validates that the sort expressions are a super-set of the `ON` expressions.
+    /// Follows PostgreSQL: the ORDER BY items that are `ON` expressions come
+    /// before every other item, in any order, and once any other item is
+    /// present every `ON` expression is among those leading items. Otherwise
+    /// the error is 42P10.
     pub fn with_sort_expr(mut self, sort_expr: Vec<SortExpr>) -> Result<Self> {
         let sort_expr = normalize_sorts(sort_expr, self.input.as_ref())?;
 
-        // Check that the left-most sort expressions are the same as the `ON` expressions.
-        let mut matched = true;
-        for (on, sort) in self.on_expr.iter().zip(sort_expr.iter()) {
-            if on != &sort.expr {
-                matched = false;
-                break;
+        let mut other_item_seen = false;
+        let mut leading: Vec<&Expr> = Vec::with_capacity(self.on_expr.len());
+        for sort in &sort_expr {
+            if self.on_expr.contains(&sort.expr) {
+                if other_item_seen {
+                    return Err(distinct_on_order_by_mismatch());
+                }
+                leading.push(&sort.expr);
+            } else {
+                other_item_seen = true;
             }
         }
-
-        if self.on_expr.len() > sort_expr.len() || !matched {
-            return plan_err!(
-                "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
-            );
+        if other_item_seen && self.on_expr.iter().any(|on| !leading.contains(&on)) {
+            return Err(distinct_on_order_by_mismatch());
         }
 
         self.sort_expr = Some(sort_expr);
         Ok(self)
     }
+}
+
+/// The 42P10 error for an ORDER BY that does not begin with the DISTINCT ON
+/// expressions.
+fn distinct_on_order_by_mismatch() -> DataFusionError {
+    sqlstate_datafusion_err(
+        "42P10",
+        "SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
+    )
 }
 
 // Manual implementation needed because of `schema` field. Comparison excludes this field.

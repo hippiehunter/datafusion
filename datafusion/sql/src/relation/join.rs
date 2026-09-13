@@ -140,6 +140,7 @@ impl SqlToRel<'_> {
                     &join_schema,
                     planner_context,
                 )?;
+                let expr = self.plan_condition_expr(expr, &join_schema)?;
                 LogicalPlanBuilder::from(left)
                     .join_on(right, join_type, Some(expr))?
                     .build()

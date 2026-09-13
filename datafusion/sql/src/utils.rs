@@ -29,6 +29,7 @@ use datafusion_common::{
     Column, DFSchemaRef, Diagnostic, HashMap, Location, Result, ScalarValue, Span,
     assert_or_internal_err, exec_datafusion_err, exec_err, internal_err, plan_err,
 };
+use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_expr::builder::get_struct_unnested_columns;
 use datafusion_expr::expr::{
     Alias, GroupingSet, Unnest, WindowFunction, WindowFunctionParams,
@@ -111,6 +112,7 @@ pub(crate) enum CheckColumnsMustReferenceAggregatePurpose {
     Having,
     Qualify,
     OrderBy,
+    DistinctOn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +134,9 @@ impl CheckColumnsSatisfyExprsPurpose {
             }
             Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::OrderBy) => {
                 "Column in ORDER BY must be in GROUP BY or an aggregate function"
+            }
+            Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::DistinctOn) => {
+                "Column in DISTINCT ON must be in GROUP BY or an aggregate function"
             }
         }
     }
@@ -192,13 +197,18 @@ fn check_column_satisfies_expr(
         )
         .with_help(format!("Either add '{expr}' to GROUP BY clause, or use an aggregate function like ANY_VALUE({expr})"), None);
 
-        return plan_err!(
-            "{}: While expanding wildcard, column \"{}\" must appear in the GROUP BY clause or must be part of an aggregate function, currently only \"{}\" appears in the SELECT clause satisfies this requirement",
-            purpose.message_prefix(),
-            expr,
-            expr_vec_fmt!(columns);
-            diagnostic=diagnostic
-        );
+        // A column that is neither grouped nor aggregated is PostgreSQL's
+        // grouping_error.
+        return Err(sqlstate_datafusion_err(
+            "42803",
+            format!(
+                "{}: While expanding wildcard, column \"{}\" must appear in the GROUP BY clause or must be part of an aggregate function, currently only \"{}\" appears in the SELECT clause satisfies this requirement",
+                purpose.message_prefix(),
+                expr,
+                expr_vec_fmt!(columns)
+            ),
+        )
+        .with_diagnostic(diagnostic));
     }
     Ok(())
 }

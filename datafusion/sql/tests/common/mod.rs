@@ -85,6 +85,11 @@ impl MockSessionState {
         self
     }
 
+    pub fn with_expr_planner(mut self, expr_planner: Arc<dyn ExprPlanner>) -> Self {
+        self.expr_planners.push(expr_planner);
+        self
+    }
+
     #[allow(dead_code)] // Window function crate was pruned but keep method for potential future use
     pub fn with_window_function(mut self, window_function: Arc<WindowUDF>) -> Self {
         self.window_functions

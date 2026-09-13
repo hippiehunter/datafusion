@@ -296,6 +296,23 @@ impl SqlToRel<'_> {
         )))
     }
 
+    /// Run a search condition through the registered expression planners'
+    /// `plan_condition` before it becomes the predicate of a plan node.
+    pub(crate) fn plan_condition_expr(
+        &self,
+        expr: Expr,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        let mut condition = expr;
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_condition(condition, schema)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(expr) => condition = expr,
+            }
+        }
+        Ok(condition)
+    }
+
     pub fn sql_to_expr_with_alias(
         &self,
         sql: SQLExprWithAlias,
@@ -857,13 +874,28 @@ impl SqlToRel<'_> {
                 internal_err!("binary_op should be handled by sql_expr_to_logical_expr.")
             }
 
+            SQLExpr::Substring {
+                expr,
+                substring_from,
+                substring_for,
+                special,
+                shorthand: true,
+            } => self.sql_substr_to_expr(
+                expr,
+                substring_from.as_ref(),
+                substring_for.as_ref(),
+                *special,
+                schema,
+                planner_context,
+            ),
+
             #[cfg(feature = "unicode_expressions")]
             SQLExpr::Substring {
                 expr,
                 substring_from,
                 substring_for,
                 special: _,
-                shorthand: _,
+                shorthand: false,
             } => self.sql_substring_to_expr(
                 expr,
                 substring_from.as_ref(),
@@ -1177,18 +1209,19 @@ impl SqlToRel<'_> {
                 )?;
                 match self.context_provider.get_function_meta("pg_collate") {
                     Some(func) => {
-                        let name = collation
-                            .0
-                            .last()
-                            .and_then(|part| part.as_ident())
-                            .map(|ident| {
-                                if ident.quote_style.is_some() {
-                                    ident.value.clone()
-                                } else {
-                                    ident.value.to_lowercase()
-                                }
-                            })
-                            .unwrap_or_else(|| collation.to_string());
+                        // A bare name arrives as its identifier value, the
+                        // collation's catalog spelling. A qualified name
+                        // arrives whole as SQL text, whose quoted parts stay
+                        // exact and whose unquoted parts the reader folds. No
+                        // part is re-cased here: the parser already applied
+                        // the dialect's fold.
+                        let name = match collation.0.as_slice() {
+                            [part] => part
+                                .as_ident()
+                                .map(|ident| ident.value.clone())
+                                .unwrap_or_else(|| collation.to_string()),
+                            _ => collation.to_string(),
+                        };
                         Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
                             func,
                             vec![operand, lit(name)],
@@ -1854,7 +1887,7 @@ impl SqlToRel<'_> {
                             stride,
                         } => {
                             // Handle array slice with optional bounds:
-                            // [:3] - slice from beginning (default start to 1, SQL arrays are 1-indexed)
+                            // [:3] - slice from the array's first element (default start to i64::MIN)
                             // [2:] - slice to end (default stop to i64::MAX for "to the end")
                             // [::2] - slice with stride (both bounds default)
                             let lower_bound = if let Some(lower_bound) = lower_bound {
@@ -1864,8 +1897,12 @@ impl SqlToRel<'_> {
                                     planner_context,
                                 )?
                             } else {
-                                // SQL arrays are 1-indexed, so start from 1
-                                lit(1i64)
+                                // An array's lower bound is not always 1
+                                // (`int2vector` starts at 0). i64::MIN is
+                                // "from the start", which `array_slice` clips
+                                // to the array's own lower bound, the way
+                                // i64::MAX below is "to the end".
+                                lit(i64::MIN)
                             };
 
                             let upper_bound = if let Some(upper_bound) = upper_bound {

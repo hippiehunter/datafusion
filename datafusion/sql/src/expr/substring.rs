@@ -17,13 +17,61 @@
 
 use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
 use arrow::datatypes::DataType;
+use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::{DFSchema, Result, ScalarValue};
 use datafusion_common::{not_impl_err, plan_err};
 use datafusion_expr::{Expr, ExprSchemable};
 
-use sqlparser::ast::{AstBox as SQLBox, Expr as SQLExpr};
+use sqlparser::ast::{
+    AstBox as SQLBox, AttachedToken, Expr as SQLExpr, Function as SQLFunction,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident,
+    ObjectName,
+};
 
 impl SqlToRel<'_> {
+    /// `SUBSTR(string, start [, count])`. PostgreSQL's `substr` is an ordinary
+    /// function, so the call plans like any other call to a function named
+    /// `substr`. The `FROM`/`FOR` spelling belongs to `SUBSTRING` alone; with
+    /// `SUBSTR` it is a syntax error.
+    pub(super) fn sql_substr_to_expr(
+        &self,
+        expr: &SQLBox<SQLExpr>,
+        substr_from: Option<&SQLBox<SQLExpr>>,
+        substr_for: Option<&SQLBox<SQLExpr>>,
+        comma_separated: bool,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        if !comma_separated && (substr_from.is_some() || substr_for.is_some()) {
+            return Err(sqlstate_datafusion_err(
+                "42601",
+                "syntax error: SUBSTR takes comma-separated arguments; FROM and FOR belong to SUBSTRING",
+            ));
+        }
+        let args = std::iter::once(expr)
+            .chain(substr_from)
+            .chain(substr_for)
+            .map(|arg| FunctionArg::Unnamed(FunctionArgExpr::Expr(arg.as_ref().clone())))
+            .collect();
+        let function = SQLFunction {
+            name: ObjectName::from(vec![Ident::new("substr")]),
+            uses_odbc_syntax: false,
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args,
+                clauses: vec![],
+                close_paren_token: AttachedToken::empty(),
+            }),
+            filter: None,
+            null_treatment: None,
+            nth_value_order: None,
+            over: None,
+            within_group: vec![],
+        };
+        self.sql_function_to_expr(&function, schema, planner_context)
+    }
+
     pub(super) fn sql_substring_to_expr(
         &self,
         expr: &SQLBox<SQLExpr>,

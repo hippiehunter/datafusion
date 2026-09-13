@@ -77,6 +77,21 @@ impl OptimizerRule for ExtractEquijoinPredicate {
                 schema,
                 null_equality,
             }) => {
+                // The keys of a null-equal join match NULL to NULL. An `=`
+                // conjunct of its filter must keep rejecting NULL, so it stays
+                // in the filter instead of joining those keys.
+                if matches!(null_equality, NullEquality::NullEqualsNull) {
+                    return Ok(Transformed::no(LogicalPlan::Join(Join {
+                        left,
+                        right,
+                        on,
+                        filter: Some(expr),
+                        join_type,
+                        join_constraint,
+                        schema,
+                        null_equality,
+                    })));
+                }
                 let left_schema = left.schema();
                 let right_schema = right.schema();
                 let (equijoin_predicates, non_equijoin_expr) =
@@ -289,6 +304,33 @@ mod tests {
                 @ $expected,
             )
         }};
+    }
+
+    #[test]
+    fn null_equal_join_keeps_equality_conjunct_in_filter() -> Result<()> {
+        let t1 = test_table_scan_with_name("t1")?;
+        let t2 = test_table_scan_with_name("t2")?;
+
+        let plan = LogicalPlanBuilder::from(t1)
+            .join_detailed(
+                t2,
+                JoinType::Inner,
+                (vec!["t1.a"], vec!["t2.a"]),
+                Some(col("t1.b").eq(col("t2.b"))),
+                NullEquality::NullEqualsNull,
+            )?
+            .build()?;
+
+        let rewritten = ExtractEquijoinPredicate::new()
+            .rewrite(plan, &crate::OptimizerContext::new())?;
+        assert!(!rewritten.transformed);
+        let LogicalPlan::Join(join) = rewritten.data else {
+            panic!("expected a join");
+        };
+        assert_eq!(join.on.len(), 1);
+        assert!(join.filter.is_some());
+        assert!(matches!(join.null_equality, NullEquality::NullEqualsNull));
+        Ok(())
     }
 
     #[test]

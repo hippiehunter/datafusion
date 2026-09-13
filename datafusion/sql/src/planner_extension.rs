@@ -471,6 +471,32 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(args))
     }
 
+    /// Plan the arguments of a call to the scalar function `function`, after
+    /// named arguments are resolved to positions and before the call is built.
+    ///
+    /// Returns the original arguments if not possible; a `Planned` expression
+    /// replaces the whole call.
+    fn plan_function_arguments(
+        &self,
+        _function: &Arc<ScalarUDF>,
+        args: Vec<Expr>,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<Vec<Expr>>> {
+        Ok(PlannerResult::Original(args))
+    }
+
+    /// Plan a search condition — a `WHERE`, `HAVING` or join `ON`
+    /// expression — before it becomes the predicate of its plan node.
+    ///
+    /// Returns the original expression if not possible
+    fn plan_condition(
+        &self,
+        expr: Expr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<Expr>> {
+        Ok(PlannerResult::Original(expr))
+    }
+
     /// Plans a struct literal, such as  `{'field1' : expr1, 'field2' : expr2, ...}`
     ///
     /// This function takes a vector of expressions and a boolean flag

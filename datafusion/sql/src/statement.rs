@@ -38,6 +38,7 @@ use crate::values::is_default_identifier;
 
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema};
 use datafusion_common::error::_plan_err;
+use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -87,6 +88,24 @@ use sqlparser::ast::{
     Statement, Subscript, TableConstraint, TableFactor, TableWithJoins, UnaryOperator,
     Value, Visitor,
 };
+
+/// The catalog spelling of a possibly qualified name: each part's identifier
+/// value (a quoted part as written, an unquoted part as the dialect folded it)
+/// joined with `.`. The name's `Display` re-adds quotes and never names a
+/// catalog object.
+fn object_name_value(name: &ObjectName) -> Result<String> {
+    name.0
+        .iter()
+        .map(|part| {
+            part.as_ident()
+                .map(|ident| ident.value.as_str())
+                .ok_or_else(|| {
+                    plan_datafusion_err!("expected an identifier in the name {name}")
+                })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join("."))
+}
 
 /// Statements whose semantics are owned by the embedding database rather than
 /// the relational planner. Keeping this check at the borrowed front door is
@@ -1177,8 +1196,14 @@ impl SqlToRel<'_> {
                 column_name,
                 expr,
                 result_type,
-                opclass: key.opclass.map(|name| name.to_string()),
-                collation: key.collation.map(|name| name.to_string()),
+                opclass: key
+                    .opclass
+                    .map(|name| object_name_value(&name))
+                    .transpose()?,
+                collation: key
+                    .collation
+                    .map(|name| object_name_value(&name))
+                    .transpose()?,
             });
         }
         Ok(Some(CreateTablePartitioning { strategy, keys }))
@@ -2593,7 +2618,7 @@ impl SqlToRel<'_> {
                     Ok(Constraint::ForeignKey {
                         name: fk.name.as_ref().map(|n| n.value.clone()),
                         columns,
-                        referenced_table: fk.foreign_table.to_string(),
+                        referenced_table: object_name_value(&fk.foreign_table)?,
                         referenced_columns,
                         on_delete: convert_action(fk.on_delete.clone()),
                         on_update: convert_action(fk.on_update.clone()),
@@ -5264,7 +5289,21 @@ impl SqlToRel<'_> {
                 idents.iter().map(|ident| ident.value.clone()).collect(),
             )),
             Some(ast::ConflictTarget::OnConstraint(name)) => {
-                Some(ConflictTarget::OnConstraint(name.to_string()))
+                // PostgreSQL's grammar takes a bare `name` here, so a qualified
+                // name is a syntax error. The target is the constraint's catalog
+                // spelling, never the quoted display of the name.
+                let Some(ident) = (match name.0.as_slice() {
+                    [part] => part.as_ident(),
+                    _ => None,
+                }) else {
+                    return Err(sqlstate_datafusion_err(
+                        "42601",
+                        format!(
+                            "ON CONFLICT ON CONSTRAINT takes an unqualified constraint name, not {name}"
+                        ),
+                    ));
+                };
+                Some(ConflictTarget::OnConstraint(ident.value.clone()))
             }
             Some(ast::ConflictTarget::Inference(inference)) => {
                 let plain_columns = inference.predicate.is_none()
