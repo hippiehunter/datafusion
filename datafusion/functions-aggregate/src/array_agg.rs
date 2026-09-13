@@ -111,13 +111,26 @@ impl AggregateUDFImpl for ArrayAgg {
         ))))
     }
 
+    fn return_field(&self, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+        let item = arg_fields[0]
+            .as_ref()
+            .clone()
+            .with_name("item")
+            .with_nullable(true);
+        Ok(Arc::new(Field::new_list(self.name(), item, true)))
+    }
+
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
         if args.is_distinct {
             return Ok(vec![
                 Field::new_list(
                     format_state_name(args.name, "distinct_array_agg"),
                     // See COMMENTS.md to understand why nullable is set to true
-                    Field::new_list_field(args.input_fields[0].data_type().clone(), true),
+                    args.input_fields[0]
+                        .as_ref()
+                        .clone()
+                        .with_name("item")
+                        .with_nullable(true),
                     true,
                 )
                 .into(),
@@ -128,7 +141,11 @@ impl AggregateUDFImpl for ArrayAgg {
             Field::new_list(
                 format_state_name(args.name, "array_agg"),
                 // See COMMENTS.md to understand why nullable is set to true
-                Field::new_list_field(args.input_fields[0].data_type().clone(), true),
+                args.input_fields[0]
+                    .as_ref()
+                    .clone()
+                    .with_name("item")
+                    .with_nullable(true),
                 true,
             )
             .into(),
@@ -194,18 +211,21 @@ impl AggregateUDFImpl for ArrayAgg {
                     );
                 }
             };
-            return Ok(Box::new(DistinctArrayAggAccumulator::try_new(
-                data_type,
-                sort_option,
-                ignore_nulls,
-            )?));
+            return Ok(preserve_item_metadata(
+                Box::new(DistinctArrayAggAccumulator::try_new(
+                    data_type,
+                    sort_option,
+                    ignore_nulls,
+                )?),
+                field,
+            ));
         }
 
         let Some(ordering) = LexOrdering::new(acc_args.order_bys.to_vec()) else {
-            return Ok(Box::new(ArrayAggAccumulator::try_new(
-                data_type,
-                ignore_nulls,
-            )?));
+            return Ok(preserve_item_metadata(
+                Box::new(ArrayAggAccumulator::try_new(data_type, ignore_nulls)?),
+                field,
+            ));
         };
 
         let ordering_dtypes = ordering
@@ -221,7 +241,7 @@ impl AggregateUDFImpl for ArrayAgg {
             acc_args.is_reversed,
             ignore_nulls,
         )
-        .map(|acc| Box::new(acc) as _)
+        .map(|acc| preserve_item_metadata(Box::new(acc), field))
     }
 
     fn reverse_expr(&self) -> datafusion_expr::ReversedUDAF {
@@ -234,6 +254,67 @@ impl AggregateUDFImpl for ArrayAgg {
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
+    }
+}
+
+/// Array values cannot carry the metadata of a scalar element by themselves.
+/// Preserve its field on both aggregate results and the first partial state.
+/// The common case without metadata keeps the original accumulator directly.
+fn preserve_item_metadata(
+    acc: Box<dyn Accumulator>,
+    field: &FieldRef,
+) -> Box<dyn Accumulator> {
+    if field.metadata().is_empty() {
+        acc
+    } else {
+        Box::new(FieldArrayAggAccumulator {
+            inner: acc,
+            field: Arc::new(field.as_ref().clone().with_name("item").with_nullable(true)),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FieldArrayAggAccumulator {
+    inner: Box<dyn Accumulator>,
+    field: FieldRef,
+}
+
+impl FieldArrayAggAccumulator {
+    fn attach(&self, value: ScalarValue) -> ScalarValue {
+        if let ScalarValue::List(list) = value {
+            ScalarValue::List(Arc::new(ListArray::new(
+                Arc::clone(&self.field),
+                list.offsets().clone(),
+                Arc::clone(list.values()),
+                list.nulls().cloned(),
+            )))
+        } else {
+            value
+        }
+    }
+}
+
+impl Accumulator for FieldArrayAggAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
+        self.inner.update_batch(values)
+    }
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
+        self.inner.merge_batch(states)
+    }
+    fn evaluate(&mut self) -> Result<ScalarValue> {
+        let value = self.inner.evaluate()?;
+        Ok(self.attach(value))
+    }
+    fn state(&mut self) -> Result<Vec<ScalarValue>> {
+        let mut states = self.inner.state()?;
+        if let Some(first) = states.first_mut() {
+            *first = self.attach(first.clone());
+        }
+        Ok(states)
+    }
+    fn size(&self) -> usize {
+        self.inner.size() + size_of_val(self) + self.field.size()
     }
 }
 
@@ -1113,6 +1194,63 @@ mod tests {
         // without compaction, the size is 17112
         assert_eq!(acc.size(), 2192);
 
+        Ok(())
+    }
+
+    #[test]
+    fn array_agg_preserves_element_field_metadata_in_results_and_states() -> Result<()> {
+        for (distinct, ordered) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut builder = ArrayAggAccumulatorBuilder::string();
+            let input = builder.schema.fields[0].as_ref().clone().with_metadata(
+                std::collections::HashMap::from([(
+                    "semantic_type".to_owned(),
+                    "custom_list".to_owned(),
+                )]),
+            );
+            builder.schema.fields = vec![input.clone()].into();
+            if distinct {
+                builder = builder.distinct();
+            }
+            if ordered {
+                builder = builder.order_by_col("col", SortOptions::new(false, false));
+            }
+            let result = ArrayAgg::default().return_field(&[Arc::new(input.clone())])?;
+            let DataType::List(item) = result.data_type() else {
+                panic!("expected list");
+            };
+            assert_eq!(item.metadata(), input.metadata());
+            let (mut first, mut merged) = builder.build_two()?;
+            for populated in [false, true] {
+                if populated {
+                    let values = string_list_data([vec!["a", "b"], vec!["c"]]);
+                    let args = if ordered {
+                        vec![Arc::clone(&values), values]
+                    } else {
+                        vec![values]
+                    };
+                    first.update_batch(&args)?;
+                }
+                let value = first.evaluate()?;
+                let DataType::List(item) = value.data_type() else {
+                    panic!("expected list");
+                };
+                assert_eq!(item.metadata(), input.metadata());
+            }
+            let states = first.state()?;
+            let DataType::List(item) = states[0].data_type() else {
+                panic!("expected list state");
+            };
+            assert_eq!(item.metadata(), input.metadata());
+            merged.merge_batch(
+                &states
+                    .iter()
+                    .map(|v| v.to_array_of_size(1))
+                    .collect::<Result<Vec<_>>>()?,
+            )?;
+            assert_eq!(merged.evaluate()?, first.evaluate()?);
+        }
         Ok(())
     }
 
