@@ -144,6 +144,7 @@ impl SqlToRel<'_> {
                     .collect::<Result<Vec<_>>>()
             })
             .collect::<Result<Vec<_>>>()?;
+        let values = self.context_provider.plan_values_coercion(values)?;
         if schema.fields().is_empty() {
             LogicalPlanBuilder::values(values)?.build()
         } else {
