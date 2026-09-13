@@ -4722,6 +4722,30 @@ Sort: z ASC NULLS LAST
 }
 
 #[test]
+fn cast_column_labels_bind_order_by_to_the_projected_value() {
+    for sql in [
+        "SELECT age::text FROM person ORDER BY age",
+        "SELECT CAST((age) AS text) FROM person ORDER BY age",
+        "SELECT CAST(CAST(age AS bigint) AS text) FROM person ORDER BY age",
+        "SELECT person.age::text FROM person GROUP BY age ORDER BY age",
+    ] {
+        let plan = logical_plan(sql).unwrap();
+        let display = plan.display_indent().to_string();
+        assert!(display.starts_with("Sort: age ASC"), "{sql}\n{display}");
+        assert!(display.contains(" AS age"), "{sql}\n{display}");
+        assert_eq!(plan.schema().field(0).name(), "age");
+        assert_eq!(plan.schema().field(0).data_type(), &DataType::Utf8View);
+        if sql.contains("GROUP BY") {
+            assert!(display.contains("groupBy=[[person.age]]"), "{display}");
+        }
+    }
+    let plan = logical_plan("SELECT age::text FROM person ORDER BY person.age").unwrap();
+    assert!(plan.display_indent().to_string().contains("person.age ASC"));
+    let plan = logical_plan("SELECT age::text AS label FROM person ORDER BY age").unwrap();
+    assert!(plan.display_indent().to_string().contains("person.age ASC"));
+}
+
+#[test]
 fn order_by_ambiguous_name() {
     let sql = "select * from person a join person b using (id) order by age";
     let err = logical_plan(sql).unwrap_err().strip_backtrace();
