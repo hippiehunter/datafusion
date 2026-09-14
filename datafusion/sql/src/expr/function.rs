@@ -22,17 +22,18 @@ use crate::planner::{
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
+    internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
     Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, ScalarValue,
-    Spans, internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err,
-    plan_err,
+    Spans,
 };
 use datafusion_expr::{
-    Expr, ExprSchemable, LogicalPlanBuilder, Operator, SortExpr, Subquery, WindowFrame,
-    WindowFunctionDefinition, expr,
+    expr,
     expr::{
         BinaryExpr, Case, NullTreatment, ScalarFunction, Unnest, WildcardOptions,
         WindowFunction,
     },
+    Expr, ExprSchemable, LogicalPlanBuilder, Operator, SortExpr, Subquery, WindowFrame,
+    WindowFunctionDefinition,
 };
 use sqlparser::ast::{
     AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
@@ -459,8 +460,12 @@ impl SqlToRel<'_> {
                 .context_provider
                 .plan_set_returning_function(&name, &srf_args, schema, None)?
             {
-                Some(crate::planner::SetReturningColumns::Lists(columns)) => self.set_returning_expr(&name, columns),
-                Some(crate::planner::SetReturningColumns::Rows(rows)) => Ok(Expr::Unnest(Unnest::new(rows))),
+                Some(crate::planner::SetReturningColumns::Lists(columns)) => {
+                    self.set_returning_expr(&name, columns)
+                }
+                Some(crate::planner::SetReturningColumns::Rows(rows)) => {
+                    Ok(Expr::Unnest(Unnest::new(rows)))
+                }
                 None => self.set_returning_source_expr(&name, srf_args),
             };
         }
@@ -525,14 +530,21 @@ impl SqlToRel<'_> {
                 (args, arg_names)
             };
 
-            let resolved_args = if arg_names.iter().any(|name| name.is_some()) {
-                if let Some(param_names) = &fm.signature().parameter_names {
-                    datafusion_expr::arguments::resolve_function_arguments(
-                        param_names,
-                        fm.signature().parameter_defaults.as_deref(),
-                        args,
-                        arg_names,
-                    )?
+            let (fm, resolved_args) = if arg_names.iter().any(|name| name.is_some()) {
+                if let Some(resolved) = self
+                    .context_provider
+                    .plan_named_scalar_function(&fm, &args, &arg_names, schema)?
+                {
+                    resolved
+                } else if let Some(param_names) = &fm.signature().parameter_names {
+                    let resolved =
+                        datafusion_expr::arguments::resolve_function_arguments(
+                            param_names,
+                            fm.signature().parameter_defaults.as_deref(),
+                            args,
+                            arg_names,
+                        )?;
+                    (fm, resolved)
                 } else {
                     return plan_err!(
                         "Function '{}' does not support named arguments",
@@ -540,7 +552,7 @@ impl SqlToRel<'_> {
                     );
                 }
             } else {
-                args
+                (fm, args)
             };
 
             // After resolution, all arguments are positional

@@ -24,8 +24,8 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, FieldRef, SchemaRef};
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::{
-    Constraints, DFSchema, DataFusionError, Result, TableReference,
-    config::ConfigOptions, file_options::file_type::FileType, not_impl_err,
+    config::ConfigOptions, file_options::file_type::FileType, not_impl_err, Constraints,
+    DFSchema, DataFusionError, Result, TableReference,
 };
 use datafusion_expr::expr::NullTreatment;
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
@@ -103,7 +103,11 @@ pub trait ContextProvider {
     /// Attach embedding-owned literal metadata while its original parser span
     /// is available. The default preserves the ordinary literal expression.
     /// Metadata can carry source provenance independently of its carrier type.
-    fn plan_literal(&self, expr: Expr, _span: sqlparser::tokenizer::Span) -> Result<Expr> {
+    fn plan_literal(
+        &self,
+        expr: Expr,
+        _span: sqlparser::tokenizer::Span,
+    ) -> Result<Expr> {
         Ok(expr)
     }
 
@@ -383,6 +387,20 @@ pub trait ContextProvider {
 
     /// Return the scalar function with a given name, if any
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>>;
+
+    /// Resolve a named call when overloads have distinct parameter lists.
+    /// Arguments have already been lowered against `schema`; the provider may
+    /// select a concrete overload and return its positional arguments. `None`
+    /// retains the ordinary signature-based named-argument resolution.
+    fn plan_named_scalar_function(
+        &self,
+        _function: &Arc<ScalarUDF>,
+        _args: &[Expr],
+        _argument_names: &[Option<String>],
+        _schema: &DFSchema,
+    ) -> Result<Option<(Arc<ScalarUDF>, Vec<Expr>)>> {
+        Ok(None)
+    }
 
     /// Return the aggregate function with a given name, if any
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>>;
