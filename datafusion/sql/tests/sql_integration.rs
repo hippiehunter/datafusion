@@ -537,6 +537,51 @@ fn parse_ident_normalization_5() {
 }
 
 #[test]
+fn qualified_function_names_use_identifier_values() {
+    for (registered, query) in [
+        ("public.f", "SELECT PUBLIC.F()"),
+        ("public.f", "SELECT \"public\".\"f\"()"),
+        ("Mixed Schema.F\"n", "SELECT \"Mixed Schema\".\"F\"\"n\"()"),
+    ] {
+        let state = MockSessionState::default().with_scalar_function(Arc::new(make_udf(
+            registered,
+            vec![],
+            DataType::Utf8,
+        )));
+        let context = MockContextProvider { state };
+        let planner = SqlToRel::new(&context);
+        let mut ast =
+            DFParser::parse_sql_with_dialect(query, &PostgreSqlDialect {}).unwrap();
+        let plan = planner.statement_to_plan(ast.pop_front().unwrap()).unwrap();
+        assert_contains!(plan.to_string(), registered);
+    }
+}
+
+#[test]
+fn oracle_qualified_names_and_named_arguments_keep_parser_owned_fold() {
+    let udf = ScalarUDF::new_from_impl(DummyUDF {
+        name: "APP.STORED_ROUTINE",
+        signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable)
+            .with_parameter_names(vec!["ARG"])
+            .unwrap(),
+        return_type: DataType::Utf8,
+    });
+    let state = MockSessionState::default().with_scalar_function(Arc::new(udf));
+    let context = MockContextProvider { state };
+    let planner = SqlToRel::new_with_options(
+        &context,
+        ident_normalization_parser_options_no_ident_normalization(),
+    );
+    let mut ast = DFParser::parse_sql_with_dialect(
+        "SELECT app.stored_routine(arg => 42)",
+        &OracleDialect {},
+    )
+    .unwrap();
+    let plan = planner.statement_to_plan(ast.pop_front().unwrap()).unwrap();
+    assert_contains!(plan.to_string(), "APP.STORED_ROUTINE");
+}
+
+#[test]
 fn oracle_function_name_keeps_the_parser_owned_fold() {
     let state = MockSessionState::default().with_scalar_function(Arc::new(make_udf(
         "STORED_ROUTINE",
