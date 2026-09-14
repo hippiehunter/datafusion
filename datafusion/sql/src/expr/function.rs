@@ -262,6 +262,23 @@ impl<'a> FunctionArgs<'a> {
 type WithinGroupExtraction = (Vec<SortExpr>, Vec<Expr>, Vec<Option<String>>);
 
 impl SqlToRel<'_> {
+    /// Catalog keys contain identifier values, not their SQL quoting syntax.
+    /// Apply the same configured folding to every component of a qualified name.
+    fn normalized_function_name(&self, name: &ObjectName) -> Result<String> {
+        name.0
+            .iter()
+            .map(|part| {
+                let Some(ident) = part.as_ident() else {
+                    return plan_err!(
+                        "Expected an identifier in function name, but found {part:?}"
+                    );
+                };
+                Ok(self.ident_normalizer.normalize(ident.clone()))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(|parts| parts.join("."))
+    }
+
     pub(super) fn sql_function_to_expr(
         &self,
         function: &SQLFunction,
@@ -305,14 +322,7 @@ impl SqlToRel<'_> {
 
         // Handle ARRAY subquery constructor (SQL:2016 S095)
         // Transform ARRAY(SELECT ...) into (SELECT ARRAY_AGG(...) FROM ...)
-        let name = if function.name.0.len() > 1 {
-            function.name.to_string()
-        } else {
-            match function.name.0[0].as_ident() {
-                Some(ident) => self.ident_normalizer.normalize(ident.clone()),
-                None => function.name.to_string(),
-            }
-        };
+        let name = self.normalized_function_name(&function.name)?;
 
         if name.eq_ignore_ascii_case("array") {
             if let FunctionArguments::Subquery(query) = &function.args {
@@ -385,21 +395,7 @@ impl SqlToRel<'_> {
         // required ordering should be defined in OVER clause.
         let is_function_window = over.is_some();
         let sql_parser_span = object_name.0[0].span();
-        let name = if object_name.0.len() > 1 {
-            // DF doesn't handle compound identifiers
-            // (e.g. "foo.bar") for function names yet
-            object_name.to_string()
-        } else {
-            match object_name.0[0].as_ident() {
-                Some(ident) => self.ident_normalizer.normalize(ident.clone()),
-                None => {
-                    return plan_err!(
-                        "Expected an identifier in function name, but found {:?}",
-                        object_name.0[0]
-                    );
-                }
-            }
-        };
+        let name = self.normalized_function_name(object_name)?;
 
         // handle make_map and map functions
         // make_map always uses plan_make_map: make_map(k1, v1, k2, v2, ...)
@@ -1046,7 +1042,7 @@ impl SqlToRel<'_> {
                 operator: _,
             } => {
                 let expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
-                let arg_name = crate::utils::normalize_ident(name.clone());
+                let arg_name = self.ident_normalizer.normalize(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             FunctionArg::Named {
@@ -1059,7 +1055,7 @@ impl SqlToRel<'_> {
                     qualifier: None,
                     options: Box::new(WildcardOptions::default()),
                 };
-                let arg_name = crate::utils::normalize_ident(name.clone());
+                let arg_name = self.ident_normalizer.normalize(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => {
@@ -1108,7 +1104,7 @@ impl SqlToRel<'_> {
                 operator: _,
             } => {
                 let expr = self.sql_expr_to_logical_expr(arg, schema, planner_context)?;
-                let arg_name = crate::utils::normalize_ident(name.clone());
+                let arg_name = self.ident_normalizer.normalize(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             FunctionArg::ExprNamed {
@@ -1121,7 +1117,7 @@ impl SqlToRel<'_> {
                     qualifier: None,
                     options: Box::new(WildcardOptions::default()),
                 };
-                let arg_name = crate::utils::normalize_ident(name.clone());
+                let arg_name = self.ident_normalizer.normalize(name.clone());
                 Ok((expr, Some(arg_name)))
             }
             // JSON_OBJECT uses string literal as key name: JSON_OBJECT('key': value)
