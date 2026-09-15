@@ -2671,11 +2671,16 @@ impl Display for SchemaDisplay<'_> {
             // TODO: remove the next line after `Expr::Wildcard` is removed
             #[expect(deprecated)]
             Expr::Column(_)
-            | Expr::Literal(_, _)
             | Expr::ScalarVariable(..)
             | Expr::OuterReferenceColumn(..)
             | Expr::Placeholder(_)
             | Expr::Wildcard { .. } => write!(f, "{}", self.0),
+            // A literal's field metadata is its type identity, not part of
+            // its name. `Display` shows the metadata so an explain plan can
+            // report it, but a schema name that carried it would differ from
+            // the same literal written without it, and every later lookup of
+            // that column would miss.
+            Expr::Literal(value, _) => write!(f, "{value:?}"),
             Expr::AggregateFunction(AggregateFunction { func, params }) => {
                 match func.schema_name(params) {
                     Ok(name) => {
