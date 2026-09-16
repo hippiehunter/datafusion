@@ -813,6 +813,9 @@ fn type_union_resolution_coercion(
     }
 
     match (lhs_type, rhs_type) {
+        // A NULL member of a struct or list takes the type it meets, as a
+        // top-level NULL does.
+        (DataType::Null, other) | (other, DataType::Null) => Some(other.clone()),
         (
             DataType::Dictionary(lhs_index_type, lhs_value_type),
             DataType::Dictionary(rhs_index_type, rhs_value_type),

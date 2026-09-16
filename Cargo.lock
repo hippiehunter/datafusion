@@ -845,6 +845,7 @@ name = "datafusion-expr"
 version = "51.0.0"
 dependencies = [
  "arrow",
+ "arrow-schema",
  "async-trait",
  "chrono",
  "ctor",

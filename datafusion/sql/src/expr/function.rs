@@ -524,14 +524,28 @@ impl SqlToRel<'_> {
                 (args, arg_names)
             };
 
+            let mut written_arguments = None;
             let resolved_args = if arg_names.iter().any(|name| name.is_some()) {
                 if let Some(param_names) = &fm.signature().parameter_names {
-                    datafusion_expr::arguments::resolve_function_arguments(
+                    let written = arg_names
+                        .iter()
+                        .enumerate()
+                        .map(|(position, name)| match name {
+                            Some(name) => param_names
+                                .iter()
+                                .position(|param| param == name)
+                                .map(|position| (position, Some(name.clone()))),
+                            None => Some((position, None)),
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    let resolved = datafusion_expr::arguments::resolve_function_arguments(
                         param_names,
                         fm.signature().parameter_defaults.as_deref(),
                         args,
                         arg_names,
-                    )?
+                    )?;
+                    written_arguments = written;
+                    resolved
                 } else {
                     return plan_err!(
                         "Function '{}' does not support named arguments",
@@ -552,6 +566,16 @@ impl SqlToRel<'_> {
             }
             let inner = ScalarFunction::new_udf(fm, resolved_args);
 
+            if let Some(written) = written_arguments {
+                let mut call = Expr::ScalarFunction(inner);
+                for planner in self.context_provider.get_expr_planners() {
+                    match planner.plan_named_call(call, &written)? {
+                        PlannerResult::Planned(planned) => return Ok(planned),
+                        PlannerResult::Original(original) => call = original,
+                    }
+                }
+                return Ok(call);
+            }
             if name.eq_ignore_ascii_case(inner.name()) {
                 return Ok(Expr::ScalarFunction(inner));
             } else {

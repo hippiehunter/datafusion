@@ -460,9 +460,9 @@ impl DFSchema {
 
     /// Find all fields having the given qualifier
     pub fn fields_with_qualified(&self, qualifier: &TableReference) -> Vec<&FieldRef> {
-        self.iter()
-            .filter(|(q, _)| q.map(|q| q.eq(qualifier)).unwrap_or(false))
-            .map(|(_, f)| f)
+        self.fields_indices_with_qualified(qualifier)
+            .into_iter()
+            .map(|idx| self.field(idx))
             .collect()
     }
 
@@ -471,10 +471,33 @@ impl DFSchema {
         &self,
         qualifier: &TableReference,
     ) -> Vec<usize> {
-        self.iter()
+        let exact: Vec<usize> = self
+            .iter()
             .enumerate()
             .filter_map(|(idx, (q, _))| q.and_then(|q| q.eq(qualifier).then_some(idx)))
-            .collect()
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        // A qualifier names a relation the way a column reference does: `t`
+        // names `s.t` when no other relation of the schema answers to `t`.
+        let mut resolved = self
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (q, _))| {
+                q.filter(|q| qualifier.resolved_eq(q)).map(|q| (idx, q))
+            });
+        let Some((first_idx, first_qualifier)) = resolved.next() else {
+            return Vec::new();
+        };
+        let mut indices = vec![first_idx];
+        for (idx, q) in resolved {
+            if q != first_qualifier {
+                return Vec::new();
+            }
+            indices.push(idx);
+        }
+        indices
     }
 
     /// Find all fields that match the given name

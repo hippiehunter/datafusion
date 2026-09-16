@@ -28,6 +28,7 @@ use crate::udf::ReturnFieldArgs;
 use crate::{LogicalPlan, Projection, Subquery, WindowFunctionDefinition, utils};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datafusion_common::datatype::FieldExt;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
@@ -134,8 +135,9 @@ impl ExprSchemable for Expr {
                     .as_ref()
                     .map_or(Ok(DataType::Null), |e| e.get_type(schema))
             }
-            Expr::Cast(Cast { data_type, .. })
-            | Expr::TryCast(TryCast { data_type, .. }) => Ok(data_type.clone()),
+            Expr::Cast(Cast { field, .. }) | Expr::TryCast(TryCast { field, .. }) => {
+                Ok(field.data_type().clone())
+            }
             Expr::Unnest(Unnest { expr }) => {
                 let arg_data_type = expr.get_type(schema)?;
                 // Unnest's output type is the inner type of the list
@@ -633,9 +635,12 @@ impl ExprSchemable for Expr {
                 func.return_field_from_args(args)
             }
             // _ => Ok((self.get_type(schema)?, self.nullable(schema)?)),
-            Expr::Cast(Cast { expr, data_type }) => expr
+            Expr::Cast(Cast { expr, field }) => expr
                 .to_field(schema)
-                .map(|(_, f)| f.retyped(data_type.clone())),
+                .map(|(_, source)| cast_output_field(&source, field, false)),
+            Expr::TryCast(TryCast { expr, field }) => expr
+                .to_field(schema)
+                .map(|(_, source)| cast_output_field(&source, field, true)),
             Expr::Placeholder(Placeholder {
                 id: _,
                 field: Some(field),
@@ -691,7 +696,6 @@ impl ExprSchemable for Expr {
             | Expr::SimilarTo(_)
             | Expr::Not(_)
             | Expr::Between(_)
-            | Expr::TryCast(_)
             | Expr::InList(_)
             | Expr::InSubquery(_)
             | Expr::Wildcard { .. }
@@ -743,6 +747,48 @@ impl ExprSchemable for Expr {
             plan_err!("Cannot automatically convert {this_type} to {cast_to_type}")
         }
     }
+}
+
+/// The output field of a cast of `source_field` to `target_field`.
+///
+/// A type-only target (an unnamed, nullable field without metadata, as
+/// [`Cast::new`] builds) keeps the source's metadata, less any Arrow extension
+/// type, since the cast changes the type the extension describes. Any other
+/// target states the output's metadata exactly: a cast to a type whose
+/// identity the metadata carries yields that identity, whatever the source
+/// carried. The output keeps the source's name and nullability; a `TryCast`
+/// (`force_nullable`) is always nullable.
+pub fn cast_output_field(
+    source_field: &FieldRef,
+    target_field: &FieldRef,
+    force_nullable: bool,
+) -> FieldRef {
+    let metadata = if is_type_only_cast_target(target_field) {
+        let mut metadata = source_field.metadata().clone();
+        metadata.remove(EXTENSION_TYPE_NAME_KEY);
+        metadata.remove(EXTENSION_TYPE_METADATA_KEY);
+        metadata
+    } else {
+        target_field.metadata().clone()
+    };
+    let field = source_field
+        .as_ref()
+        .clone()
+        .with_data_type(target_field.data_type().clone())
+        .with_metadata(metadata);
+    Arc::new(if force_nullable {
+        field.with_nullable(true)
+    } else {
+        field
+    })
+}
+
+/// Whether a cast target states only a type, leaving the output's metadata to
+/// the source.
+pub fn is_type_only_cast_target(target_field: &Field) -> bool {
+    target_field.name().is_empty()
+        && target_field.is_nullable()
+        && target_field.metadata().is_empty()
 }
 
 /// Returns the innermost [Expr] that is provably null if `expr` is null.

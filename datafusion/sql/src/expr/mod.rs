@@ -16,8 +16,9 @@
 // under the License.
 
 use std::borrow::Borrow;
+use std::sync::Arc;
 
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use sqlparser::ast::{
     AccessExpr, AstBox as SQLBox, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
@@ -35,13 +36,12 @@ use datafusion_expr::expr::{
     AllExpr, AnyExpr, InList, QuantifiedSource, WildcardOptions,
 };
 use datafusion_expr::{
-    Between, BinaryExpr, Cast, Expr, ExprSchemable, GetFieldAccess, Like, Operator,
-    TryCast, lit,
+    Between, BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, lit,
 };
 
 use crate::planner::{
-    PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawFieldAccessExpr,
-    SqlToRel,
+    PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawDistinctFromExpr,
+    RawFieldAccessExpr, SqlToRel, claimed_cast,
 };
 
 mod binary_op;
@@ -296,6 +296,44 @@ impl SqlToRel<'_> {
         )))
     }
 
+    /// `left IS [NOT] DISTINCT FROM right`, through the registered expression
+    /// planners' `plan_distinct_from` before the null-safe comparison operator.
+    fn sql_distinct_from_to_expr(
+        &self,
+        left: &SQLExpr,
+        right: &SQLExpr,
+        negated: bool,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let mut distinct_from = RawDistinctFromExpr {
+            left: self.sql_expr_to_logical_expr(left, schema, planner_context)?,
+            right: self.sql_expr_to_logical_expr(right, schema, planner_context)?,
+            negated,
+        };
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_distinct_from(distinct_from, schema)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(original) => distinct_from = original,
+            }
+        }
+        let RawDistinctFromExpr {
+            left,
+            right,
+            negated,
+        } = distinct_from;
+        let op = if negated {
+            Operator::IsNotDistinctFrom
+        } else {
+            Operator::IsDistinctFrom
+        };
+        Ok(Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(left),
+            op,
+            Box::new(right),
+        )))
+    }
+
     /// Run a search condition through the registered expression planners'
     /// `plan_condition` before it becomes the predicate of a plan node.
     pub(crate) fn plan_condition_expr(
@@ -503,37 +541,21 @@ impl SqlToRel<'_> {
                 self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?,
             ))),
 
-            SQLExpr::IsDistinctFrom(left, right) => {
-                Ok(Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(self.sql_expr_to_logical_expr(
-                        left.as_ref(),
-                        schema,
-                        planner_context,
-                    )?),
-                    Operator::IsDistinctFrom,
-                    Box::new(self.sql_expr_to_logical_expr(
-                        right.as_ref(),
-                        schema,
-                        planner_context,
-                    )?),
-                )))
-            }
+            SQLExpr::IsDistinctFrom(left, right) => self.sql_distinct_from_to_expr(
+                left.as_ref(),
+                right.as_ref(),
+                false,
+                schema,
+                planner_context,
+            ),
 
-            SQLExpr::IsNotDistinctFrom(left, right) => {
-                Ok(Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(self.sql_expr_to_logical_expr(
-                        left.as_ref(),
-                        schema,
-                        planner_context,
-                    )?),
-                    Operator::IsNotDistinctFrom,
-                    Box::new(self.sql_expr_to_logical_expr(
-                        right.as_ref(),
-                        schema,
-                        planner_context,
-                    )?),
-                )))
-            }
+            SQLExpr::IsNotDistinctFrom(left, right) => self.sql_distinct_from_to_expr(
+                left.as_ref(),
+                right.as_ref(),
+                true,
+                schema,
+                planner_context,
+            ),
 
             SQLExpr::IsTrue { expr, .. } => Ok(Expr::IsTrue(Box::new(
                 self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?,
@@ -1688,61 +1710,43 @@ impl SqlToRel<'_> {
         format: Option<CastFormat>,
         schema: &DFSchema,
     ) -> Result<Expr> {
-        // numeric constants are treated as seconds (rather as nanoseconds)
-        // to align with postgres / duckdb semantics
-        let target_data_type = self
-            .convert_data_type_to_field(sql_data_type)?
-            .data_type()
-            .clone();
+        let sql_data_type = match self.context_provider.get_type_planner() {
+            Some(type_planner) => type_planner
+                .canonical_type_spelling(sql_data_type)?
+                .unwrap_or_else(|| sql_data_type.clone()),
+            None => sql_data_type.clone(),
+        };
+        let target = self.written_cast_target(&sql_data_type)?;
         let mut cast_expr = RawCastExpr {
             cast_kind,
             expr,
-            data_type: target_data_type.clone(),
-            sql_data_type: sql_data_type.clone(),
+            field: Arc::clone(&target),
+            sql_data_type,
             format,
         };
 
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_cast(cast_expr, schema)? {
-                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Planned(expr) => {
+                    return claimed_cast(expr, &target, schema);
+                }
                 PlannerResult::Original(expr) => {
                     cast_expr = expr;
                 }
             }
         }
+        cast_expr.into_unclaimed_cast(schema)
+    }
 
-        if let Some(format) = cast_expr.format {
-            return not_impl_err!("CAST with format is not supported: {format}");
-        }
-
-        let RawCastExpr {
-            cast_kind,
-            expr,
-            data_type,
-            ..
-        } = cast_expr;
-        let expr = match &data_type {
-            DataType::Timestamp(TimeUnit::Nanosecond, tz)
-                if expr.get_type(schema)? == DataType::Int64 =>
-            {
-                Expr::Cast(Cast::new(
-                    Box::new(expr),
-                    DataType::Timestamp(TimeUnit::Second, tz.clone()),
-                ))
-            }
-            _ => expr,
-        };
-
-        // Currently drops metadata attached to the type
-        // https://github.com/apache/datafusion/issues/18060
-        match cast_kind {
-            CastKind::TryCast => {
-                Ok(Expr::TryCast(TryCast::new(Box::new(expr), data_type)))
-            }
-            CastKind::Cast | CastKind::DoubleColon => {
-                Ok(Expr::Cast(Cast::new(Box::new(expr), data_type)))
-            }
-        }
+    /// The target of a cast the SQL wrote: the field the type declares, named
+    /// by the written type so the cast states its output's metadata (none, for
+    /// a type that declares none) instead of keeping the source's.
+    pub(crate) fn written_cast_target(&self, sql_data_type: &SQLDataType) -> Result<FieldRef> {
+        let declared = self.convert_data_type_to_field(sql_data_type)?;
+        Ok(Arc::new(
+            Field::new(sql_data_type.to_string(), declared.data_type().clone(), true)
+                .with_metadata(declared.metadata().clone()),
+        ))
     }
 
     fn sql_regclass_cast_to_expr(

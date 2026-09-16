@@ -236,8 +236,8 @@ impl Unparser<'_> {
                     end_token: AttachedToken::empty(),
                 })
             }
-            Expr::Cast(Cast { expr, data_type }) => {
-                Ok(self.cast_to_sql(expr, data_type)?)
+            Expr::Cast(Cast { expr, field }) => {
+                Ok(self.cast_to_sql(expr, field.data_type())?)
             }
             Expr::Literal(value, _) => Ok(self.scalar_to_sql(value)?),
             Expr::Alias(Alias { expr, name: _, .. }) => self.expr_to_sql_inner(expr),
@@ -523,12 +523,12 @@ impl Unparser<'_> {
                     )
                 })
             }
-            Expr::TryCast(TryCast { expr, data_type }) => {
+            Expr::TryCast(TryCast { expr, field }) => {
                 let inner_expr = self.expr_to_sql_inner(expr)?;
                 Ok(ast::Expr::Cast {
                     kind: ast::CastKind::TryCast,
                     expr: SQLBox::new(inner_expr),
-                    data_type: self.arrow_dtype_to_ast_dtype(data_type)?,
+                    data_type: self.arrow_dtype_to_ast_dtype(field.data_type())?,
                     format: None,
                 })
             }
@@ -2105,34 +2105,22 @@ mod tests {
                 r#"CASE WHEN a IS NOT NULL THEN true ELSE false END"#,
             ),
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(col("a")),
-                    data_type: DataType::Date64,
-                }),
+                Expr::Cast(Cast::new(Box::new(col("a")), DataType::Date64)),
                 r#"CAST(a AS DATETIME)"#,
             ),
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(col("a")),
-                    data_type: DataType::Timestamp(
+                Expr::Cast(Cast::new(Box::new(col("a")), DataType::Timestamp(
                         TimeUnit::Nanosecond,
                         Some("+08:00".into()),
-                    ),
-                }),
+                    ))),
                 r#"CAST(a AS TIMESTAMP WITH TIME ZONE)"#,
             ),
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(col("a")),
-                    data_type: DataType::Timestamp(TimeUnit::Millisecond, None),
-                }),
+                Expr::Cast(Cast::new(Box::new(col("a")), DataType::Timestamp(TimeUnit::Millisecond, None))),
                 r#"CAST(a AS TIMESTAMP)"#,
             ),
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(col("a")),
-                    data_type: DataType::UInt32,
-                }),
+                Expr::Cast(Cast::new(Box::new(col("a")), DataType::UInt32)),
                 r#"CAST(a AS INTEGER UNSIGNED)"#,
             ),
             (
@@ -2436,10 +2424,7 @@ mod tests {
                 r#"((a + b) > 100.123)"#,
             ),
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(col("a")),
-                    data_type: DataType::Decimal128(10, -2),
-                }),
+                Expr::Cast(Cast::new(Box::new(col("a")), DataType::Decimal128(10, -2))),
                 r#"CAST(a AS DECIMAL(12,0))"#,
             ),
             (
@@ -2583,10 +2568,7 @@ mod tests {
                 .build();
             let unparser = Unparser::new(&dialect);
 
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type: DataType::Date64,
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), DataType::Date64));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -2608,10 +2590,7 @@ mod tests {
                 .build();
             let unparser = Unparser::new(&dialect);
 
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type: DataType::Float64,
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), DataType::Float64));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -2816,23 +2795,17 @@ mod tests {
     fn test_cast_value_to_binary_expr() {
         let tests = [
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(Expr::Literal(
+                Expr::Cast(Cast::new(Box::new(Expr::Literal(
                         ScalarValue::Utf8(Some("blah".to_string())),
                         None,
-                    )),
-                    data_type: DataType::Binary,
-                }),
+                    )), DataType::Binary)),
                 "'blah'",
             ),
             (
-                Expr::Cast(Cast {
-                    expr: Box::new(Expr::Literal(
+                Expr::Cast(Cast::new(Box::new(Expr::Literal(
                         ScalarValue::Utf8(Some("blah".to_string())),
                         None,
-                    )),
-                    data_type: DataType::BinaryView,
-                }),
+                    )), DataType::BinaryView)),
                 "'blah'",
             ),
         ];
@@ -2893,10 +2866,7 @@ mod tests {
             [(default_dialect, "BIGINT"), (mysql_dialect, "SIGNED")]
         {
             let unparser = Unparser::new(&dialect);
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type: DataType::Int64,
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), DataType::Int64));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -2921,10 +2891,7 @@ mod tests {
             [(default_dialect, "INTEGER"), (mysql_dialect, "SIGNED")]
         {
             let unparser = Unparser::new(&dialect);
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type: DataType::Int32,
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), DataType::Int32));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -2960,10 +2927,7 @@ mod tests {
             (&mysql_dialect, &timestamp_with_tz, "DATETIME"),
         ] {
             let unparser = Unparser::new(dialect);
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type: data_type.clone(),
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), data_type.clone()));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -3059,13 +3023,10 @@ mod tests {
     #[test]
     fn test_cast_value_to_dict_expr() {
         let tests = [(
-            Expr::Cast(Cast {
-                expr: Box::new(Expr::Literal(
+            Expr::Cast(Cast::new(Box::new(Expr::Literal(
                     ScalarValue::Utf8(Some("variation".to_string())),
                     None,
-                )),
-                data_type: DataType::Dictionary(Box::new(Int8), Box::new(DataType::Utf8)),
-            }),
+                )), DataType::Dictionary(Box::new(Int8), Box::new(DataType::Utf8)))),
             "'variation'",
         )];
         for (value, expected) in tests {
@@ -3178,10 +3139,7 @@ mod tests {
         let dialect: Arc<dyn Dialect> = Arc::new(SqliteDialect {});
 
         let unparser = Unparser::new(dialect.as_ref());
-        let expr = Expr::Cast(Cast {
-            expr: Box::new(col("a")),
-            data_type: DataType::Timestamp(TimeUnit::Nanosecond, None),
-        });
+        let expr = Expr::Cast(Cast::new(Box::new(col("a")), DataType::Timestamp(TimeUnit::Nanosecond, None)));
 
         let ast = unparser.expr_to_sql(&expr)?;
 

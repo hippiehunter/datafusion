@@ -140,7 +140,9 @@ impl SqlToRel<'_> {
                     schema,
                     planner_context,
                 )?;
-                let from_logic = Expr::Literal(ScalarValue::Int64(Some(1)), None);
+                // `SUBSTRING(text FOR n)` starts at the integer constant 1,
+                // the start PostgreSQL's grammar supplies for the form.
+                let from_logic = Expr::Literal(ScalarValue::Int32(Some(1)), None);
                 let for_logic = self.sql_expr_to_logical_expr(
                     for_expr.as_ref(),
                     schema,

@@ -21,20 +21,23 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field, FieldRef, SchemaRef};
+use arrow::datatypes::{DataType, Field, FieldRef, SchemaRef, TimeUnit};
 use datafusion_common::datatype::DataTypeExt;
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     Constraints, DFSchema, DataFusionError, Result, TableReference,
     config::ConfigOptions, file_options::file_type::FileType, not_impl_err,
 };
 use datafusion_expr::expr::NullTreatment;
+use datafusion_expr::expr_schema::is_type_only_cast_target;
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::expr_rewriter::NamePreserver;
 use datafusion_expr::logical_plan::LogicalPlan;
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
-    AggregateUDF, BoundSqlExpression, Expr, GetFieldAccess, ScalarUDF, SortExpr,
-    TableSource, WindowFrame, WindowFunctionDefinition, WindowUDF,
+    AggregateUDF, BoundSqlExpression, Cast, Expr, ExprSchemable, GetFieldAccess,
+    ScalarUDF, SortExpr, TableSource, TryCast, WindowFrame, WindowFunctionDefinition,
+    WindowUDF,
 };
 
 use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor};
@@ -485,6 +488,20 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(args))
     }
 
+    /// Plan a scalar function call the SQL wrote with named arguments, once it
+    /// is planned in positional form. `written` lists the arguments in the
+    /// order the SQL wrote them: the parameter position each is bound to, and
+    /// the name it was written with (`None` for a positional argument).
+    ///
+    /// Returns the original call if not possible.
+    fn plan_named_call(
+        &self,
+        call: Expr,
+        _written: &[(usize, Option<String>)],
+    ) -> Result<PlannerResult<Expr>> {
+        Ok(PlannerResult::Original(call))
+    }
+
     /// Plan a search condition — a `WHERE`, `HAVING` or join `ON`
     /// expression — before it becomes the predicate of its plan node.
     ///
@@ -568,6 +585,19 @@ pub trait ExprPlanner: Debug + Send + Sync {
     ///
     /// Returns origin binary expression if not possible
     fn plan_any(&self, expr: RawBinaryExpr) -> Result<PlannerResult<RawBinaryExpr>> {
+        Ok(PlannerResult::Original(expr))
+    }
+
+    /// Plans `left IS [NOT] DISTINCT FROM right`, whose operands may be of
+    /// types the null-safe comparison operator does not compare, such as row
+    /// values.
+    ///
+    /// Returns the original operands if not possible
+    fn plan_distinct_from(
+        &self,
+        expr: RawDistinctFromExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawDistinctFromExpr>> {
         Ok(PlannerResult::Original(expr))
     }
 
@@ -712,6 +742,17 @@ pub struct RawBinaryExpr {
     pub right: Expr,
 }
 
+/// The operands of `left IS [NOT] DISTINCT FROM right` to plan.
+///
+/// This structure is used by [`ExprPlanner::plan_distinct_from`].
+#[derive(Debug, Clone)]
+pub struct RawDistinctFromExpr {
+    pub left: Expr,
+    pub right: Expr,
+    /// `IS NOT DISTINCT FROM`.
+    pub negated: bool,
+}
+
 /// An expression with GetFieldAccess to plan
 ///
 /// This structure is used by [`ExprPlanner`] to plan operators with
@@ -758,9 +799,75 @@ pub struct RawAssignmentTarget {
 pub struct RawCastExpr {
     pub cast_kind: sqlparser::ast::CastKind,
     pub expr: Expr,
-    pub data_type: DataType,
+    /// The field the written type declares, which the cast yields: its
+    /// metadata replaces whatever the source carried.
+    pub field: FieldRef,
     pub sql_data_type: sqlparser::ast::DataType,
     pub format: Option<sqlparser::ast::CastFormat>,
+}
+
+impl RawCastExpr {
+    /// The cast no planner claimed: an integer cast to a timestamp counts
+    /// seconds, `FORMAT` is not supported, and the result yields the written
+    /// target field.
+    pub fn into_unclaimed_cast(self, schema: &DFSchema) -> Result<Expr> {
+        let RawCastExpr {
+            cast_kind,
+            expr,
+            field,
+            format,
+            ..
+        } = self;
+        if let Some(format) = format {
+            return not_impl_err!("CAST with format is not supported: {format}");
+        }
+        // numeric constants are treated as seconds (rather as nanoseconds)
+        // to align with postgres / duckdb semantics
+        let expr = match field.data_type() {
+            DataType::Timestamp(TimeUnit::Nanosecond, tz)
+                if expr.get_type(schema)? == DataType::Int64 =>
+            {
+                Expr::Cast(Cast::new(
+                    Box::new(expr),
+                    DataType::Timestamp(TimeUnit::Second, tz.clone()),
+                ))
+            }
+            _ => expr,
+        };
+        Ok(match cast_kind {
+            sqlparser::ast::CastKind::TryCast => {
+                Expr::TryCast(TryCast::new_from_field(Box::new(expr), field))
+            }
+            sqlparser::ast::CastKind::Cast | sqlparser::ast::CastKind::DoubleColon => {
+                Expr::Cast(Cast::new_from_field(Box::new(expr), field))
+            }
+        })
+    }
+}
+
+/// The result of a cast a planner claimed, yielding the written target
+/// field's metadata whenever the planned value is of the target's type: the
+/// written type names the cast's result, whatever the planner built it from.
+/// A constant takes the metadata itself, a bare-type cast takes the target
+/// field, and any other expression is cast to the target field.
+pub fn claimed_cast(planned: Expr, target: &FieldRef, schema: &DFSchema) -> Result<Expr> {
+    let (_, planned_field) = planned.to_field(schema)?;
+    if planned_field.data_type() != target.data_type()
+        || planned_field.metadata() == target.metadata()
+    {
+        return Ok(planned);
+    }
+    Ok(match planned {
+        Expr::Literal(value, _) => {
+            let metadata = (!target.metadata().is_empty())
+                .then(|| FieldMetadata::from(target.metadata()));
+            Expr::Literal(value, metadata)
+        }
+        Expr::Cast(cast) if is_type_only_cast_target(&cast.field) => {
+            Expr::Cast(Cast::new_from_field(cast.expr, Arc::clone(target)))
+        }
+        other => Expr::Cast(Cast::new_from_field(Box::new(other), Arc::clone(target))),
+    })
 }
 
 /// An `INTERVAL` expression to plan: the value (a text or numeric literal,
@@ -1106,6 +1213,17 @@ pub trait TypePlanner: Debug + Send + Sync {
         &self,
         _sql_type: &sqlparser::ast::DataType,
     ) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// The spelling the grammar gives a type written some other way, when
+    /// the two denote the same type (a built-in type written by its catalog
+    /// name, say). Expression planners see a cast's target in this spelling.
+    /// Returns `None` when the type is already in its canonical spelling.
+    fn canonical_type_spelling(
+        &self,
+        _sql_type: &sqlparser::ast::DataType,
+    ) -> Result<Option<sqlparser::ast::DataType>> {
         Ok(None)
     }
 }

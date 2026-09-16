@@ -25,8 +25,10 @@ use crate::physical_expr::PhysicalExpr;
 use arrow::compute::{CastOptions, can_cast_types};
 use arrow::datatypes::{DataType, DataType::*, FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
+use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::format::DEFAULT_FORMAT_OPTIONS;
 use datafusion_common::{Result, not_impl_err};
+use datafusion_expr::expr_schema::{cast_output_field, is_type_only_cast_target};
 use datafusion_expr_common::columnar_value::ColumnarValue;
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_expr_common::sort_properties::ExprProperties;
@@ -42,12 +44,15 @@ const DEFAULT_SAFE_CAST_OPTIONS: CastOptions<'static> = CastOptions {
 };
 
 /// CAST expression casts an expression to a specific data type and returns a runtime error on invalid cast
+///
+/// The target is a field with the logical `Cast`'s metadata rule: see
+/// [`cast_output_field`].
 #[derive(Debug, Clone, Eq)]
 pub struct CastExpr {
     /// The expression to cast
     pub expr: Arc<dyn PhysicalExpr>,
-    /// The data type to cast to
-    cast_type: DataType,
+    /// The field to cast to
+    target_field: FieldRef,
     /// Cast options
     cast_options: CastOptions<'static>,
 }
@@ -56,7 +61,7 @@ pub struct CastExpr {
 impl PartialEq for CastExpr {
     fn eq(&self, other: &Self) -> bool {
         self.expr.eq(&other.expr)
-            && self.cast_type.eq(&other.cast_type)
+            && self.target_field.eq(&other.target_field)
             && self.cast_options.eq(&other.cast_options)
     }
 }
@@ -64,21 +69,30 @@ impl PartialEq for CastExpr {
 impl Hash for CastExpr {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.expr.hash(state);
-        self.cast_type.hash(state);
+        self.target_field.hash(state);
         self.cast_options.hash(state);
     }
 }
 
 impl CastExpr {
-    /// Create a new CastExpr
+    /// Create a new CastExpr to a bare type
     pub fn new(
         expr: Arc<dyn PhysicalExpr>,
         cast_type: DataType,
         cast_options: Option<CastOptions<'static>>,
     ) -> Self {
+        Self::new_with_target_field(expr, cast_type.into_nullable_field_ref(), cast_options)
+    }
+
+    /// Create a new CastExpr to `target_field`
+    pub fn new_with_target_field(
+        expr: Arc<dyn PhysicalExpr>,
+        target_field: FieldRef,
+        cast_options: Option<CastOptions<'static>>,
+    ) -> Self {
         Self {
             expr,
-            cast_type,
+            target_field,
             cast_options: cast_options.unwrap_or(DEFAULT_CAST_OPTIONS),
         }
     }
@@ -90,7 +104,12 @@ impl CastExpr {
 
     /// The data type to cast to
     pub fn cast_type(&self) -> &DataType {
-        &self.cast_type
+        self.target_field.data_type()
+    }
+
+    /// The field to cast to
+    pub fn target_field(&self) -> &FieldRef {
+        &self.target_field
     }
 
     /// The cast options
@@ -123,13 +142,13 @@ impl CastExpr {
 
     /// Check if the cast is a widening cast (e.g. from `Int8` to `Int16`).
     pub fn is_bigger_cast(&self, src: &DataType) -> bool {
-        Self::check_bigger_cast(&self.cast_type, src)
+        Self::check_bigger_cast(self.cast_type(), src)
     }
 }
 
 impl fmt::Display for CastExpr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "CAST({} AS {:?})", self.expr, self.cast_type)
+        write!(f, "CAST({} AS {:?})", self.expr, self.cast_type())
     }
 }
 
@@ -140,7 +159,7 @@ impl PhysicalExpr for CastExpr {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(self.cast_type.clone())
+        Ok(self.cast_type().clone())
     }
 
     fn nullable(&self, input_schema: &Schema) -> Result<bool> {
@@ -149,17 +168,15 @@ impl PhysicalExpr for CastExpr {
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let value = self.expr.evaluate(batch)?;
-        value.cast_to(&self.cast_type, Some(&self.cast_options))
+        value.cast_to(self.cast_type(), Some(&self.cast_options))
     }
 
     fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
-        Ok(self
-            .expr
-            .return_field(input_schema)?
-            .as_ref()
-            .clone()
-            .with_data_type(self.cast_type.clone())
-            .into())
+        Ok(cast_output_field(
+            &self.expr.return_field(input_schema)?,
+            &self.target_field,
+            false,
+        ))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
@@ -170,16 +187,16 @@ impl PhysicalExpr for CastExpr {
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        Ok(Arc::new(CastExpr::new(
+        Ok(Arc::new(CastExpr::new_with_target_field(
             Arc::clone(&children[0]),
-            self.cast_type.clone(),
+            Arc::clone(&self.target_field),
             Some(self.cast_options.clone()),
         )))
     }
 
     fn evaluate_bounds(&self, children: &[&Interval]) -> Result<Interval> {
         // Cast current node's interval to the right type:
-        children[0].cast_to(&self.cast_type, &self.cast_options)
+        children[0].cast_to(self.cast_type(), &self.cast_options)
     }
 
     fn propagate_constraints(
@@ -199,7 +216,7 @@ impl PhysicalExpr for CastExpr {
     /// under the same datatype family.
     fn get_properties(&self, children: &[ExprProperties]) -> Result<ExprProperties> {
         let source_datatype = children[0].range.data_type();
-        let target_type = &self.cast_type;
+        let target_type = self.cast_type();
 
         let unbounded = Interval::make_unbounded(target_type)?;
         if (source_datatype.is_numeric() || source_datatype == Boolean)
@@ -216,7 +233,7 @@ impl PhysicalExpr for CastExpr {
     fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "CAST(")?;
         self.expr.fmt_sql(f)?;
-        write!(f, " AS {:?}", self.cast_type)?;
+        write!(f, " AS {:?}", self.cast_type())?;
 
         write!(f, ")")
     }
@@ -237,6 +254,29 @@ pub fn cast_with_options(
         Ok(Arc::clone(&expr))
     } else if can_cast_types(&expr_type, &cast_type) {
         Ok(Arc::new(CastExpr::new(expr, cast_type, cast_options)))
+    } else {
+        not_impl_err!("Unsupported CAST from {expr_type} to {cast_type}")
+    }
+}
+
+/// Return a PhysicalExpression representing `expr` casted to `target_field`,
+/// if any casting is needed: a cast to the expression's own type is needed
+/// only when the target states metadata of its own.
+pub fn cast_to_field(
+    expr: Arc<dyn PhysicalExpr>,
+    input_schema: &Schema,
+    target_field: FieldRef,
+) -> Result<Arc<dyn PhysicalExpr>> {
+    let expr_type = expr.data_type(input_schema)?;
+    let cast_type = target_field.data_type();
+    if expr_type == *cast_type && is_type_only_cast_target(&target_field) {
+        Ok(Arc::clone(&expr))
+    } else if expr_type == *cast_type || can_cast_types(&expr_type, cast_type) {
+        Ok(Arc::new(CastExpr::new_with_target_field(
+            expr,
+            target_field,
+            None,
+        )))
     } else {
         not_impl_err!("Unsupported CAST from {expr_type} to {cast_type}")
     }

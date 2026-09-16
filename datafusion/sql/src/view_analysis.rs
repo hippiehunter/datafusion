@@ -209,6 +209,8 @@ fn analyze_query_shape(query: &Query) -> std::result::Result<&Select, CreateView
     }
     let select = match query.body.as_ref() {
         SetExpr::Select(select) => select.as_ref(),
+        // A parenthesized query is the query itself.
+        SetExpr::Query(inner) => return analyze_query_shape(inner),
         _ => return Err(CreateViewNotUpdatable::SetOperation),
     };
     if select.distinct.is_some() {
