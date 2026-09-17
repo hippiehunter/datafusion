@@ -849,11 +849,25 @@ fn coerce_window_frame(
                 .first()
                 .map(|s| s.expr.get_type(schema))
                 .transpose()?;
-            if let Some(col_type) = current_types {
-                extract_window_frame_target_type(&col_type)?
-            } else {
+            let Some(col_type) = current_types else {
                 return internal_err!("ORDER BY column cannot be empty");
+            };
+            // Only a value offset of another type needs a target type: an
+            // unbounded or CURRENT ROW bound is valid over any orderable key,
+            // and an offset already of the key's type is coerced.
+            let needs_coercion = |bound: &WindowFrameBound| {
+                matches!(
+                    bound,
+                    WindowFrameBound::Preceding(v) | WindowFrameBound::Following(v)
+                        if !v.is_null() && v.data_type() != col_type
+                )
+            };
+            if !needs_coercion(&window_frame.start_bound)
+                && !needs_coercion(&window_frame.end_bound)
+            {
+                return Ok(window_frame);
             }
+            extract_window_frame_target_type(&col_type)?
         }
         WindowFrameUnits::Rows | WindowFrameUnits::Groups => DataType::UInt64,
     };

@@ -145,9 +145,11 @@ pub struct LogicalPlanBuilder {
 /// Whether a value of `data_type` is accepted by a column of `field_type`
 /// without an Arrow cast, because the column type's own input function
 /// reads it: text into a fixed-size-binary carrier (or an array of them),
-/// which Arrow cannot cast into, and a record (struct) into a text column,
-/// where the record's text form is written. The dialect's analysis decides
-/// how such a value is written.
+/// which Arrow cannot cast into; a record (struct) into a text column,
+/// where the record's text form is written; and a number into or out of
+/// the exact-numeric payload (`LargeBinary`), element for element through
+/// arrays of equal depth, whose conversions only the dialect knows. The
+/// dialect's analysis decides how such a value is written.
 pub fn value_reads_into(data_type: &DataType, field_type: &DataType) -> bool {
     let mut leaf = field_type;
     while let DataType::List(inner)
@@ -160,6 +162,72 @@ pub fn value_reads_into(data_type: &DataType, field_type: &DataType) -> bool {
     let text_target = matches!(field_type, DataType::Utf8 | DataType::LargeUtf8);
     (text_source && matches!(leaf, DataType::FixedSizeBinary(_)))
         || (matches!(data_type, DataType::Struct(_)) && text_target)
+        || exact_numeric_payload_converts(data_type, field_type)
+}
+
+/// The common type of an exact value beside another number. Two exact values
+/// whose display scales differ, or a payload beside another exact value, have
+/// the exact-numeric payload (`LargeBinary`): every value of the column keeps
+/// its own scale, as the dialect's unconstrained exact numeric does. An IEEE
+/// value beside an exact one has the IEEE type, which outranks every exact
+/// type. `None` for any other pair.
+fn exact_numeric_union(left: &DataType, right: &DataType) -> Option<DataType> {
+    // An exact type's display scale; `None` within for the payload, whose
+    // scale is each value's own.
+    let scale = |data_type: &DataType| match data_type {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => Some(Some(0)),
+        DataType::Decimal32(_, scale)
+        | DataType::Decimal64(_, scale)
+        | DataType::Decimal128(_, scale)
+        | DataType::Decimal256(_, scale) => Some(Some(*scale)),
+        DataType::LargeBinary => Some(None),
+        _ => None,
+    };
+    match (left, right) {
+        (DataType::Float32 | DataType::Float64, exact)
+        | (exact, DataType::Float32 | DataType::Float64) => {
+            let float = if matches!(left, DataType::Float32 | DataType::Float64) {
+                left
+            } else {
+                right
+            };
+            scale(exact).map(|_| float.clone())
+        }
+        _ => match (scale(left)?, scale(right)?) {
+            (Some(left), Some(right)) if left == right => None,
+            _ => Some(DataType::LargeBinary),
+        },
+    }
+}
+
+/// Whether one side of the pair is the exact-numeric payload and the other a
+/// number or text, at the same array depth.
+fn exact_numeric_payload_converts(source: &DataType, target: &DataType) -> bool {
+    match (source, target) {
+        (
+            DataType::List(source)
+            | DataType::LargeList(source)
+            | DataType::FixedSizeList(source, _),
+            DataType::List(target)
+            | DataType::LargeList(target)
+            | DataType::FixedSizeList(target, _),
+        ) => exact_numeric_payload_converts(source.data_type(), target.data_type()),
+        (DataType::LargeBinary, other) | (other, DataType::LargeBinary) => {
+            other.is_numeric()
+                || matches!(
+                    other,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                )
+        }
+        _ => false,
+    }
 }
 
 impl LogicalPlanBuilder {
@@ -383,6 +451,9 @@ impl LogicalPlanBuilder {
     ) -> Result<(DataType, Option<FieldMetadata>)> {
         let mut common_type: Option<DataType> = None;
         let mut common_metadata: Option<FieldMetadata> = None;
+        // Whether every value typed so far is a quoted literal, whose type is
+        // the one the column's other values settle on.
+        let mut only_quoted_literals = true;
         for (i, row) in values.iter().enumerate() {
             let value = &row[j];
             // A column's metadata is what every value written into it agrees
@@ -404,8 +475,33 @@ impl LogicalPlanBuilder {
             if data_type == DataType::Null {
                 continue;
             }
+            let quoted_literal = matches!(
+                value,
+                Expr::Literal(
+                    ScalarValue::Utf8(Some(_))
+                        | ScalarValue::LargeUtf8(Some(_))
+                        | ScalarValue::Utf8View(Some(_)),
+                    _
+                )
+            );
 
             if let Some(prev_type) = common_type {
+                // A quoted literal beside the exact-numeric payload is read
+                // as a payload, whichever comes first.
+                if prev_type == DataType::LargeBinary && quoted_literal {
+                    common_type = Some(prev_type);
+                    continue;
+                }
+                if data_type == DataType::LargeBinary && only_quoted_literals {
+                    common_type = Some(DataType::LargeBinary);
+                    only_quoted_literals = false;
+                    continue;
+                }
+                only_quoted_literals &= quoted_literal;
+                if let Some(exact) = exact_numeric_union(&prev_type, &data_type) {
+                    common_type = Some(exact);
+                    continue;
+                }
                 // get common type of each column values.
                 let data_types = vec![prev_type.clone(), data_type.clone()];
                 let Some(new_type) = type_union_resolution(&data_types) else {
@@ -415,6 +511,7 @@ impl LogicalPlanBuilder {
                 };
                 common_type = Some(new_type);
             } else {
+                only_quoted_literals = quoted_literal;
                 common_type = Some(data_type);
             }
         }

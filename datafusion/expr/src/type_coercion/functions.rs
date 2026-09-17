@@ -824,8 +824,11 @@ fn maybe_data_types_without_coercion(
 
         if current_type == valid_type {
             new_type.push(current_type.clone())
-        } else if can_cast_types(current_type, valid_type) {
-            // validate the valid type is castable from the current type
+        } else if can_cast_types(current_type, valid_type)
+            || crate::logical_plan::builder::value_reads_into(current_type, valid_type)
+        {
+            // validate the valid type is castable from the current type, or
+            // is a conversion the dialect's analysis spells
             new_type.push(valid_type.clone())
         } else {
             return None;
