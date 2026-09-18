@@ -28,8 +28,8 @@ pub mod tree_node;
 
 pub use builder::{
     LogicalPlanBuilder, LogicalPlanBuilderOptions, LogicalTableSource, UNNAMED_TABLE,
-    build_join_schema, requalify_sides_if_needed, table_scan, union,
-    wrap_projection_for_join_if_necessary,
+    build_join_schema, recursive_term_type_settles, requalify_sides_if_needed,
+    table_scan, union, wrap_projection_for_join_if_necessary,
 };
 pub use datafusion_common::format::ExplainFormat;
 pub use ddl::{
@@ -41,7 +41,7 @@ pub use ddl::{
 };
 pub use dml::{
     ConflictAssignment, ConflictTarget, DmlCheckOption, DmlStatement, DoUpdateAction,
-    InsertOp, OnConflict, OnConflictAction, ReturningContext, WriteOp,
+    InsertOp, OnConflict, OnConflictAction, ReturningContext, TargetSelectRights, WriteOp,
 };
 pub use merge::{
     Merge, MergeAction, MergeAssignment, MergeAssignmentTarget, MergeClause,
@@ -55,8 +55,8 @@ pub use plan::{
     GraphPatternElement, GraphPatternExpr, GraphTable, Join, JoinConstraint, JoinType,
     JsonTable, JsonTableColumnDef, JsonTableErrorHandling, LabelExpression, Limit,
     LogicalPlan, MatchRecognize, MeasureExpr, NodePattern, Partitioning, PathFinding,
-    PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery,
-    RecursiveSearch, RecursiveSearchOrder, Repartition, RepetitionQuantifier,
+    PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
+    RepetitionQuantifier,
     RowLimiting, RowsPerMatchOption, SkipType, Sort, StringifiedPlan, Subquery,
     SubqueryAlias, SubsetDef, SymbolDef, TableScan, TableScanRowLock,
     TableScanRowLockMode, TableScanRowLockWaitPolicy, ToStringifiedPlan, Union, Unnest,

@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use datafusion_common::{Result, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::utils::format_state_name;
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Coercion, Documentation, Signature, TypeSignature,
     TypeSignatureClass, Volatility,
@@ -92,6 +92,10 @@ impl ApproxMedian {
 }
 
 impl AggregateUDFImpl for ApproxMedian {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

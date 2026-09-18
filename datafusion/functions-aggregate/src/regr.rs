@@ -31,7 +31,7 @@ use datafusion_common::{
 use datafusion_doc::aggregate_doc_sections::DOC_SECTION_STATISTICAL;
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::type_coercion::aggregates::NUMERICS;
-use datafusion_expr::utils::format_state_name;
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Documentation, Signature, Volatility,
 };
@@ -456,6 +456,10 @@ fn get_regr_docs() -> &'static HashMap<RegrType, Documentation> {
 }
 
 impl AggregateUDFImpl for Regr {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

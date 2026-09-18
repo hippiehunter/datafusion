@@ -30,7 +30,7 @@ use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Documentation, Signature, Volatility,
     function::{AccumulatorArgs, StateFieldsArgs},
     type_coercion::aggregates::NUMERICS,
-    utils::format_state_name,
+    utils::{AggregateOrderSensitivity, format_state_name},
 };
 use datafusion_functions_aggregate_common::stats::StatsType;
 use datafusion_macros::user_doc;
@@ -100,6 +100,10 @@ impl CovarianceSample {
 }
 
 impl AggregateUDFImpl for CovarianceSample {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -194,6 +198,10 @@ impl CovariancePopulation {
 }
 
 impl AggregateUDFImpl for CovariancePopulation {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

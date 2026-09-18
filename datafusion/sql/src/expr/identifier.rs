@@ -216,18 +216,19 @@ impl SqlToRel<'_> {
                 // Found matching field with spare identifier(s) for nested field(s) in structure
                 Some((field, qualifier, nested_names)) if !nested_names.is_empty() => {
                     // Found matching field with spare identifier(s) for nested field(s) in structure
+                    // A planner that recognizes the value but not the field
+                    // names the missing field; only a planner that declines
+                    // the value at all leaves the path open to the next one.
                     for planner in self.context_provider.get_expr_planners() {
-                        if let Ok(planner_result) = planner.plan_compound_identifier(
+                        match planner.plan_compound_identifier(
                             field,
                             qualifier,
                             nested_names,
-                        ) {
-                            match planner_result {
-                                PlannerResult::Planned(expr) => {
-                                    return Ok(expr);
-                                }
-                                PlannerResult::Original(_args) => {}
+                        )? {
+                            PlannerResult::Planned(expr) => {
+                                return Ok(expr);
                             }
+                            PlannerResult::Original(_args) => {}
                         }
                     }
                     plan_err!("could not parse compound identifier from {ids:?}")

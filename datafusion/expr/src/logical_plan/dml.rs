@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::{DFSchemaRef, TableReference};
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_common::{Column, DFSchemaRef, Result, TableReference};
 /// Target specification for ON CONFLICT clauses.
 ///
 /// Identifies which unique constraint should trigger the conflict handling.
@@ -38,6 +39,8 @@ pub enum ConflictTarget {
     Index(String),
 }
 
+use crate::expr::{AllExpr, AnyExpr, Exists, InSubquery, QuantifiedSource};
+use crate::logical_plan::Subquery;
 use crate::{BoundSqlExpression, Expr, LogicalPlan, TableSource};
 
 /// A row-visibility predicate imposed by an automatically updatable view.
@@ -171,6 +174,113 @@ impl CopyTo {
     }
 }
 
+/// Whether a data-modifying statement reads its target relation's columns,
+/// and so needs SELECT access to the target as PostgreSQL's parse analysis
+/// records it: a WHERE, SET, RETURNING or ON CONFLICT expression that names a
+/// target column, or an ON CONFLICT arbiter. Row-level security filters the
+/// rows an UPDATE or DELETE reads, and checks the rows a write produces,
+/// against the target's SELECT policies exactly when this is required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TargetSelectRights {
+    /// No expression of the statement reads a target column.
+    NotRequired,
+    /// Some expression of the statement reads a target column.
+    Required,
+}
+
+impl TargetSelectRights {
+    /// The rights evaluating `exprs` needs when the target's columns are named
+    /// through `target`: required when any of them, or a subquery within
+    /// them, names a target column. A column without a qualifier is the
+    /// target's.
+    pub fn reading<'a>(
+        target: &TableReference,
+        exprs: impl IntoIterator<Item = &'a Expr>,
+    ) -> Result<Self> {
+        Self::reading_columns(exprs, |column| {
+            column
+                .relation
+                .as_ref()
+                .is_none_or(|relation| relation.resolved_eq(target))
+        })
+    }
+
+    /// The rights evaluating `exprs` needs when `is_target_column` tells a
+    /// column of the target from any other: required when any of them, or a
+    /// subquery within them, names a target column.
+    pub fn reading_columns<'a>(
+        exprs: impl IntoIterator<Item = &'a Expr>,
+        is_target_column: impl Fn(&Column) -> bool,
+    ) -> Result<Self> {
+        for expr in exprs {
+            if expr_reads_target(expr, &is_target_column)? {
+                return Ok(Self::Required);
+            }
+        }
+        Ok(Self::NotRequired)
+    }
+
+    /// The rights a statement needs when one part of it needs `self` and
+    /// another needs `other`.
+    pub fn and(self, other: Self) -> Self {
+        self.max(other)
+    }
+}
+
+fn expr_reads_target(expr: &Expr, is_target_column: &dyn Fn(&Column) -> bool) -> Result<bool> {
+    let mut reads = false;
+    expr.apply(|expr| {
+        reads = match expr {
+            Expr::Column(column) | Expr::OuterReferenceColumn(_, column) => {
+                is_target_column(column)
+            }
+            Expr::Exists(Exists { subquery, .. })
+            | Expr::InSubquery(InSubquery { subquery, .. })
+            | Expr::ScalarSubquery(subquery)
+            | Expr::AnyExpr(AnyExpr {
+                source: QuantifiedSource::Subquery(subquery),
+                ..
+            })
+            | Expr::AllExpr(AllExpr {
+                source: QuantifiedSource::Subquery(subquery),
+                ..
+            }) => subquery_reads_target(subquery, is_target_column)?,
+            _ => false,
+        };
+        Ok(if reads {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    })?;
+    Ok(reads)
+}
+
+/// A subquery reads the target through its outer references, at any depth of
+/// nesting; its own columns name the relations it reads itself.
+fn subquery_reads_target(
+    subquery: &Subquery,
+    is_target_column: &dyn Fn(&Column) -> bool,
+) -> Result<bool> {
+    let mut reads = false;
+    subquery.subquery.apply_with_subqueries(|plan| {
+        plan.apply_expressions(|expr| {
+            expr.apply(|expr| {
+                reads = matches!(
+                    expr,
+                    Expr::OuterReferenceColumn(_, column) if is_target_column(column)
+                );
+                Ok(if reads {
+                    TreeNodeRecursion::Stop
+                } else {
+                    TreeNodeRecursion::Continue
+                })
+            })
+        })
+    })?;
+    Ok(reads)
+}
+
 /// Modifies the content of a database
 ///
 /// This operator is used to perform DML operations such as INSERT, DELETE,
@@ -218,6 +328,8 @@ pub struct DmlStatement {
     /// Parser-free check-option obligation inherited while retargeting a write
     /// through an automatically updatable view.
     pub check_option: Option<DmlCheckOption>,
+    /// Whether the statement's own expressions read the target's columns.
+    pub target_select_rights: TargetSelectRights,
 }
 impl Eq for DmlStatement {}
 impl Hash for DmlStatement {
@@ -233,6 +345,7 @@ impl Hash for DmlStatement {
         self.returning_context.hash(state);
         self.overriding_system_value.hash(state);
         self.check_option.hash(state);
+        self.target_select_rights.hash(state);
     }
 }
 
@@ -249,6 +362,7 @@ impl PartialEq for DmlStatement {
             && self.returning_context == other.returning_context
             && self.overriding_system_value == other.overriding_system_value
             && self.check_option == other.check_option
+            && self.target_select_rights == other.target_select_rights
     }
 }
 
@@ -266,6 +380,7 @@ impl Debug for DmlStatement {
             .field("returning_exprs", &self.returning_exprs)
             .field("returning_context", &self.returning_context)
             .field("check_option", &self.check_option)
+            .field("target_select_rights", &self.target_select_rights)
             .finish()
     }
 }
@@ -277,6 +392,7 @@ impl DmlStatement {
         target: Arc<dyn TableSource>,
         op: WriteOp,
         input: Arc<LogicalPlan>,
+        target_select_rights: TargetSelectRights,
     ) -> Self {
         Self {
             table_name,
@@ -290,6 +406,7 @@ impl DmlStatement {
             returning_context: None,
             overriding_system_value: false,
             check_option: None,
+            target_select_rights,
         }
     }
 

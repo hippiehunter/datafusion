@@ -39,7 +39,7 @@ use datafusion_expr::{
     WindowFunctionDefinition,
     expr::WindowFunction,
     function::{AccumulatorArgs, StateFieldsArgs},
-    utils::format_state_name,
+    utils::{AggregateOrderSensitivity, format_state_name},
 };
 use datafusion_functions_aggregate_common::aggregate::{
     count_distinct::BytesDistinctCountAccumulator,
@@ -280,6 +280,10 @@ fn get_count_accumulator(data_type: &DataType) -> Box<dyn Accumulator> {
 }
 
 impl AggregateUDFImpl for Count {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

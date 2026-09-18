@@ -30,7 +30,7 @@ use crate::utils::{
     resolve_columns, resolve_positions_to_exprs, rewrite_recursive_unnests_bottom_up,
 };
 
-use datafusion_common::error::DataFusionErrorBuilder;
+use datafusion_common::error::{DataFusionErrorBuilder, sqlstate_datafusion_err};
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion,
 };
@@ -61,7 +61,7 @@ use sqlparser::ast::{
     FunctionArgExpr, FunctionArguments, GroupByExpr, GroupBySetQuantifier, Ident, Join,
     JoinConstraint, JoinOperator, NamedWindowExpr, ObjectName, OrderBy, OrderByExpr,
     OrderByOptions, Query as SQLQuery, SelectFlavor, SelectItemQualifiedWildcardKind, SetExpr,
-    TableAlias, TableFactor, WildcardAdditionalOptions, WindowType,
+    TableAlias, TableFactor, Value, ValueWithSpan, WildcardAdditionalOptions, WindowType,
     visit_expressions_mut,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
@@ -213,9 +213,14 @@ impl SqlToRel<'_> {
         // Having and group by clause may reference aliases defined in select projection
         let projected_plan = self.project(base_plan.clone(), select_exprs)?;
         let select_exprs = projected_plan.expressions();
+        let output_names = self.select_output_names(projection.as_ref(), &select_exprs);
 
-        let order_by =
-            to_order_by_exprs_with_select(query_order_by, Some(&select_exprs))?;
+        let order_by = self.output_column_positions(
+            to_order_by_exprs_with_select(query_order_by, Some(&select_exprs))?,
+            "ORDER BY",
+            &output_names,
+            &select_exprs,
+        )?;
 
         // Place the fields of the base plan at the front so that when there are references
         // with the same name, the fields of the base plan will be searched first.
@@ -250,6 +255,12 @@ impl SqlToRel<'_> {
                         using: None,
                     })
                     .collect::<Vec<_>>();
+                let as_order_by = self.output_column_positions(
+                    Cow::Owned(as_order_by),
+                    "DISTINCT ON",
+                    &output_names,
+                    &select_exprs,
+                )?;
                 let sorts = self.order_by_to_sort_expr(
                     as_order_by,
                     projected_plan.schema().as_ref(),
@@ -318,11 +329,19 @@ impl SqlToRel<'_> {
                 // every grouping set.
                 .filter(|expr| !is_empty_grouping_element(expr))
                 .map(|e| {
-                    let group_by_expr = self.sql_expr_to_logical_expr(
+                    let group_by_expr = match self.group_by_output_column(
                         e,
-                        &combined_schema,
-                        planner_context,
-                    )?;
+                        base_plan.schema(),
+                        &output_names,
+                        &select_exprs,
+                    )? {
+                        Some(output_expr) => output_expr,
+                        None => self.sql_expr_to_logical_expr(
+                            e,
+                            &combined_schema,
+                            planner_context,
+                        )?,
+                    };
 
                     // Aliases from the projection can conflict with same-named expressions in the input
                     let mut alias_map = alias_map.clone();
@@ -1658,7 +1677,10 @@ impl SqlToRel<'_> {
                     if let Expr::Alias(alias) = select_expr
                         && alias.expr.as_ref() == &rewritten_expr
                     {
-                        return Some(Expr::Column(alias.name.clone().into()));
+                        return Some(Expr::Column(Column::new(
+                            alias.relation.clone(),
+                            alias.name.clone(),
+                        )));
                     }
                     None
                 })
@@ -1685,16 +1707,16 @@ impl SqlToRel<'_> {
             .collect::<Result<Vec<Expr>>>()?;
 
         // ORDER BY and DISTINCT ON items may name a grouping column, an
-        // aggregate, or an output alias of either.
+        // aggregate, or an output column of the select list, which is what an
+        // output name or position resolves to. An output column is named
+        // exactly as the projection names it: an alias such as "Token" is
+        // not an identifier to fold.
         let all_valid_exprs: Vec<Expr> = column_exprs_post_aggr
             .iter()
             .cloned()
-            .chain(select_exprs_post_aggr.iter().filter_map(|e| {
-                if let Expr::Alias(alias) = e {
-                    Some(Expr::Column(alias.name.clone().into()))
-                } else {
-                    None
-                }
+            .chain(select_exprs_post_aggr.iter().map(|e| {
+                let (relation, name) = e.qualified_name();
+                Expr::Column(Column::new(relation, name))
             }))
             .collect();
 
@@ -1730,6 +1752,133 @@ impl SqlToRel<'_> {
             order_by_exprs: order_by_post_aggr,
             distinct_on_exprs: distinct_on_post_aggr,
         })
+    }
+
+    /// The name each output column of the select list goes by when ORDER BY,
+    /// DISTINCT ON and GROUP BY resolve a bare name, aligned with the planned
+    /// `select_exprs`; `None` for a column no name reaches. An alias or a
+    /// column reference names its column, and an unaliased expression takes
+    /// the name the provider's dialect gives it. A wildcard expands to a
+    /// number of columns the written list does not show, so a list with one
+    /// is named from its planned expressions alone.
+    ///
+    /// The written alias is the name, not the planned expression's: a schema
+    /// cannot hold two fields of one name, so planning renames the second of
+    /// two columns aliased alike. Reading the planned name back would hide
+    /// exactly the collision that makes a bare name ambiguous.
+    fn select_output_names(
+        &self,
+        projection: &[SelectItem],
+        select_exprs: &[Expr],
+    ) -> Vec<Option<String>> {
+        let planned_name = |planned: &Expr| match planned {
+            Expr::Alias(alias) => Some(alias.name.clone()),
+            Expr::Column(column) => Some(column.name.clone()),
+            _ => None,
+        };
+        let aligned = projection.len() == select_exprs.len()
+            && projection.iter().all(|item| {
+                matches!(
+                    item,
+                    SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }
+                )
+            });
+        if !aligned {
+            return select_exprs.iter().map(planned_name).collect();
+        }
+        projection
+            .iter()
+            .zip(select_exprs)
+            .map(|(item, planned)| match item {
+                SelectItem::UnnamedExpr(expr) => self
+                    .context_provider
+                    .implicit_output_column_name(expr)
+                    .or_else(|| planned_name(planned)),
+                SelectItem::ExprWithAlias { alias, .. } => {
+                    Some(self.ident_normalizer.normalize(alias.clone()))
+                }
+                _ => planned_name(planned),
+            })
+            .collect()
+    }
+
+    /// PostgreSQL's reading of a bare name as an ORDER BY or DISTINCT ON item:
+    /// the output column of that name, ahead of any input column. Each such
+    /// item is rewritten to its output column's position.
+    fn output_column_positions<'a>(
+        &self,
+        mut items: Cow<'a, [OrderByExpr]>,
+        clause: &str,
+        output_names: &[Option<String>],
+        select_exprs: &[Expr],
+    ) -> Result<Cow<'a, [OrderByExpr]>> {
+        for index in 0..items.len() {
+            let SQLExpr::Identifier(ident) = &items[index].expr else {
+                continue;
+            };
+            let Some(position) =
+                self.output_column_named(ident, clause, output_names, select_exprs)?
+            else {
+                continue;
+            };
+            let span = ident.span;
+            items.to_mut()[index].expr = SQLExpr::Value(ValueWithSpan {
+                value: Value::Number((position + 1).to_string(), false),
+                span,
+            });
+        }
+        Ok(items)
+    }
+
+    /// PostgreSQL's reading of a bare name as a GROUP BY item: an input column
+    /// of that name first, and otherwise the expression of the output column
+    /// it names. `None` leaves the item to ordinary expression planning.
+    fn group_by_output_column(
+        &self,
+        item: &SQLExpr,
+        input_schema: &DFSchema,
+        output_names: &[Option<String>],
+        select_exprs: &[Expr],
+    ) -> Result<Option<Expr>> {
+        let SQLExpr::Identifier(ident) = item else {
+            return Ok(None);
+        };
+        let name = self.ident_normalizer.normalize(ident.clone());
+        if input_schema.has_column_with_unqualified_name(&name) {
+            return Ok(None);
+        }
+        Ok(self
+            .output_column_named(ident, "GROUP BY", output_names, select_exprs)?
+            .map(|position| select_exprs[position].clone().unalias()))
+    }
+
+    /// The position of the output column a bare name names, or `None` when no
+    /// output column has the name. Output columns of different expressions
+    /// sharing the name leave it ambiguous.
+    fn output_column_named(
+        &self,
+        ident: &Ident,
+        clause: &str,
+        output_names: &[Option<String>],
+        select_exprs: &[Expr],
+    ) -> Result<Option<usize>> {
+        let name = self.ident_normalizer.normalize(ident.clone());
+        let mut positions = output_names
+            .iter()
+            .enumerate()
+            .filter(|(_, output)| output.as_deref() == Some(name.as_str()))
+            .map(|(position, _)| position);
+        let Some(first) = positions.next() else {
+            return Ok(None);
+        };
+        let expression = select_exprs[first].clone().unalias();
+        if positions.any(|other| select_exprs[other].clone().unalias() != expression) {
+            return Err(sqlstate_datafusion_err(
+                "42702",
+                format!("{clause} \"{name}\" is ambiguous"),
+            ));
+        }
+        Ok(Some(first))
     }
 
     // If the projection is done over a named window, that window

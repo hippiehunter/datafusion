@@ -29,7 +29,7 @@ use arrow::{array::ArrayRef, datatypes::DataType, datatypes::Field};
 use datafusion_common::{Result, internal_err, not_impl_err};
 use datafusion_common::{ScalarValue, plan_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::utils::format_state_name;
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Documentation, GroupsAccumulator, Signature,
     Volatility,
@@ -94,6 +94,10 @@ impl Stddev {
 }
 
 impl AggregateUDFImpl for Stddev {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self
@@ -210,6 +214,10 @@ impl StddevPop {
 }
 
 impl AggregateUDFImpl for StddevPop {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self

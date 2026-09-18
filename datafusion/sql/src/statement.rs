@@ -29,7 +29,8 @@ use crate::parser::{
 };
 use crate::planner::{
     AssignmentStep, CreateTableLikeOptions, DmlGeneratedColumns, DmlViewEvent,
-    MergeRowAction, MergeRowActions, PlannerContext, PlannerResult, RawAssignmentTarget,
+    IdentNormalizer, MergeRowAction, MergeRowActions, PlannerContext, PlannerResult,
+    RawAssignmentTarget,
     SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlError, ViewDmlTarget,
     object_name_to_qualifier,
 };
@@ -45,21 +46,18 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{
     Column, Constraint, Constraints, DFSchema, DFSchemaRef, DataFusionError, MatchType,
     NullsDistinct, ReferentialAction, Result, ScalarValue, SchemaError, TableReference,
-    ToDFSchema, not_impl_err, plan_datafusion_err, plan_err, schema_err,
+    ToDFSchema, internal_err, not_impl_err, plan_datafusion_err, plan_err, schema_err,
     unqualified_field_not_found,
 };
 use datafusion_expr::dml::{
     ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, InsertOp,
-    OnConflict, OnConflictAction,
+    OnConflict, OnConflictAction, TargetSelectRights,
 };
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::builder::project;
-use datafusion_expr::logical_plan::{
-    DdlStatement, TableScanRowLock, TableScanRowLockMode, TableScanRowLockWaitPolicy,
-    build_join_schema,
-};
-use datafusion_expr::utils::{expr_to_columns, exprlist_to_fields};
+use datafusion_expr::logical_plan::{DdlStatement, TableScan, build_join_schema};
+use datafusion_expr::utils::{expand_wildcard, expr_to_columns, exprlist_to_fields};
 use datafusion_expr::{
     Analyze, BoundSqlExpression, CreateExternalTable as PlanCreateExternalTable,
     CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateMemoryTableSpec,
@@ -330,24 +328,38 @@ fn rebase_create_table_like_constraints(
     )
 }
 
-/// Attach the write-intent lock to the target relation before UPDATE/DELETE
-/// joins any auxiliary FROM/USING inputs. Descendant expansion then inherits
-/// the same target-row contract, while non-target relations remain unlocked.
-fn lock_dml_target_scan(plan: LogicalPlan) -> Result<LogicalPlan> {
+/// Make the planned DML target the statement's result relation before FROM,
+/// USING or a MERGE source joins it. Those sources may name the same table
+/// again, so the role — not the table name — identifies the rows written.
+/// Descendant and partition expansion inherit the role (and an UPDATE/DELETE
+/// target's lock) from this scan; every other relation stays unmarked and
+/// unlocked. A target whose source inlines a logical plan — a view whose
+/// INSTEAD OF triggers own the write — has no result relation scan.
+fn mark_dml_result_relation(
+    plan: LogicalPlan,
+    role: fn(TableScan) -> TableScan,
+) -> Result<LogicalPlan> {
     match plan {
-        LogicalPlan::TableScan(mut scan) => {
-            scan.row_lock = Some(TableScanRowLock {
-                mode: TableScanRowLockMode::ForUpdate,
-                wait_policy: TableScanRowLockWaitPolicy::Block,
-            });
-            Ok(LogicalPlan::TableScan(scan))
-        }
+        LogicalPlan::TableScan(scan) => Ok(LogicalPlan::TableScan(role(scan))),
         LogicalPlan::SubqueryAlias(alias) => {
-            let input = lock_dml_target_scan(Arc::unwrap_or_clone(alias.input))?;
+            let input = mark_dml_result_relation(Arc::unwrap_or_clone(alias.input), role)?;
             datafusion_expr::SubqueryAlias::try_new(Arc::new(input), alias.alias)
                 .map(LogicalPlan::SubqueryAlias)
         }
         other => Ok(other),
+    }
+}
+
+/// The relation a DML target's own columns are named through in the
+/// statement's expressions: its alias, or the table reference it was named by.
+fn dml_target_relation(
+    ident_normalizer: &IdentNormalizer,
+    table: &TableReference,
+    alias: Option<&ast::TableAlias>,
+) -> TableReference {
+    match alias {
+        Some(alias) => TableReference::bare(ident_normalizer.normalize(alias.name.clone())),
+        None => table.clone(),
     }
 }
 
@@ -689,27 +701,15 @@ fn returning_columns_to_output_schema(
     )?)))
 }
 
-fn relation_matches_target(
-    relation: &TableReference,
-    target_table: &TableReference,
-    target_alias: Option<&str>,
-) -> bool {
-    let relation_table = relation.table().to_ascii_lowercase();
-    if relation_table == target_table.table().to_ascii_lowercase() {
-        return true;
-    }
-    if let Some(alias) = target_alias {
-        return relation_table == alias.to_ascii_lowercase();
-    }
-    false
-}
-
+/// Rewrite RETURNING expressions over the DML source into expressions over the
+/// written row. `target_relation` is the name the target's own columns carry
+/// in the source: its alias when it has one, which then hides the table's
+/// name, so `UPDATE t AS x ... FROM t` reads `t.v` from the FROM relation.
 fn rewrite_update_returning_exprs(
     exprs: Vec<Expr>,
     source_schema: &DFSchema,
     target_column_names: &HashSet<String>,
-    target_table: &TableReference,
-    target_alias: Option<&str>,
+    target_relation: &TableReference,
 ) -> Result<(Vec<Expr>, Vec<Expr>)> {
     let mut passthrough_aliases: HashMap<Column, String> = HashMap::new();
     let mut passthrough_exprs: Vec<Expr> = Vec::new();
@@ -719,11 +719,13 @@ fn rewrite_update_returning_exprs(
     for expr in exprs {
         // The output keeps the name the user's expression had; a joined-source
         // column is renamed to its passthrough slot below and must not leak
-        // that slot's name into the result set.
-        let output_name = match &expr {
-            Expr::Alias(alias) => alias.name.clone(),
-            Expr::Column(column) => column.name.clone(),
-            other => other.schema_name().to_string(),
+        // that slot's name into the result set. It keeps its relation too, so
+        // `RETURNING *` over a target and a FROM relation that share a column
+        // name lists both.
+        let (output_relation, output_name) = match &expr {
+            Expr::Alias(alias) => (None, alias.name.clone()),
+            Expr::Column(column) => (column.relation.clone(), column.name.clone()),
+            other => (None, other.schema_name().to_string()),
         };
         let rewritten = expr
             .transform_up(|node| {
@@ -734,8 +736,7 @@ fn rewrite_update_returning_exprs(
                 let relation_is_target = column
                     .relation
                     .as_ref()
-                    .map(|rel| relation_matches_target(rel, target_table, target_alias))
-                    .unwrap_or(false);
+                    .is_some_and(|relation| relation.resolved_eq(target_relation));
 
                 // After UPDATE, RETURNING should observe target-table columns as their
                 // post-update values. These live in the projected DML input as unqualified
@@ -775,7 +776,7 @@ fn rewrite_update_returning_exprs(
         let rewritten = match rewritten {
             Expr::Alias(alias) => Expr::Alias(alias),
             other if other.schema_name().to_string() == output_name => other,
-            other => other.alias(output_name),
+            other => other.alias_qualified(output_relation, output_name),
         };
         rewritten_exprs.push(rewritten);
     }
@@ -874,45 +875,87 @@ fn project_with_lifted_exprs(
 }
 
 /// Expand the planned RETURNING items into one expression per output
-/// column; `*` and `t.*` cover the target table's user-visible columns.
+/// column. `target_schema` is the written row, named unqualified the way
+/// RETURNING reads it, and `target_relation` names it in a qualified
+/// wildcard. `joined_columns` are the columns of the relations an UPDATE's
+/// FROM or a DELETE's USING joins beside it, as `*` lists them. `*` covers
+/// the target's user-visible columns and then every joined relation's, and
+/// `r.*` covers relation `r`'s, as PostgreSQL expands them.
 fn expand_returning_select_exprs(
     prepared: Vec<datafusion_expr::select_expr::SelectExpr>,
-    table_schema: &DFSchema,
+    target_schema: &DFSchema,
+    target_relation: &TableReference,
+    joined_columns: &[Column],
 ) -> Result<Vec<Expr>> {
-    prepared
-        .into_iter()
-        .flat_map(|select_expr| match select_expr {
+    let target_columns = || {
+        target_schema
+            .fields()
+            .iter()
+            .filter(|field| !is_gantry_hidden_dml_column(field.name()))
+            .map(|field| Expr::Column(Column::from_name(field.name())))
+    };
+    let mut exprs = Vec::with_capacity(prepared.len());
+    for select_expr in prepared {
+        match select_expr {
             datafusion_expr::select_expr::SelectExpr::Expression(expr) => {
-                vec![Ok(expr)]
+                exprs.push(expr)
             }
-            datafusion_expr::select_expr::SelectExpr::Wildcard(_) => table_schema
-                .fields()
-                .iter()
-                .filter(|field| !is_gantry_hidden_dml_column(field.name()))
-                .map(|field| Ok(Expr::Column(Column::from_name(field.name()))))
-                .collect(),
+            datafusion_expr::select_expr::SelectExpr::Wildcard(_) => {
+                exprs.extend(target_columns());
+                exprs.extend(joined_columns.iter().cloned().map(Expr::Column));
+            }
+            datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(qualifier, _)
+                if qualifier.resolved_eq(target_relation) =>
+            {
+                exprs.extend(target_columns());
+            }
             datafusion_expr::select_expr::SelectExpr::QualifiedWildcard(qualifier, _) => {
-                table_schema
-                    .fields()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, _)| {
-                        let (q, field) = table_schema.qualified_field(idx);
-                        if is_gantry_hidden_dml_column(field.name()) {
-                            return None;
-                        }
-                        if q.map(|q| q.to_string().to_ascii_lowercase())
-                            == Some(qualifier.to_string().to_ascii_lowercase())
-                        {
-                            Some(Ok(Expr::Column(Column::from_name(field.name()))))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+                let first = exprs.len();
+                exprs.extend(
+                    joined_columns
+                        .iter()
+                        .filter(|column| {
+                            column
+                                .relation
+                                .as_ref()
+                                .is_some_and(|relation| relation.resolved_eq(&qualifier))
+                        })
+                        .cloned()
+                        .map(Expr::Column),
+                );
+                if exprs.len() == first {
+                    return plan_err!(
+                        "missing FROM-clause entry for table \"{qualifier}\""
+                    );
+                }
             }
+        }
+    }
+    Ok(exprs)
+}
+
+/// The columns `*` lists for the relations an UPDATE's FROM or a DELETE's
+/// USING joins beside the target, whose row fills the first `target_width`
+/// columns of `scope`. System columns and the columns a USING join merges
+/// away are not listed.
+fn joined_relation_columns(
+    scope: &LogicalPlan,
+    target_width: usize,
+) -> Result<Vec<Column>> {
+    let listed = expand_wildcard(scope.schema(), scope, None)?
+        .into_iter()
+        .map(|expr| match expr {
+            Expr::Column(column) => Ok(column),
+            other => internal_err!("wildcard expanded to the non-column {other}"),
         })
-        .collect::<Result<Vec<_>>>()
+        .collect::<Result<HashSet<_>>>()?;
+    Ok(scope
+        .schema()
+        .iter()
+        .skip(target_width)
+        .map(Column::from)
+        .filter(|column| listed.contains(column))
+        .collect())
 }
 
 fn multiple_assignments_err<T>(column: &str) -> Result<T> {
@@ -2971,6 +3014,9 @@ impl SqlToRel<'_> {
         let table_ref = self.object_name_to_table_reference(table_name)?;
         let table_source = self.context_provider.get_table_source(table_ref.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
+        let target_relation =
+            dml_target_relation(&self.ident_normalizer, &table_ref, table_alias.as_ref());
+        let mut target_select_rights = TargetSelectRights::NotRequired;
 
         // Clone the outer planner context to inherit CTEs
         let mut planner_context = outer_planner_context.clone();
@@ -2978,8 +3024,9 @@ impl SqlToRel<'_> {
         // Build scan, joining with USING tables if present (similar to UPDATE FROM)
         // This implements PostgreSQL's DELETE ... USING syntax where additional
         // tables can be specified to form joins for the WHERE clause.
-        let mut scan = lock_dml_target_scan(
+        let mut scan = mark_dml_result_relation(
             self.plan_table_with_joins_ref(table, &mut planner_context)?,
+            TableScan::into_update_delete_target,
         )?;
         scan = apply_bound_view_row_restrictions(
             scan,
@@ -3028,6 +3075,8 @@ impl SqlToRel<'_> {
                     &[&[scan.schema()]],
                     &[using_columns.into()],
                 )?;
+                target_select_rights =
+                    TargetSelectRights::reading(&target_relation, [&filter_expr])?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
         };
@@ -3037,7 +3086,10 @@ impl SqlToRel<'_> {
         let mut returning_col_names = None;
         let mut returning_output_schema = None;
         if let Some(returning_items) = returning {
+            // With no USING relation beside it, bare names and wildcards can
+            // only name the deleted row's own columns.
             let plain_columns = view_target.is_none()
+                && using.is_none()
                 && returning_items.iter().all(|item| {
                     matches!(
                         item,
@@ -3047,6 +3099,7 @@ impl SqlToRel<'_> {
                     )
                 });
             if plain_columns {
+                target_select_rights = TargetSelectRights::Required;
                 let cols = select_items_to_column_names(returning_items);
                 returning_output_schema = returning_columns_to_output_schema(
                     &table_schema,
@@ -3059,26 +3112,17 @@ impl SqlToRel<'_> {
                 // expression over the deleted row: the row's own columns are
                 // projected under their names, and USING-source columns or
                 // subqueries ride alongside as passthrough columns.
-                let target_alias = table_alias
-                    .as_ref()
-                    .map(|alias| self.ident_normalizer.normalize(alias.name.clone()));
                 // The row is read under the relation it was scanned as; a
                 // USING table may carry a column of the same name.
                 let mut projected_exprs = table_schema
                     .fields()
                     .iter()
                     .map(|field| {
-                        let column = match &target_alias {
-                            Some(alias) => Expr::Column(Column::new(
-                                Some(alias.clone()),
-                                field.name(),
-                            )),
-                            None => Expr::Column(Column::new(
-                                Some(table_ref.clone()),
-                                field.name(),
-                            )),
-                        };
-                        column.alias(field.name())
+                        Expr::Column(Column::new(
+                            Some(target_relation.clone()),
+                            field.name(),
+                        ))
+                        .alias(field.name())
                     })
                     .collect::<Vec<_>>();
                 let binding_scope = view_target
@@ -3100,9 +3144,19 @@ impl SqlToRel<'_> {
                 let returning_target_schema = view_target
                     .map(|target| view_public_schema(binding_source, target))
                     .transpose()?;
+                let returning_target =
+                    returning_target_schema.as_ref().unwrap_or(&table_schema);
                 let mut logical_exprs = expand_returning_select_exprs(
                     prepared,
-                    returning_target_schema.as_ref().unwrap_or(&table_schema),
+                    returning_target,
+                    &view_target.map_or_else(
+                        || target_relation.clone(),
+                        |target| TableReference::bare(target.view_name.clone()),
+                    ),
+                    &joined_relation_columns(
+                        binding_source,
+                        returning_target.fields().len(),
+                    )?,
                 )?;
                 if let Some(target) = view_target {
                     logical_exprs = substitute_bound_view_returning(
@@ -3113,6 +3167,9 @@ impl SqlToRel<'_> {
                         table_schema.fields().len(),
                     )?;
                 }
+                target_select_rights = target_select_rights.and(
+                    TargetSelectRights::reading(&target_relation, &logical_exprs)?,
+                );
                 let target_column_names = table_schema
                     .fields()
                     .iter()
@@ -3122,8 +3179,7 @@ impl SqlToRel<'_> {
                     logical_exprs,
                     source.schema(),
                     &target_column_names,
-                    &table_ref,
-                    target_alias.as_deref(),
+                    &target_relation,
                 )?;
                 let (rewritten, lifted_exprs) =
                     lift_subquery_returning_exprs(rewritten, passthrough_exprs.len())?;
@@ -3143,8 +3199,13 @@ impl SqlToRel<'_> {
             }
         }
 
-        let mut dml =
-            DmlStatement::new(table_ref, table_source, WriteOp::Delete, Arc::new(source));
+        let mut dml = DmlStatement::new(
+            table_ref,
+            table_source,
+            WriteOp::Delete,
+            Arc::new(source),
+            target_select_rights,
+        );
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }
@@ -3380,9 +3441,13 @@ impl SqlToRel<'_> {
         let table_ref = self.object_name_to_table_reference(table_name)?;
         let table_source = self.context_provider.get_table_source(table_ref.clone())?;
         let target_schema = table_source.schema();
-        let mut target_plan =
+        let target_relation =
+            dml_target_relation(&self.ident_normalizer, &table_ref, table_alias.as_ref());
+        let mut target_plan = mark_dml_result_relation(
             LogicalPlanBuilder::scan(table_ref.clone(), Arc::clone(&table_source), None)?
-                .build()?;
+                .build()?,
+            TableScan::into_merge_target,
+        )?;
         if let Some(alias) = table_alias {
             target_plan = self.apply_table_alias(target_plan, alias)?;
         }
@@ -3571,12 +3636,38 @@ impl SqlToRel<'_> {
             });
         }
 
+        // The join condition, an arm's condition and an UPDATE arm's
+        // assignments are where a target column can be named; an arm that
+        // does nothing reads the row it leaves alone. RETURNING is bound by
+        // the caller, which adds its own reads.
+        let mut target_select_rights =
+            TargetSelectRights::reading(&target_relation, [&on_expr])?;
+        for clause in &merge_clauses {
+            let arm_rights = match &clause.action {
+                MergeAction::DoNothing => TargetSelectRights::Required,
+                MergeAction::Update(update) => TargetSelectRights::reading(
+                    &target_relation,
+                    clause
+                        .predicate
+                        .iter()
+                        .chain(update.assignments.iter().map(|assignment| &assignment.value))
+                        .chain(update.update_predicate.iter())
+                        .chain(update.delete_predicate.iter()),
+                )?,
+                MergeAction::Insert(_) | MergeAction::Delete => {
+                    TargetSelectRights::reading(&target_relation, clause.predicate.iter())?
+                }
+            };
+            target_select_rights = target_select_rights.and(arm_rights);
+        }
+
         Ok(LogicalPlan::Merge(Merge::new(
             table_ref,
             Arc::new(target_plan),
             Arc::new(source_plan),
             on_expr,
             merge_clauses,
+            target_select_rights,
         )))
     }
 
@@ -3783,6 +3874,9 @@ impl SqlToRel<'_> {
             table_name.clone(),
             &table_source.schema(),
         )?);
+        let target_relation =
+            dml_target_relation(&self.ident_normalizer, &table_name, table_alias.as_ref());
+        let mut target_select_rights = TargetSelectRights::NotRequired;
 
         // Overwrite with assignment expressions
         // Clone the outer planner context to inherit CTEs
@@ -3842,8 +3936,9 @@ impl SqlToRel<'_> {
             };
 
         // Build scan, join with from table if it exists.
-        let mut scan = lock_dml_target_scan(
+        let mut scan = mark_dml_result_relation(
             self.plan_table_with_joins_ref(table, &mut planner_context)?,
+            TableScan::into_update_delete_target,
         )?;
         scan = apply_bound_view_row_restrictions(
             scan,
@@ -4036,6 +4131,8 @@ impl SqlToRel<'_> {
                     &[&[scan.schema()]],
                     &[using_columns.into()],
                 )?;
+                target_select_rights =
+                    TargetSelectRights::reading(&target_relation, [&filter_expr])?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
         };
@@ -4080,6 +4177,11 @@ impl SqlToRel<'_> {
                                 table_schema.fields().len(),
                             )?;
                         }
+                        // The path's base is the stored column the executor
+                        // writes into, not a read the statement makes.
+                        target_select_rights = target_select_rights.and(
+                            TargetSelectRights::reading(&target_relation, [&value])?,
+                        );
                         base = self.plan_assignment_target(
                             base,
                             Arc::clone(field),
@@ -4133,6 +4235,9 @@ impl SqlToRel<'_> {
                                 table_schema.fields().len(),
                             )?;
                         }
+                        target_select_rights = target_select_rights.and(
+                            TargetSelectRights::reading(&target_relation, [&expr])?,
+                        );
                         // Update placeholder's datatype to the type of the target column
                         if let Expr::Placeholder(placeholder) = &mut expr {
                             placeholder.field = placeholder
@@ -4223,11 +4328,20 @@ impl SqlToRel<'_> {
             let returning_target_schema = view_target
                 .map(|target| view_public_schema(returning_source, target))
                 .transpose()?;
+            let returning_target = returning_target_schema
+                .as_ref()
+                .unwrap_or(table_schema.as_ref());
             let mut logical_exprs = expand_returning_select_exprs(
                 prepared,
-                returning_target_schema
-                    .as_ref()
-                    .unwrap_or(table_schema.as_ref()),
+                returning_target,
+                &view_target.map_or_else(
+                    || target_relation.clone(),
+                    |target| TableReference::bare(target.view_name.clone()),
+                ),
+                &joined_relation_columns(
+                    returning_source,
+                    returning_target.fields().len(),
+                )?,
             )?;
             if let Some(target) = view_target {
                 logical_exprs = substitute_bound_view_returning(
@@ -4238,22 +4352,22 @@ impl SqlToRel<'_> {
                     table_schema.fields().len(),
                 )?;
             }
+            target_select_rights = target_select_rights.and(TargetSelectRights::reading(
+                &target_relation,
+                &logical_exprs,
+            )?);
 
             let target_column_names = table_schema
                 .fields()
                 .iter()
                 .map(|f| f.name().to_string())
                 .collect::<HashSet<_>>();
-            let target_alias = table_alias
-                .as_ref()
-                .map(|alias| self.ident_normalizer.normalize(alias.name.clone()));
             let (rewritten_returning_exprs, passthrough_exprs) =
                 rewrite_update_returning_exprs(
                     logical_exprs,
                     source.schema(),
                     &target_column_names,
-                    &table_name,
-                    target_alias.as_deref(),
+                    &target_relation,
                 )?;
             let (rewritten_returning_exprs, lifted_exprs) =
                 lift_subquery_returning_exprs(
@@ -4288,6 +4402,7 @@ impl SqlToRel<'_> {
             table_source,
             WriteOp::Update,
             Arc::new(source),
+            target_select_rights,
         );
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
@@ -4892,6 +5007,17 @@ impl SqlToRel<'_> {
                 "Conflicting insert operations: `overwrite` and `replace_into` cannot both be true"
             )?,
         };
+        let mut target_select_rights = match &insert_op {
+            // An arbiter reads the target's rows to find a conflict, and DO
+            // UPDATE reads the conflicting row.
+            InsertOp::WithConflictClause(conflict)
+                if conflict.conflict_target.is_some()
+                    || matches!(conflict.action, OnConflictAction::DoUpdate(_)) =>
+            {
+                TargetSelectRights::Required
+            }
+            _ => TargetSelectRights::NotRequired,
+        };
 
         let mut returning_exprs = None;
         let (returning_col_names, returning_output_schema) =
@@ -4906,12 +5032,19 @@ impl SqlToRel<'_> {
                     &mut planner_context,
                 )?;
                 let expressions = substitute_bound_view_returning(
-                    expand_returning_select_exprs(prepared, &public_schema)?,
+                    expand_returning_select_exprs(
+                        prepared,
+                        &public_schema,
+                        &TableReference::bare(target.view_name.clone()),
+                        &[],
+                    )?,
                     &scope,
                     target,
                     source.schema(),
                     table_schema.fields().len(),
                 )?;
+                target_select_rights = target_select_rights
+                    .and(TargetSelectRights::reading(&table_name, &expressions)?);
                 let fields =
                     exprlist_to_fields(expressions.iter(), &source).map_err(|error| {
                         DataFusionError::Context(
@@ -4931,6 +5064,15 @@ impl SqlToRel<'_> {
                 returning_exprs = Some(expressions);
                 (Some(names), Some(output_schema))
             } else {
+                if let Some(returning_items) = returning {
+                    target_select_rights =
+                        target_select_rights.and(self.insert_returning_select_rights(
+                            returning_items,
+                            &table_name,
+                            &table_source,
+                            &mut outer_planner_context.clone(),
+                        )?);
+                }
                 let names = returning.map(select_items_to_column_names);
                 let schema = names
                     .as_ref()
@@ -4951,6 +5093,7 @@ impl SqlToRel<'_> {
             Arc::clone(&table_source),
             WriteOp::Insert(insert_op),
             Arc::new(source),
+            target_select_rights,
         );
         if written_columns.is_some() || !columns.is_empty() || overriding_user_value {
             dml = dml.with_target_columns(target_col_names);
@@ -4966,6 +5109,34 @@ impl SqlToRel<'_> {
         }
         let plan = LogicalPlan::Dml(dml);
         Ok(plan)
+    }
+
+    /// The rights an INSERT's RETURNING list needs, bound over the inserted row
+    /// as the frontend binds a table INSERT's RETURNING: every column it names
+    /// outside a subquery's own relations is the inserted row's.
+    fn insert_returning_select_rights(
+        &self,
+        returning: &[SelectItem],
+        table_name: &TableReference,
+        table_source: &Arc<dyn TableSource>,
+        planner_context: &mut PlannerContext,
+    ) -> Result<TargetSelectRights> {
+        let row_schema =
+            DFSchema::try_from_qualified_schema(table_name.clone(), &table_source.schema())?;
+        let mut rights = TargetSelectRights::NotRequired;
+        for item in returning {
+            let expr = match item {
+                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
+                    return Ok(TargetSelectRights::Required);
+                }
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    expr
+                }
+            };
+            let expr = self.sql_to_expr_ref(expr, &row_schema, planner_context)?;
+            rights = rights.and(TargetSelectRights::reading(table_name, [&expr])?);
+        }
+        Ok(rights)
     }
 
     /// Converts a sqlparser OnConflict clause to a DataFusion OnConflict.

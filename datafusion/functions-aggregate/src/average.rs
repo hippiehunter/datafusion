@@ -34,7 +34,7 @@ use arrow::datatypes::{
 use datafusion_common::types::{NativeType, logical_float64};
 use datafusion_common::{Result, ScalarValue, exec_err, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::utils::format_state_name;
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Coercion, Documentation, EmitTo, Expr,
     GroupsAccumulator, ReversedUDAF, Signature, TypeSignature, TypeSignatureClass,
@@ -127,6 +127,10 @@ impl Default for Avg {
 }
 
 impl AggregateUDFImpl for Avg {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -48,7 +48,7 @@ use crate::{
 };
 use datafusion_expr_common::type_coercion::binary::comparison_coercion;
 
-use super::dml::InsertOp;
+use super::dml::{InsertOp, TargetSelectRights};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_common::display::ToStringifiedPlan;
@@ -140,6 +140,16 @@ impl LogicalPlanBuilderOptions {
 pub struct LogicalPlanBuilder {
     plan: Arc<LogicalPlan>,
     options: LogicalPlanBuilderOptions,
+}
+
+/// Whether a recursive term column of `recursive_type` takes the non-recursive
+/// term's `static_type`, the type of the whole recursive query's column. The
+/// column types come from the non-recursive term, so a recursive term whose
+/// own type is wider has no type the query could settle on: coercing it would
+/// silently narrow the recursive values.
+pub fn recursive_term_type_settles(static_type: &DataType, recursive_type: &DataType) -> bool {
+    static_type == recursive_type
+        || comparison_coercion(static_type, recursive_type).as_ref() == Some(static_type)
 }
 
 /// Whether a value of `data_type` is accepted by a column of `field_type`
@@ -290,9 +300,6 @@ impl LogicalPlanBuilder {
                 recursive_fields_len
             );
         }
-        // The query's column types come from the non-recursive term, so a
-        // recursive term whose own type is wider has no type the query could
-        // settle on: coercing it would silently narrow the recursive values.
         for (index, (static_field, recursive_field)) in self
             .plan
             .schema()
@@ -303,12 +310,9 @@ impl LogicalPlanBuilder {
         {
             let static_type = static_field.data_type();
             let recursive_type = recursive_field.data_type();
-            if static_type == recursive_type {
-                continue;
-            }
-            let overall = comparison_coercion(static_type, recursive_type);
-            if overall.as_ref() != Some(static_type) {
-                let overall = overall.unwrap_or_else(|| recursive_type.clone());
+            if !recursive_term_type_settles(static_type, recursive_type) {
+                let overall = comparison_coercion(static_type, recursive_type)
+                    .unwrap_or_else(|| recursive_type.clone());
                 return plan_err!(
                     "recursive query \"{name}\" column {} has type {static_type} in \
                      non-recursive term but type {overall} overall",
@@ -320,14 +324,11 @@ impl LogicalPlanBuilder {
         // Ensure that the recursive term has the same field types as the static term
         let coerced_recursive_term =
             coerce_plan_expr_for_schema(recursive_term, self.plan.schema())?;
-        let schema = Arc::clone(self.plan.schema());
         Ok(Self::from(LogicalPlan::RecursiveQuery(RecursiveQuery {
             name,
             static_term: self.plan,
             recursive_term: Arc::new(coerced_recursive_term),
             is_distinct,
-            schema,
-            search: None,
         })))
     }
 
@@ -408,13 +409,23 @@ impl LogicalPlanBuilder {
                 fields.push_with_metadata(data_type, true, metadata);
                 continue;
             }
+            // The schema fixes the column's carrier; the values still say what
+            // they are on it. A `character(5)` written into a `varchar` column
+            // shares that carrier without being the same type, and the
+            // assignment that follows reads the difference from the column's
+            // metadata. The identity is what every row agrees on, and it is
+            // carried only while every row is already on the column's carrier,
+            // so it never describes a value of a different one.
+            let mut identity: Option<FieldMetadata> = None;
+            let mut values_on_carrier = true;
             for row in values.iter() {
                 let value = &row[j];
-                let data_type = value.get_type(schema)?;
+                let (_, value_field) = value.to_field(schema)?;
+                let data_type = value_field.data_type();
 
                 if !data_type.equals_datatype(field_type)
-                    && !can_cast_types(&data_type, field_type)
-                    && !value_reads_into(&data_type, field_type)
+                    && !can_cast_types(data_type, field_type)
+                    && !value_reads_into(data_type, field_type)
                 {
                     return exec_err!(
                         "type mismatch and can't cast to got {} and {}",
@@ -422,8 +433,25 @@ impl LogicalPlanBuilder {
                         field_type
                     );
                 }
+                values_on_carrier &= data_type.equals_datatype(field_type);
+                let metadata = FieldMetadata::from(value_field.metadata());
+                identity = Some(match identity {
+                    Some(common) => FieldMetadata::new(
+                        common
+                            .inner()
+                            .iter()
+                            .filter(|(key, value)| metadata.inner().get(*key) == Some(*value))
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    ),
+                    None => metadata,
+                });
             }
-            fields.push(field_type.to_owned(), field_nullable);
+            if values_on_carrier {
+                fields.push_with_metadata(field_type.to_owned(), field_nullable, identity);
+            } else {
+                fields.push(field_type.to_owned(), field_nullable);
+            }
         }
 
         Self::infer_inner(values, fields, schema)
@@ -641,11 +669,13 @@ impl LogicalPlanBuilder {
         target: Arc<dyn TableSource>,
         insert_op: InsertOp,
     ) -> Result<Self> {
+        // A plain insert of the input's rows names no target column.
         Ok(Self::new(LogicalPlan::Dml(DmlStatement::new(
             table_name.into(),
             target,
             WriteOp::Insert(insert_op),
             Arc::new(input),
+            TargetSelectRights::NotRequired,
         ))))
     }
 

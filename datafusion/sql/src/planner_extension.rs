@@ -173,6 +173,19 @@ pub trait ContextProvider {
         None
     }
 
+    /// The output column name an unaliased select-list expression takes, when
+    /// the dialect names one (PostgreSQL's `FigureColname`: `n::text` is `n`,
+    /// `abs(x)` is `abs`). A bare name in ORDER BY or DISTINCT ON reads the
+    /// output column it names before any input column, and GROUP BY reads it
+    /// when no input column has the name, so these names take part in name
+    /// resolution, not only in the result's column labels.
+    ///
+    /// The default names no unaliased expression: only aliases and column
+    /// references name output columns.
+    fn implicit_output_column_name(&self, _expr: &SQLExpr) -> Option<String> {
+        None
+    }
+
     /// Return the type of a file based on its extension (e.g. `.parquet`)
     ///
     /// This is used to plan `COPY` statements
@@ -576,9 +589,7 @@ pub trait ExprPlanner: Debug + Send + Sync {
         _qualifier: Option<&TableReference>,
         _nested_names: &[String],
     ) -> Result<PlannerResult<Vec<Expr>>> {
-        not_impl_err!(
-            "Default planner compound identifier hasn't been implemented for ExprPlanner"
-        )
+        Ok(PlannerResult::Original(Vec::new()))
     }
 
     /// Plans `ANY` expression, such as `expr = ANY(array_expr)`

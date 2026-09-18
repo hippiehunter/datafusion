@@ -27,6 +27,7 @@ use datafusion_common::{
 };
 use datafusion_expr::builder::project;
 use datafusion_expr::expr::AggregateFunctionParams;
+use datafusion_expr::utils::AggregateOrderSensitivity;
 use datafusion_expr::{
     Expr, col,
     expr::AggregateFunction,
@@ -83,6 +84,13 @@ fn is_single_distinct_agg(aggr_expr: &[Expr]) -> Result<bool> {
             }
             aggregate_count += 1;
             if *distinct {
+                // The rewritten aggregate reads the distinct values in the
+                // grouping's arbitrary order. A function whose answer depends
+                // on its input order keeps its DISTINCT, whose values arrive
+                // in their sorted order.
+                if func.order_sensitivity() != AggregateOrderSensitivity::Insensitive {
+                    return Ok(false);
+                }
                 for e in args {
                     fields_set.insert(e);
                 }

@@ -336,7 +336,7 @@ impl SqlToRel<'_> {
 
     /// Run a search condition through the registered expression planners'
     /// `plan_condition` before it becomes the predicate of a plan node.
-    pub(crate) fn plan_condition_expr(
+    pub fn plan_condition_expr(
         &self,
         expr: Expr,
         schema: &DFSchema,

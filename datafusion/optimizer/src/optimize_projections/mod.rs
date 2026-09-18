@@ -30,7 +30,7 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::Alias;
 use datafusion_expr::{
-    Aggregate, Distinct, EmptyRelation, Expr, Projection, TableScan, Unnest, Window,
+    Aggregate, Distinct, EmptyRelation, Expr, Projection, Unnest, Window,
     logical_plan::LogicalPlan,
 };
 
@@ -253,37 +253,16 @@ fn optimize_projections(
             });
         }
         LogicalPlan::TableScan(table_scan) => {
-            let TableScan {
-                table_name,
-                source,
-                projection,
-                filters,
-                fetch,
-                row_lock,
-                only,
-                projected_schema: _,
-            } = table_scan;
-
             // Get indices referred to in the original (schema with all fields)
             // given projected indices.
-            let projection = match &projection {
+            let projection = match &table_scan.projection {
                 Some(projection) => indices.into_mapped_indices(|idx| projection[idx]),
                 None => indices.into_inner(),
             };
-            return TableScan::try_new(
-                table_name,
-                source,
-                Some(projection),
-                filters,
-                fetch,
-            )
-            .map(|mut scan| {
-                scan.row_lock = row_lock;
-                scan.only = only;
-                scan
-            })
-            .map(LogicalPlan::TableScan)
-            .map(Transformed::yes);
+            return table_scan
+                .try_reproject(Some(projection))
+                .map(LogicalPlan::TableScan)
+                .map(Transformed::yes);
         }
         // Other node types are handled below
         _ => {}

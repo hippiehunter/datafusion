@@ -2818,14 +2818,11 @@ fn test_recursive_cte_unparse() {
         .unwrap(),
     ));
 
-    let schema = Arc::clone(static_term.schema());
     let recursive_query = RecursiveQuery {
         name: "numbers".to_string(),
         static_term,
         recursive_term,
         is_distinct: false, // UNION ALL
-        schema,
-        search: None,
     };
 
     let plan = LogicalPlan::RecursiveQuery(recursive_query);
@@ -2884,14 +2881,11 @@ fn test_recursive_cte_union_distinct() {
         .unwrap(),
     ));
 
-    let schema = Arc::clone(static_term.schema());
     let recursive_query = RecursiveQuery {
         name: "tree".to_string(),
         static_term,
         recursive_term,
         is_distinct: true, // UNION (distinct)
-        schema,
-        search: None,
     };
 
     let plan = LogicalPlan::RecursiveQuery(recursive_query);

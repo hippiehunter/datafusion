@@ -304,6 +304,8 @@ impl Unparser<'_> {
             from: None,
             materialized: None,
             closing_paren_token: AttachedToken::empty(),
+            search: None,
+            cycle: None,
         };
 
         // Create WITH RECURSIVE clause
@@ -312,8 +314,6 @@ impl Unparser<'_> {
             recursive: true,
             oracle_declarations: vec![],
             cte_tables: vec![cte],
-            cycle: None,
-            search: None,
         };
 
         // Create outer SELECT * FROM <name>

@@ -33,7 +33,7 @@ use arrow::datatypes::{
 use datafusion_common::cast::as_list_array;
 use datafusion_common::{Result, ScalarValue, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::utils::format_state_name;
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Coercion, Documentation, GroupsAccumulator,
     ReversedUDAF, Signature, TypeSignatureClass, Volatility,
@@ -240,6 +240,10 @@ impl BitwiseOperation {
 }
 
 impl AggregateUDFImpl for BitwiseOperation {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

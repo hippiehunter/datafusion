@@ -253,6 +253,7 @@ impl TreeNode for LogicalPlan {
                 returning_context,
                 overriding_system_value,
                 check_option,
+                target_select_rights,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
                     table_name,
@@ -266,6 +267,7 @@ impl TreeNode for LogicalPlan {
                     returning_context,
                     overriding_system_value,
                     check_option,
+                    target_select_rights,
                 })
             }),
             LogicalPlan::Merge(Merge {
@@ -278,6 +280,7 @@ impl TreeNode for LogicalPlan {
                 returning_exprs,
                 returning_context,
                 output_schema,
+                target_select_rights,
             }) => (target, source)
                 .map_elements(f)?
                 .update_data(|(target, source)| {
@@ -291,6 +294,7 @@ impl TreeNode for LogicalPlan {
                         returning_exprs,
                         returning_context,
                         output_schema,
+                        target_select_rights,
                     })
                 }),
             LogicalPlan::CopyFrom(CopyFrom {
@@ -368,8 +372,6 @@ impl TreeNode for LogicalPlan {
                 static_term,
                 recursive_term,
                 is_distinct,
-                schema,
-                search,
             }) => (static_term, recursive_term).map_elements(f)?.update_data(
                 |(static_term, recursive_term)| {
                     LogicalPlan::RecursiveQuery(RecursiveQuery {
@@ -377,8 +379,6 @@ impl TreeNode for LogicalPlan {
                         static_term,
                         recursive_term,
                         is_distinct,
-                        schema,
-                        search,
                     })
                 },
             ),
@@ -809,6 +809,7 @@ impl LogicalPlan {
                 fetch,
                 row_lock,
                 only,
+                result_relation,
             }) => filters.map_elements(f)?.update_data(|filters| {
                 LogicalPlan::TableScan(TableScan {
                     table_name,
@@ -819,6 +820,7 @@ impl LogicalPlan {
                     fetch,
                     row_lock,
                     only,
+                    result_relation,
                 })
             }),
             LogicalPlan::Distinct(Distinct::On(DistinctOn {

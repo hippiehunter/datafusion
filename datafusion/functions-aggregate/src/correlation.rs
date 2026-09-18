@@ -42,7 +42,7 @@ use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{
     Accumulator, AggregateUDFImpl, Documentation, Signature, Volatility,
     function::{AccumulatorArgs, StateFieldsArgs},
-    utils::format_state_name,
+    utils::{AggregateOrderSensitivity, format_state_name},
 };
 use datafusion_functions_aggregate_common::stats::StatsType;
 use datafusion_macros::user_doc;
@@ -96,6 +96,10 @@ impl Correlation {
 }
 
 impl AggregateUDFImpl for Correlation {
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self

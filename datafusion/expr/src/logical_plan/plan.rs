@@ -1067,7 +1067,11 @@ impl LogicalPlan {
             LogicalPlan::CopyFrom(CopyFrom { output_schema, .. }) => output_schema,
             LogicalPlan::Ddl(ddl) => ddl.schema(),
             LogicalPlan::Unnest(Unnest { schema, .. }) => schema,
-            LogicalPlan::RecursiveQuery(RecursiveQuery { schema, .. }) => schema,
+            LogicalPlan::RecursiveQuery(RecursiveQuery { static_term, .. }) => {
+                // The recursive term is coerced to the static term's columns,
+                // so the static term's schema is the whole query's.
+                static_term.schema()
+            }
             LogicalPlan::MatchRecognize(MatchRecognize { schema, .. }) => schema,
             LogicalPlan::JsonTable(JsonTable { schema, .. }) => schema,
             LogicalPlan::GraphTable(GraphTable { schema, .. }) => schema,
@@ -1585,6 +1589,7 @@ impl LogicalPlan {
                     Arc::clone(&dml.target),
                     dml.op.clone(),
                     Arc::new(input),
+                    dml.target_select_rights,
                 );
                 new_dml.output_schema = dml.output_schema.clone();
                 new_dml.target_columns = dml.target_columns.clone();
@@ -1718,6 +1723,7 @@ impl LogicalPlan {
                     returning_exprs: merge.returning_exprs.clone(),
                     returning_context: merge.returning_context.clone(),
                     output_schema: Arc::clone(&merge.output_schema),
+                    target_select_rights: merge.target_select_rights,
                 }))
             }
             LogicalPlan::Copy(CopyTo {
@@ -1993,11 +1999,7 @@ impl LogicalPlan {
                 Ok(LogicalPlan::Distinct(distinct))
             }
             LogicalPlan::RecursiveQuery(RecursiveQuery {
-                name,
-                is_distinct,
-                schema,
-                search,
-                ..
+                name, is_distinct, ..
             }) => {
                 self.assert_no_expressions(expr)?;
                 let (static_term, recursive_term) = self.only_two_inputs(inputs)?;
@@ -2006,8 +2008,6 @@ impl LogicalPlan {
                     static_term: Arc::new(static_term),
                     recursive_term: Arc::new(recursive_term),
                     is_distinct: *is_distinct,
-                    schema: Arc::clone(schema),
-                    search: search.clone(),
                 }))
             }
             LogicalPlan::Analyze(a) => {
@@ -3269,7 +3269,7 @@ impl PartialOrd for EmptyRelation {
 ///   intermediate table, then empty the intermediate table.
 ///
 /// [Postgres Docs]: https://www.postgresql.org/docs/current/queries-with.html#QUERIES-WITH-RECURSIVE
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct RecursiveQuery {
     /// Name of the query
     pub name: String,
@@ -3281,48 +3281,6 @@ pub struct RecursiveQuery {
     /// Should the output of the recursive term be deduplicated (`UNION`) or
     /// not (`UNION ALL`).
     pub is_distinct: bool,
-    /// Output schema. Ordinarily this is the static term's schema; a SQL
-    /// `SEARCH` clause appends its generated traversal-order column without
-    /// changing either recursive term's row shape.
-    pub schema: DFSchemaRef,
-    /// Runtime traversal contract for SQL `SEARCH ... SET ...`.
-    pub search: Option<RecursiveSearch>,
-}
-
-// Manual implementation needed because of `schema` field. Comparison excludes this field.
-impl PartialOrd for RecursiveQuery {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (
-            &self.name,
-            &self.static_term,
-            &self.recursive_term,
-            self.is_distinct,
-            &self.search,
-        )
-            .partial_cmp(&(
-                &other.name,
-                &other.static_term,
-                &other.recursive_term,
-                other.is_distinct,
-                &other.search,
-            ))
-            // TODO (https://github.com/apache/datafusion/issues/17477) avoid recomparing all fields
-            .filter(|cmp| *cmp != Ordering::Equal || self == other)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RecursiveSearchOrder {
-    DepthFirst,
-    BreadthFirst,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RecursiveSearch {
-    pub order: RecursiveSearchOrder,
-    /// Positions in the unextended recursive row used by the `BY` list.
-    pub by_column_indices: Vec<usize>,
-    pub set_column: String,
 }
 
 /// Values expression. See
@@ -3930,6 +3888,12 @@ pub struct TableScan {
     /// PostgreSQL `FROM ONLY <table>`: when true, descendant tables that
     /// inherit from `table_name` must be excluded from the scan.
     pub only: bool,
+    /// True when this scan reads the result relation of an UPDATE, DELETE or
+    /// MERGE: the rows it produces are the rows the statement writes. The
+    /// same table can appear again in FROM, USING or the MERGE source, so this
+    /// role — never the table name — identifies the written rows. It is not a
+    /// row lock: a MERGE target is read unlocked.
+    pub result_relation: bool,
 }
 
 impl Debug for TableScan {
@@ -3943,6 +3907,7 @@ impl Debug for TableScan {
             .field("fetch", &self.fetch)
             .field("row_lock", &self.row_lock)
             .field("only", &self.only)
+            .field("result_relation", &self.result_relation)
             .finish_non_exhaustive()
     }
 }
@@ -3956,6 +3921,7 @@ impl PartialEq for TableScan {
             && self.fetch == other.fetch
             && self.row_lock == other.row_lock
             && self.only == other.only
+            && self.result_relation == other.result_relation
     }
 }
 
@@ -3979,6 +3945,8 @@ impl PartialOrd for TableScan {
             pub row_lock: &'a Option<TableScanRowLock>,
             /// PostgreSQL `FROM ONLY` modifier.
             pub only: &'a bool,
+            /// DML result-relation role.
+            pub result_relation: &'a bool,
         }
         let comparable_self = ComparableTableScan {
             table_name: &self.table_name,
@@ -3987,6 +3955,7 @@ impl PartialOrd for TableScan {
             fetch: &self.fetch,
             row_lock: &self.row_lock,
             only: &self.only,
+            result_relation: &self.result_relation,
         };
         let comparable_other = ComparableTableScan {
             table_name: &other.table_name,
@@ -3995,6 +3964,7 @@ impl PartialOrd for TableScan {
             fetch: &other.fetch,
             row_lock: &other.row_lock,
             only: &other.only,
+            result_relation: &other.result_relation,
         };
         comparable_self
             .partial_cmp(&comparable_other)
@@ -4012,6 +3982,7 @@ impl Hash for TableScan {
         self.fetch.hash(state);
         self.row_lock.hash(state);
         self.only.hash(state);
+        self.result_relation.hash(state);
     }
 }
 
@@ -4067,7 +4038,48 @@ impl TableScan {
             fetch,
             row_lock: None,
             only: false,
+            result_relation: false,
         })
+    }
+
+    /// This scan reading a different projection of the same source. Every
+    /// other property describes the relation read, not the columns read, so
+    /// it carries over unchanged.
+    pub fn try_reproject(self, projection: Option<Vec<usize>>) -> Result<Self> {
+        let Self {
+            table_name,
+            source,
+            projection: _,
+            projected_schema: _,
+            filters,
+            fetch,
+            row_lock,
+            only,
+            result_relation,
+        } = self;
+        let mut scan = Self::try_new(table_name, source, projection, filters, fetch)?;
+        scan.row_lock = row_lock;
+        scan.only = only;
+        scan.result_relation = result_relation;
+        Ok(scan)
+    }
+
+    /// This scan as the result relation of an UPDATE or DELETE, which holds a
+    /// write-intent lock on every row it produces.
+    pub fn into_update_delete_target(mut self) -> Self {
+        self.row_lock = Some(TableScanRowLock {
+            mode: TableScanRowLockMode::ForUpdate,
+            wait_policy: TableScanRowLockWaitPolicy::Block,
+        });
+        self.result_relation = true;
+        self
+    }
+
+    /// This scan as the target of a MERGE. The target is read unlocked: a
+    /// target row is locked only when a WHEN clause writes it.
+    pub fn into_merge_target(mut self) -> Self {
+        self.result_relation = true;
+        self
     }
 }
 
@@ -6304,6 +6316,7 @@ mod tests {
             fetch: None,
             row_lock: None,
             only: false,
+            result_relation: false,
         }));
         let col = schema.field_names()[0].clone();
 
@@ -6337,6 +6350,7 @@ mod tests {
             fetch: None,
             row_lock: None,
             only: false,
+            result_relation: false,
         }));
         let col = schema.field_names()[0].clone();
 

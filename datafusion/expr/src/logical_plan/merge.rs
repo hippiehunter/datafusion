@@ -20,7 +20,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::logical_plan::dml::{ReturningContext, make_count_schema};
+use crate::logical_plan::dml::{ReturningContext, TargetSelectRights, make_count_schema};
 use crate::{Expr, LogicalPlan};
 use datafusion_common::{DFSchemaRef, TableReference};
 
@@ -45,6 +45,10 @@ pub struct Merge {
     pub returning_context: Option<ReturningContext>,
     /// Output schema (a count column without RETURNING).
     pub output_schema: DFSchemaRef,
+    /// Whether the statement reads the target's rows: its ON condition, an
+    /// arm's condition or assignment, or its RETURNING list names a target
+    /// column, or an arm does nothing.
+    pub target_select_rights: TargetSelectRights,
 }
 
 impl Merge {
@@ -54,6 +58,7 @@ impl Merge {
         source: Arc<LogicalPlan>,
         on: Expr,
         clauses: Vec<MergeClause>,
+        target_select_rights: TargetSelectRights,
     ) -> Self {
         Self {
             target_table,
@@ -65,6 +70,7 @@ impl Merge {
             returning_exprs: None,
             returning_context: None,
             output_schema: make_count_schema(),
+            target_select_rights,
         }
     }
 
@@ -96,6 +102,7 @@ impl Debug for Merge {
             .field("returning_exprs", &self.returning_exprs)
             .field("returning_context", &self.returning_context)
             .field("output_schema", &self.output_schema)
+            .field("target_select_rights", &self.target_select_rights)
             .finish()
     }
 }
@@ -111,6 +118,7 @@ impl PartialEq for Merge {
             && self.returning_exprs == other.returning_exprs
             && self.returning_context == other.returning_context
             && self.output_schema == other.output_schema
+            && self.target_select_rights == other.target_select_rights
     }
 }
 
@@ -127,6 +135,7 @@ impl Hash for Merge {
         self.returning_exprs.hash(state);
         self.returning_context.hash(state);
         self.output_schema.hash(state);
+        self.target_select_rights.hash(state);
     }
 }
 

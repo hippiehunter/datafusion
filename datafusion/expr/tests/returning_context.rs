@@ -22,7 +22,7 @@ use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::logical_plan::builder::LogicalTableSource;
 use datafusion_expr::{
     DmlStatement, EmptyRelation, Expr, InsertOp, LogicalPlan, Merge, ReturningContext,
-    WriteOp,
+    TargetSelectRights, WriteOp,
 };
 
 fn schema() -> Arc<DFSchema> {
@@ -50,6 +50,7 @@ fn rebuilding_dml_preserves_dual_image_returning_context() {
         target,
         WriteOp::Insert(InsertOp::Append),
         Arc::new(empty(Arc::clone(&table_schema))),
+        TargetSelectRights::NotRequired,
     );
     let context = ReturningContext::DualImage {
         eval_schema: Arc::clone(&table_schema),
@@ -76,6 +77,7 @@ fn rebuilding_merge_preserves_applied_image_returning_context() {
         Arc::clone(&source),
         Expr::Literal(true.into(), None),
         vec![],
+        TargetSelectRights::NotRequired,
     );
     let context = ReturningContext::MergeApplied {
         eval_schema: Arc::clone(&table_schema),

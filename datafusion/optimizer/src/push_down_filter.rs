@@ -2886,6 +2886,7 @@ mod tests {
             fetch: None,
             row_lock: None,
             only: false,
+            result_relation: false,
         });
 
         Ok(LogicalPlanBuilder::from(table_scan))
