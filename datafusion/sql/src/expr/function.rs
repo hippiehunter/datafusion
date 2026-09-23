@@ -459,8 +459,12 @@ impl SqlToRel<'_> {
                 .context_provider
                 .plan_set_returning_function(&name, &srf_args, schema, None)?
             {
-                Some(crate::planner::SetReturningColumns::Lists(columns)) => self.set_returning_expr(&name, columns),
-                Some(crate::planner::SetReturningColumns::Rows(rows)) => Ok(Expr::Unnest(Unnest::new(rows))),
+                Some(crate::planner::SetReturningColumns::Lists(columns)) => {
+                    self.set_returning_expr(&name, columns)
+                }
+                Some(crate::planner::SetReturningColumns::Rows(rows)) => {
+                    Ok(Expr::Unnest(Unnest::new(rows)))
+                }
                 None => self.set_returning_source_expr(&name, srf_args),
             };
         }
@@ -526,19 +530,21 @@ impl SqlToRel<'_> {
             };
 
             let mut written_arguments = None;
-            let resolved_args = if arg_names.iter().any(|name| name.is_some()) {
-                if let Some(param_names) = &fm.signature().parameter_names {
-                    let written = arg_names
-                        .iter()
-                        .enumerate()
-                        .map(|(position, name)| match name {
-                            Some(name) => param_names
-                                .iter()
-                                .position(|param| param == name)
-                                .map(|position| (position, Some(name.clone()))),
-                            None => Some((position, None)),
-                        })
-                        .collect::<Option<Vec<_>>>();
+            let (fm, resolved_args) = if arg_names.iter().any(|name| name.is_some()) {
+                if let Some((chosen, resolved)) = self
+                    .context_provider
+                    .plan_named_scalar_function(&fm, &args, &arg_names, schema)?
+                {
+                    written_arguments = chosen
+                        .signature()
+                        .parameter_names
+                        .as_deref()
+                        .and_then(|param_names| {
+                            written_argument_positions(param_names, &arg_names)
+                        });
+                    (chosen, resolved)
+                } else if let Some(param_names) = &fm.signature().parameter_names {
+                    let written = written_argument_positions(param_names, &arg_names);
                     let resolved = datafusion_expr::arguments::resolve_function_arguments(
                         param_names,
                         fm.signature().parameter_defaults.as_deref(),
@@ -546,7 +552,7 @@ impl SqlToRel<'_> {
                         arg_names,
                     )?;
                     written_arguments = written;
-                    resolved
+                    (fm, resolved)
                 } else {
                     return plan_err!(
                         "Function '{}' does not support named arguments",
@@ -554,7 +560,7 @@ impl SqlToRel<'_> {
                     );
                 }
             } else {
-                args
+                (fm, args)
             };
 
             // After resolution, all arguments are positional
@@ -1556,4 +1562,25 @@ fn unicode_normal_form_args(
         Value::SingleQuotedString(form).with_empty_span(),
     )));
     Some(lowered)
+}
+
+/// The arguments of a call in the order the SQL wrote them: the parameter
+/// position each binds to in `param_names` and the name it was written with
+/// (`None` for a positional argument). `None` when a written name names no
+/// parameter.
+fn written_argument_positions(
+    param_names: &[String],
+    arg_names: &[Option<String>],
+) -> Option<Vec<(usize, Option<String>)>> {
+    arg_names
+        .iter()
+        .enumerate()
+        .map(|(position, name)| match name {
+            Some(name) => param_names
+                .iter()
+                .position(|param| param == name)
+                .map(|position| (position, Some(name.clone()))),
+            None => Some((position, None)),
+        })
+        .collect()
 }

@@ -400,6 +400,20 @@ pub trait ContextProvider {
     /// Return the scalar function with a given name, if any
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>>;
 
+    /// Resolve a named call when overloads have distinct parameter lists.
+    /// Arguments have already been lowered against `schema`; the provider may
+    /// select a concrete overload and return its positional arguments. `None`
+    /// retains the ordinary signature-based named-argument resolution.
+    fn plan_named_scalar_function(
+        &self,
+        _function: &Arc<ScalarUDF>,
+        _args: &[Expr],
+        _argument_names: &[Option<String>],
+        _schema: &DFSchema,
+    ) -> Result<Option<(Arc<ScalarUDF>, Vec<Expr>)>> {
+        Ok(None)
+    }
+
     /// Return the aggregate function with a given name, if any
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>>;
 
