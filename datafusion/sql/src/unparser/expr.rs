@@ -2836,10 +2836,7 @@ mod tests {
         ] {
             let unparser = Unparser::new(dialect);
 
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type,
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), data_type));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
@@ -2980,10 +2977,7 @@ mod tests {
         ] {
             let unparser = Unparser::new(dialect);
 
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(col("a")),
-                data_type,
-            });
+            let expr = Expr::Cast(Cast::new(Box::new(col("a")), data_type));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{ast}");
