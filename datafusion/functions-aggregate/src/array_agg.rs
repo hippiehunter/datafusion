@@ -1249,7 +1249,14 @@ mod tests {
                     .map(|v| v.to_array_of_size(1))
                     .collect::<Result<Vec<_>>>()?,
             )?;
-            assert_eq!(merged.evaluate()?, first.evaluate()?);
+            let (merged_value, first_value) = (merged.evaluate()?, first.evaluate()?);
+            assert_eq!(merged_value.data_type(), first_value.data_type());
+            // A DISTINCT aggregate without ORDER BY emits its set in no
+            // defined order, so only the ordered and non-distinct results
+            // must match element for element.
+            if !distinct || ordered {
+                assert_eq!(merged_value, first_value);
+            }
         }
         Ok(())
     }
