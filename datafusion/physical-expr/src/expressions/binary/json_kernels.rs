@@ -80,7 +80,7 @@ fn evaluate_scalar_scalar(
     if left.is_null() || right.is_null() {
         return Ok(ColumnarValue::Scalar(null_result_for_op(
             op,
-            left.data_type(),
+            &left.data_type(),
         )));
     }
 
@@ -119,14 +119,14 @@ fn evaluate_scalar_scalar(
             // lhs @> rhs (lhs contains rhs)
             let right_bytes = scalar_to_jsonb(right)?;
             let right_raw = RawJsonb::new(right_bytes.as_ref());
-            let result = raw.contains(&right_raw).map_err(jsonb_err)?;
+            let result = raw.contains(&right_raw).map_err(|e| jsonb_err(&e))?;
             Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(result))))
         }
         Operator::ArrowAt => {
             // lhs <@ rhs (lhs is contained by rhs) → rhs.contains(lhs)
             let right_bytes = scalar_to_jsonb(right)?;
             let right_raw = RawJsonb::new(right_bytes.as_ref());
-            let result = right_raw.contains(&raw).map_err(jsonb_err)?;
+            let result = right_raw.contains(&raw).map_err(|e| jsonb_err(&e))?;
             Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(result))))
         }
         Operator::Question => {
@@ -138,14 +138,14 @@ fn evaluate_scalar_scalar(
             let key = right_str.as_deref().unwrap_or("");
             let result = raw
                 .exists_all_keys(std::iter::once(key))
-                .map_err(jsonb_err)?;
+                .map_err(|e| jsonb_err(&e))?;
             Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(result))))
         }
         Operator::QuestionPipe => {
             let key = right_str.as_deref().unwrap_or("");
             let result = raw
                 .exists_any_keys(std::iter::once(key))
-                .map_err(jsonb_err)?;
+                .map_err(|e| jsonb_err(&e))?;
             Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(result))))
         }
         Operator::HashMinus => {
@@ -319,12 +319,12 @@ fn evaluate_array_scalar(
                     Operator::AtArrow => {
                         let right_bytes = right_jsonb_bytes.as_ref().unwrap();
                         let right_raw = RawJsonb::new(right_bytes.as_ref());
-                        raw.contains(&right_raw).map_err(jsonb_err)?
+                        raw.contains(&right_raw).map_err(|e| jsonb_err(&e))?
                     }
                     Operator::ArrowAt => {
                         let right_bytes = right_jsonb_bytes.as_ref().unwrap();
                         let right_raw = RawJsonb::new(right_bytes.as_ref());
-                        right_raw.contains(&raw).map_err(jsonb_err)?
+                        right_raw.contains(&raw).map_err(|e| jsonb_err(&e))?
                     }
                     Operator::Question => {
                         let key = right_str.as_deref().unwrap_or("");
@@ -333,12 +333,12 @@ fn evaluate_array_scalar(
                     Operator::QuestionAnd => {
                         let key = right_str.as_deref().unwrap_or("");
                         raw.exists_all_keys(std::iter::once(key))
-                            .map_err(jsonb_err)?
+                            .map_err(|e| jsonb_err(&e))?
                     }
                     Operator::QuestionPipe => {
                         let key = right_str.as_deref().unwrap_or("");
                         raw.exists_any_keys(std::iter::once(key))
-                            .map_err(jsonb_err)?
+                            .map_err(|e| jsonb_err(&e))?
                     }
                     Operator::AtQuestion => {
                         let path_str = right_str.as_deref().unwrap_or("$");
@@ -501,12 +501,12 @@ fn evaluate_array_array(
                     Operator::AtArrow => {
                         let right_bytes = get_jsonb_bytes(right_arr, i, is_text_rhs)?;
                         let right_raw = RawJsonb::new(right_bytes.as_ref());
-                        raw.contains(&right_raw).map_err(jsonb_err)?
+                        raw.contains(&right_raw).map_err(|e| jsonb_err(&e))?
                     }
                     Operator::ArrowAt => {
                         let right_bytes = get_jsonb_bytes(right_arr, i, is_text_rhs)?;
                         let right_raw = RawJsonb::new(right_bytes.as_ref());
-                        right_raw.contains(&raw).map_err(jsonb_err)?
+                        right_raw.contains(&raw).map_err(|e| jsonb_err(&e))?
                     }
                     Operator::Question => {
                         let key_str = text_array_value_as_str(right_arr, i);
@@ -517,13 +517,13 @@ fn evaluate_array_array(
                         let key_str = text_array_value_as_str(right_arr, i);
                         let key = key_str.as_deref().unwrap_or("");
                         raw.exists_all_keys(std::iter::once(key))
-                            .map_err(jsonb_err)?
+                            .map_err(|e| jsonb_err(&e))?
                     }
                     Operator::QuestionPipe => {
                         let key_str = text_array_value_as_str(right_arr, i);
                         let key = key_str.as_deref().unwrap_or("");
                         raw.exists_any_keys(std::iter::once(key))
-                            .map_err(jsonb_err)?
+                            .map_err(|e| jsonb_err(&e))?
                     }
                     Operator::AtQuestion => {
                         let path_str = text_array_value_as_str(right_arr, i);
@@ -557,14 +557,14 @@ fn json_get(
     index: Option<i64>,
 ) -> Result<Option<OwnedJsonb>> {
     if let Some(key) = key {
-        raw.get_by_name(key, false).map_err(jsonb_err)
+        raw.get_by_name(key, false).map_err(|e| jsonb_err(&e))
     } else if let Some(idx) = index {
         if idx < 0 {
             // PostgreSQL supports negative indexing
             if let Ok(Some(len)) = raw.array_length() {
                 let actual = len as i64 + idx;
                 if actual >= 0 {
-                    raw.get_by_index(actual as usize).map_err(jsonb_err)
+                    raw.get_by_index(actual as usize).map_err(|e| jsonb_err(&e))
                 } else {
                     Ok(None)
                 }
@@ -572,7 +572,7 @@ fn json_get(
                 Ok(None)
             }
         } else {
-            raw.get_by_index(idx as usize).map_err(jsonb_err)
+            raw.get_by_index(idx as usize).map_err(|e| jsonb_err(&e))
         }
     } else {
         Ok(None)
@@ -582,7 +582,8 @@ fn json_get(
 /// Extract by path (#> operator). Path is a PostgreSQL text array literal like '{a,b,c}'.
 fn json_get_by_path(raw: &RawJsonb, path_str: &str) -> Result<Option<OwnedJsonb>> {
     let keypaths = parse_pg_path(path_str);
-    raw.get_by_keypath(keypaths.iter()).map_err(jsonb_err)
+    raw.get_by_keypath(keypaths.iter())
+        .map_err(|e| jsonb_err(&e))
 }
 
 /// Check if a key exists (? operator).
@@ -591,7 +592,7 @@ fn json_key_exists(raw: &RawJsonb, key: &str) -> Result<bool> {
     match raw.get_by_name(key, false) {
         Ok(Some(_)) => Ok(true),
         Ok(None) => Ok(false),
-        Err(e) => Err(jsonb_err(e)),
+        Err(e) => Err(jsonb_err(&e)),
     }
 }
 
@@ -606,12 +607,13 @@ fn json_delete(
         let trimmed = key.trim();
         if trimmed.starts_with('{') && trimmed.ends_with('}') {
             let keypaths = parse_pg_path(key);
-            raw.delete_by_keypath(keypaths.iter()).map_err(jsonb_err)
+            raw.delete_by_keypath(keypaths.iter())
+                .map_err(|e| jsonb_err(&e))
         } else {
-            raw.delete_by_name(key).map_err(jsonb_err)
+            raw.delete_by_name(key).map_err(|e| jsonb_err(&e))
         }
     } else if let Some(idx) = index {
-        raw.delete_by_index(idx as i32).map_err(jsonb_err)
+        raw.delete_by_index(idx as i32).map_err(|e| jsonb_err(&e))
     } else {
         // No key or index — return original
         Ok(raw.to_owned())
@@ -626,7 +628,7 @@ fn json_path_exists(raw: &RawJsonb, path_str: &str) -> Result<bool> {
                 "Invalid JSON path: {e}"
             ))
         })?;
-    raw.path_exists(&json_path).map_err(jsonb_err)
+    raw.path_exists(&json_path).map_err(|e| jsonb_err(&e))
 }
 
 /// Check jsonpath predicate match (@@ operator).
@@ -637,7 +639,7 @@ fn json_path_match(raw: &RawJsonb, path_str: &str) -> Result<Option<bool>> {
                 "Invalid JSON path: {e}"
             ))
         })?;
-    raw.path_match(&json_path).map_err(jsonb_err)
+    raw.path_match(&json_path).map_err(|e| jsonb_err(&e))
 }
 
 // ===========================================================================
@@ -659,7 +661,8 @@ fn scalar_to_jsonb(scalar: &ScalarValue) -> Result<Vec<u8>> {
         ScalarValue::Utf8(Some(s))
         | ScalarValue::Utf8View(Some(s))
         | ScalarValue::LargeUtf8(Some(s)) => {
-            let owned = jsonb::parse_owned_jsonb(s.as_bytes()).map_err(jsonb_err)?;
+            let owned =
+                jsonb::parse_owned_jsonb(s.as_bytes()).map_err(|e| jsonb_err(&e))?;
             Ok(owned.to_vec())
         }
         ScalarValue::Binary(Some(b))
@@ -707,7 +710,7 @@ fn get_jsonb_bytes(arr: &ArrayRef, i: usize, is_text: bool) -> Result<Vec<u8>> {
 /// Parse a text array value at index `i` into JSONB binary bytes.
 fn text_array_value_to_jsonb(arr: &ArrayRef, i: usize) -> Result<Vec<u8>> {
     let s = text_array_value_as_str(arr, i).unwrap_or_default();
-    let owned = jsonb::parse_owned_jsonb(s.as_bytes()).map_err(jsonb_err)?;
+    let owned = jsonb::parse_owned_jsonb(s.as_bytes()).map_err(|e| jsonb_err(&e))?;
     Ok(owned.to_vec())
 }
 
@@ -829,7 +832,7 @@ fn append_owned_jsonb_as_binary(builder: &mut BinaryBuilder, result: Option<Owne
 }
 
 /// Return a null ScalarValue appropriate for the operator's return type.
-fn null_result_for_op(op: &Operator, lhs_type: DataType) -> ScalarValue {
+fn null_result_for_op(op: &Operator, lhs_type: &DataType) -> ScalarValue {
     match op {
         // Boolean-returning operators
         Operator::AtArrow
@@ -843,7 +846,7 @@ fn null_result_for_op(op: &Operator, lhs_type: DataType) -> ScalarValue {
         Operator::LongArrow | Operator::HashLongArrow => ScalarValue::Utf8View(None),
         // Same-type-as-LHS operators
         _ => {
-            if is_text_type(&lhs_type) {
+            if is_text_type(lhs_type) {
                 ScalarValue::Utf8View(None)
             } else {
                 ScalarValue::BinaryView(None)
@@ -879,6 +882,6 @@ fn parse_pg_path(path_str: &str) -> Vec<KeyPath<'static>> {
 }
 
 /// Convert a jsonb crate error to a DataFusion error.
-fn jsonb_err(e: jsonb::Error) -> datafusion_common::DataFusionError {
+fn jsonb_err(e: &jsonb::Error) -> datafusion_common::DataFusionError {
     datafusion_common::DataFusionError::Execution(format!("JSONB error: {e}"))
 }

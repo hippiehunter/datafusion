@@ -183,12 +183,12 @@ fn reject_generated_assignments(
         if is_default_value(&assignment.value) {
             continue;
         }
-        if generated.columns.iter().any(|name| *name == leaf) {
+        if generated.columns.contains(&leaf) {
             return Err(
                 provider.generated_column_write_error(&generated.table_name, &leaf)
             );
         }
-        if generated.identity_always.iter().any(|name| *name == leaf) {
+        if generated.identity_always.contains(&leaf) {
             return Err(provider.identity_column_write_error(
                 &generated.table_name,
                 &leaf,

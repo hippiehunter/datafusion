@@ -184,7 +184,6 @@ impl Column {
     }
 
     /// Deserialize a fully qualified name string into a column preserving column text case
-
     pub fn from_qualified_name_ignore_case(flat_name: impl Into<String>) -> Self {
         let flat_name = flat_name.into();
         Self::from_idents(parse_identifiers_normalized(&flat_name, true)).unwrap_or_else(
@@ -296,10 +295,10 @@ impl Column {
                         let all_matched =
                             columns.iter().all(|c| using_col.columns.contains(c));
                         if all_matched {
-                            if let Some(ref preferred) = using_col.preferred {
-                                if columns.contains(preferred) {
-                                    return Ok(preferred.clone());
-                                }
+                            if let Some(ref preferred) = using_col.preferred
+                                && columns.contains(preferred)
+                            {
+                                return Ok(preferred.clone());
                             }
                             return Ok(columns[0].clone());
                         }

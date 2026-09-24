@@ -193,10 +193,10 @@ impl<'a> BinaryTypeCoercer<'a> {
             _ => {}
         }
 
-        if matches!(self.op, Operator::Divide) {
-            if let Some(dt) = pg_decimal_division_result_type(lhs, rhs) {
-                return Ok(dt);
-            }
+        if matches!(self.op, Operator::Divide)
+            && let Some(dt) = pg_decimal_division_result_type(lhs, rhs)
+        {
+            return Ok(dt);
         }
 
         use arrow::compute::kernels::numeric::*;
@@ -2198,14 +2198,7 @@ fn json_access_coercion(
             },
         )
     } else if matches!(lhs, DataType::Null) {
-        (
-            DataType::Utf8View,
-            if return_text {
-                DataType::Utf8View
-            } else {
-                DataType::Utf8View
-            },
-        )
+        (DataType::Utf8View, DataType::Utf8View)
     } else {
         return None;
     };
@@ -2363,9 +2356,9 @@ fn json_path_predicate_coercion(
 
 fn pg_decimal_division_result_type(lhs: &DataType, rhs: &DataType) -> Option<DataType> {
     let (p1, s1) = decimal_precision_scale(lhs)?;
-    let (_p2, s2) = decimal_precision_scale(rhs)?;
+    let (p2, s2) = decimal_precision_scale(rhs)?;
     let int_digits_1 = (p1 as i16 - s1 as i16).max(0);
-    let int_digits_2 = (_p2 as i16 - s2 as i16).max(0);
+    let int_digits_2 = (p2 as i16 - s2 as i16).max(0);
     let weight1 = if int_digits_1 > 0 {
         (int_digits_1 - 1) / 4
     } else {

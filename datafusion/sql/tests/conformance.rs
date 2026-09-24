@@ -299,17 +299,17 @@ pub trait ConformanceFunctionProvider: Send + Sync {
 
         for name in REQUIRED_AGGREGATE_FUNCTIONS {
             if self.get_aggregate_function(name).is_none() {
-                missing.push(format!("aggregate:{}", name));
+                missing.push(format!("aggregate:{name}"));
             }
         }
         for name in REQUIRED_SCALAR_FUNCTIONS {
             if self.get_scalar_function(name).is_none() {
-                missing.push(format!("scalar:{}", name));
+                missing.push(format!("scalar:{name}"));
             }
         }
         for name in REQUIRED_WINDOW_FUNCTIONS {
             if self.get_window_function(name).is_none() {
-                missing.push(format!("window:{}", name));
+                missing.push(format!("window:{name}"));
             }
         }
 
@@ -1057,7 +1057,7 @@ impl ScalarUDFImpl for RowConstructor {
             .enumerate()
             .map(|(idx, field)| {
                 Field::new(
-                    format!("c{}", idx),
+                    format!("c{idx}"),
                     field.data_type().clone(),
                     field.is_nullable(),
                 )
@@ -1123,7 +1123,7 @@ impl ScalarUDFImpl for NamedStructConstructor {
         // Scalar arguments contains the names (at even indices)
         // arg_fields contains the field types (at odd indices for values)
 
-        if args.arg_fields.len() % 2 != 0 {
+        if !args.arg_fields.len().is_multiple_of(2) {
             return plan_err!(
                 "named_struct requires an even number of arguments (name-value pairs)"
             );
@@ -2003,7 +2003,7 @@ pub fn default_expr_planner() -> Arc<dyn ExprPlanner> {
 #[macro_export]
 macro_rules! assert_parses {
     ($sql:expr) => {{
-        let result = crate::parse_sql($sql);
+        let result = $crate::parse_sql($sql);
         assert!(
             result.is_ok(),
             "SQL should parse successfully.\nSQL: {}\nError: {:?}",
@@ -2019,7 +2019,7 @@ macro_rules! assert_parses {
 #[macro_export]
 macro_rules! assert_parse_error {
     ($sql:expr) => {{
-        let result = crate::parse_sql($sql);
+        let result = $crate::parse_sql($sql);
         assert!(
             result.is_err(),
             "SQL should fail to parse but succeeded.\nSQL: {}",
@@ -2027,7 +2027,7 @@ macro_rules! assert_parse_error {
         );
     }};
     ($sql:expr, $expected_error:expr) => {{
-        let result = crate::parse_sql($sql);
+        let result = $crate::parse_sql($sql);
         assert!(
             result.is_err(),
             "SQL should fail to parse but succeeded.\nSQL: {}",
@@ -2055,7 +2055,7 @@ macro_rules! assert_parse_error {
 #[macro_export]
 macro_rules! assert_plans {
     ($sql:expr) => {{
-        let result = crate::logical_plan($sql);
+        let result = $crate::logical_plan($sql);
         assert!(
             result.is_ok(),
             "SQL should plan successfully.\nSQL: {}\nError: {:?}",
@@ -2071,7 +2071,7 @@ macro_rules! assert_plans {
 #[macro_export]
 macro_rules! assert_plan_error {
     ($sql:expr) => {{
-        let result = crate::logical_plan($sql);
+        let result = $crate::logical_plan($sql);
         assert!(
             result.is_err(),
             "SQL should fail to plan but succeeded.\nSQL: {}",
@@ -2079,7 +2079,7 @@ macro_rules! assert_plan_error {
         );
     }};
     ($sql:expr, $expected_error:expr) => {{
-        let result = crate::logical_plan($sql);
+        let result = $crate::logical_plan($sql);
         assert!(
             result.is_err(),
             "SQL should fail to plan but succeeded.\nSQL: {}",
@@ -2101,7 +2101,7 @@ macro_rules! assert_plan_error {
 #[macro_export]
 macro_rules! assert_utility_boundary {
     ($sql:expr, $feature_id:expr, $description:expr) => {{
-        let parse_result = crate::parse_sql($sql);
+        let parse_result = $crate::parse_sql($sql);
         assert!(
             parse_result.is_ok(),
             "Utility feature {} ({}) should parse.\nSQL: {}\nError: {:?}",
@@ -2111,7 +2111,7 @@ macro_rules! assert_utility_boundary {
             parse_result.unwrap_err()
         );
 
-        let plan_error = crate::logical_plan($sql)
+        let plan_error = $crate::logical_plan($sql)
             .expect_err("utility statement must not enter the relational plan");
         assert!(
             plan_error
@@ -2144,8 +2144,8 @@ macro_rules! assert_utility_boundary {
 #[macro_export]
 macro_rules! assert_not_implemented {
     ($sql:expr, $feature_id:expr, $description:expr) => {{
-        let parse_result = crate::parse_sql($sql);
-        let plan_result = crate::logical_plan($sql);
+        let parse_result = $crate::parse_sql($sql);
+        let plan_result = $crate::logical_plan($sql);
 
         // Feature is "not implemented" if either parsing or planning fails
         let is_not_implemented = parse_result.is_err() || plan_result.is_err();
@@ -2167,7 +2167,7 @@ macro_rules! assert_not_implemented {
 macro_rules! assert_feature_supported {
     ($sql:expr, $feature_id:expr, $description:expr) => {{
         // First verify it parses
-        let parse_result = crate::parse_sql($sql);
+        let parse_result = $crate::parse_sql($sql);
         assert!(
             parse_result.is_ok(),
             "Feature {} ({}) should parse.\nSQL: {}\nError: {:?}",
@@ -2178,7 +2178,7 @@ macro_rules! assert_feature_supported {
         );
 
         // Then verify it plans
-        let plan_result = crate::logical_plan($sql);
+        let plan_result = $crate::logical_plan($sql);
         assert!(
             plan_result.is_ok(),
             "Feature {} ({}) should plan.\nSQL: {}\nError: {:?}",
@@ -2198,7 +2198,7 @@ macro_rules! assert_feature_supported {
 macro_rules! assert_psm_feature_supported {
     ($sql:expr, $feature_id:expr, $description:expr) => {{
         // First verify it parses with MsSqlDialect
-        let parse_result = crate::parse_psm_sql($sql);
+        let parse_result = $crate::parse_psm_sql($sql);
         assert!(
             parse_result.is_ok(),
             "PSM Feature {} ({}) should parse.\nSQL: {}\nError: {:?}",
@@ -2209,7 +2209,7 @@ macro_rules! assert_psm_feature_supported {
         );
 
         // Then verify it plans
-        let plan_result = crate::logical_plan_psm($sql);
+        let plan_result = $crate::logical_plan_psm($sql);
         assert!(
             plan_result.is_ok(),
             "PSM Feature {} ({}) should plan.\nSQL: {}\nError: {:?}",
@@ -2225,7 +2225,7 @@ macro_rules! assert_psm_feature_supported {
 #[macro_export]
 macro_rules! assert_psm_utility_boundary {
     ($sql:expr, $feature_id:expr, $description:expr) => {{
-        let parse_result = crate::parse_psm_sql($sql);
+        let parse_result = $crate::parse_psm_sql($sql);
         assert!(
             parse_result.is_ok(),
             "PSM utility feature {} ({}) should parse.\nSQL: {}\nError: {:?}",
@@ -2235,7 +2235,7 @@ macro_rules! assert_psm_utility_boundary {
             parse_result.unwrap_err()
         );
 
-        let plan_error = crate::logical_plan_psm($sql)
+        let plan_error = $crate::logical_plan_psm($sql)
             .expect_err("utility statement must not enter the relational plan");
         assert!(
             plan_error
@@ -2257,7 +2257,7 @@ macro_rules! assert_psm_utility_boundary {
 #[macro_export]
 macro_rules! assert_psm_parses {
     ($sql:expr) => {{
-        let result = crate::parse_psm_sql($sql);
+        let result = $crate::parse_psm_sql($sql);
         assert!(
             result.is_ok(),
             "SQL/PSM should parse successfully.\nSQL: {}\nError: {:?}",
@@ -2274,7 +2274,7 @@ macro_rules! assert_psm_parses {
 #[macro_export]
 macro_rules! assert_postgres_parses {
     ($sql:expr) => {{
-        let result = crate::parse_postgres_sql($sql);
+        let result = $crate::parse_postgres_sql($sql);
         assert!(
             result.is_ok(),
             "PostgreSQL SQL should parse successfully.\nSQL: {}\nError: {:?}",
@@ -2772,7 +2772,7 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider
         // Return the required scalar functions (even if not all are implemented)
         REQUIRED_SCALAR_FUNCTIONS
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect()
     }
 
@@ -2780,7 +2780,7 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider
         // Return the required aggregate functions
         REQUIRED_AGGREGATE_FUNCTIONS
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect()
     }
 
@@ -2788,7 +2788,7 @@ impl<'a, F: ConformanceFunctionProvider> ContextProvider
         // Return the required window functions
         REQUIRED_WINDOW_FUNCTIONS
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect()
     }
 

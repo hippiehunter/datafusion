@@ -643,8 +643,8 @@ impl<'a> SqlToRel<'a> {
         plan: LogicalPlan,
         alias: TableAlias,
     ) -> Result<LogicalPlan> {
-        let idents = alias.columns.into_iter().map(|c| c.name).collect();
-        let plan = self.apply_expr_alias(plan, idents)?;
+        let idents: Vec<Ident> = alias.columns.into_iter().map(|c| c.name).collect();
+        let plan = self.apply_expr_alias(plan, &idents)?;
 
         LogicalPlanBuilder::from(plan)
             .alias(TableReference::bare(
@@ -656,7 +656,7 @@ impl<'a> SqlToRel<'a> {
     pub(crate) fn apply_expr_alias(
         &self,
         plan: LogicalPlan,
-        idents: Vec<Ident>,
+        idents: &[Ident],
     ) -> Result<LogicalPlan> {
         if idents.is_empty() {
             Ok(plan)
@@ -672,7 +672,7 @@ impl<'a> SqlToRel<'a> {
         } else {
             // SQL:2016 E051-09: Allow partial column aliasing
             // If fewer aliases than columns, only rename the first N columns
-            let schema = plan.schema().clone();
+            let schema = Arc::clone(plan.schema());
             let num_fields = schema.fields().len();
 
             // Collect the new column names for the renamed columns
@@ -698,10 +698,10 @@ impl<'a> SqlToRel<'a> {
                     if new_names.contains(original_name) {
                         // Conflict detected: this column's original name matches a renamed column
                         // Rename it to avoid ambiguity by adding a unique suffix
-                        let mut unique_name = format!("{}_1", original_name);
+                        let mut unique_name = format!("{original_name}_1");
                         let mut counter = 2;
                         while new_names.contains(&unique_name) {
-                            unique_name = format!("{}_{}", original_name, counter);
+                            unique_name = format!("{original_name}_{counter}");
                             counter += 1;
                         }
                         new_names.insert(unique_name.clone());
@@ -1036,7 +1036,7 @@ impl<'a> SqlToRel<'a> {
             // ROW types are parsed as Custom types by sqlparser
             SQLDataType::Custom(name, modifiers)
                 if name.0.len() == 1
-                    && name.0[0].as_ident().map_or(false, |i| i.value.to_uppercase() == "ROW") =>
+                    && name.0[0].as_ident().is_some_and(|i| i.value.to_uppercase() == "ROW") =>
             {
                 // Parse modifiers as field name/type pairs: [name1, type1, name2, type2, ...]
                 let mut fields = Vec::new();
@@ -1060,7 +1060,7 @@ impl<'a> SqlToRel<'a> {
                         fields.push(Field::new(field_name, data_type, true));
                     } else {
                         // No type specified, use default
-                        fields.push(Field::new(format!("c{}", idx), DataType::Utf8, true));
+                        fields.push(Field::new(format!("c{idx}"), DataType::Utf8, true));
                     }
                     idx += 1;
                 }
@@ -1085,7 +1085,7 @@ impl<'a> SqlToRel<'a> {
                     ArrayElemTypeDef::SquareBracket(inner_type, _)
                     | ArrayElemTypeDef::Parenthesis(inner_type)
                     | ArrayElemTypeDef::AngleBracket(inner_type) => {
-                        let inner = self.convert_simple_data_type(&inner_type)?;
+                        let inner = self.convert_simple_data_type(inner_type)?;
                         Ok(DataType::List(Arc::new(Field::new("item", inner, true))))
                     }
                     ArrayElemTypeDef::None => {
@@ -1317,16 +1317,16 @@ fn extract_identity_metadata(
     let mut meta = HashMap::new();
 
     // SERIAL / SMALLSERIAL / BIGSERIAL detection
-    if let SQLDataType::Custom(name, modifiers) = data_type {
-        if modifiers.is_empty() && name.0.len() == 1 {
-            if let Some(ident) = name.0[0].as_ident() {
-                let normalized = ident.value.to_ascii_uppercase();
-                if matches!(normalized.as_str(), "SERIAL" | "SMALLSERIAL" | "BIGSERIAL") {
-                    meta.insert("identity_start".to_string(), "1".to_string());
-                    meta.insert("identity_increment".to_string(), "1".to_string());
-                    return meta;
-                }
-            }
+    if let SQLDataType::Custom(name, modifiers) = data_type
+        && modifiers.is_empty()
+        && name.0.len() == 1
+        && let Some(ident) = name.0[0].as_ident()
+    {
+        let normalized = ident.value.to_ascii_uppercase();
+        if matches!(normalized.as_str(), "SERIAL" | "SMALLSERIAL" | "BIGSERIAL") {
+            meta.insert("identity_start".to_string(), "1".to_string());
+            meta.insert("identity_increment".to_string(), "1".to_string());
+            return meta;
         }
     }
 
@@ -1432,14 +1432,13 @@ fn parse_sequence_options(
 
 fn expr_to_i64(expr: &sqlparser::ast::Expr) -> Result<i64> {
     match expr {
-        sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan { value, .. }) => {
-            match value {
-                sqlparser::ast::Value::Number(n, _) => n
-                    .parse::<i64>()
-                    .map_err(|e| plan_datafusion_err!("Invalid identity value: {e}")),
-                _ => plan_err!("Expected numeric identity value"),
-            }
-        }
+        sqlparser::ast::Expr::Value(sqlparser::ast::ValueWithSpan {
+            value: sqlparser::ast::Value::Number(n, _),
+            ..
+        }) => n
+            .parse::<i64>()
+            .map_err(|e| plan_datafusion_err!("Invalid identity value: {e}")),
+        sqlparser::ast::Expr::Value(_) => plan_err!("Expected numeric identity value"),
         sqlparser::ast::Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Minus,
             expr,

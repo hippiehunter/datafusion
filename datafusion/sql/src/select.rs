@@ -139,15 +139,11 @@ impl SqlToRel<'_> {
     pub(super) fn select_to_plan(
         &self,
         mut select: Select,
-        query_order_by: Option<OrderBy>,
+        query_order_by: Option<&OrderBy>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         Self::rewrite_projection_tvf_star(&mut select);
-        self.select_to_plan_ref_prepared(
-            &select,
-            query_order_by.as_ref(),
-            planner_context,
-        )
+        self.select_to_plan_ref_prepared(&select, query_order_by, planner_context)
     }
 
     pub(super) fn select_to_plan_ref(
@@ -157,11 +153,7 @@ impl SqlToRel<'_> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         if Self::is_projection_tvf_star(select) {
-            return self.select_to_plan(
-                select.clone(),
-                query_order_by.cloned(),
-                planner_context,
-            );
+            return self.select_to_plan(select.clone(), query_order_by, planner_context);
         }
         self.select_to_plan_ref_prepared(select, query_order_by, planner_context)
     }
@@ -685,7 +677,7 @@ impl SqlToRel<'_> {
         &self,
         input: LogicalPlan,
         select_exprs: Vec<Expr>,
-        custom_options: Option<UnnestOptions>,
+        custom_options: Option<&UnnestOptions>,
     ) -> Result<LogicalPlan> {
         // Try process group by unnest
         let input = self.try_process_aggregate_unnest(input)?;
@@ -735,7 +727,7 @@ impl SqlToRel<'_> {
             } else {
                 // Set preserve_nulls to false to ensure compatibility with DuckDB and PostgreSQL
                 // Use custom_options if provided, otherwise use defaults
-                let mut unnest_options = if let Some(custom) = custom_options.clone() {
+                let mut unnest_options = if let Some(custom) = custom_options.cloned() {
                     custom
                 } else {
                     UnnestOptions::new().with_preserve_nulls(false)
@@ -769,11 +761,11 @@ impl SqlToRel<'_> {
         // If we used custom options with ordinality, we need to include the ordinality column
         // in the final projection
         let mut final_projection = intermediate_select_exprs;
-        if let Some(opts) = &custom_options {
-            if opts.with_ordinality {
-                // Add the ordinality column to the projection
-                final_projection.push(Expr::Column(Column::from_name("ordinality")));
-            }
+        if let Some(opts) = custom_options
+            && opts.with_ordinality
+        {
+            // Add the ordinality column to the projection
+            final_projection.push(Expr::Column(Column::from_name("ordinality")));
         }
 
         LogicalPlanBuilder::from(intermediate_plan)
@@ -1352,7 +1344,7 @@ impl SqlToRel<'_> {
                 Ok(SelectExpr::Expression(expr))
             }
             SelectItem::Wildcard(options) => {
-                Self::check_wildcard_options(&options)?;
+                Self::check_wildcard_options(options)?;
                 if empty_from {
                     return plan_err!("SELECT * with no tables specified is not valid");
                 }
@@ -1362,7 +1354,7 @@ impl SqlToRel<'_> {
                 Ok(SelectExpr::Wildcard(planned_options))
             }
             SelectItem::QualifiedWildcard(object_name, options) => {
-                Self::check_wildcard_options(&options)?;
+                Self::check_wildcard_options(options)?;
                 let object_name = match object_name {
                     SelectItemQualifiedWildcardKind::ObjectName(object_name) => {
                         object_name.clone()

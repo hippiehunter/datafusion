@@ -32,15 +32,6 @@ use sqlparser::ast::{SetExpr, SetOperator, SetQuantifier, Spanned};
 
 impl SqlToRel<'_> {
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-    pub(super) fn set_expr_to_plan(
-        &self,
-        set_expr: SetExpr,
-        planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
-        self.set_expr_to_plan_ref(&set_expr, planner_context)
-    }
-
-    #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
     pub(super) fn set_expr_to_plan_ref(
         &self,
         set_expr: &SetExpr,
@@ -78,7 +69,7 @@ impl SqlToRel<'_> {
                     || *set_quantifier == SetQuantifier::AllByName)
                 {
                     self.validate_set_expr_num_of_columns(
-                        op.clone(),
+                        *op,
                         left_span,
                         right_span,
                         &left_plan,
@@ -86,12 +77,7 @@ impl SqlToRel<'_> {
                         set_expr_span,
                     )?;
                 }
-                self.set_operation_to_plan(
-                    op.clone(),
-                    left_plan,
-                    right_plan,
-                    set_quantifier.clone(),
-                )
+                self.set_operation_to_plan(*op, left_plan, right_plan, *set_quantifier)
             }
             SetExpr::Query(q) => self.query_to_plan_ref(q.as_ref(), planner_context),
             SetExpr::Insert(stmt) => {

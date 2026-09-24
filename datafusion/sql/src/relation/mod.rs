@@ -323,13 +323,13 @@ impl SqlToRel<'_> {
 
             for field in input_schema.fields() {
                 // Create a qualified field with the pattern variable as the qualifier
-                qualified_fields.push((Some(pattern_var_ref.clone()), field.clone()));
+                qualified_fields.push((Some(pattern_var_ref.clone()), Arc::clone(field)));
             }
         }
 
         // Also include the original input schema fields (with their original qualifiers)
         for (qualifier, field) in input_schema.iter() {
-            qualified_fields.push((qualifier.cloned(), field.clone()));
+            qualified_fields.push((qualifier.cloned(), Arc::clone(field)));
         }
 
         // Create new schema with all qualified fields
@@ -348,8 +348,8 @@ impl SqlToRel<'_> {
         pattern_var_names: &[String],
     ) -> Expr {
         expr.transform(|e| {
-            if let Expr::Column(col) = &e {
-                if let Some(qualifier) = &col.relation {
+            if let Expr::Column(col) = &e
+                && let Some(qualifier) = &col.relation {
                     // Check if this qualifier is a pattern variable
                     if pattern_var_names
                         .iter()
@@ -361,7 +361,6 @@ impl SqlToRel<'_> {
                         )));
                     }
                 }
-            }
             Ok(Transformed::no(e))
         })
         .data()
@@ -379,9 +378,9 @@ impl SqlToRel<'_> {
     ) -> Result<LogicalPlan> {
         let planned_relation =
             match self.create_extension_relation(relation, planner_context)? {
-                RelationPlanning::Planned(planned) => planned,
+                RelationPlanning::Planned(planned) => *planned,
                 RelationPlanning::Original(original) => {
-                    self.create_default_relation(original, planner_context)?
+                    self.create_default_relation(*original, planner_context)?
                 }
             };
 
@@ -566,7 +565,7 @@ impl SqlToRel<'_> {
                 };
                 let single_unnest_output = !*with_ordinality && unnest_exprs.len() == 1;
                 let logical_plan =
-                    self.try_process_unnest_with_options(input, unnest_exprs, options)?;
+                    self.try_process_unnest_with_options(input, unnest_exprs, options.as_ref())?;
                 let mut alias = alias.clone();
                 if single_unnest_output
                     && let Some(table_alias) = alias.as_mut()
@@ -699,7 +698,7 @@ impl SqlToRel<'_> {
     ) -> Result<RelationPlanning> {
         let planners = self.context_provider.get_relation_planners();
         if planners.is_empty() {
-            return Ok(RelationPlanning::Original(relation));
+            return Ok(RelationPlanning::Original(Box::new(relation)));
         }
 
         let mut current_relation = relation;
@@ -714,12 +713,12 @@ impl SqlToRel<'_> {
                     return Ok(RelationPlanning::Planned(planned));
                 }
                 RelationPlanning::Original(original) => {
-                    current_relation = original;
+                    current_relation = *original;
                 }
             }
         }
 
-        Ok(RelationPlanning::Original(current_relation))
+        Ok(RelationPlanning::Original(Box::new(current_relation)))
     }
 
     fn create_default_relation(
@@ -800,17 +799,15 @@ impl SqlToRel<'_> {
                 subquery, alias, ..
             } => {
                 let logical_plan =
-                    self.query_to_plan(SQLBox::into_owned(subquery), planner_context)?;
+                    self.query_to_plan_ref(&subquery, planner_context)?;
                 (logical_plan, alias)
             }
             TableFactor::NestedJoin {
                 table_with_joins,
                 alias,
             } => {
-                let plan = self.plan_table_with_joins(
-                    SQLBox::into_owned(table_with_joins),
-                    planner_context,
-                )?;
+                let plan =
+                    self.plan_table_with_joins_ref(&table_with_joins, planner_context)?;
                 let plan = match alias {
                     Some(_) => project_visible_columns(plan)?,
                     None => plan,
@@ -858,13 +855,13 @@ impl SqlToRel<'_> {
 
                 let single_unnest_output = !with_ordinality && unnest_exprs.len() == 1;
                 let logical_plan =
-                    self.try_process_unnest_with_options(input, unnest_exprs, options)?;
+                    self.try_process_unnest_with_options(input, unnest_exprs, options.as_ref())?;
 
                 // PostgreSQL compatibility: for a single-argument UNNEST with an alias but no
                 // explicit column alias list, treat the relation alias as the output column name.
                 // Example: `UNNEST(arr) AS x` exposes column `x`.
-                if single_unnest_output {
-                    if let Some(table_alias) = alias.as_mut()
+                if single_unnest_output
+                    && let Some(table_alias) = alias.as_mut()
                         && table_alias.columns.is_empty()
                     {
                         table_alias.columns.push(TableAliasColumnDef {
@@ -873,7 +870,6 @@ impl SqlToRel<'_> {
                             collation: None,
                         });
                     }
-                }
 
                 (logical_plan, alias)
             }
@@ -1711,12 +1707,12 @@ impl SqlToRel<'_> {
             .transpose()?;
 
         // Convert path mode
-        let path_mode = match_clause.path_mode.map(|pm| self.convert_path_mode(pm));
+        let path_mode = match_clause.path_mode.map(|pm| self.convert_path_mode(&pm));
 
         // Convert row limiting
         let row_limiting = match_clause
             .row_limiting
-            .map(|rl| self.convert_row_limiting(rl));
+            .map(|rl| self.convert_row_limiting(&rl));
 
         // Convert graph patterns
         let patterns = match_clause
@@ -1801,7 +1797,7 @@ impl SqlToRel<'_> {
     }
 
     /// Convert sqlparser path mode to DataFusion PathMode
-    fn convert_path_mode(&self, pm: sqlparser::ast::PathMode) -> PathMode {
+    fn convert_path_mode(&self, pm: &sqlparser::ast::PathMode) -> PathMode {
         use sqlparser::ast::PathMode as SqlPM;
         match pm {
             SqlPM::Walk => PathMode::Walk,
@@ -1812,7 +1808,7 @@ impl SqlToRel<'_> {
     }
 
     /// Convert sqlparser row limiting to DataFusion RowLimiting
-    fn convert_row_limiting(&self, rl: sqlparser::ast::RowLimiting) -> RowLimiting {
+    fn convert_row_limiting(&self, rl: &sqlparser::ast::RowLimiting) -> RowLimiting {
         use sqlparser::ast::RowLimiting as SqlRL;
         match rl {
             SqlRL::OneRowPerMatch => RowLimiting::OneRowPerMatch,
@@ -1860,7 +1856,7 @@ impl SqlToRel<'_> {
                 pattern: Box::new(
                     self.convert_graph_pattern_expr(SQLBox::into_owned(pattern))?,
                 ),
-                quantifier: quantifier.map(|q| self.convert_quantifier(q)),
+                quantifier: quantifier.map(|q| self.convert_quantifier(&q)),
             },
         })
     }
@@ -1955,15 +1951,15 @@ impl SqlToRel<'_> {
                     self.sql_expr_to_logical_expr(e, &empty_schema, &mut planner_context)
                 })
                 .transpose()?,
-            direction: self.convert_edge_direction(edge.direction),
-            quantifier: edge.quantifier.map(|q| self.convert_quantifier(q)),
+            direction: self.convert_edge_direction(&edge.direction),
+            quantifier: edge.quantifier.map(|q| self.convert_quantifier(&q)),
         })
     }
 
     /// Convert sqlparser EdgeDirection to DataFusion EdgeDirection
     fn convert_edge_direction(
         &self,
-        dir: sqlparser::ast::EdgeDirection,
+        dir: &sqlparser::ast::EdgeDirection,
     ) -> EdgeDirection {
         use sqlparser::ast::EdgeDirection as SqlED;
         match dir {
@@ -2003,17 +1999,17 @@ impl SqlToRel<'_> {
     /// Convert sqlparser RepetitionQuantifier to DataFusion RepetitionQuantifier
     fn convert_quantifier(
         &self,
-        q: sqlparser::ast::RepetitionQuantifier,
+        q: &sqlparser::ast::RepetitionQuantifier,
     ) -> RepetitionQuantifier {
         use sqlparser::ast::RepetitionQuantifier as SqlRQ;
         match q {
             SqlRQ::ZeroOrMore => RepetitionQuantifier::ZeroOrMore,
             SqlRQ::OneOrMore => RepetitionQuantifier::OneOrMore,
             SqlRQ::AtMostOne => RepetitionQuantifier::AtMostOne,
-            SqlRQ::Exactly(n) => RepetitionQuantifier::Exactly(n),
-            SqlRQ::AtLeast(n) => RepetitionQuantifier::AtLeast(n),
-            SqlRQ::AtMost(n) => RepetitionQuantifier::AtMost(n),
-            SqlRQ::Range(min, max) => RepetitionQuantifier::Range(min, max),
+            SqlRQ::Exactly(n) => RepetitionQuantifier::Exactly(*n),
+            SqlRQ::AtLeast(n) => RepetitionQuantifier::AtLeast(*n),
+            SqlRQ::AtMost(n) => RepetitionQuantifier::AtMost(*n),
+            SqlRQ::Range(min, max) => RepetitionQuantifier::Range(*min, *max),
         }
     }
 
@@ -2032,7 +2028,7 @@ impl SqlToRel<'_> {
             .iter()
             .enumerate()
             .map(|(idx, col)| {
-                let name = col.alias.clone().unwrap_or_else(|| format!("col{}", idx));
+                let name = col.alias.clone().unwrap_or_else(|| format!("col{idx}"));
                 Arc::new(Field::new(name, DataType::Utf8, true))
             })
             .collect();

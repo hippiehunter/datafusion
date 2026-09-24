@@ -1720,7 +1720,7 @@ fn table_with_column_alias_collision_with_original() {
     // We rename first column to "price" (which is the 3rd column)
     let sql = "SELECT * FROM lineitem l (price, renamed)";
     let plan = logical_plan(sql).expect("Collision should be handled");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
 
     // The original "price" column should be renamed to avoid ambiguity
     // Look for price_1 or similar conflict resolution
@@ -1736,7 +1736,7 @@ fn table_with_column_alias_special_chars() {
     let sql =
         r#"SELECT "col-1", "col 2", "col@3" FROM lineitem l ("col-1", "col 2", "col@3")"#;
     let plan = logical_plan(sql).expect("Special characters should work when quoted");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
     assert!(
         plan_str.contains("col-1")
             || plan_str.contains("col 2")
@@ -1751,7 +1751,7 @@ fn table_with_column_alias_reserved_keywords() {
     let sql =
         r#"SELECT "select", "from", "where" FROM lineitem l ("select", "from", "where")"#;
     let plan = logical_plan(sql).expect("Reserved keywords should work when quoted");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
     assert!(
         plan_str.contains("select")
             && plan_str.contains("from")
@@ -1765,7 +1765,7 @@ fn table_with_column_alias_case_sensitivity() {
     // Unquoted aliases should be normalized (lowercased)
     let sql = "SELECT ABC, DEF FROM lineitem l (ABC, DEF)";
     let plan = logical_plan(sql).expect("Case sensitivity should be handled");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
     // Unquoted identifiers are normalized to lowercase
     assert!(
         plan_str.contains("abc") && plan_str.contains("def"),
@@ -1794,7 +1794,7 @@ fn table_with_column_alias_empty_vs_no_alias() {
     // This tests behavior when using table alias without column aliases
     let sql = "SELECT * FROM lineitem l";
     let plan = logical_plan(sql).expect("Table alias should work");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
     // Should have either SubqueryAlias or just table reference
     assert!(
         plan_str.contains("lineitem") || plan_str.contains("SubqueryAlias"),
@@ -1809,7 +1809,7 @@ fn table_with_column_alias_collision_renamed() {
     // Rename first to "price" - the original "price" should become "price_1"
     let sql = "SELECT price, price_1 FROM lineitem l (price, renamed)";
     let plan = logical_plan(sql).expect("Collision should be resolved");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
 
     // Verify that both "price" (new alias) and "price_1" (renamed original) exist
     assert!(
@@ -1829,7 +1829,7 @@ fn table_with_column_alias_collision_detection() {
     // Rename first two to names of last two (creating conflicts)
     let sql = "SELECT * FROM lineitem l (l_description, price)";
     let plan = logical_plan(sql).expect("Collision should be handled");
-    let plan_str = format!("{:?}", plan);
+    let plan_str = format!("{plan:?}");
 
     // The plan should be created successfully with collision resolution
     assert!(
@@ -5339,8 +5339,7 @@ fn test_any_subquery() {
     let plan_str = format!("{plan}");
     assert!(
         plan_str.contains("ANY"),
-        "Expected ANY in plan: {}",
-        plan_str
+        "Expected ANY in plan: {plan_str}"
     );
 }
 
@@ -5352,8 +5351,7 @@ fn test_all_subquery() {
     let plan_str = format!("{plan}");
     assert!(
         plan_str.contains("ALL"),
-        "Expected ALL in plan: {}",
-        plan_str
+        "Expected ALL in plan: {plan_str}"
     );
 }
 
@@ -5366,8 +5364,7 @@ fn test_some_subquery() {
     // SOME gets converted to ANY internally
     assert!(
         plan_str.contains("ANY"),
-        "Expected ANY (from SOME) in plan: {}",
-        plan_str
+        "Expected ANY (from SOME) in plan: {plan_str}"
     );
 }
 
@@ -5377,8 +5374,7 @@ fn test_any_with_different_operators() {
     let operators = ["=", "<>", "<", "<=", ">", ">="];
     for op in operators {
         let sql = format!(
-            "SELECT id FROM person WHERE id {} ANY(SELECT id FROM person WHERE id < 5)",
-            op
+            "SELECT id FROM person WHERE id {op} ANY(SELECT id FROM person WHERE id < 5)"
         );
         let result = logical_plan(&sql);
         assert!(
@@ -5396,8 +5392,7 @@ fn test_all_with_different_operators() {
     let operators = ["=", "<>", "<", "<=", ">", ">="];
     for op in operators {
         let sql = format!(
-            "SELECT id FROM person WHERE id {} ALL(SELECT id FROM person WHERE id < 5)",
-            op
+            "SELECT id FROM person WHERE id {op} ALL(SELECT id FROM person WHERE id < 5)"
         );
         let result = logical_plan(&sql);
         assert!(

@@ -30,9 +30,9 @@
 //! and it flows through [`crate::udf::ScalarFunctionArgs::session`] at
 //! invoke time. UDFs stay stateless singletons safe to cache.
 
+use datafusion_common::instant::Instant;
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::Instant;
 
 use datafusion_common::Result;
 

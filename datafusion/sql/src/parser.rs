@@ -37,7 +37,7 @@ use sqlparser::{
 use std::collections::VecDeque;
 use std::fmt;
 
-fn parser_error(error: ParserError) -> DataFusionError {
+fn parser_error(error: &ParserError) -> DataFusionError {
     DataFusionError::SQL(format!("{error:?}").into_boxed_str(), None)
 }
 
@@ -47,7 +47,7 @@ trait ParserResultExt<T> {
 
 impl<T> ParserResultExt<T> for Result<T, ParserError> {
     fn map_parser_err(self) -> Result<T, DataFusionError> {
-        self.map_err(parser_error)
+        self.map_err(|error| parser_error(&error))
     }
 }
 
@@ -55,7 +55,7 @@ impl<T> ParserResultExt<T> for Result<T, ParserError> {
 macro_rules! parser_err {
     ($MSG:expr $(; diagnostic = $DIAG:expr)?) => {{
 
-        let err = parser_error(ParserError::ParserError($MSG.to_string()));
+        let err = parser_error(&ParserError::ParserError($MSG.to_string()));
         $(
             let err = err.with_diagnostic($DIAG);
         )?
@@ -652,7 +652,7 @@ impl<'a> DFParser<'a> {
             return parser_err!("Unsupported command in expression")?;
         }
 
-        Ok(self.parser.parse_expr_with_alias().map_parser_err()?)
+        self.parser.parse_expr_with_alias().map_parser_err()
     }
 
     /// Parses the entire SQL string into an expression.
@@ -678,7 +678,7 @@ impl<'a> DFParser<'a> {
                         self.options.recursion_limit
                     )),
                 ),
-                other => parser_error(other),
+                other => parser_error(&other),
             })
     }
 

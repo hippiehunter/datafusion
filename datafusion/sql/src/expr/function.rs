@@ -324,35 +324,28 @@ impl SqlToRel<'_> {
         // Transform ARRAY(SELECT ...) into (SELECT ARRAY_AGG(...) FROM ...)
         let name = self.normalized_function_name(&function.name)?;
 
-        if name.eq_ignore_ascii_case("array") {
-            if let FunctionArguments::Subquery(query) = &function.args {
-                return self.plan_array_subquery_constructor(
-                    query.as_ref(),
-                    schema,
-                    planner_context,
-                );
-            }
+        if name.eq_ignore_ascii_case("array")
+            && let FunctionArguments::Subquery(query) = &function.args
+        {
+            return self.plan_array_subquery_constructor(
+                query.as_ref(),
+                schema,
+                planner_context,
+            );
         }
 
         // PostgreSQL typecast-as-function syntax: bpchar(expr) → CAST(expr AS CHARACTER)
-        if name.eq_ignore_ascii_case("bpchar") {
-            if let FunctionArguments::List(list) = &function.args {
-                if list.args.len() == 1 {
-                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(inner)) =
-                        &list.args[0]
-                    {
-                        let inner_expr = self.sql_expr_to_logical_expr(
-                            inner,
-                            schema,
-                            planner_context,
-                        )?;
-                        return Ok(Expr::Cast(datafusion_expr::Cast::new(
-                            Box::new(inner_expr),
-                            DataType::Utf8,
-                        )));
-                    }
-                }
-            }
+        if name.eq_ignore_ascii_case("bpchar")
+            && let FunctionArguments::List(list) = &function.args
+            && list.args.len() == 1
+            && let FunctionArg::Unnamed(FunctionArgExpr::Expr(inner)) = &list.args[0]
+        {
+            let inner_expr =
+                self.sql_expr_to_logical_expr(inner, schema, planner_context)?;
+            return Ok(Expr::Cast(datafusion_expr::Cast::new(
+                Box::new(inner_expr),
+                DataType::Utf8,
+            )));
         }
 
         // The SQL/JSON forms carry their behaviour in clauses rather than in
@@ -1331,7 +1324,7 @@ impl SqlToRel<'_> {
         let agg_arg = if let datafusion_expr::LogicalPlan::Projection(proj) = &sub_plan {
             if proj.expr.len() == 1 {
                 let projected = proj.expr[0].clone();
-                sub_plan = std::sync::Arc::unwrap_or_clone(proj.input.clone());
+                sub_plan = proj.input.as_ref().clone();
                 match projected {
                     Expr::Column(_) => projected,
                     Expr::Alias(alias) => *alias.expr,

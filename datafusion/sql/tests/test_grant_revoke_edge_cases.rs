@@ -33,13 +33,12 @@ fn test_grant_role_empty_list() {
 
     if let Err(e) = result {
         let error_msg = e.to_string();
-        println!("Error (expected): {}", error_msg);
+        println!("Error (expected): {error_msg}");
         // Error should mention something about unexpected TO keyword or missing identifier
         assert!(
             error_msg.to_lowercase().contains("unexpected")
                 || error_msg.to_lowercase().contains("expected"),
-            "Error message should indicate parsing issue: {}",
-            error_msg
+            "Error message should indicate parsing issue: {error_msg}"
         );
     }
 }
@@ -58,12 +57,11 @@ fn test_grant_role_empty_grantees() {
 
     if let Err(e) = result {
         let error_msg = e.to_string();
-        println!("Error (expected): {}", error_msg);
+        println!("Error (expected): {error_msg}");
         assert!(
             error_msg.to_lowercase().contains("unexpected")
                 || error_msg.to_lowercase().contains("expected"),
-            "Error message should indicate parsing issue: {}",
-            error_msg
+            "Error message should indicate parsing issue: {error_msg}"
         );
     }
 }

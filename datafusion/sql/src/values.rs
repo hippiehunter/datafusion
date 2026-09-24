@@ -91,7 +91,7 @@ impl SqlToRel<'_> {
             }
             let exprs = match &assembly {
                 Some(assembly) => self.assemble_values_row(
-                    exprs,
+                    &exprs,
                     assembly,
                     &row_schema,
                     planner_context,
@@ -272,7 +272,7 @@ impl SqlToRel<'_> {
     /// Turn the planned slots of one values row into the target table's row.
     fn assemble_values_row(
         &self,
-        slots: Vec<Expr>,
+        slots: &[Expr],
         assembly: &ValuesAssembly,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,

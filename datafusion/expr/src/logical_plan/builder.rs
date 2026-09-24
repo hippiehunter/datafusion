@@ -2138,15 +2138,15 @@ pub fn validate_unique_names<'a>(
 /// `NULL`.  DataFusion's `DFSchema` requires unique field names, so this
 /// function appends `:N` suffixes to duplicates so the schema is valid while
 /// the query still executes.
-fn deduplicate_expr_names(exprs: &mut Vec<Expr>) {
+fn deduplicate_expr_names(exprs: &mut [Expr]) {
     let mut seen: HashMap<String, usize> = HashMap::new();
-    for i in 0..exprs.len() {
-        let name = exprs[i].schema_name().to_string();
+    for expr in exprs.iter_mut() {
+        let name = expr.schema_name().to_string();
         let count = seen.entry(name.clone()).or_insert(0);
         *count += 1;
         if *count > 1 {
             let alias = format!("{name}:{}", *count - 1);
-            exprs[i] = exprs[i].clone().alias(alias);
+            *expr = expr.clone().alias(alias);
         }
     }
 }

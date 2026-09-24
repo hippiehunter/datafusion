@@ -25,7 +25,7 @@ fn parse_sql(sql: &str) -> Result<(), String> {
     let dialect = PostgreSqlDialect {};
     Parser::parse_sql(&dialect, sql)
         .map(|_| ())
-        .map_err(|e| format!("Parse error: {}", e))
+        .map_err(|e| format!("Parse error: {e}"))
 }
 
 /// Keep valid MATCH_RECOGNIZE shapes executable while the parser lacks the

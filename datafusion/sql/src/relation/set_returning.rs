@@ -333,7 +333,7 @@ impl SqlToRel<'_> {
             }
         }
         let plan = unnested.project(output)?.build()?;
-        Ok(self.qualify_function_relation(plan, alias, &relation_name)?)
+        self.qualify_function_relation(plan, alias, &relation_name)
     }
 
     /// A function the provider plans as a table source of its own.
@@ -380,7 +380,7 @@ impl SqlToRel<'_> {
             output[0] = output[0].clone().alias(alias_name);
             plan = LogicalPlanBuilder::from(plan).project(output)?.build()?;
         }
-        Ok(self.qualify_function_relation(plan, alias, name)?)
+        self.qualify_function_relation(plan, alias, name)
     }
 
     /// A FROM item is addressed by its alias, or by the function's name when

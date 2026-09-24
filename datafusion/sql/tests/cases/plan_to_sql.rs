@@ -2776,18 +2776,15 @@ fn test_recursive_cte_unparse() {
     // Verify the output contains WITH RECURSIVE
     assert!(
         sql_string.contains("WITH RECURSIVE"),
-        "Expected WITH RECURSIVE in output: {}",
-        sql_string
+        "Expected WITH RECURSIVE in output: {sql_string}"
     );
     assert!(
         sql_string.contains("numbers"),
-        "Expected CTE name 'numbers' in output: {}",
-        sql_string
+        "Expected CTE name 'numbers' in output: {sql_string}"
     );
     assert!(
         sql_string.contains("UNION ALL"),
-        "Expected UNION ALL in output: {}",
-        sql_string
+        "Expected UNION ALL in output: {sql_string}"
     );
 }
 
@@ -2839,18 +2836,15 @@ fn test_recursive_cte_union_distinct() {
     // Verify the output contains WITH RECURSIVE and UNION (not UNION ALL)
     assert!(
         sql_string.contains("WITH RECURSIVE"),
-        "Expected WITH RECURSIVE in output: {}",
-        sql_string
+        "Expected WITH RECURSIVE in output: {sql_string}"
     );
     assert!(
         sql_string.contains("tree"),
-        "Expected CTE name 'tree' in output: {}",
-        sql_string
+        "Expected CTE name 'tree' in output: {sql_string}"
     );
     // UNION without ALL means UNION DISTINCT (SQL standard behavior)
     assert!(
         sql_string.contains("UNION") && !sql_string.contains("UNION ALL"),
-        "Expected UNION (not UNION ALL) in output: {}",
-        sql_string
+        "Expected UNION (not UNION ALL) in output: {sql_string}"
     );
 }

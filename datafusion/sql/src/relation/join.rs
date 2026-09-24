@@ -29,14 +29,6 @@ use sqlparser::ast::{
 use std::collections::HashSet;
 
 impl SqlToRel<'_> {
-    pub(crate) fn plan_table_with_joins(
-        &self,
-        t: TableWithJoins,
-        planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
-        self.plan_table_with_joins_ref(&t, planner_context)
-    }
-
     pub(crate) fn plan_table_with_joins_ref(
         &self,
         t: &TableWithJoins,
@@ -62,7 +54,7 @@ impl SqlToRel<'_> {
         join: &Join,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        let right = if is_lateral_join(&join)? {
+        let right = if is_lateral_join(join)? {
             self.create_relation_subquery_ref(&join.relation, planner_context)?
         } else {
             self.create_relation_ref(&join.relation, planner_context)?
@@ -149,11 +141,11 @@ impl SqlToRel<'_> {
                 let keys = self.using_clause_keys(columns)?;
                 let alias =
                     TableReference::bare(self.ident_normalizer.normalize(alias.clone()));
-                self.plan_using_join(left, right, join_type, keys, Some(alias))
+                self.plan_using_join(left, right, join_type, &keys, Some(&alias))
             }
             JoinConstraint::Using(object_names) => {
                 let keys = self.using_clause_keys(object_names)?;
-                self.plan_using_join(left, right, join_type, keys, None)
+                self.plan_using_join(left, right, join_type, &keys, None)
             }
             JoinConstraint::Natural => {
                 let left_names: HashSet<String> = visible_column_names(&left)?;
@@ -173,7 +165,7 @@ impl SqlToRel<'_> {
                             ordered.push(field.name().clone());
                         }
                     }
-                    self.plan_using_join(left, right, join_type, ordered, None)
+                    self.plan_using_join(left, right, join_type, &ordered, None)
                 }
             }
             JoinConstraint::None => LogicalPlanBuilder::from(left)
@@ -219,8 +211,8 @@ impl SqlToRel<'_> {
         left: LogicalPlan,
         right: LogicalPlan,
         join_type: JoinType,
-        keys: Vec<String>,
-        alias: Option<TableReference>,
+        keys: &[String],
+        alias: Option<&TableReference>,
     ) -> Result<LogicalPlan> {
         let left_keys = keys
             .iter()
@@ -288,7 +280,7 @@ impl SqlToRel<'_> {
                     else_expr: Some(Box::new(right_value)),
                 }),
             };
-            if let Some(alias) = &alias {
+            if let Some(alias) = alias {
                 alias_copies.push(Expr::Alias(Alias::new(
                     merged.clone(),
                     Some(alias.clone()),

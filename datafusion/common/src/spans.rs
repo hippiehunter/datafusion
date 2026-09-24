@@ -124,8 +124,9 @@ impl Span {
     /// // line 1, column 1 -> line 4, column 2
     /// assert_eq!(
     ///   Span::union_iter(spans),
-    ///   Span::new(Location::new(1, 1), Location::new(4, 2))
+    ///   Some(Span::new(Location::new(1, 1), Location::new(4, 2)))
     /// );
+    /// ```
     pub fn union_iter<I: IntoIterator<Item = Span>>(iter: I) -> Option<Span> {
         iter.into_iter().reduce(|acc, item| acc.union(&item))
     }

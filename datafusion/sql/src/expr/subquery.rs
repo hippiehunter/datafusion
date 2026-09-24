@@ -133,7 +133,7 @@ impl SqlToRel<'_> {
                 row,
                 &BinaryOperator::Eq,
                 RowQuantifier::Any,
-                sub_plan,
+                &sub_plan,
                 input_schema,
                 planner_context,
             )?;
@@ -261,7 +261,7 @@ impl SqlToRel<'_> {
                 row,
                 compare_op,
                 RowQuantifier::Any,
-                sub_plan,
+                &sub_plan,
                 input_schema,
                 planner_context,
             );
@@ -326,7 +326,7 @@ impl SqlToRel<'_> {
                 row,
                 compare_op,
                 RowQuantifier::All,
-                sub_plan,
+                &sub_plan,
                 input_schema,
                 planner_context,
             );
@@ -368,7 +368,7 @@ impl SqlToRel<'_> {
         row: &[&SQLExpr],
         compare_op: &BinaryOperator,
         quantifier: RowQuantifier,
-        sub_plan: LogicalPlan,
+        sub_plan: &LogicalPlan,
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {

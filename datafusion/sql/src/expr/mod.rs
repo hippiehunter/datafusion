@@ -141,8 +141,8 @@ impl SqlToRel<'_> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let (left_start_sql, left_end_sql) = self.extract_pg_overlaps_period(left)?;
-        let (right_start_sql, right_end_sql) = self.extract_pg_overlaps_period(right)?;
+        let (left_start_sql, left_end_sql) = Self::extract_pg_overlaps_period(left)?;
+        let (right_start_sql, right_end_sql) = Self::extract_pg_overlaps_period(right)?;
 
         let left_end_is_interval = matches!(left_end_sql, SQLExpr::Interval(_));
         let right_end_is_interval = matches!(right_end_sql, SQLExpr::Interval(_));
@@ -250,12 +250,9 @@ impl SqlToRel<'_> {
         )))
     }
 
-    fn extract_pg_overlaps_period<'a>(
-        &self,
-        expr: &'a SQLExpr,
-    ) -> Result<(&'a SQLExpr, &'a SQLExpr)> {
+    fn extract_pg_overlaps_period(expr: &SQLExpr) -> Result<(&SQLExpr, &SQLExpr)> {
         match expr {
-            SQLExpr::Nested(inner) => self.extract_pg_overlaps_period(inner.as_ref()),
+            SQLExpr::Nested(inner) => Self::extract_pg_overlaps_period(inner.as_ref()),
             SQLExpr::Tuple(values) => {
                 if values.len() != 2 {
                     return plan_err!(
@@ -529,7 +526,7 @@ impl SqlToRel<'_> {
                     planner_context.prepare_param_data_types(),
                     planner_context,
                 )?;
-                if Self::is_regclass_sql_type(&data_type) {
+                if Self::is_regclass_sql_type(data_type) {
                     return self.sql_regclass_cast_from_arg_expr(value_expr);
                 }
 
@@ -1124,12 +1121,12 @@ impl SqlToRel<'_> {
                 // specified but it doesn't affect the plan so ignore the field
                 is_some: _,
             } => {
-                let op = self.parse_sql_binary_op(&compare_op)?;
+                let op = self.parse_sql_binary_op(compare_op)?;
                 // Check if right side is a subquery
                 match right.as_ref() {
                     SQLExpr::Subquery(subquery) => self.parse_any_subquery(
                         left.as_ref(),
-                        &compare_op,
+                        compare_op,
                         subquery.as_ref(),
                         schema,
                         planner_context,
@@ -1175,12 +1172,12 @@ impl SqlToRel<'_> {
                 compare_op,
                 right,
             } => {
-                let op = self.parse_sql_binary_op(&compare_op)?;
+                let op = self.parse_sql_binary_op(compare_op)?;
                 // Check if right side is a subquery
                 match right.as_ref() {
                     SQLExpr::Subquery(subquery) => self.parse_all_subquery(
                         left.as_ref(),
-                        &compare_op,
+                        compare_op,
                         subquery.as_ref(),
                         schema,
                         planner_context,
@@ -2040,6 +2037,22 @@ impl SqlToRel<'_> {
     }
 }
 
+/// The escape argument of a SIMILAR TO / SUBSTRING SIMILAR call as a text
+/// expression: the default `\\` when no ESCAPE clause is present, the empty
+/// string when `ESCAPE ''` disables escaping, and NULL when the clause is NULL.
+fn similar_escape_expr(escape_char: Option<&Value>) -> Result<Expr> {
+    Ok(match escape_char {
+        None => lit("\\"),
+        Some(Value::SingleQuotedString(text)) => lit(text.clone()),
+        Some(Value::Null) => Expr::Literal(ScalarValue::Utf8(None), None),
+        Some(other) => {
+            return plan_err!(
+                "Invalid escape character in SIMILAR TO expression, got {other}"
+            );
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2223,20 +2236,4 @@ mod tests {
             "keyword OVERLAPS fell back to tuple parser: {err_text}"
         );
     }
-}
-
-/// The escape argument of a SIMILAR TO / SUBSTRING SIMILAR call as a text
-/// expression: the default `\\` when no ESCAPE clause is present, the empty
-/// string when `ESCAPE ''` disables escaping, and NULL when the clause is NULL.
-fn similar_escape_expr(escape_char: Option<&Value>) -> Result<Expr> {
-    Ok(match escape_char {
-        None => lit("\\"),
-        Some(Value::SingleQuotedString(text)) => lit(text.clone()),
-        Some(Value::Null) => Expr::Literal(ScalarValue::Utf8(None), None),
-        Some(other) => {
-            return plan_err!(
-                "Invalid escape character in SIMILAR TO expression, got {other}"
-            );
-        }
-    })
 }

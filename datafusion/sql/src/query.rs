@@ -40,7 +40,7 @@ use sqlparser::ast::{
 use sqlparser::tokenizer::Span;
 
 /// Internal representation of limit/offset with WITH TIES support
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct LimitInfo<'a> {
     limit: Option<&'a SQLExpr>,
     offset: Option<&'a SQLExpr>,
@@ -60,15 +60,6 @@ struct PlannedLockClause {
 }
 
 impl SqlToRel<'_> {
-    /// Generate a logical plan from an SQL query/subquery
-    pub(crate) fn query_to_plan(
-        &self,
-        query: Query,
-        outer_planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
-        self.query_to_plan_ref(&query, outer_planner_context)
-    }
-
     /// Generate a logical plan while borrowing a parsed query document.
     pub(crate) fn query_to_plan_ref(
         &self,
@@ -97,13 +88,13 @@ impl SqlToRel<'_> {
                     query.order_by.as_ref(),
                     planner_context,
                 )?;
-                let plan = self.limit(plan, limit_info.clone(), planner_context)?;
+                let plan = self.limit(plan, limit_info, planner_context)?;
                 let plan = self.apply_query_locks(plan, &query.locks)?;
                 // Process the `SELECT INTO` after `LIMIT`.
                 self.select_into_ref(plan, select.into.as_ref())
             }
             other => {
-                // The functions called from `set_expr_to_plan()` need more than 128KB
+                // The functions called from `set_expr_to_plan_ref()` need more than 128KB
                 // stack in debug builds as investigated in:
                 // https://github.com/apache/datafusion/pull/13310#discussion_r1836813902
                 let plan = {
@@ -138,7 +129,7 @@ impl SqlToRel<'_> {
         let planned_locks = locks
             .iter()
             .map(|lock| {
-                let row_lock = table_scan_row_lock(&lock);
+                let row_lock = table_scan_row_lock(lock);
                 let target = lock
                     .of
                     .as_ref()
@@ -193,10 +184,7 @@ impl SqlToRel<'_> {
             None => {
                 // Only FETCH, no LIMIT/OFFSET
                 // Convert FETCH to LimitClause
-                match fetch_quantity {
-                    Some(quantity) => Some((Some(quantity), None, &[][..])),
-                    None => None,
-                }
+                fetch_quantity.map(|quantity| (Some(quantity), None, &[][..]))
             }
             Some(LimitClause::LimitOffset {
                 limit,
@@ -418,7 +406,7 @@ fn table_scan_row_lock(lock: &LockClause) -> TableScanRowLock {
 
 fn apply_locks_to_plan(
     plan: LogicalPlan,
-    visible_relation: Option<TableReference>,
+    visible_relation: Option<&TableReference>,
     locks: &[PlannedLockClause],
     matched_targets: &mut [bool],
 ) -> Result<LogicalPlan> {
@@ -426,7 +414,7 @@ fn apply_locks_to_plan(
         LogicalPlan::SubqueryAlias(alias) => {
             let input = apply_locks_to_plan(
                 Arc::unwrap_or_clone(alias.input),
-                Some(alias.alias.clone()),
+                Some(&alias.alias),
                 locks,
                 matched_targets,
             )?;
@@ -438,7 +426,7 @@ fn apply_locks_to_plan(
             for (idx, lock) in locks.iter().enumerate() {
                 if lock_applies_to_scan(
                     lock.target.as_ref(),
-                    visible_relation.as_ref(),
+                    visible_relation,
                     &scan.table_name,
                 ) {
                     matched_targets[idx] = true;
@@ -453,13 +441,8 @@ fn apply_locks_to_plan(
         }
         other => other
             .map_children(|child| {
-                apply_locks_to_plan(
-                    child,
-                    visible_relation.clone(),
-                    locks,
-                    matched_targets,
-                )
-                .map(Transformed::yes)
+                apply_locks_to_plan(child, visible_relation, locks, matched_targets)
+                    .map(Transformed::yes)
             })
             .map(|transformed| transformed.data),
     }
@@ -537,7 +520,7 @@ pub(crate) fn to_order_by_exprs_with_select<'a>(
                             quote_style: None,
                             span: Span::empty(),
                         }),
-                        options: order_by_options.clone(),
+                        options: *order_by_options,
                         with_fill: None,
                         using: None,
                     }),

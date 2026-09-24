@@ -145,139 +145,6 @@ impl Display for TableScanRowLock {
     }
 }
 
-/// A `LogicalPlan` is a node in a tree of relational operators (such as
-/// Projection or Filter).
-///
-/// Represents transforming an input relation (table) to an output relation
-/// (table) with a potentially different schema. Plans form a dataflow tree
-/// where data flows from leaves up to the root to produce the query result.
-///
-/// `LogicalPlan`s can be created by the SQL query planner, the DataFrame API,
-/// or programmatically (for example custom query languages).
-///
-/// # See also:
-/// * [`Expr`]: For the expressions that are evaluated by the plan
-/// * [`LogicalPlanBuilder`]: For building `LogicalPlan`s
-/// * [`tree_node`]: To inspect and rewrite `LogicalPlan`s
-///
-/// [`tree_node`]: crate::logical_plan::tree_node
-///
-/// # Examples
-///
-/// ## Creating a LogicalPlan from SQL:
-///
-/// See [`SessionContext::sql`](https://docs.rs/datafusion/latest/datafusion/execution/context/struct.SessionContext.html#method.sql)
-///
-/// ## Creating a LogicalPlan from the DataFrame API:
-///
-/// See [`DataFrame::logical_plan`](https://docs.rs/datafusion/latest/datafusion/dataframe/struct.DataFrame.html#method.logical_plan)
-///
-/// ## Creating a LogicalPlan programmatically:
-///
-/// See [`LogicalPlanBuilder`]
-///
-/// # Visiting and Rewriting `LogicalPlan`s
-///
-/// Using the [`tree_node`] API, you can recursively walk all nodes in a
-/// `LogicalPlan`. For example, to find all column references in a plan:
-///
-/// ```
-/// # use std::collections::HashSet;
-/// # use arrow::datatypes::{DataType, Field, Schema};
-/// # use datafusion_expr::{Expr, col, lit, LogicalPlan, LogicalPlanBuilder, table_scan};
-/// # use datafusion_common::tree_node::{TreeNodeRecursion, TreeNode};
-/// # use datafusion_common::{Column, Result};
-/// # fn employee_schema() -> Schema {
-/// #    Schema::new(vec![
-/// #           Field::new("name", DataType::Utf8, false),
-/// #           Field::new("salary", DataType::Int32, false),
-/// #       ])
-/// #   }
-/// // Projection(name, salary)
-/// //   Filter(salary > 1000)
-/// //     TableScan(employee)
-/// # fn main() -> Result<()> {
-/// let plan = table_scan(Some("employee"), &employee_schema(), None)?
-///  .filter(col("salary").gt(lit(1000)))?
-///  .project(vec![col("name")])?
-///  .build()?;
-///
-/// // use apply to walk the plan and collect all expressions
-/// let mut expressions = HashSet::new();
-/// plan.apply(|node| {
-///   // collect all expressions in the plan
-///   node.apply_expressions(|expr| {
-///    expressions.insert(expr.clone());
-///    Ok(TreeNodeRecursion::Continue) // control walk of expressions
-///   })?;
-///   Ok(TreeNodeRecursion::Continue) // control walk of plan nodes
-/// }).unwrap();
-///
-/// // we found the expression in projection and filter
-/// assert_eq!(expressions.len(), 2);
-/// println!("Found expressions: {:?}", expressions);
-/// // found predicate in the Filter: employee.salary > 1000
-/// let salary = Expr::Column(Column::new(Some("employee"), "salary"));
-/// assert!(expressions.contains(&salary.gt(lit(1000))));
-/// // found projection in the Projection: employee.name
-/// let name = Expr::Column(Column::new(Some("employee"), "name"));
-/// assert!(expressions.contains(&name));
-/// # Ok(())
-/// # }
-/// ```
-///
-/// You can also rewrite plans using the [`tree_node`] API. For example, to
-/// replace the filter predicate in a plan:
-///
-/// ```
-/// # use std::collections::HashSet;
-/// # use arrow::datatypes::{DataType, Field, Schema};
-/// # use datafusion_expr::{Expr, col, lit, LogicalPlan, LogicalPlanBuilder, table_scan};
-/// # use datafusion_common::tree_node::{TreeNodeRecursion, TreeNode};
-/// # use datafusion_common::{Column, Result};
-/// # fn employee_schema() -> Schema {
-/// #    Schema::new(vec![
-/// #           Field::new("name", DataType::Utf8, false),
-/// #           Field::new("salary", DataType::Int32, false),
-/// #       ])
-/// #   }
-/// // Projection(name, salary)
-/// //   Filter(salary > 1000)
-/// //     TableScan(employee)
-/// # fn main() -> Result<()> {
-/// use datafusion_common::tree_node::Transformed;
-/// let plan = table_scan(Some("employee"), &employee_schema(), None)?
-///  .filter(col("salary").gt(lit(1000)))?
-///  .project(vec![col("name")])?
-///  .build()?;
-///
-/// // use transform to rewrite the plan
-/// let transformed_result = plan.transform(|node| {
-///   // when we see the filter node
-///   if let LogicalPlan::Filter(mut filter) = node {
-///     // replace predicate with salary < 2000
-///     filter.predicate = Expr::Column(Column::new(Some("employee"), "salary")).lt(lit(2000));
-///     let new_plan = LogicalPlan::Filter(filter);
-///     return Ok(Transformed::yes(new_plan)); // communicate the node was changed
-///   }
-///   // return the node unchanged
-///   Ok(Transformed::no(node))
-/// }).unwrap();
-///
-/// // Transformed result contains rewritten plan and information about
-/// // whether the plan was changed
-/// assert!(transformed_result.transformed);
-/// let rewritten_plan = transformed_result.data;
-///
-/// // we found the filter
-/// assert_eq!(rewritten_plan.display_indent().to_string(),
-/// "Projection: employee.name\
-/// \n  Filter: employee.salary < Int32(2000)\
-/// \n    TableScan: employee");
-/// # Ok(())
-/// # }
-/// ```
-
 // ============================================================================
 // MATCH_RECOGNIZE Types (Row Pattern Recognition - SQL:2016)
 // ============================================================================
@@ -607,9 +474,6 @@ pub struct NodePattern {
     pub where_clause: Option<Expr>,
 }
 
-/// Quantifier for path patterns (same as MATCH_RECOGNIZE)
-/// Already defined as RepetitionQuantifier in this module
-
 /// Edge pattern in a graph query (SQL/PGQ)
 /// Example: `-[e:KNOWS*1..3]->`
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
@@ -752,6 +616,7 @@ pub struct GraphTable {
 
 impl GraphTable {
     /// Create a new GraphTable node
+    #[expect(clippy::too_many_arguments)]
     pub fn try_new(
         graph_name: TableReference,
         path_finding: Option<PathFinding>,
@@ -838,6 +703,7 @@ pub struct MatchRecognize {
 
 impl MatchRecognize {
     /// Create a new MatchRecognize node
+    #[expect(clippy::too_many_arguments)]
     pub fn try_new(
         input: Arc<LogicalPlan>,
         partition_by: Vec<Expr>,
@@ -910,6 +776,138 @@ impl PartialOrd for MatchRecognize {
     }
 }
 
+/// A `LogicalPlan` is a node in a tree of relational operators (such as
+/// Projection or Filter).
+///
+/// Represents transforming an input relation (table) to an output relation
+/// (table) with a potentially different schema. Plans form a dataflow tree
+/// where data flows from leaves up to the root to produce the query result.
+///
+/// `LogicalPlan`s can be created by the SQL query planner, the DataFrame API,
+/// or programmatically (for example custom query languages).
+///
+/// # See also:
+/// * [`Expr`]: For the expressions that are evaluated by the plan
+/// * [`LogicalPlanBuilder`]: For building `LogicalPlan`s
+/// * [`tree_node`]: To inspect and rewrite `LogicalPlan`s
+///
+/// [`tree_node`]: crate::logical_plan::tree_node
+///
+/// # Examples
+///
+/// ## Creating a LogicalPlan from SQL:
+///
+/// See [`SessionContext::sql`](https://docs.rs/datafusion/latest/datafusion/execution/context/struct.SessionContext.html#method.sql)
+///
+/// ## Creating a LogicalPlan from the DataFrame API:
+///
+/// See [`DataFrame::logical_plan`](https://docs.rs/datafusion/latest/datafusion/dataframe/struct.DataFrame.html#method.logical_plan)
+///
+/// ## Creating a LogicalPlan programmatically:
+///
+/// See [`LogicalPlanBuilder`]
+///
+/// # Visiting and Rewriting `LogicalPlan`s
+///
+/// Using the [`tree_node`] API, you can recursively walk all nodes in a
+/// `LogicalPlan`. For example, to find all column references in a plan:
+///
+/// ```
+/// # use std::collections::HashSet;
+/// # use arrow::datatypes::{DataType, Field, Schema};
+/// # use datafusion_expr::{Expr, col, lit, LogicalPlan, LogicalPlanBuilder, table_scan};
+/// # use datafusion_common::tree_node::{TreeNodeRecursion, TreeNode};
+/// # use datafusion_common::{Column, Result};
+/// # fn employee_schema() -> Schema {
+/// #    Schema::new(vec![
+/// #           Field::new("name", DataType::Utf8, false),
+/// #           Field::new("salary", DataType::Int32, false),
+/// #       ])
+/// #   }
+/// // Projection(name, salary)
+/// //   Filter(salary > 1000)
+/// //     TableScan(employee)
+/// # fn main() -> Result<()> {
+/// let plan = table_scan(Some("employee"), &employee_schema(), None)?
+///  .filter(col("salary").gt(lit(1000)))?
+///  .project(vec![col("name")])?
+///  .build()?;
+///
+/// // use apply to walk the plan and collect all expressions
+/// let mut expressions = HashSet::new();
+/// plan.apply(|node| {
+///   // collect all expressions in the plan
+///   node.apply_expressions(|expr| {
+///    expressions.insert(expr.clone());
+///    Ok(TreeNodeRecursion::Continue) // control walk of expressions
+///   })?;
+///   Ok(TreeNodeRecursion::Continue) // control walk of plan nodes
+/// }).unwrap();
+///
+/// // we found the expression in projection and filter
+/// assert_eq!(expressions.len(), 2);
+/// println!("Found expressions: {:?}", expressions);
+/// // found predicate in the Filter: employee.salary > 1000
+/// let salary = Expr::Column(Column::new(Some("employee"), "salary"));
+/// assert!(expressions.contains(&salary.gt(lit(1000))));
+/// // found projection in the Projection: employee.name
+/// let name = Expr::Column(Column::new(Some("employee"), "name"));
+/// assert!(expressions.contains(&name));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// You can also rewrite plans using the [`tree_node`] API. For example, to
+/// replace the filter predicate in a plan:
+///
+/// ```
+/// # use std::collections::HashSet;
+/// # use arrow::datatypes::{DataType, Field, Schema};
+/// # use datafusion_expr::{Expr, col, lit, LogicalPlan, LogicalPlanBuilder, table_scan};
+/// # use datafusion_common::tree_node::{TreeNodeRecursion, TreeNode};
+/// # use datafusion_common::{Column, Result};
+/// # fn employee_schema() -> Schema {
+/// #    Schema::new(vec![
+/// #           Field::new("name", DataType::Utf8, false),
+/// #           Field::new("salary", DataType::Int32, false),
+/// #       ])
+/// #   }
+/// // Projection(name, salary)
+/// //   Filter(salary > 1000)
+/// //     TableScan(employee)
+/// # fn main() -> Result<()> {
+/// use datafusion_common::tree_node::Transformed;
+/// let plan = table_scan(Some("employee"), &employee_schema(), None)?
+///  .filter(col("salary").gt(lit(1000)))?
+///  .project(vec![col("name")])?
+///  .build()?;
+///
+/// // use transform to rewrite the plan
+/// let transformed_result = plan.transform(|node| {
+///   // when we see the filter node
+///   if let LogicalPlan::Filter(mut filter) = node {
+///     // replace predicate with salary < 2000
+///     filter.predicate = Expr::Column(Column::new(Some("employee"), "salary")).lt(lit(2000));
+///     let new_plan = LogicalPlan::Filter(filter);
+///     return Ok(Transformed::yes(new_plan)); // communicate the node was changed
+///   }
+///   // return the node unchanged
+///   Ok(Transformed::no(node))
+/// }).unwrap();
+///
+/// // Transformed result contains rewritten plan and information about
+/// // whether the plan was changed
+/// assert!(transformed_result.transformed);
+/// let rewritten_plan = transformed_result.data;
+///
+/// // we found the filter
+/// assert_eq!(rewritten_plan.display_indent().to_string(),
+/// "Projection: employee.name\
+/// \n  Filter: employee.salary < Int32(2000)\
+/// \n    TableScan: employee");
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum LogicalPlan {
     /// Evaluates an arbitrary list of expressions (essentially a
@@ -1591,7 +1589,7 @@ impl LogicalPlan {
                     Arc::new(input),
                     dml.target_select_rights,
                 );
-                new_dml.output_schema = dml.output_schema.clone();
+                new_dml.output_schema = Arc::clone(&dml.output_schema);
                 new_dml.target_columns = dml.target_columns.clone();
                 new_dml.returning_columns = dml.returning_columns.clone();
                 new_dml.returning_exprs = dml.returning_exprs.clone();
@@ -1654,7 +1652,7 @@ impl LogicalPlan {
                             MergeAction::Insert(MergeInsertExpr {
                                 columns: insert.columns.clone(),
                                 provided_columns: insert.provided_columns.clone(),
-                                overriding: insert.overriding.clone(),
+                                overriding: insert.overriding,
                                 kind,
                                 insert_predicate,
                             })
@@ -1703,7 +1701,7 @@ impl LogicalPlan {
                     };
 
                     clauses.push(MergeClause {
-                        clause_kind: clause.clause_kind.clone(),
+                        clause_kind: clause.clause_kind,
                         predicate,
                         action,
                     });
@@ -2182,7 +2180,7 @@ impl LogicalPlan {
                 };
                 let new_columns = columns
                     .iter()
-                    .zip(expr.into_iter())
+                    .zip(expr)
                     .map(|(old_col, new_expr)| GraphColumn {
                         expr: new_expr,
                         alias: old_col.alias.clone(),
@@ -3202,10 +3200,10 @@ impl LogicalPlan {
                         write!(f, "MatchRecognize")
                     }
                     LogicalPlan::JsonTable(JsonTable { json_path, .. }) => {
-                        write!(f, "JsonTable: path={}", json_path)
+                        write!(f, "JsonTable: path={json_path}")
                     }
                     LogicalPlan::GraphTable(GraphTable { graph_name, .. }) => {
-                        write!(f, "GraphTable: graph={}", graph_name)
+                        write!(f, "GraphTable: graph={graph_name}")
                     }
                 }
             }

@@ -613,15 +613,15 @@ impl Display for OnConflict {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", col)?;
+                        write!(f, "{col}")?;
                     }
                     write!(f, ")")?;
                 }
                 ConflictTarget::OnConstraint(name) => {
-                    write!(f, " ON CONSTRAINT {}", name)?;
+                    write!(f, " ON CONSTRAINT {name}")?;
                 }
                 ConflictTarget::Index(name) => {
-                    write!(f, " ON INDEX {}", name)?;
+                    write!(f, " ON INDEX {name}")?;
                 }
             }
         }
@@ -651,7 +651,7 @@ impl Display for OnConflictAction {
                     write!(f, "{} = {}", assignment.target, assignment.value)?;
                 }
                 if let Some(selection) = &update.selection {
-                    write!(f, " WHERE {}", selection)?;
+                    write!(f, " WHERE {selection}")?;
                 }
                 Ok(())
             }

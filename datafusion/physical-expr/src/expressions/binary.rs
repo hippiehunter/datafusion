@@ -580,7 +580,7 @@ fn is_integral_numeric_type(data_type: &DataType) -> bool {
     )
 }
 
-fn unwrap_dictionary_scalar<'a>(scalar: &'a ScalarValue) -> &'a ScalarValue {
+fn unwrap_dictionary_scalar(scalar: &ScalarValue) -> &ScalarValue {
     match scalar {
         ScalarValue::Dictionary(_, value) => unwrap_dictionary_scalar(value.as_ref()),
         _ => scalar,

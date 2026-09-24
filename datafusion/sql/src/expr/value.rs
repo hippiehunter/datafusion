@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::ops::Neg;
 use std::str::FromStr;
 
-fn literal_syntax_error(message: String) -> DataFusionError {
+fn literal_syntax_error(message: &str) -> DataFusionError {
     DataFusionError::SQL(format!("ParserError({message:?})").into_boxed_str(), None)
 }
 
@@ -119,7 +119,7 @@ impl SqlToRel<'_> {
         // Convert anonymous placeholder `?` to unique positional placeholder
         let param = if param == "?" {
             let num = planner_context.next_anonymous_placeholder_number();
-            format!("${}", num)
+            format!("${num}")
         } else {
             param
         };
@@ -280,7 +280,6 @@ impl SqlToRel<'_> {
         Ok(None)
     }
 
-    #[expect(clippy::only_used_in_recursion)]
     fn sql_interval_to_expr_builtin(
         &self,
         negative: bool,
@@ -320,12 +319,12 @@ impl SqlToRel<'_> {
                     return not_impl_err!("Unsupported interval operator: {op:?}");
                 }
             };
-            let left_expr = self.sql_interval_value_to_expr(
+            let left_expr = Self::sql_interval_value_to_expr(
                 negative,
                 left.as_ref(),
                 interval.leading_field.as_ref(),
             )?;
-            let right_expr = self.sql_interval_value_to_expr(
+            let right_expr = Self::sql_interval_value_to_expr(
                 false,
                 right.as_ref(),
                 interval.leading_field.as_ref(),
@@ -337,7 +336,7 @@ impl SqlToRel<'_> {
             )));
         }
 
-        self.sql_interval_value_to_expr(
+        Self::sql_interval_value_to_expr(
             negative,
             interval_value,
             interval.leading_field.as_ref(),
@@ -345,7 +344,6 @@ impl SqlToRel<'_> {
     }
 
     fn sql_interval_value_to_expr(
-        &self,
         negative: bool,
         interval_value: &SQLExpr,
         leading_field: Option<&DateTimeField>,
@@ -357,9 +355,9 @@ impl SqlToRel<'_> {
                 _ => return not_impl_err!("Unsupported interval operator: {op:?}"),
             };
             let left_expr =
-                self.sql_interval_value_to_expr(negative, left.as_ref(), leading_field)?;
+                Self::sql_interval_value_to_expr(negative, left.as_ref(), leading_field)?;
             let right_expr =
-                self.sql_interval_value_to_expr(false, right.as_ref(), leading_field)?;
+                Self::sql_interval_value_to_expr(false, right.as_ref(), leading_field)?;
             return Ok(Expr::BinaryExpr(BinaryExpr::new(
                 Box::new(left_expr),
                 df_op,
@@ -519,7 +517,7 @@ fn parse_compound_interval(
             }
             let years = parts[0].trim();
             let months = parts[1].trim();
-            Ok(format!("{} years {} months", years, months))
+            Ok(format!("{years} years {months} months"))
         }
         (Day, Hour) => {
             // Format: "D H" e.g., "1 12" -> "1 days 12 hours"
@@ -532,7 +530,7 @@ fn parse_compound_interval(
             }
             let days = parts[0].trim();
             let hours = parts[1].trim();
-            Ok(format!("{} days {} hours", days, hours))
+            Ok(format!("{days} days {hours} hours"))
         }
         (Day, Minute) => {
             // Format: "D H:M" e.g., "1 12:30" -> "1 days 12 hours 30 minutes"
@@ -553,7 +551,7 @@ fn parse_compound_interval(
             }
             let hours = time_parts[0].trim();
             let minutes = time_parts[1].trim();
-            Ok(format!("{} days {} hours {} minutes", days, hours, minutes))
+            Ok(format!("{days} days {hours} hours {minutes} minutes"))
         }
         (Day, Second) => {
             // Format: "D H:M:S" or "D H:M:S.f" e.g., "1 12:30:45" -> "1 days 12 hours 30 minutes 45 seconds"
@@ -576,8 +574,7 @@ fn parse_compound_interval(
             let minutes = time_parts[1].trim();
             let seconds = time_parts[2].trim();
             Ok(format!(
-                "{} days {} hours {} minutes {} seconds",
-                days, hours, minutes, seconds
+                "{days} days {hours} hours {minutes} minutes {seconds} seconds"
             ))
         }
         (Hour, Minute) => {
@@ -591,7 +588,7 @@ fn parse_compound_interval(
             }
             let hours = parts[0].trim();
             let minutes = parts[1].trim();
-            Ok(format!("{} hours {} minutes", hours, minutes))
+            Ok(format!("{hours} hours {minutes} minutes"))
         }
         (Hour, Second) => {
             // Format: "H:M:S" or "H:M:S.f" e.g., "2:30:45" -> "2 hours 30 minutes 45 seconds"
@@ -605,10 +602,7 @@ fn parse_compound_interval(
             let hours = parts[0].trim();
             let minutes = parts[1].trim();
             let seconds = parts[2].trim();
-            Ok(format!(
-                "{} hours {} minutes {} seconds",
-                hours, minutes, seconds
-            ))
+            Ok(format!("{hours} hours {minutes} minutes {seconds} seconds"))
         }
         (Minute, Second) => {
             // Format: "M:S" or "M:S.f" e.g., "30:45" -> "30 minutes 45 seconds"
@@ -621,7 +615,7 @@ fn parse_compound_interval(
             }
             let minutes = parts[0].trim();
             let seconds = parts[1].trim();
-            Ok(format!("{} minutes {} seconds", minutes, seconds))
+            Ok(format!("{minutes} minutes {seconds} seconds"))
         }
         _ => {
             not_impl_err!("Unsupported compound interval: {:?} TO {:?}", leading, last)
@@ -702,7 +696,7 @@ pub fn sql_number_literal(
     let unsigned_number: &str = &unsigned_number;
     if let Some((radix, digits)) = radix_integer_literal(unsigned_number) {
         let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
-            literal_syntax_error(format!("Cannot parse {unsigned_number} as an integer"))
+            literal_syntax_error(&format!("Cannot parse {unsigned_number} as an integer"))
         })?;
         let value = if negative { -magnitude } else { magnitude };
         return Ok(if let Ok(n) = i32::try_from(value) {
@@ -744,14 +738,16 @@ pub fn sql_number_literal(
             .parse::<f64>()
             .map(|value| ScalarValue::Float64(Some(value)))
             .map_err(|_| {
-                literal_syntax_error(format!("Cannot parse {signed_number} as f64"))
+                literal_syntax_error(&format!("Cannot parse {signed_number} as f64"))
             })
     }
 }
 
 fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<ScalarValue> {
     let mut dec = BigDecimal::from_str(unsigned_number).map_err(|e| {
-        literal_syntax_error(format!("Cannot parse {unsigned_number} as BigDecimal: {e}"))
+        literal_syntax_error(&format!(
+            "Cannot parse {unsigned_number} as BigDecimal: {e}"
+        ))
     })?;
     if negative {
         dec = dec.neg();
@@ -824,6 +820,19 @@ fn parse_decimal(unsigned_number: &str, negative: bool) -> Result<ScalarValue> {
             ),
         }
     }
+}
+
+/// Split a PostgreSQL non-decimal integer literal (`0x1F`, `0o17`, `0b101`)
+/// into its radix and digit text.
+fn radix_integer_literal(text: &str) -> Option<(u32, &str)> {
+    let (prefix, digits) = text.split_at_checked(2)?;
+    let radix = match prefix {
+        "0x" | "0X" => 16,
+        "0o" | "0O" => 8,
+        "0b" | "0B" => 2,
+        _ => return None,
+    };
+    (!digits.is_empty()).then_some((radix, digits))
 }
 
 #[cfg(test)]
@@ -967,17 +976,4 @@ mod tests {
         );
         assert_eq!(normalize_iso8601_interval_literal("2 days"), None);
     }
-}
-
-/// Split a PostgreSQL non-decimal integer literal (`0x1F`, `0o17`, `0b101`)
-/// into its radix and digit text.
-fn radix_integer_literal(text: &str) -> Option<(u32, &str)> {
-    let (prefix, digits) = text.split_at_checked(2)?;
-    let radix = match prefix {
-        "0x" | "0X" => 16,
-        "0o" | "0O" => 8,
-        "0b" | "0B" => 2,
-        _ => return None,
-    };
-    (!digits.is_empty()).then_some((radix, digits))
 }

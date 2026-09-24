@@ -1047,13 +1047,10 @@ fn normalize_scientific_notation_scalar_for_decimal(
 
 fn normalize_scientific_decimal_string(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    let exponent_idx = trimmed.find(|c: char| c == 'e' || c == 'E')?;
+    let exponent_idx = trimmed.find(['e', 'E'])?;
 
     // Reject multiple exponent markers and let Arrow report the cast error.
-    if trimmed[exponent_idx + 1..]
-        .find(|c: char| c == 'e' || c == 'E')
-        .is_some()
-    {
+    if trimmed[exponent_idx + 1..].find(['e', 'E']).is_some() {
         return None;
     }
 

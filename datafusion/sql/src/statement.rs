@@ -91,6 +91,10 @@ use sqlparser::ast::{
 /// value (a quoted part as written, an unquoted part as the dialect folded it)
 /// joined with `.`. The name's `Display` re-adds quotes and never names a
 /// catalog object.
+/// Per target column, the INSERT source columns that write it, each with the
+/// subscript or field path below the column it assigns.
+type ColumnValueSources<'a> = Vec<Vec<(usize, &'a [AccessExpr])>>;
+
 fn object_name_value(name: &ObjectName) -> Result<String> {
     name.0
         .iter()
@@ -762,7 +766,7 @@ fn rewrite_update_returning_exprs(
                 {
                     alias.clone()
                 } else {
-                    let alias = format!("__returning_src_{}", next_passthrough_idx);
+                    let alias = format!("__returning_src_{next_passthrough_idx}");
                     next_passthrough_idx += 1;
                     passthrough_aliases.insert(resolved_column.clone(), alias.clone());
                     passthrough_exprs
@@ -1073,9 +1077,9 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         )],
                         foreign_table: fk_constraint.foreign_table.clone(),
                         referred_columns: fk_constraint.referred_columns.clone(),
-                        on_delete: fk_constraint.on_delete.clone(),
-                        on_update: fk_constraint.on_update.clone(),
-                        match_kind: fk_constraint.match_kind.clone(),
+                        on_delete: fk_constraint.on_delete,
+                        on_update: fk_constraint.on_update,
+                        match_kind: fk_constraint.match_kind,
                         characteristics: fk_constraint.characteristics,
                         on_delete_columns: fk_constraint.on_delete_columns.clone(),
                     }));
@@ -1424,9 +1428,7 @@ impl SqlToRel<'_> {
                 statement,
                 ..
             } => match SQLBox::into_owned(statement) {
-                Statement::Query(query) => {
-                    self.describe_query_to_plan(SQLBox::into_owned(query))
-                }
+                Statement::Query(query) => self.describe_query_to_plan_ref(&query),
                 _ => {
                     not_impl_err!("Describing statements other than SELECT not supported")
                 }
@@ -1444,9 +1446,7 @@ impl SqlToRel<'_> {
                     DFStatement::Statement(Box::new(SQLBox::into_owned(statement)));
                 self.explain_to_plan(verbose, analyze, format, statement)
             }
-            Statement::Query(query) => {
-                self.query_to_plan(SQLBox::into_owned(query), planner_context)
-            }
+            Statement::Query(query) => self.query_to_plan_ref(&query, planner_context),
             Statement::ShowVariable { variable, .. } => {
                 self.show_variable_to_plan(&variable)
             }
@@ -1667,8 +1667,7 @@ impl SqlToRel<'_> {
 
                 match query {
                     Some(query) => {
-                        let plan = self
-                            .query_to_plan(SQLBox::into_owned(query), planner_context)?;
+                        let plan = self.query_to_plan_ref(&query, planner_context)?;
                         // WITH NO DATA still plans the query so the created
                         // relation receives its names and types, but exposes a
                         // zero-row input to the CTAS executor.
@@ -1830,8 +1829,8 @@ impl SqlToRel<'_> {
                 let query_definition = view.query.to_string();
                 let query = SQLBox::into_owned(view.query);
                 let mut plan =
-                    self.query_to_plan(query.clone(), &mut PlannerContext::new())?;
-                plan = self.apply_expr_alias(plan, columns.clone())?;
+                    self.query_to_plan_ref(&query, &mut PlannerContext::new())?;
+                plan = self.apply_expr_alias(plan, &columns)?;
                 let updatability = crate::view_analysis::analyze_updatable_view(
                     self,
                     &query,
@@ -2039,33 +2038,33 @@ impl SqlToRel<'_> {
                 let mut plan = if source.is_none() {
                     self.insert_default_values_to_plan(
                         table_name,
-                        columns,
+                        &columns,
                         overwrite,
                         replace_into,
-                        on_conflict,
+                        on_conflict.as_ref(),
                         table_alias.as_ref(),
                         planner_context,
                     )?
                 } else {
-                    self.insert_to_plan(
-                        table_name,
-                        columns,
-                        column_targets,
-                        Box::new(SQLBox::into_owned(source.unwrap())),
+                    self.insert_to_plan_ref(
+                        &table_name,
+                        &columns,
+                        column_targets.as_deref(),
+                        &source.unwrap(),
                         overwrite,
                         replace_into,
-                        on_conflict,
-                        returning_clause_into_items(returning)?,
+                        on_conflict.as_ref(),
+                        returning_clause_into_items(returning)?.as_deref(),
                         table_alias.as_ref(),
                         overriding.as_ref(),
+                        &[],
+                        None,
                         planner_context,
                     )?
                 };
 
-                if is_overriding_system {
-                    if let LogicalPlan::Dml(ref mut dml) = plan {
-                        dml.overriding_system_value = true;
-                    }
+                if is_overriding_system && let LogicalPlan::Dml(ref mut dml) = plan {
+                    dml.overriding_system_value = true;
                 }
 
                 Ok(plan)
@@ -2088,12 +2087,13 @@ impl SqlToRel<'_> {
                 if update.limit.is_some() {
                     return not_impl_err!("Update-limit clause not supported")?;
                 }
-                self.update_to_plan(
-                    update.table,
+                self.update_to_plan_ref(
+                    &update.table,
                     &update.assignments,
-                    update_from,
-                    update.selection,
-                    returning_clause_into_items(update.returning)?,
+                    update_from.as_ref(),
+                    update.selection.as_ref(),
+                    returning_clause_into_items(update.returning)?.as_deref(),
+                    None,
                     planner_context,
                 )
             }
@@ -2121,11 +2121,12 @@ impl SqlToRel<'_> {
                 }
 
                 let table = self.get_delete_target(from)?;
-                self.delete_to_plan(
-                    table,
-                    using,
-                    selection,
-                    returning_clause_into_items(returning)?,
+                self.delete_to_plan_ref(
+                    &table,
+                    using.as_deref(),
+                    selection.as_ref(),
+                    returning_clause_into_items(returning)?.as_deref(),
+                    None,
                     planner_context,
                 )
             }
@@ -2150,7 +2151,7 @@ impl SqlToRel<'_> {
                     source_joins,
                     Box::new(SQLBox::into_owned(on)),
                     clauses,
-                    output,
+                    output.as_ref(),
                     planner_context,
                 )
             }
@@ -2270,10 +2271,6 @@ impl SqlToRel<'_> {
         }))
     }
 
-    fn describe_query_to_plan(&self, query: Query) -> Result<LogicalPlan> {
-        self.describe_query_to_plan_ref(&query)
-    }
-
     fn describe_query_to_plan_ref(&self, query: &Query) -> Result<LogicalPlan> {
         let plan = self.query_to_plan_ref(query, &mut PlannerContext::new())?;
 
@@ -2302,7 +2299,7 @@ impl SqlToRel<'_> {
                 (plan, input_schema, Some(table_ref))
             }
             CopyToSource::Query(query) => {
-                let plan = self.query_to_plan(*query, &mut PlannerContext::new())?;
+                let plan = self.query_to_plan_ref(&query, &mut PlannerContext::new())?;
                 let input_schema = Arc::clone(plan.schema());
                 (plan, input_schema, None)
             }
@@ -2667,8 +2664,8 @@ impl SqlToRel<'_> {
                         columns,
                         referenced_table: object_name_value(&fk.foreign_table)?,
                         referenced_columns,
-                        on_delete: convert_action(fk.on_delete.clone()),
-                        on_update: convert_action(fk.on_update.clone()),
+                        on_delete: convert_action(fk.on_delete),
+                        on_update: convert_action(fk.on_update),
                         match_type,
                     })
                 }
@@ -2954,25 +2951,6 @@ impl SqlToRel<'_> {
         self.statement_to_plan(rewrite.pop_front().unwrap())
     }
 
-    /// Converts a SQL expression to a string value for SET statement processing
-    fn delete_to_plan(
-        &self,
-        table: TableWithJoins,
-        using: Option<Vec<TableWithJoins>>,
-        predicate_expr: Option<SQLExpr>,
-        returning: Option<Vec<SelectItem>>,
-        outer_planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
-        self.delete_to_plan_ref(
-            &table,
-            using.as_deref(),
-            predicate_expr.as_ref(),
-            returning.as_deref(),
-            None,
-            outer_planner_context,
-        )
-    }
-
     fn delete_to_plan_ref(
         &self,
         table: &TableWithJoins,
@@ -3056,7 +3034,7 @@ impl SqlToRel<'_> {
                     .transpose()?;
                 let binding_schema = binding_scope
                     .as_ref()
-                    .map_or(scan.schema(), LogicalPlan::schema);
+                    .map_or_else(|| scan.schema(), LogicalPlan::schema);
                 let mut filter_expr = self.sql_to_expr_ref(
                     predicate_expr,
                     binding_schema,
@@ -3221,7 +3199,6 @@ impl SqlToRel<'_> {
         Ok(plan)
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Restate one MERGE `INSERT` value row in the target row's own column
     /// order, filling every column the statement does not name from its
     /// declared default (NULL when it has none) — the resolution an omitted
@@ -3231,7 +3208,7 @@ impl SqlToRel<'_> {
         &self,
         target_schema: &Schema,
         named_columns: &[String],
-        values: Vec<Expr>,
+        values: &[Expr],
         table_source: &dyn TableSource,
         value_schema: &DFSchema,
     ) -> Result<Vec<Expr>> {
@@ -3296,7 +3273,6 @@ impl SqlToRel<'_> {
         Ok(row)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_merge_object_name(&self, name: ObjectName) -> Result<Vec<String>> {
         name.0
             .into_iter()
@@ -3333,6 +3309,7 @@ impl SqlToRel<'_> {
         })
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn merge_to_plan(
         &self,
         _into: bool,
@@ -3341,7 +3318,7 @@ impl SqlToRel<'_> {
         source_joins: Vec<ast::Join>,
         on: Box<ast::Expr>,
         clauses: Vec<ast::MergeClause>,
-        output: Option<ast::OutputClause>,
+        output: Option<&ast::OutputClause>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         if output.is_some() {
@@ -3361,7 +3338,7 @@ impl SqlToRel<'_> {
             match &clause.action {
                 ast::MergeAction::Insert(_) => row_actions.declare(MergeRowAction::Insert),
                 ast::MergeAction::Update { .. } => row_actions.declare(MergeRowAction::Update),
-                ast::MergeAction::Delete { .. } => row_actions.declare(MergeRowAction::Delete),
+                ast::MergeAction::Delete => row_actions.declare(MergeRowAction::Delete),
                 ast::MergeAction::DoNothing => {}
             }
         }
@@ -3457,8 +3434,8 @@ impl SqlToRel<'_> {
         // `USING a JOIN b ON ...` makes the whole join the source relation, so
         // dropping the joins would let rows the join excludes reach the WHEN
         // clauses and be written.
-        let source_plan = self.plan_table_with_joins(
-            TableWithJoins {
+        let source_plan = self.plan_table_with_joins_ref(
+            &TableWithJoins {
                 relation: source,
                 joins: source_joins,
             },
@@ -3553,7 +3530,7 @@ impl SqlToRel<'_> {
                                 self.merge_insert_row_in_table_order(
                                     &target_schema,
                                     &named_columns,
-                                    Vec::new(),
+                                    &[],
                                     table_source.as_ref(),
                                     clause_schema,
                                 )?,
@@ -3569,7 +3546,7 @@ impl SqlToRel<'_> {
                                 rows.push(self.merge_insert_row_in_table_order(
                                     &target_schema,
                                     &named_columns,
-                                    expr_row,
+                                    &expr_row,
                                     table_source.as_ref(),
                                     clause_schema,
                                 )?);
@@ -3617,7 +3594,7 @@ impl SqlToRel<'_> {
                             .transpose()?,
                     })
                 }
-                ast::MergeAction::Delete { .. } => MergeAction::Delete,
+                ast::MergeAction::Delete => MergeAction::Delete,
                 ast::MergeAction::DoNothing => MergeAction::DoNothing,
             };
 
@@ -3785,26 +3762,7 @@ impl SqlToRel<'_> {
         )
     }
 
-    fn update_to_plan(
-        &self,
-        table: TableWithJoins,
-        assignments: &[Assignment],
-        from: Option<TableWithJoins>,
-        predicate_expr: Option<SQLExpr>,
-        returning: Option<Vec<SelectItem>>,
-        outer_planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
-        self.update_to_plan_ref(
-            &table,
-            assignments,
-            from.as_ref(),
-            predicate_expr.as_ref(),
-            returning.as_deref(),
-            None,
-            outer_planner_context,
-        )
-    }
-
+    #[expect(clippy::too_many_arguments)]
     fn update_to_plan_ref(
         &self,
         table: &TableWithJoins,
@@ -3995,7 +3953,7 @@ impl SqlToRel<'_> {
                     // Extract column names
                     let columns: Vec<String> = col_names
                         .iter()
-                        .map(|obj| extract_column_name(obj))
+                        .map(&extract_column_name)
                         .collect::<Result<Vec<_>>>()?;
 
                     // Validate columns exist
@@ -4112,7 +4070,7 @@ impl SqlToRel<'_> {
                     .transpose()?;
                 let binding_schema = binding_scope
                     .as_ref()
-                    .map_or(scan.schema(), LogicalPlan::schema);
+                    .map_or_else(|| scan.schema(), LogicalPlan::schema);
                 let mut filter_expr = self.sql_to_expr_ref(
                     predicate_expr,
                     binding_schema,
@@ -4146,7 +4104,7 @@ impl SqlToRel<'_> {
             .transpose()?;
         let assignment_schema = assignment_scope
             .as_ref()
-            .map_or(source.schema(), LogicalPlan::schema);
+            .map_or_else(|| source.schema(), LogicalPlan::schema);
 
         // Build updated values for each column, using the previous value if not modified
         let mut projected_exprs = table_schema
@@ -4332,7 +4290,7 @@ impl SqlToRel<'_> {
                 .transpose()?;
             let returning_target = returning_target_schema
                 .as_ref()
-                .unwrap_or(table_schema.as_ref());
+                .unwrap_or_else(|| table_schema.as_ref());
             let mut logical_exprs = expand_returning_select_exprs(
                 prepared,
                 returning_target,
@@ -4419,7 +4377,6 @@ impl SqlToRel<'_> {
         Ok(plan)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_statement_to_plan_ref(
         &self,
         insert: &Insert,
@@ -4486,10 +4443,10 @@ impl SqlToRel<'_> {
         } else {
             self.insert_default_values_to_plan(
                 table_name.clone(),
-                insert.columns.clone(),
+                &insert.columns,
                 insert.overwrite,
                 insert.replace_into,
-                on_conflict.cloned(),
+                on_conflict,
                 insert.table_alias.as_ref(),
                 planner_context,
             )?
@@ -4501,39 +4458,7 @@ impl SqlToRel<'_> {
         Ok(plan)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_to_plan(
-        &self,
-        table_name: ObjectName,
-        columns: Vec<Ident>,
-        column_targets: Option<Vec<ColumnTarget>>,
-        source: Box<Query>,
-        overwrite: bool,
-        replace_into: bool,
-        on_conflict: Option<SqlOnConflict>,
-        returning: Option<Vec<SelectItem>>,
-        table_alias: Option<&Ident>,
-        overriding: Option<&OverridingKind>,
-        outer_planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
-        self.insert_to_plan_ref(
-            &table_name,
-            &columns,
-            column_targets.as_deref(),
-            source.as_ref(),
-            overwrite,
-            replace_into,
-            on_conflict.as_ref(),
-            returning.as_deref(),
-            table_alias,
-            overriding,
-            &[],
-            None,
-            outer_planner_context,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn insert_to_plan_ref(
         &self,
         table_name: &ObjectName,
@@ -4709,75 +4634,75 @@ impl SqlToRel<'_> {
         // the subscript/field path below the column it writes (`a[2]`,
         // `fn.first`); a whole-column target has an empty path.
         let empty_path: &[AccessExpr] = &[];
-        let (fields, value_sources): (Fields, Vec<Vec<(usize, &[AccessExpr])>>) =
-            if columns.is_empty() {
-                // Empty means we're inserting into all columns of the table
-                (
-                    table_schema.fields().clone(),
-                    (0..table_schema.fields().len())
-                        .map(|i| vec![(i, empty_path)])
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                let mut value_sources: Vec<Vec<(usize, &[AccessExpr])>> =
-                    vec![Vec::new(); table_schema.fields().len()];
-                let fields = columns
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(i, c)| {
-                        let c = self.ident_normalizer.normalize(c);
-                        let column_index =
-                            table_schema.index_of_column_by_name(None, &c).ok_or_else(
-                                || unqualified_field_not_found(&c, &table_schema),
-                            )?;
-                        let path = column_targets
-                            .and_then(|targets| targets.get(i))
-                            .map(|target| target.indirection.as_slice())
-                            .unwrap_or(empty_path);
-                        let sources = &mut value_sources[column_index];
-                        // A column may be written through several paths, but
-                        // only once as a whole.
-                        if path.is_empty() && !sources.is_empty()
-                            || sources.iter().any(|(_, p)| p.is_empty())
-                        {
-                            return schema_err!(SchemaError::DuplicateUnqualifiedField {
-                                name: c,
-                            });
+        let (fields, value_sources): (Fields, ColumnValueSources<'_>) = if columns
+            .is_empty()
+        {
+            // Empty means we're inserting into all columns of the table
+            (
+                table_schema.fields().clone(),
+                (0..table_schema.fields().len())
+                    .map(|i| vec![(i, empty_path)])
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let mut value_sources: Vec<Vec<(usize, &[AccessExpr])>> =
+                vec![Vec::new(); table_schema.fields().len()];
+            let fields = columns
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, c)| {
+                    let c = self.ident_normalizer.normalize(c);
+                    let column_index = table_schema
+                        .index_of_column_by_name(None, &c)
+                        .ok_or_else(|| unqualified_field_not_found(&c, &table_schema))?;
+                    let path = column_targets
+                        .and_then(|targets| targets.get(i))
+                        .map(|target| target.indirection.as_slice())
+                        .unwrap_or(empty_path);
+                    let sources = &mut value_sources[column_index];
+                    // A column may be written through several paths, but
+                    // only once as a whole.
+                    if path.is_empty() && !sources.is_empty()
+                        || sources.iter().any(|(_, p)| p.is_empty())
+                    {
+                        return schema_err!(SchemaError::DuplicateUnqualifiedField {
+                            name: c,
+                        });
+                    }
+                    sources.push((i, path));
+                    let field = table_schema.field(column_index);
+                    // A value written through an element subscript has the
+                    // element's type, and one written through a slice the
+                    // column's own. A value written into a field of a
+                    // composite has the field's type, which the dialect's
+                    // type registry holds rather than this schema, so the
+                    // slot is left untyped for the value to type.
+                    Ok(match path {
+                        [] | [AccessExpr::Subscript(Subscript::Slice { .. })] => {
+                            Arc::clone(field)
                         }
-                        sources.push((i, path));
-                        let field = table_schema.field(column_index);
-                        // A value written through an element subscript has the
-                        // element's type, and one written through a slice the
-                        // column's own. A value written into a field of a
-                        // composite has the field's type, which the dialect's
-                        // type registry holds rather than this schema, so the
-                        // slot is left untyped for the value to type.
-                        Ok(match path {
-                            [] | [AccessExpr::Subscript(Subscript::Slice { .. })] => {
-                                Arc::clone(field)
+                        [AccessExpr::Subscript(Subscript::Index { .. })] => {
+                            match field.data_type() {
+                                DataType::List(item)
+                                | DataType::LargeList(item)
+                                | DataType::FixedSizeList(item, _) => Arc::new(
+                                    Field::new(
+                                        field.name(),
+                                        item.data_type().clone(),
+                                        true,
+                                    )
+                                    .with_metadata(field.metadata().clone()),
+                                ),
+                                _ => Arc::clone(field),
                             }
-                            [AccessExpr::Subscript(Subscript::Index { .. })] => {
-                                match field.data_type() {
-                                    DataType::List(item)
-                                    | DataType::LargeList(item)
-                                    | DataType::FixedSizeList(item, _) => Arc::new(
-                                        Field::new(
-                                            field.name(),
-                                            item.data_type().clone(),
-                                            true,
-                                        )
-                                        .with_metadata(field.metadata().clone()),
-                                    ),
-                                    _ => Arc::clone(field),
-                                }
-                            }
-                            _ => Arc::new(Field::new(field.name(), DataType::Null, true)),
-                        })
+                        }
+                        _ => Arc::new(Field::new(field.name(), DataType::Null, true)),
                     })
-                    .collect::<Result<Vec<_>>>()?;
-                (Fields::from(fields), value_sources)
-            };
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (Fields::from(fields), value_sources)
+        };
 
         // Adapt source literals to their target columns — canonicalizing a
         // flexible timestamp text literal, or wrapping a value in a dialect
@@ -4919,7 +4844,7 @@ impl SqlToRel<'_> {
             .map(|(i, sources)| {
                 let target_field = table_schema.field(i);
                 let expr = match sources.as_slice() {
-                    [(v, path)] if path.is_empty() => {
+                    [(v, [])] => {
                         let value = Expr::Column(Column::from(
                             source.schema().qualified_field(*v),
                         ));
@@ -5149,7 +5074,7 @@ impl SqlToRel<'_> {
     /// Plan an `ON CONFLICT` clause against the INSERT `source`. A DO UPDATE
     /// sub-select is computed on the source, which comes back widened by one
     /// column per sub-select.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn plan_on_conflict(
         &self,
         conflict: &SqlOnConflict,
@@ -5558,15 +5483,14 @@ impl SqlToRel<'_> {
         Ok((OnConflict::new(conflict_target, action), source))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn insert_default_values_to_plan(
         &self,
         table_name: ObjectName,
-        columns: Vec<Ident>,
+        columns: &[Ident],
         overwrite: bool,
         replace_into: bool,
-        on_conflict: Option<SqlOnConflict>,
+        on_conflict: Option<&SqlOnConflict>,
         table_alias: Option<&Ident>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
@@ -5623,16 +5547,18 @@ impl SqlToRel<'_> {
         parts.push(Ident::new(table_name.table()));
         let object_name = ObjectName::from(parts);
 
-        self.insert_to_plan(
-            object_name,
+        self.insert_to_plan_ref(
+            &object_name,
             columns,
             None,
-            source,
+            &source,
             overwrite,
             replace_into,
             on_conflict,
             None,
             table_alias,
+            None,
+            &[],
             None,
             planner_context,
         )

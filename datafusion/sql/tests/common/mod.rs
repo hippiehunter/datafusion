@@ -56,6 +56,9 @@ impl Display for MockCsvType {
     }
 }
 
+/// Host hook that coerces the rows of a VALUES list to their common types.
+pub(crate) type ValuesCoercion = fn(Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>>;
+
 #[derive(Default)]
 pub(crate) struct MockSessionState {
     scalar_functions: HashMap<String, Arc<ScalarUDF>>,
@@ -64,7 +67,7 @@ pub(crate) struct MockSessionState {
     type_planner: Option<Arc<dyn TypePlanner>>,
     window_functions: HashMap<String, Arc<WindowUDF>>,
     pub config_options: ConfigOptions,
-    pub values_coercion: Option<fn(Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>>>,
+    pub values_coercion: Option<ValuesCoercion>,
     pub literal_planner: Option<fn(Expr, sqlparser::tokenizer::Span) -> Result<Expr>>,
     pub row_stream_function: Option<Arc<ScalarUDF>>,
 }
@@ -344,23 +347,25 @@ impl ContextProvider for MockContextProvider {
                 unreachable!("test LIKE source has no default for {data_type}")
             }
         };
-        let column_defaults = options
-            .defaults
-            .then(|| vec![(names[1].0.to_string(), Expr::Literal(default_value, None))])
-            .unwrap_or_default();
+        let column_defaults = if options.defaults {
+            vec![(names[1].0.to_string(), Expr::Literal(default_value, None))]
+        } else {
+            Vec::new()
+        };
 
         Ok(CreateTableLikeSource {
             schema: Arc::new(Schema::new(fields)),
             constraints: Constraints::new_unverified(constraints),
             column_defaults,
-            check_expressions: options
-                .constraints
-                .then(|| {
+            check_expressions: if options.constraints {
+                {
                     vec![datafusion_expr::BoundSqlExpression::new(
                         datafusion_expr::col(names[0].0).is_not_null(),
                     )]
-                })
-                .unwrap_or_default(),
+                }
+            } else {
+                Default::default()
+            },
             generated_expressions: Vec::new(),
         })
     }

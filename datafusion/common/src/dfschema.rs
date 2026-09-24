@@ -389,9 +389,7 @@ impl DFSchema {
                     // field to lookup is unqualified, no need to compare qualifier
                     (None, Some(_)) | (None, None) => f.name() == name,
                 });
-        let Some((first, (first_qualifier, _))) = matches.next() else {
-            return None;
-        };
+        let (first, (first_qualifier, _)) = matches.next()?;
         if qualifier.is_some() || first_qualifier.is_none() {
             return Some(first);
         }

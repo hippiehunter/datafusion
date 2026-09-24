@@ -202,7 +202,7 @@ impl SqlToRel<'_> {
         } else {
             let aliased = self
                 .inject_column_aliases_into_set_expr(left_expr.clone(), &column_aliases)?;
-            self.set_expr_to_plan(aliased, planner_context)?
+            self.set_expr_to_plan_ref(&aliased, planner_context)?
         };
 
         // Since the recursive CTEs include a component that references a
@@ -233,7 +233,7 @@ impl SqlToRel<'_> {
         let static_columns: SchemaRef = if !column_aliases.is_empty() {
             // Create a new schema with aliased column names
             self.apply_column_aliases_to_schema(
-                Arc::clone(static_plan.schema().inner()),
+                static_plan.schema().inner(),
                 &column_aliases,
             )?
         } else {
@@ -309,7 +309,7 @@ impl SqlToRel<'_> {
                 SetOperator::Union,
                 static_plan,
                 recursive_plan,
-                set_quantifier.clone(),
+                *set_quantifier,
             );
         }
         let recursive_plan = match &search_cycle {
@@ -338,7 +338,7 @@ impl SqlToRel<'_> {
         };
 
         // ---------- Step 4: Create the final plan ------------------
-        let distinct = !Self::is_union_all(set_quantifier.clone())?;
+        let distinct = !Self::is_union_all(*set_quantifier)?;
         LogicalPlanBuilder::from(static_plan)
             .to_recursive_query(name, recursive_plan, distinct)?
             .build()
@@ -700,7 +700,7 @@ impl SqlToRel<'_> {
     /// Apply column aliases to a schema, returning a new schema with the aliased names
     fn apply_column_aliases_to_schema(
         &self,
-        schema: SchemaRef,
+        schema: &Schema,
         column_aliases: &[Ident],
     ) -> Result<SchemaRef> {
         let fields = schema.fields();

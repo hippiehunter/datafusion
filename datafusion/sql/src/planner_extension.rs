@@ -272,7 +272,6 @@ pub trait ContextProvider {
     }
 
     /// Return [`RelationPlanner`] extensions for planning table factors
-
     fn get_relation_planners(&self) -> &[Arc<dyn RelationPlanner>] {
         &[]
     }
@@ -392,7 +391,6 @@ pub trait ContextProvider {
     }
 
     /// Return [`TypePlanner`] extensions for planning data types
-
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
         None
     }
@@ -1166,13 +1164,12 @@ impl PlannedRelation {
 #[derive(Debug)]
 pub enum RelationPlanning {
     /// The relation was successfully planned by an extension planner
-    Planned(PlannedRelation),
+    Planned(Box<PlannedRelation>),
     /// No extension planner handled the relation, return it for default processing
-    Original(TableFactor),
+    Original(Box<TableFactor>),
 }
 
 /// Customize planning SQL table factors to [`LogicalPlan`]s.
-
 pub trait RelationPlanner: Debug + Send + Sync {
     /// Plan a table factor into a [`LogicalPlan`].
     ///
@@ -1193,7 +1190,6 @@ pub trait RelationPlanner: Debug + Send + Sync {
 /// such as converting SQL expressions to logical expressions and normalizing
 /// identifiers. It uses composition to provide access to session context via
 /// [`ContextProvider`].
-
 pub trait RelationPlannerContext {
     /// Provides access to the underlying context provider for reading session
     /// configuration, accessing tables, functions, and other metadata.
@@ -1223,7 +1219,6 @@ pub trait RelationPlannerContext {
 }
 
 /// Customize planning SQL types to DataFusion (Arrow) types.
-
 pub trait TypePlanner: Debug + Send + Sync {
     /// Plan SQL [`sqlparser::ast::DataType`] to DataFusion [`DataType`]
     ///
