@@ -218,12 +218,6 @@ fn roundtrip_statement() -> Result<()> {
             // Catalog utility statements deliberately stop before LogicalPlan;
             // their host-owned commands are not part of relational plan-to-SQL.
             "MERGE INTO j1 USING j2 ON j1.j1_id = j2.j2_id WHEN MATCHED THEN UPDATE SET j1_string = j2.j2_string WHEN NOT MATCHED THEN INSERT (j1_id, j1_string) VALUES (j2.j2_id, j2.j2_string)",
-            "GRANT SELECT ON TABLE j1 TO PUBLIC",
-            "REVOKE SELECT ON TABLE j1 FROM PUBLIC",
-            "SAVEPOINT sp1",
-            "ROLLBACK TO SAVEPOINT sp1",
-            "RELEASE SAVEPOINT sp1",
-            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
             // Removed: Array/struct/map literals require datafusion_functions_nested which was pruned
             // "SELECT ARRAY[1, 2, 3]",
             // "SELECT ARRAY[1, 2, 3][1]",
@@ -293,56 +287,6 @@ fn plan_create_temporary_table() -> Result<()> {
                 "Expected CreateMemoryTable for temp table, got {other:?}"
             )));
         }
-    }
-
-    Ok(())
-}
-
-#[test]
-fn roundtrip_grant_revoke_role() -> Result<()> {
-    let tests: Vec<&str> = vec![
-        // Basic role grant
-        "GRANT reporting_role TO alice",
-        // Role grant with admin option
-        "GRANT reporting_role TO alice WITH ADMIN OPTION",
-        // Multiple roles
-        "GRANT role1, role2 TO alice",
-        // Multiple grantees
-        "GRANT reporting_role TO alice, bob",
-        // Basic revoke
-        "REVOKE reporting_role FROM alice",
-        // Revoke with CASCADE
-        "REVOKE reporting_role FROM alice CASCADE",
-        // Revoke with RESTRICT
-        "REVOKE reporting_role FROM alice RESTRICT",
-        // Revoke admin option
-        "REVOKE ADMIN OPTION FOR reporting_role FROM alice",
-    ];
-
-    // For each test sql string, we transform as follows:
-    // sql -> ast::Statement (s1) -> LogicalPlan (p1) -> ast::Statement (s2) -> LogicalPlan (p2)
-    // We test not that s1==s2, but rather p1==p2. This ensures that unparser preserves the logical
-    // query information of the original sql string and disregards other differences in syntax or
-    // quoting.
-    for query in tests {
-        let dialect = PostgreSqlDialect {};
-        let statement = Parser::new(&dialect)
-            .try_with_sql(query)
-            .map_err(parser_test_error)?
-            .parse_statement()
-            .map_err(parser_test_error)?;
-        let state = MockSessionState::default();
-        let context = MockContextProvider { state };
-        let sql_to_rel = SqlToRel::new(&context);
-        let plan = sql_to_rel.sql_statement_to_plan(statement).unwrap();
-
-        let roundtrip_statement = plan_to_sql(&plan)?;
-
-        let plan_roundtrip = sql_to_rel
-            .sql_statement_to_plan(roundtrip_statement.clone())
-            .unwrap();
-
-        assert_eq!(plan, plan_roundtrip);
     }
 
     Ok(())
@@ -447,7 +391,7 @@ fn roundtrip_statement_with_dialect_3() -> Result<(), DataFusionError> {
         sql: "select min(ta.j1_id) as j1_min, max(tb.j1_max) from j1 ta, (select distinct max(ta.j1_id) as j1_max from j1 ta order by max(ta.j1_id)) tb order by min(ta.j1_id) limit 10;",
         parser_dialect: MySqlDialect {},
         unparser_dialect: UnparserMySqlDialect {},
-        expected: @"SELECT min(`ta`.`j1_id`) AS `j1_min`, max(`tb`.`j1_max`) FROM `j1` AS `ta` CROSS JOIN (SELECT DISTINCT max(`ta`.`j1_id`) AS `j1_max` FROM `j1` AS `ta`) AS `tb` ORDER BY `j1_min` ASC LIMIT 10",
+        expected: @"SELECT min(`ta`.`j1_id`) AS `j1_min`, max(`tb`.`j1_max`) AS `max` FROM `j1` AS `ta` CROSS JOIN (SELECT DISTINCT max(`ta`.`j1_id`) AS `j1_max` FROM `j1` AS `ta`) AS `tb` ORDER BY `j1_min` ASC LIMIT 10",
     );
     Ok(())
 }

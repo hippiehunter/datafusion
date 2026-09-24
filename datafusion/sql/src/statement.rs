@@ -165,6 +165,8 @@ pub fn is_host_utility_statement(statement: &Statement) -> bool {
             | Statement::Call(_)
             | Statement::CreatePropertyGraph(_)
             | Statement::DropPropertyGraph(_)
+            | Statement::DropFunction(_)
+            | Statement::DropProcedure { .. }
     )
 }
 

@@ -1157,7 +1157,7 @@ fn mixed_array_cte() {
 /// Mixed: Array with LATERAL join
 #[test]
 fn mixed_array_lateral_join() {
-    crate::assert_not_implemented!(
+    assert_feature_supported!(
         "SELECT t.a, u.val FROM t, LATERAL UNNEST(ARRAY[t.a, t.b]) AS u(val)",
         "S091",
         "Array with LATERAL join"

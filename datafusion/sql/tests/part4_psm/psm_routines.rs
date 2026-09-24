@@ -49,8 +49,8 @@
 //! PostgreSQL-style tests with standard variable names are included where applicable.
 
 use crate::{
-    assert_feature_supported, assert_parses, assert_postgres_parses,
-    assert_psm_feature_supported, assert_psm_parses,
+    assert_parses, assert_postgres_parses, assert_psm_parses,
+    assert_psm_utility_boundary, assert_utility_boundary,
 };
 
 // ============================================================================
@@ -145,7 +145,7 @@ fn p001_02_drop_procedure_if_exists() {
 /// P001-03: Basic stored function with RETURNS
 #[test]
 fn p001_03_create_function_basic() {
-    assert_psm_feature_supported!(
+    assert_psm_utility_boundary!(
         "CREATE FUNCTION get_tax_rate() RETURNS DECIMAL(5,2)
          AS BEGIN
            RETURN 0.08;
@@ -159,7 +159,7 @@ fn p001_03_create_function_basic() {
 /// Note: Uses simple RETURN to avoid variable reference issues in expression planner
 #[test]
 fn p001_03_create_function_with_params() {
-    assert_psm_feature_supported!(
+    assert_psm_utility_boundary!(
         "CREATE FUNCTION calculate_tax(amount DECIMAL(10,2)) RETURNS DECIMAL(10,2)
          AS BEGIN
            RETURN 0.08;
@@ -173,7 +173,7 @@ fn p001_03_create_function_with_params() {
 /// Note: MsSqlDialect requires @ prefix for variables; standard syntax tested separately
 #[test]
 fn p001_03_create_function_sql_body() {
-    assert_psm_feature_supported!(
+    assert_psm_utility_boundary!(
         "CREATE FUNCTION get_employee_salary(emp_id INT) RETURNS DECIMAL(10,2)
          AS BEGIN
            DECLARE @result DECIMAL(10,2);
@@ -187,7 +187,7 @@ fn p001_03_create_function_sql_body() {
 /// P001-03: DROP FUNCTION statement
 #[test]
 fn p001_03_drop_function() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP FUNCTION calculate_tax",
         "P001-03",
         "DROP FUNCTION statement"
@@ -197,7 +197,7 @@ fn p001_03_drop_function() {
 /// P001-03: DROP FUNCTION IF EXISTS
 #[test]
 fn p001_03_drop_function_if_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP FUNCTION IF EXISTS calculate_tax",
         "P001-03",
         "DROP FUNCTION IF EXISTS"
@@ -232,7 +232,7 @@ fn p001_03_postgres_function_syntax() {
 /// IF...THEN...END IF statement
 #[test]
 fn control_flow_if_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE check_value(val INT)
          BEGIN
            IF val > 0 THEN
@@ -247,7 +247,7 @@ fn control_flow_if_basic() {
 /// IF...THEN...ELSE...END IF statement
 #[test]
 fn control_flow_if_else() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE check_value(val INT)
          BEGIN
            IF val > 0 THEN
@@ -264,7 +264,7 @@ fn control_flow_if_else() {
 /// IF...THEN...ELSEIF...ELSE...END IF statement
 #[test]
 fn control_flow_if_elseif() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE check_value(val INT)
          BEGIN
            IF val > 0 THEN
@@ -287,7 +287,7 @@ fn control_flow_if_elseif() {
 /// CASE statement (searched form)
 #[test]
 fn control_flow_case_searched() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE classify_age(age INT)
          BEGIN
            CASE
@@ -304,7 +304,7 @@ fn control_flow_case_searched() {
 /// CASE statement (simple form)
 #[test]
 fn control_flow_case_simple() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE classify_status(status INT)
          BEGIN
            CASE status
@@ -326,7 +326,7 @@ fn control_flow_case_simple() {
 /// Basic LOOP...END LOOP
 #[test]
 fn control_flow_loop_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE loop_example()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -345,7 +345,7 @@ fn control_flow_loop_basic() {
 /// LOOP with LEAVE statement
 #[test]
 fn control_flow_loop_leave() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE loop_with_leave()
          BEGIN
            my_loop: LOOP
@@ -360,7 +360,7 @@ fn control_flow_loop_leave() {
 /// LOOP with ITERATE statement
 #[test]
 fn control_flow_loop_iterate() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE loop_with_iterate()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -386,7 +386,7 @@ fn control_flow_loop_iterate() {
 /// WHILE...DO...END WHILE statement
 #[test]
 fn control_flow_while() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE while_example()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -402,7 +402,7 @@ fn control_flow_while() {
 /// WHILE with labeled statement
 #[test]
 fn control_flow_while_labeled() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE while_labeled()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -425,7 +425,7 @@ fn control_flow_while_labeled() {
 /// REPEAT...UNTIL...END REPEAT statement
 #[test]
 fn control_flow_repeat() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE repeat_example()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -442,7 +442,7 @@ fn control_flow_repeat() {
 /// REPEAT with labeled statement
 #[test]
 fn control_flow_repeat_labeled() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE repeat_labeled()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -502,7 +502,7 @@ fn control_flow_for_labeled() {
 /// DECLARE variable with type
 #[test]
 fn variable_declare_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE declare_example()
          BEGIN
            DECLARE counter INT;
@@ -515,7 +515,7 @@ fn variable_declare_basic() {
 /// DECLARE variable with DEFAULT value
 #[test]
 fn variable_declare_with_default() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE declare_with_default()
          BEGIN
            DECLARE counter INT DEFAULT 0;
@@ -547,7 +547,7 @@ fn variable_declare_multiple() {
 /// SET variable statement
 #[test]
 fn variable_set_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE set_example()
          BEGIN
            DECLARE counter INT;
@@ -561,7 +561,7 @@ fn variable_set_basic() {
 /// SET with expression
 #[test]
 fn variable_set_expression() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE set_expression()
          BEGIN
            DECLARE x INT DEFAULT 5;
@@ -594,7 +594,7 @@ fn variable_set_multiple() {
 /// SELECT INTO variable
 #[test]
 fn variable_select_into_single() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE select_into_example()
          BEGIN
            DECLARE emp_name VARCHAR(100);
@@ -608,7 +608,7 @@ fn variable_select_into_single() {
 /// SELECT INTO multiple variables
 #[test]
 fn variable_select_into_multiple() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE select_into_multiple()
          BEGIN
            DECLARE emp_first VARCHAR(50);
@@ -695,7 +695,7 @@ fn exception_handler_not_found() {
 /// SIGNAL statement
 #[test]
 fn exception_signal() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE signal_example()
          BEGIN
            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Custom error';
@@ -723,7 +723,7 @@ fn exception_resignal() {
 /// SIGNAL with multiple attributes
 #[test]
 fn exception_signal_attributes() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE signal_attrs()
          BEGIN
            SIGNAL SQLSTATE '45000'
@@ -742,7 +742,7 @@ fn exception_signal_attributes() {
 /// T321-01: Simple UDF
 #[test]
 fn t321_01_udf_simple() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION add_ten(x INT) RETURNS INT
          RETURN x + 10",
         "T321-01",
@@ -765,7 +765,7 @@ fn t321_01_udf_deterministic() {
 /// T321-01: UDF with CONTAINS SQL
 #[test]
 fn t321_01_udf_contains_sql() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION get_count() RETURNS INT
          CONTAINS SQL
          BEGIN
@@ -781,7 +781,7 @@ fn t321_01_udf_contains_sql() {
 /// T321-01: UDF with NO SQL
 #[test]
 fn t321_01_udf_no_sql() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION pure_calc(x INT, y INT) RETURNS INT
          NO SQL
          RETURN x * y + 42",
@@ -793,7 +793,7 @@ fn t321_01_udf_no_sql() {
 /// T321-01: UDF with READS SQL DATA
 #[test]
 fn t321_01_udf_reads_sql() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION get_salary(emp_id INT) RETURNS DECIMAL(10,2)
          READS SQL DATA
          BEGIN
@@ -836,7 +836,7 @@ fn t321_02_procedure_modifies_sql() {
 /// T321-02: Procedure with multiple statements
 #[test]
 fn t321_02_procedure_multiple_statements() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE complex_update()
          BEGIN
            UPDATE person SET salary = salary * 1.1 WHERE age < 30;
@@ -888,13 +888,13 @@ fn t321_03_function_invocation_column() {
 /// T321-04: Basic CALL statement
 #[test]
 fn t321_04_call_basic() {
-    assert_feature_supported!("CALL reset_salaries()", "T321-04", "CALL statement");
+    assert_utility_boundary!("CALL reset_salaries()", "T321-04", "CALL statement");
 }
 
 /// T321-04: CALL with parameters
 #[test]
 fn t321_04_call_with_params() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CALL increase_salary(123, 10.5)",
         "T321-04",
         "CALL with parameters"
@@ -928,7 +928,7 @@ fn t321_04_execute_procedure() {
 /// T321-05: RETURN with literal value
 #[test]
 fn t321_05_return_literal() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION get_constant() RETURNS INT
          BEGIN
            RETURN 42;
@@ -941,7 +941,7 @@ fn t321_05_return_literal() {
 /// T321-05: RETURN with expression
 #[test]
 fn t321_05_return_expression() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION calc(x INT, y INT) RETURNS INT
          BEGIN
            RETURN x * y + 10;
@@ -954,7 +954,7 @@ fn t321_05_return_expression() {
 /// T321-05: RETURN with variable
 #[test]
 fn t321_05_return_variable() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION get_value() RETURNS INT
          BEGIN
            DECLARE result INT;
@@ -969,7 +969,7 @@ fn t321_05_return_variable() {
 /// T321-05: RETURN with SELECT result
 #[test]
 fn t321_05_return_select() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE FUNCTION get_max_salary() RETURNS DECIMAL(10,2)
          BEGIN
            DECLARE max_sal DECIMAL(10,2);
@@ -988,7 +988,7 @@ fn t321_05_return_select() {
 /// Nested IF statements
 #[test]
 fn complex_nested_if() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE nested_if(val INT)
          BEGIN
            IF val > 0 THEN
@@ -1009,7 +1009,7 @@ fn complex_nested_if() {
 /// LOOP with multiple control statements
 #[test]
 fn complex_loop_control() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE complex_loop()
          BEGIN
            DECLARE i INT DEFAULT 0;
@@ -1032,7 +1032,7 @@ fn complex_loop_control() {
 /// Mixed control flow structures
 #[test]
 fn complex_mixed_control() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE PROCEDURE mixed_control(max_val INT)
          BEGIN
            DECLARE i INT DEFAULT 0;

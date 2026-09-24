@@ -38,7 +38,9 @@
 //!
 //! E151 and E152 are CORE features (mandatory for SQL:2016 conformance).
 
-use crate::{assert_feature_supported, assert_parse_error, assert_parses, assert_plans};
+use crate::{
+    assert_parse_error, assert_parses, assert_plan_error, assert_utility_boundary,
+};
 
 // ============================================================================
 // E151-01: COMMIT statement
@@ -47,35 +49,31 @@ use crate::{assert_feature_supported, assert_parse_error, assert_parses, assert_
 /// E151-01: Basic COMMIT statement
 #[test]
 fn e151_01_commit_basic() {
-    assert_feature_supported!("COMMIT", "E151-01", "COMMIT statement");
+    assert_utility_boundary!("COMMIT", "E151-01", "COMMIT statement");
 }
 
 /// E151-01: COMMIT WORK (optional WORK keyword)
 #[test]
 fn e151_01_commit_work() {
-    assert_feature_supported!("COMMIT WORK", "E151-01", "COMMIT WORK statement");
+    assert_utility_boundary!("COMMIT WORK", "E151-01", "COMMIT WORK statement");
 }
 
 /// E151-01: COMMIT with explicit AND CHAIN
 #[test]
 fn e151_01_commit_and_chain() {
-    assert_feature_supported!("COMMIT AND CHAIN", "E151-01", "COMMIT AND CHAIN");
+    assert_utility_boundary!("COMMIT AND CHAIN", "E151-01", "COMMIT AND CHAIN");
 }
 
 /// E151-01: COMMIT with explicit AND NO CHAIN
 #[test]
 fn e151_01_commit_no_chain() {
-    assert_feature_supported!("COMMIT AND NO CHAIN", "E151-01", "COMMIT AND NO CHAIN");
+    assert_utility_boundary!("COMMIT AND NO CHAIN", "E151-01", "COMMIT AND NO CHAIN");
 }
 
 /// E151-01: COMMIT WORK AND CHAIN
 #[test]
 fn e151_01_commit_work_and_chain() {
-    assert_feature_supported!(
-        "COMMIT WORK AND CHAIN",
-        "E151-01",
-        "COMMIT WORK AND CHAIN"
-    );
+    assert_utility_boundary!("COMMIT WORK AND CHAIN", "E151-01", "COMMIT WORK AND CHAIN");
 }
 
 // ============================================================================
@@ -85,35 +83,31 @@ fn e151_01_commit_work_and_chain() {
 /// E151-02: Basic ROLLBACK statement
 #[test]
 fn e151_02_rollback_basic() {
-    assert_feature_supported!("ROLLBACK", "E151-02", "ROLLBACK statement");
+    assert_utility_boundary!("ROLLBACK", "E151-02", "ROLLBACK statement");
 }
 
 /// E151-02: ROLLBACK WORK (optional WORK keyword)
 #[test]
 fn e151_02_rollback_work() {
-    assert_feature_supported!("ROLLBACK WORK", "E151-02", "ROLLBACK WORK statement");
+    assert_utility_boundary!("ROLLBACK WORK", "E151-02", "ROLLBACK WORK statement");
 }
 
 /// E151-02: ROLLBACK with explicit AND CHAIN
 #[test]
 fn e151_02_rollback_and_chain() {
-    assert_feature_supported!("ROLLBACK AND CHAIN", "E151-02", "ROLLBACK AND CHAIN");
+    assert_utility_boundary!("ROLLBACK AND CHAIN", "E151-02", "ROLLBACK AND CHAIN");
 }
 
 /// E151-02: ROLLBACK with explicit AND NO CHAIN
 #[test]
 fn e151_02_rollback_no_chain() {
-    assert_feature_supported!(
-        "ROLLBACK AND NO CHAIN",
-        "E151-02",
-        "ROLLBACK AND NO CHAIN"
-    );
+    assert_utility_boundary!("ROLLBACK AND NO CHAIN", "E151-02", "ROLLBACK AND NO CHAIN");
 }
 
 /// E151-02: ROLLBACK WORK AND CHAIN
 #[test]
 fn e151_02_rollback_work_and_chain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ROLLBACK WORK AND CHAIN",
         "E151-02",
         "ROLLBACK WORK AND CHAIN"
@@ -127,7 +121,7 @@ fn e151_02_rollback_work_and_chain() {
 /// E152-01: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
 #[test]
 fn e152_01_set_transaction_serializable() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
         "E152-01",
         "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
@@ -137,7 +131,7 @@ fn e152_01_set_transaction_serializable() {
 /// E152-01: SET TRANSACTION with SESSION scope
 #[test]
 fn e152_01_set_session_transaction_serializable() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
         "E152-01",
         "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
@@ -151,7 +145,7 @@ fn e152_01_set_session_transaction_serializable() {
 /// E152-02: SET TRANSACTION READ ONLY
 #[test]
 fn e152_02_set_transaction_read_only() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION READ ONLY",
         "E152-02",
         "SET TRANSACTION READ ONLY"
@@ -161,7 +155,7 @@ fn e152_02_set_transaction_read_only() {
 /// E152-02: SET TRANSACTION READ WRITE
 #[test]
 fn e152_02_set_transaction_read_write() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION READ WRITE",
         "E152-02",
         "SET TRANSACTION READ WRITE"
@@ -171,7 +165,7 @@ fn e152_02_set_transaction_read_write() {
 /// E152-02: SET TRANSACTION with both isolation level and access mode
 #[test]
 fn e152_02_set_transaction_combined() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY",
         "E152-02",
         "SET TRANSACTION with isolation and access mode"
@@ -181,7 +175,7 @@ fn e152_02_set_transaction_combined() {
 /// E152-02: SET TRANSACTION READ WRITE with isolation level
 #[test]
 fn e152_02_set_transaction_read_write_with_isolation() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION READ WRITE ISOLATION LEVEL SERIALIZABLE",
         "E152-02",
         "SET TRANSACTION READ WRITE with isolation level"
@@ -195,31 +189,31 @@ fn e152_02_set_transaction_read_write_with_isolation() {
 /// T241: Basic START TRANSACTION statement
 #[test]
 fn t241_start_transaction_basic() {
-    assert_feature_supported!("START TRANSACTION", "T241", "START TRANSACTION statement");
+    assert_utility_boundary!("START TRANSACTION", "T241", "START TRANSACTION statement");
 }
 
 /// T241: BEGIN (synonym for START TRANSACTION)
 #[test]
 fn t241_begin_transaction() {
-    assert_feature_supported!("BEGIN", "T241", "BEGIN statement");
+    assert_utility_boundary!("BEGIN", "T241", "BEGIN statement");
 }
 
 /// T241: BEGIN TRANSACTION
 #[test]
 fn t241_begin_transaction_explicit() {
-    assert_feature_supported!("BEGIN TRANSACTION", "T241", "BEGIN TRANSACTION statement");
+    assert_utility_boundary!("BEGIN TRANSACTION", "T241", "BEGIN TRANSACTION statement");
 }
 
 /// T241: BEGIN WORK
 #[test]
 fn t241_begin_work() {
-    assert_feature_supported!("BEGIN WORK", "T241", "BEGIN WORK statement");
+    assert_utility_boundary!("BEGIN WORK", "T241", "BEGIN WORK statement");
 }
 
 /// T241: START TRANSACTION with READ ONLY
 #[test]
 fn t241_start_transaction_read_only() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION READ ONLY",
         "T241",
         "START TRANSACTION READ ONLY"
@@ -229,7 +223,7 @@ fn t241_start_transaction_read_only() {
 /// T241: START TRANSACTION with READ WRITE
 #[test]
 fn t241_start_transaction_read_write() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION READ WRITE",
         "T241",
         "START TRANSACTION READ WRITE"
@@ -239,7 +233,7 @@ fn t241_start_transaction_read_write() {
 /// T241: START TRANSACTION with isolation level
 #[test]
 fn t241_start_transaction_isolation() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION ISOLATION LEVEL SERIALIZABLE",
         "T241",
         "START TRANSACTION with isolation level"
@@ -249,7 +243,7 @@ fn t241_start_transaction_isolation() {
 /// T241: START TRANSACTION with multiple options
 #[test]
 fn t241_start_transaction_multiple_options() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION READ ONLY, ISOLATION LEVEL SERIALIZABLE",
         "T241",
         "START TRANSACTION with multiple options"
@@ -263,13 +257,13 @@ fn t241_start_transaction_multiple_options() {
 /// T271: SAVEPOINT statement
 #[test]
 fn t271_savepoint() {
-    assert_feature_supported!("SAVEPOINT sp1", "T271", "SAVEPOINT statement");
+    assert_utility_boundary!("SAVEPOINT sp1", "T271", "SAVEPOINT statement");
 }
 
 /// T271: SAVEPOINT with quoted identifier
 #[test]
 fn t271_savepoint_quoted() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SAVEPOINT \"my_savepoint\"",
         "T271",
         "SAVEPOINT with quoted identifier"
@@ -279,7 +273,7 @@ fn t271_savepoint_quoted() {
 /// T271: ROLLBACK TO SAVEPOINT
 #[test]
 fn t271_rollback_to_savepoint() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ROLLBACK TO SAVEPOINT sp1",
         "T271",
         "ROLLBACK TO SAVEPOINT"
@@ -289,19 +283,19 @@ fn t271_rollback_to_savepoint() {
 /// T271: ROLLBACK TO (without SAVEPOINT keyword)
 #[test]
 fn t271_rollback_to() {
-    assert_feature_supported!("ROLLBACK TO sp1", "T271", "ROLLBACK TO");
+    assert_utility_boundary!("ROLLBACK TO sp1", "T271", "ROLLBACK TO");
 }
 
 /// T271: RELEASE SAVEPOINT
 #[test]
 fn t271_release_savepoint() {
-    assert_feature_supported!("RELEASE SAVEPOINT sp1", "T271", "RELEASE SAVEPOINT");
+    assert_utility_boundary!("RELEASE SAVEPOINT sp1", "T271", "RELEASE SAVEPOINT");
 }
 
 /// T271: RELEASE (without SAVEPOINT keyword)
 #[test]
 fn t271_release() {
-    assert_feature_supported!("RELEASE sp1", "T271", "RELEASE");
+    assert_utility_boundary!("RELEASE sp1", "T271", "RELEASE");
 }
 
 // ============================================================================
@@ -311,7 +305,7 @@ fn t271_release() {
 /// SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
 #[test]
 fn isolation_level_read_uncommitted() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
         "E152",
         "ISOLATION LEVEL READ UNCOMMITTED"
@@ -321,7 +315,7 @@ fn isolation_level_read_uncommitted() {
 /// SET TRANSACTION ISOLATION LEVEL READ COMMITTED
 #[test]
 fn isolation_level_read_committed() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
         "E152",
         "ISOLATION LEVEL READ COMMITTED"
@@ -331,7 +325,7 @@ fn isolation_level_read_committed() {
 /// SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
 #[test]
 fn isolation_level_repeatable_read() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "E152",
         "ISOLATION LEVEL REPEATABLE READ"
@@ -341,7 +335,7 @@ fn isolation_level_repeatable_read() {
 /// START TRANSACTION with READ UNCOMMITTED
 #[test]
 fn start_transaction_read_uncommitted() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
         "T241",
         "START TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
@@ -351,7 +345,7 @@ fn start_transaction_read_uncommitted() {
 /// START TRANSACTION with READ COMMITTED
 #[test]
 fn start_transaction_read_committed() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION ISOLATION LEVEL READ COMMITTED",
         "T241",
         "START TRANSACTION ISOLATION LEVEL READ COMMITTED"
@@ -361,7 +355,7 @@ fn start_transaction_read_committed() {
 /// START TRANSACTION with REPEATABLE READ
 #[test]
 fn start_transaction_repeatable_read() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "START TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "T241",
         "START TRANSACTION ISOLATION LEVEL REPEATABLE READ"
@@ -375,7 +369,7 @@ fn start_transaction_repeatable_read() {
 /// SET SESSION CHARACTERISTICS for READ ONLY
 #[test]
 fn set_session_read_only() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
         "E152",
         "SET SESSION READ ONLY"
@@ -385,7 +379,7 @@ fn set_session_read_only() {
 /// SET SESSION CHARACTERISTICS for READ WRITE
 #[test]
 fn set_session_read_write() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
         "E152",
         "SET SESSION READ WRITE"
@@ -395,7 +389,7 @@ fn set_session_read_write() {
 /// SET SESSION CHARACTERISTICS with multiple options
 #[test]
 fn set_session_multiple_options() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY",
         "E152",
         "SET SESSION with multiple options"
@@ -409,19 +403,19 @@ fn set_session_multiple_options() {
 /// END statement (PostgreSQL-style)
 #[test]
 fn end_statement() {
-    assert_feature_supported!("END", "E151", "END statement");
+    assert_utility_boundary!("END", "E151", "END statement");
 }
 
 /// END TRANSACTION
 #[test]
 fn end_transaction() {
-    assert_feature_supported!("END TRANSACTION", "E151", "END TRANSACTION statement");
+    assert_utility_boundary!("END TRANSACTION", "E151", "END TRANSACTION statement");
 }
 
 /// END WORK
 #[test]
 fn end_work() {
-    assert_feature_supported!("END WORK", "E151", "END WORK statement");
+    assert_utility_boundary!("END WORK", "E151", "END WORK statement");
 }
 
 // ============================================================================
@@ -431,31 +425,31 @@ fn end_work() {
 /// ABORT statement
 #[test]
 fn abort_statement() {
-    assert_feature_supported!("ABORT", "E151", "ABORT statement");
+    assert_utility_boundary!("ABORT", "E151", "ABORT statement");
 }
 
 /// ABORT TRANSACTION
 #[test]
 fn abort_transaction() {
-    assert_feature_supported!("ABORT TRANSACTION", "E151", "ABORT TRANSACTION statement");
+    assert_utility_boundary!("ABORT TRANSACTION", "E151", "ABORT TRANSACTION statement");
 }
 
 /// ABORT WORK
 #[test]
 fn abort_work() {
-    assert_feature_supported!("ABORT WORK", "E151", "ABORT WORK statement");
+    assert_utility_boundary!("ABORT WORK", "E151", "ABORT WORK statement");
 }
 
 /// ABORT AND CHAIN (starts new transaction after abort)
 #[test]
 fn abort_and_chain() {
-    assert_feature_supported!("ABORT AND CHAIN", "E151", "ABORT AND CHAIN statement");
+    assert_utility_boundary!("ABORT AND CHAIN", "E151", "ABORT AND CHAIN statement");
 }
 
 /// ABORT AND NO CHAIN (does not start new transaction)
 #[test]
 fn abort_and_no_chain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ABORT AND NO CHAIN",
         "E151",
         "ABORT AND NO CHAIN statement"
@@ -465,7 +459,7 @@ fn abort_and_no_chain() {
 /// ABORT WORK AND CHAIN
 #[test]
 fn abort_work_and_chain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ABORT WORK AND CHAIN",
         "E151",
         "ABORT WORK AND CHAIN statement"
@@ -475,7 +469,7 @@ fn abort_work_and_chain() {
 /// ABORT WORK AND NO CHAIN
 #[test]
 fn abort_work_and_no_chain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ABORT WORK AND NO CHAIN",
         "E151",
         "ABORT WORK AND NO CHAIN statement"
@@ -485,7 +479,7 @@ fn abort_work_and_no_chain() {
 /// ABORT TRANSACTION AND CHAIN
 #[test]
 fn abort_transaction_and_chain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ABORT TRANSACTION AND CHAIN",
         "E151",
         "ABORT TRANSACTION AND CHAIN statement"
@@ -495,7 +489,7 @@ fn abort_transaction_and_chain() {
 /// ABORT TRANSACTION AND NO CHAIN
 #[test]
 fn abort_transaction_and_no_chain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ABORT TRANSACTION AND NO CHAIN",
         "E151",
         "ABORT TRANSACTION AND NO CHAIN statement"
@@ -655,25 +649,25 @@ fn transaction_isolation_levels_sequence() {
 /// COMMIT AND CHAIN creates new transaction
 #[test]
 fn t261_commit_and_chain() {
-    assert_feature_supported!("COMMIT AND CHAIN", "T261", "COMMIT AND CHAIN");
+    assert_utility_boundary!("COMMIT AND CHAIN", "T261", "COMMIT AND CHAIN");
 }
 
 /// ROLLBACK AND CHAIN creates new transaction
 #[test]
 fn t261_rollback_and_chain() {
-    assert_feature_supported!("ROLLBACK AND CHAIN", "T261", "ROLLBACK AND CHAIN");
+    assert_utility_boundary!("ROLLBACK AND CHAIN", "T261", "ROLLBACK AND CHAIN");
 }
 
 /// COMMIT AND NO CHAIN explicitly terminates
 #[test]
 fn t261_commit_no_chain() {
-    assert_feature_supported!("COMMIT AND NO CHAIN", "T261", "COMMIT AND NO CHAIN");
+    assert_utility_boundary!("COMMIT AND NO CHAIN", "T261", "COMMIT AND NO CHAIN");
 }
 
 /// ROLLBACK AND NO CHAIN explicitly terminates
 #[test]
 fn t261_rollback_no_chain() {
-    assert_feature_supported!("ROLLBACK AND NO CHAIN", "T261", "ROLLBACK AND NO CHAIN");
+    assert_utility_boundary!("ROLLBACK AND NO CHAIN", "T261", "ROLLBACK AND NO CHAIN");
 }
 
 // ============================================================================
@@ -723,38 +717,63 @@ fn all_isolation_levels() {
 #[test]
 fn e151_e152_summary_basic_transaction_flow() {
     // Basic transaction lifecycle
-    assert_plans!("BEGIN");
-    assert_plans!("COMMIT");
-    assert_plans!("ROLLBACK");
+    assert_plan_error!("BEGIN", "bypass relational SQL planning");
+    assert_plan_error!("COMMIT", "bypass relational SQL planning");
+    assert_plan_error!("ROLLBACK", "bypass relational SQL planning");
 }
 
 #[test]
 fn e151_e152_summary_transaction_settings() {
     // Transaction configuration
-    assert_plans!("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-    assert_plans!("SET TRANSACTION READ ONLY");
-    assert_plans!("SET TRANSACTION READ WRITE");
-    assert_plans!("START TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY");
+    assert_plan_error!(
+        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "SET TRANSACTION READ ONLY",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "SET TRANSACTION READ WRITE",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "START TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e151_e152_summary_savepoints() {
     // Savepoint management
-    assert_plans!("SAVEPOINT sp1");
-    assert_plans!("ROLLBACK TO SAVEPOINT sp1");
-    assert_plans!("RELEASE SAVEPOINT sp1");
+    assert_plan_error!("SAVEPOINT sp1", "bypass relational SQL planning");
+    assert_plan_error!(
+        "ROLLBACK TO SAVEPOINT sp1",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!("RELEASE SAVEPOINT sp1", "bypass relational SQL planning");
 }
 
 #[test]
 fn e151_e152_summary_all_features() {
     // Comprehensive transaction test combining all features
-    assert_plans!(
-        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+    assert_plan_error!(
+        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        "bypass relational SQL planning"
     );
-    assert_plans!("START TRANSACTION READ WRITE");
-    assert_plans!("SAVEPOINT before_changes");
-    assert_plans!("ROLLBACK TO SAVEPOINT before_changes");
-    assert_plans!("RELEASE SAVEPOINT before_changes");
-    assert_plans!("COMMIT AND CHAIN");
-    assert_plans!("ROLLBACK");
+    assert_plan_error!(
+        "START TRANSACTION READ WRITE",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!("SAVEPOINT before_changes", "bypass relational SQL planning");
+    assert_plan_error!(
+        "ROLLBACK TO SAVEPOINT before_changes",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "RELEASE SAVEPOINT before_changes",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!("COMMIT AND CHAIN", "bypass relational SQL planning");
+    assert_plan_error!("ROLLBACK", "bypass relational SQL planning");
 }

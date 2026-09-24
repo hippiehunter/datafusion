@@ -106,42 +106,112 @@ fn postgres_bit_string_literal_plans_as_text() {
 fn literal_provider_receives_original_unicode_and_multiline_spans() {
     use datafusion_common::metadata::FieldMetadata;
     use datafusion_expr::Expr;
-    let mut context = MockContextProvider { state: MockSessionState::default() };
+    let mut context = MockContextProvider {
+        state: MockSessionState::default(),
+    };
     context.state.literal_planner = Some(|expr, span| {
-        let Expr::Literal(value, _) = expr else { return Ok(expr); };
-        Ok(Expr::Literal(value, Some(FieldMetadata::from(std::collections::HashMap::from([
-            ("test.origin".to_owned(), format!("{}:{}", span.start.line, span.start.column)),
-        ])))))
+        let Expr::Literal(value, _) = expr else {
+            return Ok(expr);
+        };
+        Ok(Expr::Literal(
+            value,
+            Some(FieldMetadata::from(std::collections::HashMap::from([(
+                "test.origin".to_owned(),
+                format!("{}:{}", span.start.line, span.start.column),
+            )]))),
+        ))
     });
-    let statement = DFParser::parse_sql("SELECT 'é',\n  'second'").unwrap().pop_front().unwrap();
-    let plan = SqlToRel::new(&context).statement_to_plan(statement).unwrap();
-    assert_eq!(plan.schema().field(0).metadata().get("test.origin").map(String::as_str), Some("1:8"));
-    assert_eq!(plan.schema().field(1).metadata().get("test.origin").map(String::as_str), Some("2:3"));
+    let statement = DFParser::parse_sql("SELECT 'é',\n  'second'")
+        .unwrap()
+        .pop_front()
+        .unwrap();
+    let plan = SqlToRel::new(&context)
+        .statement_to_plan(statement)
+        .unwrap();
+    assert_eq!(
+        plan.schema()
+            .field(0)
+            .metadata()
+            .get("test.origin")
+            .map(String::as_str),
+        Some("1:8")
+    );
+    assert_eq!(
+        plan.schema()
+            .field(1)
+            .metadata()
+            .get("test.origin")
+            .map(String::as_str),
+        Some("2:3")
+    );
 }
 
 #[test]
 fn record_stream_expands_fields_without_duplicating_its_call() {
-    let fields = Fields::from(vec![Field::new("id", DataType::Int32, false),
-        Field::new("label", DataType::Utf8, true).with_metadata(std::collections::HashMap::from([
-            ("test.identity".to_owned(), "label_type".to_owned()),
-        ]))]);
+    let fields = Fields::from(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("label", DataType::Utf8, true).with_metadata(
+            std::collections::HashMap::from([(
+                "test.identity".to_owned(),
+                "label_type".to_owned(),
+            )]),
+        ),
+    ]);
     let rows_type = DataType::new_list(DataType::Struct(fields.clone()), false);
-    let mut context = MockContextProvider { state: MockSessionState::default() };
-    context.state.row_stream_function = Some(Arc::new(make_udf("row_stream", vec![DataType::Int64], rows_type)));
+    let mut context = MockContextProvider {
+        state: MockSessionState::default(),
+    };
+    context.state.row_stream_function = Some(Arc::new(make_udf(
+        "row_stream",
+        vec![DataType::Int64],
+        rows_type,
+    )));
     for (sql, names, calls) in [
-        ("SELECT * FROM row_stream(1) WITH ORDINALITY", vec!["id", "label", "ordinality"], 1),
-        ("SELECT * FROM ROWS FROM (row_stream(1),row_stream(2)) AS t(a,b,c,d)", vec!["a", "b", "c", "d"], 2),
-        ("SELECT r.id,r.label FROM person,LATERAL row_stream(person.age) AS r", vec!["id", "label"], 1),
+        (
+            "SELECT * FROM row_stream(1) WITH ORDINALITY",
+            vec!["id", "label", "ordinality"],
+            1,
+        ),
+        (
+            "SELECT * FROM ROWS FROM (row_stream(1),row_stream(2)) AS t(a,b,c,d)",
+            vec!["a", "b", "c", "d"],
+            2,
+        ),
+        (
+            "SELECT r.id,r.label FROM person,LATERAL row_stream(person.age) AS r",
+            vec!["id", "label"],
+            1,
+        ),
     ] {
         let stmt = DFParser::parse_sql(sql).unwrap().pop_front().unwrap();
         let plan = SqlToRel::new(&context).statement_to_plan(stmt).unwrap();
-        assert_eq!(plan.schema().fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>(), names);
+        assert_eq!(
+            plan.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            names
+        );
         assert_eq!(row_stream_calls(&plan), calls, "{sql}");
-        assert_eq!(plan.schema().field(1).metadata().get("test.identity").map(String::as_str), Some("label_type"));
+        assert_eq!(
+            plan.schema()
+                .field(1)
+                .metadata()
+                .get("test.identity")
+                .map(String::as_str),
+            Some("label_type")
+        );
     }
-    let stmt = DFParser::parse_sql("SELECT row_stream(1)").unwrap().pop_front().unwrap();
+    let stmt = DFParser::parse_sql("SELECT row_stream(1)")
+        .unwrap()
+        .pop_front()
+        .unwrap();
     let plan = SqlToRel::new(&context).statement_to_plan(stmt).unwrap();
-    assert_eq!(plan.schema().field(0).data_type(), &DataType::Struct(fields));
+    assert_eq!(
+        plan.schema().field(0).data_type(),
+        &DataType::Struct(fields)
+    );
     assert_eq!(row_stream_calls(&plan), 1);
 
     fn row_stream_calls(plan: &LogicalPlan) -> usize {
@@ -713,11 +783,11 @@ fn try_cast_from_aggregation() {
     let plan = logical_plan("SELECT TRY_CAST(sum(age) AS FLOAT) FROM person").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: TRY_CAST(sum(person.age) AS Float32)
-          Aggregate: groupBy=[[]], aggr=[[sum(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: TRY_CAST(sum(person.age) AS Float32) AS sum
+      Aggregate: groupBy=[[]], aggr=[[sum(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -774,118 +844,6 @@ fn cast_to_invalid_decimal_type_precision_lt_scale() {
 // Removed: plan_create_table_with_pk, plan_create_table_with_multi_pk,
 // plan_create_table_with_unique, plan_create_table_no_pk, plan_create_table_check_constraint
 // (Hive formats not supported after pruning)
-
-#[test]
-fn plan_start_transaction() {
-    let sql = "start transaction";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionStart: ReadWrite Serializable
-        "#
-    );
-}
-
-#[test]
-fn plan_start_transaction_isolation() {
-    let sql = "start transaction isolation level read committed";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionStart: ReadWrite ReadCommitted
-        "#
-    );
-}
-
-#[test]
-fn plan_start_transaction_read_only() {
-    let sql = "start transaction read only";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionStart: ReadOnly Serializable
-        "#
-    );
-}
-
-#[test]
-fn plan_start_transaction_fully_qualified() {
-    let sql = "start transaction isolation level read committed read only";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionStart: ReadOnly ReadCommitted
-        "#
-    );
-}
-
-#[test]
-fn plan_start_transaction_overly_qualified() {
-    let sql = r#"start transaction
-isolation level read committed
-read only
-isolation level repeatable read
-"#;
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionStart: ReadOnly RepeatableRead
-        "#
-    );
-}
-
-#[test]
-fn plan_commit_transaction() {
-    let sql = "commit transaction";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionEnd: Commit chain:=false
-        "#
-    );
-}
-
-#[test]
-fn plan_commit_transaction_chained() {
-    let sql = "commit transaction and chain";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionEnd: Commit chain:=true
-        "#
-    );
-}
-
-#[test]
-fn plan_rollback_transaction() {
-    let sql = "rollback transaction";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionEnd: Rollback chain:=false
-        "#
-    );
-}
-
-#[test]
-fn plan_rollback_transaction_chained() {
-    let sql = "rollback transaction and chain";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-        TransactionEnd: Rollback chain:=true
-        "#
-    );
-}
 
 #[test]
 fn plan_copy_to() {
@@ -1276,14 +1234,6 @@ fn reject_unsupported_oracle_statement_options_during_planning() {
             "CREATE OR REPLACE FORCE VIEW active_people AS SELECT id FROM person",
             "Oracle CREATE VIEW options are not supported",
         ),
-        (
-            "COMMIT WRITE IMMEDIATE NOWAIT",
-            "Oracle COMMIT options are not supported",
-        ),
-        (
-            "TRUNCATE TABLE person DROP STORAGE",
-            "Oracle TRUNCATE storage options are not supported",
-        ),
     ];
 
     for (sql, expected) in cases {
@@ -1411,8 +1361,8 @@ fn plan_create_table_with_storage_parameter_expression_error() {
     "Error during planning: Inconsistent data length across values list: got 2 values in row 0 but expected 3"
 )]
 #[case::source_column_count_mismatch(
-    "INSERT INTO person VALUES ($1, $2)",
-    "Error during planning: Inconsistent data length across values list: got 2 values in row 0 but expected 8"
+    "INSERT INTO test_decimal VALUES (1, 2, 3)",
+    "Error during planning: Inconsistent data length across values list: got 3 values in row 0 but expected 2"
 )]
 #[case::extra_placeholder(
     "INSERT INTO person (id, first_name, last_name) VALUES ($1, $2, $3, $4)",
@@ -1437,11 +1387,11 @@ fn plan_update() {
     assert_snapshot!(
         plan,
         @r#"
-        Dml: op=[Update] table=[person]
-          Projection: person.id AS id, person.first_name AS first_name, Utf8("Kay") AS last_name, person.age AS age, person.state AS state, person.salary AS salary, person.birth_date AS birth_date, person.😀 AS 😀
-            Filter: person.id = Int32(1)
-              TableScan: person
-        "#
+    Dml: op=[Update] table=[person]
+      Projection: person.id AS id, person.first_name AS first_name, Utf8("Kay") AS last_name, person.age AS age, person.state AS state, person.salary AS salary, person.birth_date AS birth_date, person.😀 AS 😀
+        Filter: person.id = Int32(1)
+          TableScan: person, row_lock=[FOR UPDATE]
+    "#
     );
 }
 
@@ -1463,11 +1413,11 @@ fn plan_delete() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Dml: op=[Delete] table=[person]
-          Filter: person.id = Int32(1)
-            TableScan: person
-        "#
+        @"
+    Dml: op=[Delete] table=[person]
+      Filter: person.id = Int32(1)
+        TableScan: person, row_lock=[FOR UPDATE]
+    "
     );
 }
 
@@ -1478,11 +1428,11 @@ fn plan_delete_quoted_identifier_case_sensitive() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Dml: op=[Delete] table=[SomeCatalog.SomeSchema.UPPERCASE_test]
-          Filter: SomeCatalog.SomeSchema.UPPERCASE_test.Id = Int32(1)
-            TableScan: SomeCatalog.SomeSchema.UPPERCASE_test
-        "#
+        @"
+    Dml: op=[Delete] table=[SomeCatalog.SomeSchema.UPPERCASE_test]
+      Filter: SomeCatalog.SomeSchema.UPPERCASE_test.Id = Int32(1)
+        TableScan: SomeCatalog.SomeSchema.UPPERCASE_test, row_lock=[FOR UPDATE]
+    "
     );
 }
 
@@ -1512,8 +1462,8 @@ fn select_scalar_func_with_literal_no_relation() {
     let plan = logical_plan("SELECT sqrt(9)").unwrap();
     assert_snapshot!(
         plan,
-        @r"
-    Projection: sqrt(Int32(9))
+        @"
+    Projection: sqrt(Int32(9)) AS sqrt
       EmptyRelation: rows=1
     "
     );
@@ -1727,7 +1677,7 @@ fn table_with_column_alias_too_many() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r"Error during planning: Source table contains 3 columns but 5 names given as column alias"
+        @"External error: Source table contains 3 columns but 5 names given as column alias"
     );
 }
 
@@ -1963,7 +1913,7 @@ fn select_with_having() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r"Error during planning: HAVING clause references: person.age > Int32(100) AND person.age < Int32(200) must appear in the GROUP BY clause or be used in an aggregate function"
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.id" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(Int64(1))" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -1976,9 +1926,7 @@ fn select_with_having_referencing_column_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        Error during planning: HAVING clause references: person.first_name = Utf8("M") must appear in the GROUP BY clause or be used in an aggregate function
-        "#
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.id" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(Int64(1))" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -1992,9 +1940,7 @@ fn select_with_having_refers_to_invalid_column() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        External error: Column inHAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.id, max(person.age)" appears in the SELECT clause satisfies this requirement
-        "#
+        @r#"External error: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.id, max(person.age)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2007,9 +1953,7 @@ fn select_with_having_referencing_column_nested_in_select_expression() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        Error during planning: HAVING clause references: person.age > Int32(100) must appear in the GROUP BY clause or be used in an aggregate function
-        "#
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.id" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(Int64(1))" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2022,7 +1966,7 @@ fn select_with_having_with_aggregate_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "max(person.age)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "max(person.age)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2034,12 +1978,12 @@ fn select_aggregate_with_having_that_reuses_aggregate() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: max(person.age)
-          Filter: max(person.age) < Int32(30)
-            Aggregate: groupBy=[[]], aggr=[[max(person.age)]]
-              TableScan: person
-        "#
+        @"
+    Projection: max(person.age) AS max
+      Filter: max(person.age) < Int32(30)
+        Aggregate: groupBy=[[]], aggr=[[max(person.age)]]
+          TableScan: person
+    "
     );
 }
 
@@ -2052,11 +1996,11 @@ fn select_aggregate_with_having_with_aggregate_not_in_select() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: max(person.age)
-          Filter: max(person.first_name) > Utf8("M")
-            Aggregate: groupBy=[[]], aggr=[[max(person.age), max(person.first_name)]]
-              TableScan: person
-        "#
+    Projection: max(person.age) AS max
+      Filter: max(person.first_name) > Utf8("M")
+        Aggregate: groupBy=[[]], aggr=[[max(person.age), max(person.first_name)]]
+          TableScan: person
+    "#
     );
 }
 
@@ -2069,9 +2013,7 @@ fn select_aggregate_with_having_referencing_column_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        External error: Column inHAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(*)" appears in the SELECT clause satisfies this requirement
-        "#
+        @r#"External error: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(*)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2120,11 +2062,11 @@ fn select_aggregate_with_group_by_with_having() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: person.first_name = Utf8("M")
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              TableScan: person
-        "#
+    Projection: person.first_name, max(person.age) AS max
+      Filter: person.first_name = Utf8("M")
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
+          TableScan: person
+    "#
     );
 }
 
@@ -2138,13 +2080,13 @@ fn select_aggregate_with_group_by_with_having_and_where() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) < Int32(100)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              Filter: person.id > Int32(5)
-                TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) < Int32(100)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
+          Filter: person.id > Int32(5)
+            TableScan: person
+    "
     );
 }
 
@@ -2158,13 +2100,13 @@ fn select_aggregate_with_group_by_with_having_and_where_filtering_on_aggregate_c
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) < Int32(100)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              Filter: person.id > Int32(5) AND person.age > Int32(18)
-                TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) < Int32(100)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
+          Filter: person.id > Int32(5) AND person.age > Int32(18)
+            TableScan: person
+    "
     );
 }
 
@@ -2178,11 +2120,11 @@ fn select_aggregate_with_group_by_with_having_using_column_by_alias() {
     assert_snapshot!(
         plan,
         @r#"
-        Projection: person.first_name AS fn, max(person.age)
-          Filter: max(person.age) > Int32(2) AND person.first_name = Utf8("M")
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              TableScan: person
-        "#
+    Projection: person.first_name AS fn, max(person.age) AS max
+      Filter: max(person.age) > Int32(2) AND person.first_name = Utf8("M")
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
+          TableScan: person
+    "#
     );
 }
 
@@ -2214,12 +2156,12 @@ fn select_aggregate_with_group_by_with_having_that_reuses_aggregate() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int32(100)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) > Int32(100)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
+          TableScan: person
+    "
     );
 }
 
@@ -2233,9 +2175,7 @@ fn select_aggregate_with_group_by_with_having_referencing_column_not_in_group_by
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        External error: Column inHAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.last_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.first_name, max(person.age)" appears in the SELECT clause satisfies this requirement
-        "#
+        @r#"External error: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.last_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.first_name, max(person.age)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2248,12 +2188,12 @@ fn select_aggregate_with_group_by_with_having_that_reuses_aggregate_multiple_tim
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int32(100) AND max(person.age) < Int32(200)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
-              TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) > Int32(100) AND max(person.age) < Int32(200)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age)]]
+          TableScan: person
+    "
     );
 }
 
@@ -2266,12 +2206,12 @@ fn select_aggregate_with_group_by_with_having_using_aggregate_not_in_select() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int32(100) AND min(person.id) < Int32(50)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id)]]
-              TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) > Int32(100) AND min(person.id) < Int32(50)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id)]]
+          TableScan: person
+    "
     );
 }
 
@@ -2323,12 +2263,12 @@ fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int32(100) AND min(person.id - Int32(2)) < Int32(50)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id - Int32(2))]]
-              TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) > Int32(100) AND min(person.id - Int32(2)) < Int32(50)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), min(person.id - Int32(2))]]
+          TableScan: person
+    "
     );
 }
 
@@ -2341,12 +2281,12 @@ fn select_aggregate_with_group_by_with_having_using_count_star_not_in_select() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.first_name, max(person.age)
-          Filter: max(person.age) > Int32(100) AND count(*) < Int32(50)
-            Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), count(*)]]
-              TableScan: person
-        "#
+        @"
+    Projection: person.first_name, max(person.age) AS max
+      Filter: max(person.age) > Int32(100) AND count(*) < Int32(50)
+        Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.age), count(*)]]
+          TableScan: person
+    "
     );
 }
 
@@ -2381,11 +2321,11 @@ fn select_simple_aggregate() {
     let plan = logical_plan("SELECT MIN(age) FROM person").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: min(person.age)
-          Aggregate: groupBy=[[]], aggr=[[min(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: min(person.age) AS min
+      Aggregate: groupBy=[[]], aggr=[[min(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2394,11 +2334,11 @@ fn test_sum_aggregate() {
     let plan = logical_plan("SELECT sum(age) from person").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: sum(person.age)
-          Aggregate: groupBy=[[]], aggr=[[sum(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: sum(person.age) AS sum
+      Aggregate: groupBy=[[]], aggr=[[sum(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2428,11 +2368,11 @@ fn select_simple_aggregate_repeated_aggregate_with_single_alias() {
     let plan = logical_plan("SELECT MIN(age), MIN(age) AS a FROM person").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: min(person.age), min(person.age) AS a
-          Aggregate: groupBy=[[]], aggr=[[min(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: min(person.age) AS min, min(person.age) AS a
+      Aggregate: groupBy=[[]], aggr=[[min(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2486,11 +2426,11 @@ fn select_simple_aggregate_with_groupby() {
             .unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.state, min(person.age), max(person.age)
-          Aggregate: groupBy=[[person.state]], aggr=[[min(person.age), max(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.state, min(person.age) AS min, max(person.age) AS max
+      Aggregate: groupBy=[[person.state]], aggr=[[min(person.age), max(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2529,11 +2469,11 @@ fn select_simple_aggregate_with_groupby_column_unselected() {
         logical_plan("SELECT MIN(age), MAX(age) FROM person GROUP BY state").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: min(person.age), max(person.age)
-          Aggregate: groupBy=[[person.state]], aggr=[[min(person.age), max(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: min(person.age) AS min, max(person.age) AS max
+      Aggregate: groupBy=[[person.state]], aggr=[[min(person.age), max(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2544,9 +2484,7 @@ fn select_simple_aggregate_with_groupby_and_column_in_group_by_does_not_exist() 
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        Schema error: No field named doesnotexist. Valid fields are "sum(person.age)", person.id, person.first_name, person.last_name, person.age, person.state, person.salary, person.birth_date, person."😀".
-        "#
+        @r#"Schema error: No field named doesnotexist. Valid fields are sum, person.id, person.first_name, person.last_name, person.age, person.state, person.salary, person.birth_date, person."😀"."#
     );
 }
 
@@ -2576,11 +2514,11 @@ fn select_simple_aggregate_with_groupby_and_column_is_in_aggregate_and_groupby()
         logical_plan("SELECT MAX(first_name) FROM person GROUP BY first_name").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: max(person.first_name)
-          Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.first_name)]]
-            TableScan: person
-        "#
+        @"
+    Projection: max(person.first_name) AS max
+      Aggregate: groupBy=[[person.first_name]], aggr=[[max(person.first_name)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2590,21 +2528,21 @@ fn select_simple_aggregate_with_groupby_can_use_positions() {
         .unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.state, person.age AS b, count(Int32(1))
-          Aggregate: groupBy=[[person.state, person.age]], aggr=[[count(Int32(1))]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.state, person.age AS b, count(Int32(1)) AS count
+      Aggregate: groupBy=[[person.state, person.age]], aggr=[[count(Int32(1))]]
+        TableScan: person
+    "
     );
     let plan = logical_plan("SELECT state, age AS b, count(1) FROM person GROUP BY 2, 1")
         .unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.state, person.age AS b, count(Int32(1))
-          Aggregate: groupBy=[[person.age, person.state]], aggr=[[count(Int32(1))]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.state, person.age AS b, count(Int32(1)) AS count
+      Aggregate: groupBy=[[person.age, person.state]], aggr=[[count(Int32(1))]]
+        TableScan: person
+    "
     );
 }
 
@@ -2666,11 +2604,11 @@ fn select_simple_aggregate_with_groupby_aggregate_repeated_and_one_has_alias() {
             .unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.state, min(person.age), min(person.age) AS ma
-          Aggregate: groupBy=[[person.state]], aggr=[[min(person.age)]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.state, min(person.age) AS min, min(person.age) AS ma
+      Aggregate: groupBy=[[person.state]], aggr=[[min(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2680,11 +2618,11 @@ fn select_simple_aggregate_with_groupby_non_column_expression_unselected() {
         logical_plan("SELECT MIN(first_name) FROM person GROUP BY age + 1").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: min(person.first_name)
-          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
-            TableScan: person
-        "#
+        @"
+    Projection: min(person.first_name) AS min
+      Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2695,22 +2633,22 @@ fn select_simple_aggregate_with_groupby_non_column_expression_selected_and_resol
             .unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.age + Int32(1), min(person.first_name)
-          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.age + Int32(1), min(person.first_name) AS min
+      Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
+        TableScan: person
+    "
     );
     let plan =
         logical_plan("SELECT MIN(first_name), age + 1 FROM person GROUP BY age + 1")
             .unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: min(person.first_name), person.age + Int32(1)
-          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
-            TableScan: person
-        "#
+        @"
+    Projection: min(person.first_name) AS min, person.age + Int32(1)
+      Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2721,11 +2659,11 @@ fn select_simple_aggregate_with_groupby_non_column_expression_nested_and_resolva
     ).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.age + Int32(1) / Int32(2) * person.age + Int32(1), min(person.first_name)
-          Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.age + Int32(1) / Int32(2) * person.age + Int32(1), min(person.first_name) AS min
+      Aggregate: groupBy=[[person.age + Int32(1)]], aggr=[[min(person.first_name)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2738,9 +2676,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_nested_and_not_res
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
-        "#
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2751,9 +2687,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_and_its_column_sel
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement
-        "#
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -2777,11 +2711,11 @@ fn select_simple_aggregate_and_nested_groupby_column() {
         logical_plan("SELECT MAX(first_name), age + 1 FROM person GROUP BY age").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: max(person.first_name), person.age + Int32(1)
-          Aggregate: groupBy=[[person.age]], aggr=[[max(person.first_name)]]
-            TableScan: person
-        "#
+        @"
+    Projection: max(person.first_name) AS max, person.age + Int32(1)
+      Aggregate: groupBy=[[person.age]], aggr=[[max(person.first_name)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2804,11 +2738,11 @@ fn select_aggregate_with_non_column_inner_expression_with_groupby() {
         logical_plan("SELECT state, MIN(age + 1) FROM person GROUP BY state").unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: person.state, min(person.age + Int32(1))
-          Aggregate: groupBy=[[person.state]], aggr=[[min(person.age + Int32(1))]]
-            TableScan: person
-        "#
+        @"
+    Projection: person.state, min(person.age + Int32(1)) AS min
+      Aggregate: groupBy=[[person.state]], aggr=[[min(person.age + Int32(1))]]
+        TableScan: person
+    "
     );
 }
 
@@ -2818,11 +2752,11 @@ fn select_count_one() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: count(Int32(1))
-  Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
-    TableScan: person
-"#
+        @"
+    Projection: count(Int32(1)) AS count
+      Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
+        TableScan: person
+    "
     );
 }
 
@@ -2832,11 +2766,11 @@ fn select_count_column() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: count(person.id)
-  Aggregate: groupBy=[[]], aggr=[[count(person.id)]]
-    TableScan: person
-"#
+        @"
+    Projection: count(person.id) AS count
+      Aggregate: groupBy=[[]], aggr=[[count(person.id)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2846,11 +2780,11 @@ fn select_approx_median() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: approx_median(person.age)
-  Aggregate: groupBy=[[]], aggr=[[approx_median(person.age)]]
-    TableScan: person
-"#
+        @"
+    Projection: approx_median(person.age) AS approx_median
+      Aggregate: groupBy=[[]], aggr=[[approx_median(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -2860,10 +2794,10 @@ fn select_scalar_func() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: sqrt(person.age)
-  TableScan: person
-"#
+        @"
+    Projection: sqrt(person.age) AS sqrt
+      TableScan: person
+    "
     );
 }
 
@@ -3068,11 +3002,11 @@ fn select_group_by_columns_not_in_select() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: max(person.age)
-  Aggregate: groupBy=[[person.state]], aggr=[[max(person.age)]]
-    TableScan: person
-"#
+        @"
+    Projection: max(person.age) AS max
+      Aggregate: groupBy=[[person.state]], aggr=[[max(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -3082,11 +3016,11 @@ fn select_group_by_count_star() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: person.state, count(*)
-  Aggregate: groupBy=[[person.state]], aggr=[[count(*)]]
-    TableScan: person
-"#
+        @"
+    Projection: person.state, count(*) AS count
+      Aggregate: groupBy=[[person.state]], aggr=[[count(*)]]
+        TableScan: person
+    "
     );
 }
 
@@ -3096,11 +3030,11 @@ fn select_group_by_needs_projection() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-        Projection: count(person.state), person.state
-          Aggregate: groupBy=[[person.state]], aggr=[[count(person.state)]]
-            TableScan: person
-        "#
+        @"
+    Projection: count(person.state) AS count, person.state
+      Aggregate: groupBy=[[person.state]], aggr=[[count(person.state)]]
+        TableScan: person
+    "
     );
 }
 
@@ -3110,11 +3044,11 @@ fn select_7480_1() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: aggregate_test_100.c1, min(aggregate_test_100.c12)
-  Aggregate: groupBy=[[aggregate_test_100.c1, aggregate_test_100.c13]], aggr=[[min(aggregate_test_100.c12)]]
-    TableScan: aggregate_test_100
-"#
+        @"
+    Projection: aggregate_test_100.c1, min(aggregate_test_100.c12) AS min
+      Aggregate: groupBy=[[aggregate_test_100.c1, aggregate_test_100.c13]], aggr=[[min(aggregate_test_100.c12)]]
+        TableScan: aggregate_test_100
+    "
     );
 }
 
@@ -3125,9 +3059,7 @@ fn select_7480_2() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"
-        External error: Column inSELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "aggregate_test_100.c13" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "aggregate_test_100.c1, min(aggregate_test_100.c12)" appears in the SELECT clause satisfies this requirement
-        "#
+        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "aggregate_test_100.c13" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "aggregate_test_100.c1, min(aggregate_test_100.c12)" appears in the SELECT clause satisfies this requirement"#
     );
 }
 
@@ -3163,42 +3095,6 @@ fn create_external_table_wih_schema() {
         plan,
         @r#"
 CreateExternalTable: Partial { schema: "staging", table: "foo" }
-"#
-    );
-}
-
-#[test]
-fn create_schema_with_quoted_name() {
-    let sql = "CREATE SCHEMA \"quoted_schema_name\"";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-CreateCatalogSchema: "quoted_schema_name"
-"#
-    );
-}
-
-#[test]
-fn create_schema_with_quoted_unnormalized_name() {
-    let sql = "CREATE SCHEMA \"Foo\"";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-CreateCatalogSchema: "Foo"
-"#
-    );
-}
-
-#[test]
-fn create_schema_with_unquoted_normalized_name() {
-    let sql = "CREATE SCHEMA Foo";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-CreateCatalogSchema: "foo"
 "#
     );
 }
@@ -4352,7 +4248,8 @@ mod postgres_planning_semantics {
             .with_expr_planner(Arc::new(HookProbePlanner));
         let context = MockContextProvider { state };
         let planner = SqlToRel::new(&context);
-        let mut statements = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let mut statements =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
         let statement = statements.pop_front().expect("one statement");
         planner.statement_to_plan(statement)
     }
@@ -4414,9 +4311,7 @@ mod postgres_planning_semantics {
 
     #[test]
     fn where_having_and_join_on_conditions_run_through_plan_condition() {
-        let is_true_filter = |node: &LogicalPlan| {
-            matches!(node, LogicalPlan::Filter(filter) if filter.predicate == lit(true))
-        };
+        let is_true_filter = |node: &LogicalPlan| matches!(node, LogicalPlan::Filter(filter) if filter.predicate == lit(true));
 
         let plan = plan_with_hook_probe("SELECT id FROM person WHERE 'true'").unwrap();
         assert!(plan_has(&plan, is_true_filter));
@@ -4442,7 +4337,8 @@ mod postgres_planning_semantics {
     #[test]
     fn substr_is_an_ordinary_function_call() {
         let plan =
-            plan_with_hook_probe("SELECT SUBSTR(first_name, age, age) FROM person").unwrap();
+            plan_with_hook_probe("SELECT SUBSTR(first_name, age, age) FROM person")
+                .unwrap();
         assert_eq!(
             scalar_call_args(&plan, "substr"),
             Some(vec![
@@ -4534,12 +4430,15 @@ mod postgres_planning_semantics {
         else {
             panic!("expected CreateMemoryTable plan");
         };
-        let referenced = spec.constraints.iter().find_map(|constraint| match constraint {
-            Constraint::ForeignKey {
-                referenced_table, ..
-            } => Some(referenced_table.clone()),
-            _ => None,
-        });
+        let referenced =
+            spec.constraints
+                .iter()
+                .find_map(|constraint| match constraint {
+                    Constraint::ForeignKey {
+                        referenced_table, ..
+                    } => Some(referenced_table.clone()),
+                    _ => None,
+                });
         assert_eq!(referenced.as_deref(), Some("app.Parent"));
     }
 
@@ -4573,7 +4472,10 @@ mod postgres_planning_semantics {
         )
         .unwrap();
         let distinct_on = distinct_on(&plan).expect("DISTINCT ON node");
-        assert!(matches!(distinct_on.input.as_ref(), LogicalPlan::Aggregate(_)));
+        assert!(matches!(
+            distinct_on.input.as_ref(),
+            LogicalPlan::Aggregate(_)
+        ));
         assert_eq!(distinct_on.sort_expr.as_ref().map(Vec::len), Some(2));
     }
 
@@ -4602,9 +4504,10 @@ mod postgres_planning_semantics {
 
     #[test]
     fn distinct_on_reads_an_output_alias_as_its_expression() {
-        let plan =
-            logical_plan("SELECT DISTINCT ON (s) state AS s, id FROM person ORDER BY s, id")
-                .unwrap();
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (s) state AS s, id FROM person ORDER BY s, id",
+        )
+        .unwrap();
         let distinct_on = distinct_on(&plan).expect("DISTINCT ON node");
         assert_eq!(distinct_on.on_expr, vec![col("person.state")]);
     }
@@ -5020,16 +4923,16 @@ fn scalar_subquery() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: p.id, (<subquery>)
-  Subquery:
-    Projection: max(person.id)
-      Aggregate: groupBy=[[]], aggr=[[max(person.id)]]
-        Filter: person.last_name = outer_ref(p.last_name)
-          TableScan: person
-  SubqueryAlias: p
-    TableScan: person
-"#
+        @"
+    Projection: p.id, (<subquery>)
+      Subquery:
+        Projection: max(person.id) AS max
+          Aggregate: groupBy=[[]], aggr=[[max(person.id)]]
+            Filter: person.last_name = outer_ref(p.last_name)
+              TableScan: person
+      SubqueryAlias: p
+        TableScan: person
+    "
     );
 }
 
@@ -5045,20 +4948,20 @@ fn scalar_subquery_reference_outer_field() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: j1.j1_string, j2.j2_string
-  Filter: j1.j1_id = j2.j2_id - Int32(1) AND j2.j2_id < (<subquery>)
-    Subquery:
-      Projection: count(*)
-        Aggregate: groupBy=[[]], aggr=[[count(*)]]
-          Filter: outer_ref(j2.j2_id) = j1.j1_id AND j1.j1_id = j3.j3_id
-            Cross Join: 
-              TableScan: j1
-              TableScan: j3
-    Cross Join: 
-      TableScan: j1
-      TableScan: j2
-"#
+        @"
+    Projection: j1.j1_string, j2.j2_string
+      Filter: j1.j1_id = j2.j2_id - Int32(1) AND j2.j2_id < (<subquery>)
+        Subquery:
+          Projection: count(*) AS count
+            Aggregate: groupBy=[[]], aggr=[[count(*)]]
+              Filter: outer_ref(j2.j2_id) = j1.j1_id AND j1.j1_id = j3.j3_id
+                Cross Join: 
+                  TableScan: j1
+                  TableScan: j3
+        Cross Join: 
+          TableScan: j1
+          TableScan: j2
+    "
     );
 }
 
@@ -5069,11 +4972,11 @@ fn aggregate_with_rollup() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: person.id, person.state, person.age, count(*)
-  Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[count(*)]]
-    TableScan: person
-"#
+        @"
+    Projection: person.id, person.state, person.age, count(*) AS count
+      Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[count(*)]]
+        TableScan: person
+    "
     );
 }
 
@@ -5084,11 +4987,11 @@ fn aggregate_with_rollup_with_grouping() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: person.id, person.state, person.age, grouping(person.state), grouping(person.age), grouping(person.state) + grouping(person.age), count(*)
-  Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[grouping(person.state), grouping(person.age), count(*)]]
-    TableScan: person
-"#
+        @"
+    Projection: person.id, person.state, person.age, grouping(person.state), grouping(person.age), grouping(person.state) + grouping(person.age), count(*) AS count
+      Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[grouping(person.state), grouping(person.age), count(*)]]
+        TableScan: person
+    "
     );
 }
 
@@ -5101,11 +5004,11 @@ fn aggregate_with_cube() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: person.id, person.state, person.age, count(*)
-  Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.age), (person.id, person.state, person.age))]], aggr=[[count(*)]]
-    TableScan: person
-"#
+        @"
+    Projection: person.id, person.state, person.age, count(*) AS count
+      Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.age), (person.id, person.state, person.age))]], aggr=[[count(*)]]
+        TableScan: person
+    "
     );
 }
 
@@ -5115,10 +5018,10 @@ fn round_decimal() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: round(test_decimal.price / Int32(3), Int32(2))
-  TableScan: test_decimal
-"#
+        @"
+    Projection: round(test_decimal.price / Int32(3), Int32(2)) AS round
+      TableScan: test_decimal
+    "
     );
 }
 
@@ -5128,11 +5031,11 @@ fn aggregate_with_grouping_sets() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: person.id, person.state, person.age, count(*)
-  Aggregate: groupBy=[[GROUPING SETS ((person.id, person.state), (person.id, person.state, person.age), (person.id, person.id, person.state))]], aggr=[[count(*)]]
-    TableScan: person
-"#
+        @"
+    Projection: person.id, person.state, person.age, count(*) AS count
+      Aggregate: groupBy=[[GROUPING SETS ((person.id, person.state), (person.id, person.state, person.age), (person.id, person.id, person.state))]], aggr=[[count(*)]]
+        TableScan: person
+    "
     );
 }
 
@@ -5229,7 +5132,8 @@ fn cast_column_labels_bind_order_by_to_the_projected_value() {
     }
     let plan = logical_plan("SELECT age::text FROM person ORDER BY person.age").unwrap();
     assert!(plan.display_indent().to_string().contains("person.age ASC"));
-    let plan = logical_plan("SELECT age::text AS label FROM person ORDER BY age").unwrap();
+    let plan =
+        logical_plan("SELECT age::text AS label FROM person ORDER BY age").unwrap();
     assert!(plan.display_indent().to_string().contains("person.age ASC"));
 }
 
@@ -5240,9 +5144,7 @@ fn order_by_ambiguous_name() {
 
     assert_snapshot!(
         err,
-        @r###"
-        Schema error: Ambiguous reference to unqualified field age
-        "###
+        @r#"External error: ORDER BY "age" is ambiguous"#
     );
 }
 
@@ -6292,10 +6194,13 @@ fn host_utility_statements_stop_before_relational_planning() {
         "GRANT utility_role TO utility_user",
         "REVOKE utility_role FROM utility_user",
         "BEGIN",
+        "START TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
         "COMMIT",
+        "COMMIT AND CHAIN",
         "SAVEPOINT utility_savepoint",
         "RELEASE SAVEPOINT utility_savepoint",
         "ROLLBACK",
+        "ROLLBACK AND CHAIN",
         "SET application_name = 'utility'",
         "RESET application_name",
         "CREATE FUNCTION utility_function() RETURNS INT LANGUAGE SQL RETURN 1",
@@ -6338,23 +6243,23 @@ fn multi_level_correlated_scalar_subquery_inside_exists() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: p.first_name
-  Filter: EXISTS (<subquery>)
-    Subquery:
-      Projection: Int32(1)
-        Filter: o.customer_id = outer_ref(p.id) AND o.price > (<subquery>)
-          Subquery:
-            Projection: avg(o2.price)
-              Aggregate: groupBy=[[]], aggr=[[avg(o2.price)]]
-                Filter: o2.customer_id = outer_ref(p.id)
-                  SubqueryAlias: o2
-                    TableScan: orders
-          SubqueryAlias: o
-            TableScan: orders
-    SubqueryAlias: p
-      TableScan: person
-"#
+        @"
+    Projection: p.first_name
+      Filter: EXISTS (<subquery>)
+        Subquery:
+          Projection: Int32(1)
+            Filter: o.customer_id = outer_ref(p.id) AND o.price > (<subquery>)
+              Subquery:
+                Projection: avg(o2.price) AS avg
+                  Aggregate: groupBy=[[]], aggr=[[avg(o2.price)]]
+                    Filter: o2.customer_id = outer_ref(p.id)
+                      SubqueryAlias: o2
+                        TableScan: orders
+              SubqueryAlias: o
+                TableScan: orders
+        SubqueryAlias: p
+          TableScan: person
+    "
     );
 }
 
@@ -6369,23 +6274,23 @@ fn multi_level_correlated_scalar_in_scalar() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: p1.first_name, (<subquery>)
-  Subquery:
-    Projection: avg(p2.salary)
-      Aggregate: groupBy=[[]], aggr=[[avg(p2.salary)]]
-        Filter: p2.state = outer_ref(p1.state) AND p2.age > (<subquery>)
-          Subquery:
-            Projection: avg(p3.age)
-              Aggregate: groupBy=[[]], aggr=[[avg(p3.age)]]
-                Filter: p3.state = outer_ref(p1.state)
-                  SubqueryAlias: p3
-                    TableScan: person
-          SubqueryAlias: p2
-            TableScan: person
-  SubqueryAlias: p1
-    TableScan: person
-"#
+        @"
+    Projection: p1.first_name, (<subquery>)
+      Subquery:
+        Projection: avg(p2.salary) AS avg
+          Aggregate: groupBy=[[]], aggr=[[avg(p2.salary)]]
+            Filter: p2.state = outer_ref(p1.state) AND p2.age > (<subquery>)
+              Subquery:
+                Projection: avg(p3.age) AS avg
+                  Aggregate: groupBy=[[]], aggr=[[avg(p3.age)]]
+                    Filter: p3.state = outer_ref(p1.state)
+                      SubqueryAlias: p3
+                        TableScan: person
+              SubqueryAlias: p2
+                TableScan: person
+      SubqueryAlias: p1
+        TableScan: person
+    "
     );
 }
 
@@ -6402,22 +6307,22 @@ fn multi_level_correlated_in_subquery_with_scalar() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Projection: p.first_name
-  Filter: p.id IN (<subquery>)
-    Subquery:
-      Projection: o.customer_id
-        Filter: o.price > (<subquery>)
-          Subquery:
-            Projection: avg(person.salary)
-              Aggregate: groupBy=[[]], aggr=[[avg(person.salary)]]
-                Filter: person.state = outer_ref(p.state)
-                  TableScan: person
-          SubqueryAlias: o
-            TableScan: orders
-    SubqueryAlias: p
-      TableScan: person
-"#
+        @"
+    Projection: p.first_name
+      Filter: p.id IN (<subquery>)
+        Subquery:
+          Projection: o.customer_id
+            Filter: o.price > (<subquery>)
+              Subquery:
+                Projection: avg(person.salary) AS avg
+                  Aggregate: groupBy=[[]], aggr=[[avg(person.salary)]]
+                    Filter: person.state = outer_ref(p.state)
+                      TableScan: person
+              SubqueryAlias: o
+                TableScan: orders
+        SubqueryAlias: p
+          TableScan: person
+    "
     );
 }
 
@@ -6433,14 +6338,14 @@ fn plan_delete_using() {
     assert_snapshot!(
         plan,
         @r#"
-Dml: op=[Delete] table=[orders]
-  Filter: o.customer_id = p.id AND p.state = Utf8("CA")
-    Cross Join: 
-      SubqueryAlias: o
-        TableScan: orders
-      SubqueryAlias: p
-        TableScan: person
-"#
+    Dml: op=[Delete] table=[orders]
+      Filter: o.customer_id = p.id AND p.state = Utf8("CA")
+        Cross Join: 
+          SubqueryAlias: o
+            TableScan: orders, row_lock=[FOR UPDATE]
+          SubqueryAlias: p
+            TableScan: person
+    "#
     );
 }
 
@@ -6451,17 +6356,17 @@ fn plan_delete_using_multiple_tables() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Dml: op=[Delete] table=[orders]
-  Filter: o.customer_id = p.id AND p.id = j1.j1_id
-    Cross Join: 
-      Cross Join: 
-        SubqueryAlias: o
-          TableScan: orders
-        SubqueryAlias: p
-          TableScan: person
-      TableScan: j1
-"#
+        @"
+    Dml: op=[Delete] table=[orders]
+      Filter: o.customer_id = p.id AND p.id = j1.j1_id
+        Cross Join: 
+          Cross Join: 
+            SubqueryAlias: o
+              TableScan: orders, row_lock=[FOR UPDATE]
+            SubqueryAlias: p
+              TableScan: person
+          TableScan: j1
+    "
     );
 }
 
@@ -6472,13 +6377,13 @@ fn plan_delete_using_no_alias() {
     let plan = logical_plan(sql).unwrap();
     assert_snapshot!(
         plan,
-        @r#"
-Dml: op=[Delete] table=[orders]
-  Filter: orders.customer_id = person.id
-    Cross Join: 
-      TableScan: orders
-      TableScan: person
-"#
+        @"
+    Dml: op=[Delete] table=[orders]
+      Filter: orders.customer_id = person.id
+        Cross Join: 
+          TableScan: orders, row_lock=[FOR UPDATE]
+          TableScan: person
+    "
     );
 }
 

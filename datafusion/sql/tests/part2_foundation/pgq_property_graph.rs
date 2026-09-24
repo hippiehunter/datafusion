@@ -40,7 +40,7 @@
 //! Note: SQL/PGQ is defined in ISO/IEC 9075-16:2023 and is an optional
 //! extension to the SQL standard.
 
-use crate::assert_plans;
+use crate::{assert_plan_error, assert_plans};
 
 // ============================================================================
 // PGQ001: CREATE PROPERTY GRAPH
@@ -49,85 +49,92 @@ use crate::assert_plans;
 /// PGQ001: Basic CREATE PROPERTY GRAPH with vertex table
 #[test]
 fn pgq001_create_property_graph_basic() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with multiple vertex tables
 #[test]
 fn pgq001_create_property_graph_multiple_vertices() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person,
            Company
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with key specification
 #[test]
 fn pgq001_create_property_graph_with_key() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person KEY (id)
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with label
 #[test]
 fn pgq001_create_property_graph_with_label() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person LABEL User
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with properties clause
 #[test]
 fn pgq001_create_property_graph_with_properties() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person PROPERTIES (name, age)
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: Explicit all-column property exposure remains a typed plan mode.
 #[test]
 fn pgq001_create_property_graph_with_all_columns() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person LABEL User PROPERTIES ARE ALL COLUMNS
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with full vertex definition
 #[test]
 fn pgq001_create_property_graph_full_vertex() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person KEY (id) LABEL User PROPERTIES (name, age, email)
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with edge table
 #[test]
 fn pgq001_create_property_graph_with_edges() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person
@@ -135,14 +142,15 @@ fn pgq001_create_property_graph_with_edges() {
          EDGE TABLES (
            Knows SOURCE KEY (src_id) REFERENCES Person
                  DESTINATION KEY (dst_id) REFERENCES Person
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with edge label
 #[test]
 fn pgq001_create_property_graph_edge_with_label() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person
@@ -151,14 +159,15 @@ fn pgq001_create_property_graph_edge_with_label() {
            Friendship SOURCE KEY (person1_id) REFERENCES Person
                       DESTINATION KEY (person2_id) REFERENCES Person
                       LABEL Knows
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with edge properties
 #[test]
 fn pgq001_create_property_graph_edge_properties() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person
@@ -167,14 +176,15 @@ fn pgq001_create_property_graph_edge_properties() {
            Knows SOURCE KEY (src_id) REFERENCES Person
                  DESTINATION KEY (dst_id) REFERENCES Person
                  PROPERTIES (since, strength)
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH with multiple edge tables
 #[test]
 fn pgq001_create_property_graph_multiple_edges() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person,
@@ -185,29 +195,32 @@ fn pgq001_create_property_graph_multiple_edges() {
                  DESTINATION KEY (dst) REFERENCES Person,
            WorksAt SOURCE KEY (person_id) REFERENCES Person
                    DESTINATION KEY (company_id) REFERENCES Company
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE OR REPLACE PROPERTY GRAPH
 #[test]
 fn pgq001_create_or_replace_property_graph() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE OR REPLACE PROPERTY GRAPH social_network
          VERTEX TABLES (
            Person
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
 /// PGQ001: CREATE PROPERTY GRAPH IF NOT EXISTS
 #[test]
 fn pgq001_create_property_graph_if_not_exists() {
-    assert_plans!(
+    assert_plan_error!(
         "CREATE PROPERTY GRAPH IF NOT EXISTS social_network
          VERTEX TABLES (
            Person
-         )"
+         )",
+        "bypass relational SQL planning"
     );
 }
 
@@ -218,31 +231,46 @@ fn pgq001_create_property_graph_if_not_exists() {
 /// PGQ002: Basic DROP PROPERTY GRAPH
 #[test]
 fn pgq002_drop_property_graph_basic() {
-    assert_plans!("DROP PROPERTY GRAPH social_network");
+    assert_plan_error!(
+        "DROP PROPERTY GRAPH social_network",
+        "bypass relational SQL planning"
+    );
 }
 
 /// PGQ002: DROP PROPERTY GRAPH IF EXISTS
 #[test]
 fn pgq002_drop_property_graph_if_exists() {
-    assert_plans!("DROP PROPERTY GRAPH IF EXISTS social_network");
+    assert_plan_error!(
+        "DROP PROPERTY GRAPH IF EXISTS social_network",
+        "bypass relational SQL planning"
+    );
 }
 
 /// PGQ002: DROP PROPERTY GRAPH CASCADE
 #[test]
 fn pgq002_drop_property_graph_cascade() {
-    assert_plans!("DROP PROPERTY GRAPH social_network CASCADE");
+    assert_plan_error!(
+        "DROP PROPERTY GRAPH social_network CASCADE",
+        "bypass relational SQL planning"
+    );
 }
 
 /// PGQ002: DROP PROPERTY GRAPH RESTRICT
 #[test]
 fn pgq002_drop_property_graph_restrict() {
-    assert_plans!("DROP PROPERTY GRAPH social_network RESTRICT");
+    assert_plan_error!(
+        "DROP PROPERTY GRAPH social_network RESTRICT",
+        "bypass relational SQL planning"
+    );
 }
 
 /// PGQ002: DROP PROPERTY GRAPH IF EXISTS CASCADE
 #[test]
 fn pgq002_drop_property_graph_if_exists_cascade() {
-    assert_plans!("DROP PROPERTY GRAPH IF EXISTS social_network CASCADE");
+    assert_plan_error!(
+        "DROP PROPERTY GRAPH IF EXISTS social_network CASCADE",
+        "bypass relational SQL planning"
+    );
 }
 
 // ============================================================================

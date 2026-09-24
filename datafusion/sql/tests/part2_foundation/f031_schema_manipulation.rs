@@ -39,7 +39,8 @@
 //! F031 is a CORE feature (mandatory for SQL:2016 conformance).
 
 use crate::{
-    assert_feature_supported, assert_parses, assert_plans, assert_utility_boundary,
+    assert_feature_supported, assert_parses, assert_plan_error, assert_plans,
+    assert_utility_boundary,
 };
 
 // ============================================================================
@@ -265,7 +266,7 @@ fn f031_02_create_view_on_view() {
 #[test]
 fn f031_03_grant_select() {
     // GAP: DataFusion does not currently support GRANT statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON t TO user1",
         "F031-03",
         "GRANT SELECT privilege"
@@ -276,7 +277,7 @@ fn f031_03_grant_select() {
 #[test]
 fn f031_03_grant_multiple() {
     // GAP: DataFusion does not currently support GRANT statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT, INSERT, UPDATE ON person TO user1",
         "F031-03",
         "GRANT multiple privileges"
@@ -287,7 +288,7 @@ fn f031_03_grant_multiple() {
 #[test]
 fn f031_03_grant_all() {
     // GAP: DataFusion does not currently support GRANT statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT ALL PRIVILEGES ON t TO user1",
         "F031-03",
         "GRANT ALL PRIVILEGES"
@@ -298,7 +299,7 @@ fn f031_03_grant_all() {
 #[test]
 fn f031_03_grant_with_grant_option() {
     // GAP: DataFusion does not currently support GRANT statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON t TO user1 WITH GRANT OPTION",
         "F031-03",
         "GRANT with WITH GRANT OPTION"
@@ -309,11 +310,7 @@ fn f031_03_grant_with_grant_option() {
 #[test]
 fn f031_03_grant_to_public() {
     // GAP: DataFusion does not currently support GRANT statements
-    assert_feature_supported!(
-        "GRANT SELECT ON t TO PUBLIC",
-        "F031-03",
-        "GRANT to PUBLIC"
-    );
+    assert_utility_boundary!("GRANT SELECT ON t TO PUBLIC", "F031-03", "GRANT to PUBLIC");
 }
 
 // ============================================================================
@@ -407,35 +404,31 @@ fn f031_04_alter_table_add_if_not_exists() {
 /// F031-13: DROP TABLE basic
 #[test]
 fn f031_13_drop_table_basic() {
-    assert_feature_supported!("DROP TABLE t", "F031-13", "Basic DROP TABLE");
+    assert_utility_boundary!("DROP TABLE t", "F031-13", "Basic DROP TABLE");
 }
 
 /// F031-13: DROP TABLE with RESTRICT
 #[test]
 fn f031_13_drop_table_restrict() {
-    assert_feature_supported!("DROP TABLE t RESTRICT", "F031-13", "DROP TABLE RESTRICT");
+    assert_utility_boundary!("DROP TABLE t RESTRICT", "F031-13", "DROP TABLE RESTRICT");
 }
 
 /// F031-13: DROP TABLE with CASCADE
 #[test]
 fn f031_13_drop_table_cascade() {
-    assert_feature_supported!("DROP TABLE t CASCADE", "F031-13", "DROP TABLE CASCADE");
+    assert_utility_boundary!("DROP TABLE t CASCADE", "F031-13", "DROP TABLE CASCADE");
 }
 
 /// F031-13: DROP TABLE IF EXISTS
 #[test]
 fn f031_13_drop_table_if_exists() {
-    assert_feature_supported!(
-        "DROP TABLE IF EXISTS t",
-        "F031-13",
-        "DROP TABLE IF EXISTS"
-    );
+    assert_utility_boundary!("DROP TABLE IF EXISTS t", "F031-13", "DROP TABLE IF EXISTS");
 }
 
 /// F031-13: DROP TABLE with qualified name
 #[test]
 fn f031_13_drop_table_qualified() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP TABLE schema_name.t",
         "F031-13",
         "DROP TABLE with qualified name"
@@ -445,7 +438,7 @@ fn f031_13_drop_table_qualified() {
 /// F031-13: DROP TABLE IF EXISTS with RESTRICT
 #[test]
 fn f031_13_drop_table_if_exists_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP TABLE IF EXISTS t RESTRICT",
         "F031-13",
         "DROP TABLE IF EXISTS RESTRICT"
@@ -455,7 +448,7 @@ fn f031_13_drop_table_if_exists_restrict() {
 /// F031-13: DROP TABLE IF EXISTS with CASCADE
 #[test]
 fn f031_13_drop_table_if_exists_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP TABLE IF EXISTS t CASCADE",
         "F031-13",
         "DROP TABLE IF EXISTS CASCADE"
@@ -469,31 +462,31 @@ fn f031_13_drop_table_if_exists_cascade() {
 /// F031-16: DROP VIEW basic
 #[test]
 fn f031_16_drop_view_basic() {
-    assert_feature_supported!("DROP VIEW v", "F031-16", "Basic DROP VIEW");
+    assert_utility_boundary!("DROP VIEW v", "F031-16", "Basic DROP VIEW");
 }
 
 /// F031-16: DROP VIEW with RESTRICT
 #[test]
 fn f031_16_drop_view_restrict() {
-    assert_feature_supported!("DROP VIEW v RESTRICT", "F031-16", "DROP VIEW RESTRICT");
+    assert_utility_boundary!("DROP VIEW v RESTRICT", "F031-16", "DROP VIEW RESTRICT");
 }
 
 /// F031-16: DROP VIEW with CASCADE
 #[test]
 fn f031_16_drop_view_cascade() {
-    assert_feature_supported!("DROP VIEW v CASCADE", "F031-16", "DROP VIEW CASCADE");
+    assert_utility_boundary!("DROP VIEW v CASCADE", "F031-16", "DROP VIEW CASCADE");
 }
 
 /// F031-16: DROP VIEW IF EXISTS
 #[test]
 fn f031_16_drop_view_if_exists() {
-    assert_feature_supported!("DROP VIEW IF EXISTS v", "F031-16", "DROP VIEW IF EXISTS");
+    assert_utility_boundary!("DROP VIEW IF EXISTS v", "F031-16", "DROP VIEW IF EXISTS");
 }
 
 /// F031-16: DROP VIEW with qualified name
 #[test]
 fn f031_16_drop_view_qualified() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP VIEW schema_name.v",
         "F031-16",
         "DROP VIEW with qualified name"
@@ -503,7 +496,7 @@ fn f031_16_drop_view_qualified() {
 /// F031-16: DROP VIEW IF EXISTS with RESTRICT
 #[test]
 fn f031_16_drop_view_if_exists_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP VIEW IF EXISTS v RESTRICT",
         "F031-16",
         "DROP VIEW IF EXISTS RESTRICT"
@@ -513,7 +506,7 @@ fn f031_16_drop_view_if_exists_restrict() {
 /// F031-16: DROP VIEW IF EXISTS with CASCADE
 #[test]
 fn f031_16_drop_view_if_exists_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP VIEW IF EXISTS v CASCADE",
         "F031-16",
         "DROP VIEW IF EXISTS CASCADE"
@@ -528,14 +521,14 @@ fn f031_16_drop_view_if_exists_cascade() {
 #[test]
 fn f031_19_revoke_basic() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!("REVOKE SELECT ON t FROM user1", "F031-19", "Basic REVOKE");
+    assert_utility_boundary!("REVOKE SELECT ON t FROM user1", "F031-19", "Basic REVOKE");
 }
 
 /// F031-19: REVOKE with RESTRICT
 #[test]
 fn f031_19_revoke_restrict() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON t FROM user1 RESTRICT",
         "F031-19",
         "REVOKE with RESTRICT"
@@ -546,7 +539,7 @@ fn f031_19_revoke_restrict() {
 #[test]
 fn f031_19_revoke_cascade() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON t FROM user1 CASCADE",
         "F031-19",
         "REVOKE with CASCADE"
@@ -557,7 +550,7 @@ fn f031_19_revoke_cascade() {
 #[test]
 fn f031_19_revoke_multiple() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT, INSERT, UPDATE ON person FROM user1",
         "F031-19",
         "REVOKE multiple privileges"
@@ -568,7 +561,7 @@ fn f031_19_revoke_multiple() {
 #[test]
 fn f031_19_revoke_all() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE ALL PRIVILEGES ON t FROM user1",
         "F031-19",
         "REVOKE ALL PRIVILEGES"
@@ -579,7 +572,7 @@ fn f031_19_revoke_all() {
 #[test]
 fn f031_19_revoke_grant_option() {
     // GAP: DataFusion does not currently support REVOKE statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE GRANT OPTION FOR SELECT ON t FROM user1",
         "F031-19",
         "REVOKE GRANT OPTION FOR"
@@ -593,7 +586,7 @@ fn f031_19_revoke_grant_option() {
 /// F311-01: CREATE SCHEMA basic
 #[test]
 fn f311_01_create_schema_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE SCHEMA schema_name",
         "F311-01",
         "Basic CREATE SCHEMA"
@@ -603,7 +596,7 @@ fn f311_01_create_schema_basic() {
 /// F311-01: CREATE SCHEMA IF NOT EXISTS
 #[test]
 fn f311_01_create_schema_if_not_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE SCHEMA IF NOT EXISTS schema_name",
         "F311-01",
         "CREATE SCHEMA IF NOT EXISTS"
@@ -614,7 +607,7 @@ fn f311_01_create_schema_if_not_exists() {
 #[test]
 fn f311_01_create_schema_authorization() {
     // GAP: DataFusion may not support AUTHORIZATION clause
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE SCHEMA schema_name AUTHORIZATION user1",
         "F311-01",
         "CREATE SCHEMA with AUTHORIZATION"
@@ -678,7 +671,7 @@ fn f311_04_create_view_local_check() {
 #[test]
 fn f311_05_grant_statement() {
     // GAP: DataFusion does not currently support GRANT statements
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT, INSERT ON person TO user1",
         "F311-05",
         "GRANT statement in schema definition"
@@ -831,13 +824,13 @@ fn f381_alter_table_drop_constraint_cascade() {
 /// DROP SCHEMA basic
 #[test]
 fn drop_schema_basic() {
-    assert_feature_supported!("DROP SCHEMA schema_name", "F031", "Basic DROP SCHEMA");
+    assert_utility_boundary!("DROP SCHEMA schema_name", "F031", "Basic DROP SCHEMA");
 }
 
 /// DROP SCHEMA IF EXISTS
 #[test]
 fn drop_schema_if_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP SCHEMA IF EXISTS schema_name",
         "F031",
         "DROP SCHEMA IF EXISTS"
@@ -847,7 +840,7 @@ fn drop_schema_if_exists() {
 /// DROP SCHEMA with RESTRICT
 #[test]
 fn drop_schema_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP SCHEMA schema_name RESTRICT",
         "F031",
         "DROP SCHEMA RESTRICT"
@@ -857,7 +850,7 @@ fn drop_schema_restrict() {
 /// DROP SCHEMA with CASCADE
 #[test]
 fn drop_schema_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP SCHEMA schema_name CASCADE",
         "F031",
         "DROP SCHEMA CASCADE"
@@ -907,13 +900,13 @@ fn create_index_if_not_exists() {
 /// DROP INDEX basic
 #[test]
 fn drop_index_basic() {
-    assert_feature_supported!("DROP INDEX idx_name", "F031", "Basic DROP INDEX");
+    assert_utility_boundary!("DROP INDEX idx_name", "F031", "Basic DROP INDEX");
 }
 
 /// DROP INDEX IF EXISTS
 #[test]
 fn drop_index_if_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP INDEX IF EXISTS idx_name",
         "F031",
         "DROP INDEX IF EXISTS"
@@ -1030,7 +1023,10 @@ fn f031_f311_summary_ddl_workflow() {
     // This test verifies a complete DDL workflow using F031 and F311 features
 
     // Create schema
-    assert_plans!("CREATE SCHEMA IF NOT EXISTS myschema");
+    assert_plan_error!(
+        "CREATE SCHEMA IF NOT EXISTS myschema",
+        "bypass relational SQL planning"
+    );
 
     // Create base tables
     assert_plans!(
@@ -1074,10 +1070,16 @@ fn f031_f311_summary_ddl_workflow() {
     assert_parses!("ALTER TABLE person DROP COLUMN phone");
 
     // Drop objects
-    assert_plans!("DROP VIEW customer_order_summary");
-    assert_plans!("DROP VIEW active_customers");
-    assert_plans!("DROP TABLE orders");
-    assert_plans!("DROP TABLE person");
+    assert_plan_error!(
+        "DROP VIEW customer_order_summary",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "DROP VIEW active_customers",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!("DROP TABLE orders", "bypass relational SQL planning");
+    assert_plan_error!("DROP TABLE person", "bypass relational SQL planning");
 }
 
 #[test]
@@ -1102,7 +1104,7 @@ fn f031_table_lifecycle() {
     assert_parses!("ALTER TABLE t DROP COLUMN age");
 
     // Drop table
-    assert_plans!("DROP TABLE t");
+    assert_plan_error!("DROP TABLE t", "bypass relational SQL planning");
 }
 
 #[test]
@@ -1116,8 +1118,8 @@ fn f031_view_lifecycle() {
     assert_plans!("CREATE VIEW v2 AS SELECT id, first_name FROM v");
 
     // Drop views (must drop dependent view first)
-    assert_plans!("DROP VIEW v2");
-    assert_plans!("DROP VIEW v");
+    assert_plan_error!("DROP VIEW v2", "bypass relational SQL planning");
+    assert_plan_error!("DROP VIEW v", "bypass relational SQL planning");
 }
 
 #[test]
@@ -1148,7 +1150,7 @@ fn f031_ctas_workflow() {
     );
 
     // Drop created tables
-    assert_plans!("DROP TABLE age_groups");
-    assert_plans!("DROP TABLE adults");
-    assert_plans!("DROP TABLE person_copy");
+    assert_plan_error!("DROP TABLE age_groups", "bypass relational SQL planning");
+    assert_plan_error!("DROP TABLE adults", "bypass relational SQL planning");
+    assert_plan_error!("DROP TABLE person_copy", "bypass relational SQL planning");
 }

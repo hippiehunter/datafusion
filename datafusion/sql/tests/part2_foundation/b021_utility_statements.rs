@@ -40,7 +40,9 @@
 //!
 //! Tests that fail indicate gaps in DataFusion's utility statement support.
 
-use crate::{assert_feature_supported, assert_plans};
+use crate::{
+    assert_feature_supported, assert_plan_error, assert_plans, assert_utility_boundary,
+};
 
 // ============================================================================
 // COPY Statement
@@ -319,7 +321,7 @@ fn b021_explain_create_table_as() {
 /// PREPARE: Basic PREPARE statement
 #[test]
 fn b021_prepare_basic() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "PREPARE my_query AS SELECT * FROM t",
         "B021",
         "PREPARE statement"
@@ -329,7 +331,7 @@ fn b021_prepare_basic() {
 /// PREPARE: PREPARE with WHERE clause
 #[test]
 fn b021_prepare_where() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "PREPARE filtered_query AS SELECT * FROM person WHERE age > 21",
         "B021",
         "PREPARE with WHERE"
@@ -339,7 +341,7 @@ fn b021_prepare_where() {
 /// PREPARE: PREPARE with parameters ($1 style)
 #[test]
 fn b021_prepare_parameters_dollar() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "PREPARE param_query AS SELECT * FROM person WHERE age > $1 AND state = $2",
         "B021",
         "PREPARE with $N parameters"
@@ -359,7 +361,7 @@ fn b021_prepare_parameters_question() {
 /// PREPARE: PREPARE INSERT statement
 #[test]
 fn b021_prepare_insert() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "PREPARE insert_stmt AS INSERT INTO t (a, b, c) VALUES ($1, $2, $3)",
         "B021",
         "PREPARE INSERT"
@@ -369,7 +371,7 @@ fn b021_prepare_insert() {
 /// PREPARE: PREPARE UPDATE statement
 #[test]
 fn b021_prepare_update() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "PREPARE update_stmt AS UPDATE person SET salary = $1 WHERE id = $2",
         "B021",
         "PREPARE UPDATE"
@@ -379,7 +381,7 @@ fn b021_prepare_update() {
 /// PREPARE: PREPARE DELETE statement
 #[test]
 fn b021_prepare_delete() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "PREPARE delete_stmt AS DELETE FROM orders WHERE order_id = $1",
         "B021",
         "PREPARE DELETE"
@@ -389,13 +391,13 @@ fn b021_prepare_delete() {
 /// EXECUTE: Basic EXECUTE statement
 #[test]
 fn b021_execute_basic() {
-    assert_feature_supported!("EXECUTE my_query", "B021", "EXECUTE prepared statement");
+    assert_utility_boundary!("EXECUTE my_query", "B021", "EXECUTE prepared statement");
 }
 
 /// EXECUTE: EXECUTE with USING clause
 #[test]
 fn b021_execute_using() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "EXECUTE param_query USING 30, 'CA'",
         "B021",
         "EXECUTE with USING values"
@@ -405,7 +407,7 @@ fn b021_execute_using() {
 /// EXECUTE: EXECUTE with parenthesized values
 #[test]
 fn b021_execute_values() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "EXECUTE param_query(30, 'CA')",
         "B021",
         "EXECUTE with parameter values"
@@ -415,7 +417,7 @@ fn b021_execute_values() {
 /// DEALLOCATE: DEALLOCATE specific statement
 #[test]
 fn b021_deallocate_specific() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DEALLOCATE my_query",
         "B021",
         "DEALLOCATE prepared statement"
@@ -425,23 +427,19 @@ fn b021_deallocate_specific() {
 /// DEALLOCATE: DEALLOCATE PREPARE variant
 #[test]
 fn b021_deallocate_prepare() {
-    assert_feature_supported!(
-        "DEALLOCATE PREPARE my_query",
-        "B021",
-        "DEALLOCATE PREPARE"
-    );
+    assert_utility_boundary!("DEALLOCATE PREPARE my_query", "B021", "DEALLOCATE PREPARE");
 }
 
 /// DEALLOCATE: DEALLOCATE ALL
 #[test]
 fn b021_deallocate_all() {
-    assert_feature_supported!("DEALLOCATE ALL", "B021", "DEALLOCATE ALL");
+    assert_utility_boundary!("DEALLOCATE ALL", "B021", "DEALLOCATE ALL");
 }
 
 /// DEALLOCATE: DEALLOCATE PREPARE ALL
 #[test]
 fn b021_deallocate_prepare_all() {
-    assert_feature_supported!("DEALLOCATE PREPARE ALL", "B021", "DEALLOCATE PREPARE ALL");
+    assert_utility_boundary!("DEALLOCATE PREPARE ALL", "B021", "DEALLOCATE PREPARE ALL");
 }
 
 // ============================================================================
@@ -489,19 +487,19 @@ fn b021_show_columns() {
 /// SET: SET variable to value
 #[test]
 fn b021_set_variable() {
-    assert_feature_supported!("SET max_parallel_workers = 8", "B021", "SET variable");
+    assert_utility_boundary!("SET max_parallel_workers = 8", "B021", "SET variable");
 }
 
 /// SET: SET variable to string value
 #[test]
 fn b021_set_string_value() {
-    assert_feature_supported!("SET timezone = 'UTC'", "B021", "SET string variable");
+    assert_utility_boundary!("SET timezone = 'UTC'", "B021", "SET string variable");
 }
 
 /// SET: SET with dotted variable name
 #[test]
 fn b021_set_dotted_variable() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET datafusion.execution.batch_size = 8192",
         "B021",
         "SET dotted variable name"
@@ -511,7 +509,7 @@ fn b021_set_dotted_variable() {
 /// SET: SET SESSION variable
 #[test]
 fn b021_set_session() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET SESSION max_parallel_workers = 8",
         "B021",
         "SET SESSION variable"
@@ -521,7 +519,7 @@ fn b021_set_session() {
 /// SET: SET LOCAL variable (transaction scope)
 #[test]
 fn b021_set_local() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET LOCAL timezone = 'America/New_York'",
         "B021",
         "SET LOCAL variable"
@@ -531,7 +529,7 @@ fn b021_set_local() {
 /// SET: SET variable to DEFAULT
 #[test]
 fn b021_set_default() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "SET max_parallel_workers = DEFAULT",
         "B021",
         "SET variable to DEFAULT"
@@ -541,19 +539,19 @@ fn b021_set_default() {
 /// SET: SET TIME ZONE
 #[test]
 fn b021_set_time_zone() {
-    assert_feature_supported!("SET TIME ZONE 'UTC'", "B021", "SET TIME ZONE");
+    assert_utility_boundary!("SET TIME ZONE 'UTC'", "B021", "SET TIME ZONE");
 }
 
 /// RESET: RESET variable to default
 #[test]
 fn b021_reset_variable() {
-    assert_feature_supported!("RESET max_parallel_workers", "B021", "RESET variable");
+    assert_utility_boundary!("RESET max_parallel_workers", "B021", "RESET variable");
 }
 
 /// RESET: RESET ALL variables
 #[test]
 fn b021_reset_all() {
-    assert_feature_supported!("RESET ALL", "B021", "RESET ALL");
+    assert_utility_boundary!("RESET ALL", "B021", "RESET ALL");
 }
 
 // ============================================================================
@@ -609,19 +607,19 @@ fn b021_describe_aggregation_query() {
 /// TRUNCATE: Basic TRUNCATE TABLE
 #[test]
 fn b021_truncate_basic() {
-    assert_feature_supported!("TRUNCATE TABLE t", "B021", "TRUNCATE TABLE");
+    assert_utility_boundary!("TRUNCATE TABLE t", "B021", "TRUNCATE TABLE");
 }
 
 /// TRUNCATE: TRUNCATE without TABLE keyword
 #[test]
 fn b021_truncate_no_table_keyword() {
-    assert_feature_supported!("TRUNCATE person", "B021", "TRUNCATE without TABLE");
+    assert_utility_boundary!("TRUNCATE person", "B021", "TRUNCATE without TABLE");
 }
 
 /// TRUNCATE: TRUNCATE with qualified name
 #[test]
 fn b021_truncate_qualified() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "TRUNCATE TABLE public.orders",
         "B021",
         "TRUNCATE qualified table"
@@ -635,19 +633,19 @@ fn b021_truncate_qualified() {
 /// ANALYZE: ANALYZE table
 #[test]
 fn b021_analyze_table() {
-    assert_feature_supported!("ANALYZE TABLE person", "B021", "ANALYZE TABLE");
+    assert_utility_boundary!("ANALYZE TABLE person", "B021", "ANALYZE TABLE");
 }
 
 /// ANALYZE: ANALYZE without TABLE keyword
 #[test]
 fn b021_analyze_no_table_keyword() {
-    assert_feature_supported!("ANALYZE person", "B021", "ANALYZE without TABLE");
+    assert_utility_boundary!("ANALYZE person", "B021", "ANALYZE without TABLE");
 }
 
 /// ANALYZE: ANALYZE with qualified name
 #[test]
 fn b021_analyze_qualified() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ANALYZE TABLE public.orders",
         "B021",
         "ANALYZE qualified table"
@@ -657,7 +655,7 @@ fn b021_analyze_qualified() {
 /// ANALYZE: ANALYZE with COMPUTE STATISTICS
 #[test]
 fn b021_analyze_compute_statistics() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "ANALYZE TABLE person COMPUTE STATISTICS",
         "B021",
         "ANALYZE COMPUTE STATISTICS"
@@ -671,25 +669,25 @@ fn b021_analyze_compute_statistics() {
 /// VACUUM: Basic VACUUM
 #[test]
 fn b021_vacuum_basic() {
-    assert_feature_supported!("VACUUM", "B021", "VACUUM");
+    assert_utility_boundary!("VACUUM", "B021", "VACUUM");
 }
 
 /// VACUUM: VACUUM specific table
 #[test]
 fn b021_vacuum_table() {
-    assert_feature_supported!("VACUUM person", "B021", "VACUUM table");
+    assert_utility_boundary!("VACUUM person", "B021", "VACUUM table");
 }
 
 /// VACUUM: VACUUM FULL
 #[test]
 fn b021_vacuum_full() {
-    assert_feature_supported!("VACUUM FULL person", "B021", "VACUUM FULL");
+    assert_utility_boundary!("VACUUM FULL person", "B021", "VACUUM FULL");
 }
 
 /// VACUUM: VACUUM ANALYZE
 #[test]
 fn b021_vacuum_analyze() {
-    assert_feature_supported!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
+    assert_utility_boundary!("VACUUM ANALYZE person", "B021", "VACUUM ANALYZE");
 }
 
 // ============================================================================
@@ -699,7 +697,7 @@ fn b021_vacuum_analyze() {
 /// USE: USE database
 #[test]
 fn b021_use_database() {
-    assert_feature_supported!("USE mydb", "B021", "USE database");
+    assert_utility_boundary!("USE mydb", "B021", "USE database");
 }
 
 /// USE: USE schema
@@ -721,43 +719,43 @@ fn b021_use_database_explicit() {
 /// BEGIN TRANSACTION
 #[test]
 fn b021_begin_transaction() {
-    assert_feature_supported!("BEGIN", "B021", "BEGIN transaction");
+    assert_utility_boundary!("BEGIN", "B021", "BEGIN transaction");
 }
 
 /// BEGIN TRANSACTION explicit
 #[test]
 fn b021_begin_transaction_explicit() {
-    assert_feature_supported!("BEGIN TRANSACTION", "B021", "BEGIN TRANSACTION");
+    assert_utility_boundary!("BEGIN TRANSACTION", "B021", "BEGIN TRANSACTION");
 }
 
 /// START TRANSACTION
 #[test]
 fn b021_start_transaction() {
-    assert_feature_supported!("START TRANSACTION", "B021", "START TRANSACTION");
+    assert_utility_boundary!("START TRANSACTION", "B021", "START TRANSACTION");
 }
 
 /// COMMIT
 #[test]
 fn b021_commit() {
-    assert_feature_supported!("COMMIT", "B021", "COMMIT transaction");
+    assert_utility_boundary!("COMMIT", "B021", "COMMIT transaction");
 }
 
 /// COMMIT TRANSACTION
 #[test]
 fn b021_commit_transaction() {
-    assert_feature_supported!("COMMIT TRANSACTION", "B021", "COMMIT TRANSACTION");
+    assert_utility_boundary!("COMMIT TRANSACTION", "B021", "COMMIT TRANSACTION");
 }
 
 /// ROLLBACK
 #[test]
 fn b021_rollback() {
-    assert_feature_supported!("ROLLBACK", "B021", "ROLLBACK transaction");
+    assert_utility_boundary!("ROLLBACK", "B021", "ROLLBACK transaction");
 }
 
 /// ROLLBACK TRANSACTION
 #[test]
 fn b021_rollback_transaction() {
-    assert_feature_supported!("ROLLBACK TRANSACTION", "B021", "ROLLBACK TRANSACTION");
+    assert_utility_boundary!("ROLLBACK TRANSACTION", "B021", "ROLLBACK TRANSACTION");
 }
 
 // ============================================================================
@@ -778,9 +776,15 @@ fn b021_explain_copy() {
 #[test]
 fn b021_multiple_set_operations() {
     // Individual SET operations should work
-    assert_plans!("SET max_parallel_workers = 8");
-    assert_plans!("SET datafusion.execution.batch_size = 8192");
-    assert_plans!("SET timezone = 'UTC'");
+    assert_plan_error!(
+        "SET max_parallel_workers = 8",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "SET datafusion.execution.batch_size = 8192",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!("SET timezone = 'UTC'", "bypass relational SQL planning");
 }
 
 /// Summary: Verify EXPLAIN works with all DML statements

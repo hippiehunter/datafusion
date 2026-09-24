@@ -67,7 +67,7 @@
 //! grantee ::= PUBLIC | authorization_identifier
 //! ```
 
-use crate::{assert_feature_supported, assert_parses, assert_plans};
+use crate::{assert_parses, assert_plan_error, assert_utility_boundary};
 
 // ============================================================================
 // E081-01: SELECT privilege at table level
@@ -76,7 +76,7 @@ use crate::{assert_feature_supported, assert_parses, assert_plans};
 /// E081-01: GRANT SELECT on a table to a user
 #[test]
 fn e081_01_grant_select_to_user() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON person TO alice",
         "E081-01",
         "GRANT SELECT privilege to user"
@@ -86,7 +86,7 @@ fn e081_01_grant_select_to_user() {
 /// E081-01: GRANT SELECT on a table to a role
 #[test]
 fn e081_01_grant_select_to_role() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON person TO reporting_role",
         "E081-01",
         "GRANT SELECT privilege to role"
@@ -96,7 +96,7 @@ fn e081_01_grant_select_to_role() {
 /// E081-01: GRANT SELECT with explicit TABLE keyword
 #[test]
 fn e081_01_grant_select_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON TABLE person TO alice",
         "E081-01",
         "GRANT SELECT with TABLE keyword"
@@ -106,7 +106,7 @@ fn e081_01_grant_select_explicit_table() {
 /// E081-01: GRANT SELECT to PUBLIC
 #[test]
 fn e081_01_grant_select_to_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON person TO PUBLIC",
         "E081-01",
         "GRANT SELECT to PUBLIC"
@@ -116,7 +116,7 @@ fn e081_01_grant_select_to_public() {
 /// E081-01: GRANT SELECT on qualified table name
 #[test]
 fn e081_01_grant_select_qualified_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON myschema.person TO alice",
         "E081-01",
         "GRANT SELECT on qualified table"
@@ -126,7 +126,7 @@ fn e081_01_grant_select_qualified_table() {
 /// E081-01: GRANT SELECT to multiple grantees
 #[test]
 fn e081_01_grant_select_multiple_grantees() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON person TO alice, bob, charlie",
         "E081-01",
         "GRANT SELECT to multiple users"
@@ -140,7 +140,7 @@ fn e081_01_grant_select_multiple_grantees() {
 /// E081-02: GRANT DELETE on a table
 #[test]
 fn e081_02_grant_delete() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT DELETE ON person TO alice",
         "E081-02",
         "GRANT DELETE privilege"
@@ -150,7 +150,7 @@ fn e081_02_grant_delete() {
 /// E081-02: GRANT DELETE with explicit TABLE keyword
 #[test]
 fn e081_02_grant_delete_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT DELETE ON TABLE orders TO admin_role",
         "E081-02",
         "GRANT DELETE with TABLE keyword"
@@ -160,7 +160,7 @@ fn e081_02_grant_delete_explicit_table() {
 /// E081-02: GRANT DELETE to PUBLIC
 #[test]
 fn e081_02_grant_delete_to_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT DELETE ON orders TO PUBLIC",
         "E081-02",
         "GRANT DELETE to PUBLIC"
@@ -174,7 +174,7 @@ fn e081_02_grant_delete_to_public() {
 /// E081-03: GRANT INSERT on a table
 #[test]
 fn e081_03_grant_insert() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT INSERT ON person TO alice",
         "E081-03",
         "GRANT INSERT privilege"
@@ -184,7 +184,7 @@ fn e081_03_grant_insert() {
 /// E081-03: GRANT INSERT with explicit TABLE keyword
 #[test]
 fn e081_03_grant_insert_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT INSERT ON TABLE person TO data_entry_role",
         "E081-03",
         "GRANT INSERT with TABLE keyword"
@@ -194,7 +194,7 @@ fn e081_03_grant_insert_explicit_table() {
 /// E081-03: GRANT INSERT on multiple tables
 #[test]
 fn e081_03_grant_insert_multiple_tables() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT INSERT ON person TO alice",
         "E081-03",
         "GRANT INSERT on table"
@@ -208,7 +208,7 @@ fn e081_03_grant_insert_multiple_tables() {
 /// E081-04: GRANT UPDATE on a table
 #[test]
 fn e081_04_grant_update() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE ON person TO alice",
         "E081-04",
         "GRANT UPDATE privilege"
@@ -218,7 +218,7 @@ fn e081_04_grant_update() {
 /// E081-04: GRANT UPDATE with explicit TABLE keyword
 #[test]
 fn e081_04_grant_update_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE ON TABLE person TO editor_role",
         "E081-04",
         "GRANT UPDATE with TABLE keyword"
@@ -228,7 +228,7 @@ fn e081_04_grant_update_explicit_table() {
 /// E081-04: GRANT UPDATE to PUBLIC
 #[test]
 fn e081_04_grant_update_to_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE ON person TO PUBLIC",
         "E081-04",
         "GRANT UPDATE to PUBLIC"
@@ -242,7 +242,7 @@ fn e081_04_grant_update_to_public() {
 /// E081-05: GRANT UPDATE on specific columns
 #[test]
 fn e081_05_grant_update_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE (salary, age) ON person TO alice",
         "E081-05",
         "GRANT UPDATE on columns"
@@ -252,7 +252,7 @@ fn e081_05_grant_update_columns() {
 /// E081-05: GRANT UPDATE on single column
 #[test]
 fn e081_05_grant_update_single_column() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE (salary) ON person TO hr_role",
         "E081-05",
         "GRANT UPDATE on single column"
@@ -262,7 +262,7 @@ fn e081_05_grant_update_single_column() {
 /// E081-05: GRANT UPDATE on multiple columns
 #[test]
 fn e081_05_grant_update_multiple_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE (first_name, last_name, age, salary) ON person TO admin",
         "E081-05",
         "GRANT UPDATE on multiple columns"
@@ -272,7 +272,7 @@ fn e081_05_grant_update_multiple_columns() {
 /// E081-05: GRANT UPDATE on columns with TABLE keyword
 #[test]
 fn e081_05_grant_update_columns_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE (salary) ON TABLE person TO hr_manager",
         "E081-05",
         "GRANT UPDATE on column with TABLE keyword"
@@ -286,7 +286,7 @@ fn e081_05_grant_update_columns_explicit_table() {
 /// E081-06: GRANT REFERENCES on a table
 #[test]
 fn e081_06_grant_references() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT REFERENCES ON person TO alice",
         "E081-06",
         "GRANT REFERENCES privilege"
@@ -296,7 +296,7 @@ fn e081_06_grant_references() {
 /// E081-06: GRANT REFERENCES with explicit TABLE keyword
 #[test]
 fn e081_06_grant_references_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT REFERENCES ON TABLE person TO schema_designer",
         "E081-06",
         "GRANT REFERENCES with TABLE keyword"
@@ -306,7 +306,7 @@ fn e081_06_grant_references_explicit_table() {
 /// E081-06: GRANT REFERENCES to PUBLIC
 #[test]
 fn e081_06_grant_references_to_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT REFERENCES ON person TO PUBLIC",
         "E081-06",
         "GRANT REFERENCES to PUBLIC"
@@ -320,7 +320,7 @@ fn e081_06_grant_references_to_public() {
 /// E081-07: GRANT REFERENCES on specific columns
 #[test]
 fn e081_07_grant_references_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT REFERENCES (id) ON person TO alice",
         "E081-07",
         "GRANT REFERENCES on column"
@@ -330,7 +330,7 @@ fn e081_07_grant_references_columns() {
 /// E081-07: GRANT REFERENCES on multiple columns
 #[test]
 fn e081_07_grant_references_multiple_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT REFERENCES (id, first_name, last_name) ON person TO fk_creator",
         "E081-07",
         "GRANT REFERENCES on multiple columns"
@@ -340,7 +340,7 @@ fn e081_07_grant_references_multiple_columns() {
 /// E081-07: GRANT REFERENCES on column with TABLE keyword
 #[test]
 fn e081_07_grant_references_column_explicit_table() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT REFERENCES (id) ON TABLE person TO bob",
         "E081-07",
         "GRANT REFERENCES on column with TABLE"
@@ -354,7 +354,7 @@ fn e081_07_grant_references_column_explicit_table() {
 /// E081-08: GRANT SELECT with GRANT OPTION
 #[test]
 fn e081_08_grant_select_with_grant_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT ON person TO alice WITH GRANT OPTION",
         "E081-08",
         "GRANT with GRANT OPTION"
@@ -364,7 +364,7 @@ fn e081_08_grant_select_with_grant_option() {
 /// E081-08: GRANT multiple privileges with GRANT OPTION
 #[test]
 fn e081_08_grant_multiple_with_grant_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT, INSERT, UPDATE ON person TO alice WITH GRANT OPTION",
         "E081-08",
         "GRANT multiple privileges with GRANT OPTION"
@@ -374,7 +374,7 @@ fn e081_08_grant_multiple_with_grant_option() {
 /// E081-08: GRANT UPDATE on columns with GRANT OPTION
 #[test]
 fn e081_08_grant_update_columns_with_grant_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT UPDATE (salary) ON person TO hr_role WITH GRANT OPTION",
         "E081-08",
         "GRANT UPDATE on column with GRANT OPTION"
@@ -384,7 +384,7 @@ fn e081_08_grant_update_columns_with_grant_option() {
 /// E081-08: GRANT DELETE with GRANT OPTION
 #[test]
 fn e081_08_grant_delete_with_grant_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT DELETE ON orders TO admin WITH GRANT OPTION",
         "E081-08",
         "GRANT DELETE with GRANT OPTION"
@@ -398,7 +398,7 @@ fn e081_08_grant_delete_with_grant_option() {
 /// E081-09: GRANT USAGE on DOMAIN
 #[test]
 fn e081_09_grant_usage_domain() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT USAGE ON DOMAIN email_address TO alice",
         "E081-09",
         "GRANT USAGE on domain"
@@ -418,7 +418,7 @@ fn e081_09_grant_usage_charset() {
 /// E081-09: GRANT USAGE on COLLATION
 #[test]
 fn e081_09_grant_usage_collation() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT USAGE ON COLLATION utf8_general_ci TO alice",
         "E081-09",
         "GRANT USAGE on collation"
@@ -428,7 +428,7 @@ fn e081_09_grant_usage_collation() {
 /// E081-09: GRANT USAGE on SEQUENCE
 #[test]
 fn e081_09_grant_usage_sequence() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT USAGE ON SEQUENCE person_id_seq TO alice",
         "E081-09",
         "GRANT USAGE on sequence"
@@ -438,7 +438,7 @@ fn e081_09_grant_usage_sequence() {
 /// E081-09: GRANT USAGE on TYPE
 #[test]
 fn e081_09_grant_usage_type() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT USAGE ON TYPE address_type TO alice",
         "E081-09",
         "GRANT USAGE on type"
@@ -448,7 +448,7 @@ fn e081_09_grant_usage_type() {
 /// E081-09: GRANT USAGE to PUBLIC
 #[test]
 fn e081_09_grant_usage_to_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT USAGE ON SEQUENCE person_id_seq TO PUBLIC",
         "E081-09",
         "GRANT USAGE to PUBLIC"
@@ -462,7 +462,7 @@ fn e081_09_grant_usage_to_public() {
 /// E081-10: GRANT EXECUTE on a function
 #[test]
 fn e081_10_grant_execute_function() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT EXECUTE ON FUNCTION calculate_bonus TO alice",
         "E081-10",
         "GRANT EXECUTE on function"
@@ -472,7 +472,7 @@ fn e081_10_grant_execute_function() {
 /// E081-10: GRANT EXECUTE on a procedure
 #[test]
 fn e081_10_grant_execute_procedure() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT EXECUTE ON PROCEDURE update_salary TO alice",
         "E081-10",
         "GRANT EXECUTE on procedure"
@@ -492,7 +492,7 @@ fn e081_10_grant_execute_specific_routine() {
 /// E081-10: GRANT EXECUTE with GRANT OPTION
 #[test]
 fn e081_10_grant_execute_with_grant_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT EXECUTE ON FUNCTION calculate_bonus TO alice WITH GRANT OPTION",
         "E081-10",
         "GRANT EXECUTE with GRANT OPTION"
@@ -502,7 +502,7 @@ fn e081_10_grant_execute_with_grant_option() {
 /// E081-10: GRANT EXECUTE to PUBLIC
 #[test]
 fn e081_10_grant_execute_to_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT EXECUTE ON FUNCTION public_function TO PUBLIC",
         "E081-10",
         "GRANT EXECUTE to PUBLIC"
@@ -516,7 +516,7 @@ fn e081_10_grant_execute_to_public() {
 /// GRANT multiple privileges on same object
 #[test]
 fn grant_multiple_privileges() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON person TO alice",
         "E081",
         "GRANT multiple privileges"
@@ -526,7 +526,7 @@ fn grant_multiple_privileges() {
 /// GRANT INSERT and UPDATE with column list
 #[test]
 fn grant_insert_update_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT INSERT, UPDATE (salary, age) ON person TO alice",
         "E081",
         "GRANT INSERT and UPDATE with columns"
@@ -536,7 +536,7 @@ fn grant_insert_update_columns() {
 /// GRANT SELECT and REFERENCES
 #[test]
 fn grant_select_references() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT, REFERENCES ON person TO alice",
         "E081",
         "GRANT SELECT and REFERENCES"
@@ -546,7 +546,7 @@ fn grant_select_references() {
 /// GRANT ALL PRIVILEGES
 #[test]
 fn grant_all_privileges() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT ALL PRIVILEGES ON person TO alice",
         "E081",
         "GRANT ALL PRIVILEGES"
@@ -556,13 +556,13 @@ fn grant_all_privileges() {
 /// GRANT ALL (shorthand)
 #[test]
 fn grant_all() {
-    assert_feature_supported!("GRANT ALL ON person TO alice", "E081", "GRANT ALL");
+    assert_utility_boundary!("GRANT ALL ON person TO alice", "E081", "GRANT ALL");
 }
 
 /// GRANT ALL PRIVILEGES with GRANT OPTION
 #[test]
 fn grant_all_privileges_with_grant_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT ALL PRIVILEGES ON person TO alice WITH GRANT OPTION",
         "E081",
         "GRANT ALL PRIVILEGES with GRANT OPTION"
@@ -576,7 +576,7 @@ fn grant_all_privileges_with_grant_option() {
 /// REVOKE SELECT privilege
 #[test]
 fn revoke_select() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON person FROM alice",
         "E081",
         "REVOKE SELECT"
@@ -586,7 +586,7 @@ fn revoke_select() {
 /// REVOKE INSERT privilege
 #[test]
 fn revoke_insert() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE INSERT ON person FROM alice",
         "E081",
         "REVOKE INSERT"
@@ -596,7 +596,7 @@ fn revoke_insert() {
 /// REVOKE UPDATE privilege
 #[test]
 fn revoke_update() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE UPDATE ON person FROM alice",
         "E081",
         "REVOKE UPDATE"
@@ -606,7 +606,7 @@ fn revoke_update() {
 /// REVOKE DELETE privilege
 #[test]
 fn revoke_delete() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE DELETE ON person FROM alice",
         "E081",
         "REVOKE DELETE"
@@ -616,7 +616,7 @@ fn revoke_delete() {
 /// REVOKE UPDATE on specific columns
 #[test]
 fn revoke_update_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE UPDATE (salary, age) ON person FROM alice",
         "E081",
         "REVOKE UPDATE on columns"
@@ -626,7 +626,7 @@ fn revoke_update_columns() {
 /// REVOKE REFERENCES
 #[test]
 fn revoke_references() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE REFERENCES ON person FROM alice",
         "E081",
         "REVOKE REFERENCES"
@@ -636,7 +636,7 @@ fn revoke_references() {
 /// REVOKE REFERENCES on columns
 #[test]
 fn revoke_references_columns() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE REFERENCES (id) ON person FROM alice",
         "E081",
         "REVOKE REFERENCES on column"
@@ -646,7 +646,7 @@ fn revoke_references_columns() {
 /// REVOKE multiple privileges
 #[test]
 fn revoke_multiple_privileges() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT, INSERT, UPDATE, DELETE ON person FROM alice",
         "E081",
         "REVOKE multiple privileges"
@@ -656,7 +656,7 @@ fn revoke_multiple_privileges() {
 /// REVOKE ALL PRIVILEGES
 #[test]
 fn revoke_all_privileges() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE ALL PRIVILEGES ON person FROM alice",
         "E081",
         "REVOKE ALL PRIVILEGES"
@@ -666,13 +666,13 @@ fn revoke_all_privileges() {
 /// REVOKE ALL
 #[test]
 fn revoke_all() {
-    assert_feature_supported!("REVOKE ALL ON person FROM alice", "E081", "REVOKE ALL");
+    assert_utility_boundary!("REVOKE ALL ON person FROM alice", "E081", "REVOKE ALL");
 }
 
 /// REVOKE from multiple grantees
 #[test]
 fn revoke_multiple_grantees() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON person FROM alice, bob, charlie",
         "E081",
         "REVOKE from multiple users"
@@ -682,7 +682,7 @@ fn revoke_multiple_grantees() {
 /// REVOKE from PUBLIC
 #[test]
 fn revoke_from_public() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON person FROM PUBLIC",
         "E081",
         "REVOKE from PUBLIC"
@@ -692,7 +692,7 @@ fn revoke_from_public() {
 /// REVOKE with CASCADE
 #[test]
 fn revoke_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON person FROM alice CASCADE",
         "E081",
         "REVOKE with CASCADE"
@@ -702,7 +702,7 @@ fn revoke_cascade() {
 /// REVOKE with RESTRICT
 #[test]
 fn revoke_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON person FROM alice RESTRICT",
         "E081",
         "REVOKE with RESTRICT"
@@ -712,7 +712,7 @@ fn revoke_restrict() {
 /// REVOKE GRANT OPTION FOR
 #[test]
 fn revoke_grant_option_for() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE GRANT OPTION FOR SELECT ON person FROM alice",
         "E081-08",
         "REVOKE GRANT OPTION FOR"
@@ -722,7 +722,7 @@ fn revoke_grant_option_for() {
 /// REVOKE GRANT OPTION FOR multiple privileges
 #[test]
 fn revoke_grant_option_for_multiple() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE GRANT OPTION FOR SELECT, INSERT, UPDATE ON person FROM alice",
         "E081-08",
         "REVOKE GRANT OPTION FOR multiple privileges"
@@ -732,7 +732,7 @@ fn revoke_grant_option_for_multiple() {
 /// REVOKE GRANT OPTION FOR with CASCADE
 #[test]
 fn revoke_grant_option_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE GRANT OPTION FOR SELECT ON person FROM alice CASCADE",
         "E081-08",
         "REVOKE GRANT OPTION with CASCADE"
@@ -742,7 +742,7 @@ fn revoke_grant_option_cascade() {
 /// REVOKE USAGE privilege
 #[test]
 fn revoke_usage() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE USAGE ON SEQUENCE person_id_seq FROM alice",
         "E081-09",
         "REVOKE USAGE"
@@ -752,7 +752,7 @@ fn revoke_usage() {
 /// REVOKE EXECUTE privilege
 #[test]
 fn revoke_execute() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE EXECUTE ON FUNCTION calculate_bonus FROM alice",
         "E081-10",
         "REVOKE EXECUTE"
@@ -766,13 +766,13 @@ fn revoke_execute() {
 /// T331: CREATE ROLE
 #[test]
 fn t331_create_role() {
-    assert_feature_supported!("CREATE ROLE reporting_role", "T331", "CREATE ROLE");
+    assert_utility_boundary!("CREATE ROLE reporting_role", "T331", "CREATE ROLE");
 }
 
 /// T331: CREATE ROLE with quoted identifier
 #[test]
 fn t331_create_role_quoted() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "CREATE ROLE \"Admin Role\"",
         "T331",
         "CREATE ROLE with quoted name"
@@ -782,13 +782,13 @@ fn t331_create_role_quoted() {
 /// T331: DROP ROLE
 #[test]
 fn t331_drop_role() {
-    assert_feature_supported!("DROP ROLE reporting_role", "T331", "DROP ROLE");
+    assert_utility_boundary!("DROP ROLE reporting_role", "T331", "DROP ROLE");
 }
 
 /// T331: DROP ROLE with IF EXISTS
 #[test]
 fn t331_drop_role_if_exists() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "DROP ROLE IF EXISTS reporting_role",
         "T331",
         "DROP ROLE IF EXISTS"
@@ -822,7 +822,7 @@ fn t331_drop_role_restrict() {
 /// T332: GRANT role TO user
 #[test]
 fn t332_grant_role_to_user() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT reporting_role TO alice",
         "T332",
         "GRANT role to user"
@@ -832,7 +832,7 @@ fn t332_grant_role_to_user() {
 /// T332: GRANT role TO multiple users
 #[test]
 fn t332_grant_role_to_multiple_users() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT reporting_role TO alice, bob, charlie",
         "T332",
         "GRANT role to multiple users"
@@ -842,7 +842,7 @@ fn t332_grant_role_to_multiple_users() {
 /// T332: GRANT role TO role (role hierarchy)
 #[test]
 fn t332_grant_role_to_role() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT admin_role TO super_admin_role",
         "T332",
         "GRANT role to role"
@@ -852,7 +852,7 @@ fn t332_grant_role_to_role() {
 /// T332: GRANT role WITH ADMIN OPTION
 #[test]
 fn t332_grant_role_with_admin_option() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT reporting_role TO alice WITH ADMIN OPTION",
         "T332",
         "GRANT role WITH ADMIN OPTION"
@@ -862,7 +862,7 @@ fn t332_grant_role_with_admin_option() {
 /// T332: GRANT multiple roles
 #[test]
 fn t332_grant_multiple_roles() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT role1, role2, role3 TO alice",
         "T332",
         "GRANT multiple roles"
@@ -872,7 +872,7 @@ fn t332_grant_multiple_roles() {
 /// T332: REVOKE role FROM user
 #[test]
 fn t332_revoke_role_from_user() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE reporting_role FROM alice",
         "T332",
         "REVOKE role from user"
@@ -882,7 +882,7 @@ fn t332_revoke_role_from_user() {
 /// T332: REVOKE role FROM multiple users
 #[test]
 fn t332_revoke_role_from_multiple_users() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE reporting_role FROM alice, bob, charlie",
         "T332",
         "REVOKE role from multiple users"
@@ -892,7 +892,7 @@ fn t332_revoke_role_from_multiple_users() {
 /// T332: REVOKE multiple roles
 #[test]
 fn t332_revoke_multiple_roles() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE role1, role2, role3 FROM alice",
         "T332",
         "REVOKE multiple roles"
@@ -902,7 +902,7 @@ fn t332_revoke_multiple_roles() {
 /// T332: REVOKE role with CASCADE
 #[test]
 fn t332_revoke_role_cascade() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE reporting_role FROM alice CASCADE",
         "T332",
         "REVOKE role CASCADE"
@@ -912,7 +912,7 @@ fn t332_revoke_role_cascade() {
 /// T332: REVOKE role with RESTRICT
 #[test]
 fn t332_revoke_role_restrict() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE reporting_role FROM alice RESTRICT",
         "T332",
         "REVOKE role RESTRICT"
@@ -922,7 +922,7 @@ fn t332_revoke_role_restrict() {
 /// T332: REVOKE ADMIN OPTION FOR
 #[test]
 fn t332_revoke_admin_option_for() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE ADMIN OPTION FOR reporting_role FROM alice",
         "T332",
         "REVOKE ADMIN OPTION FOR"
@@ -936,7 +936,7 @@ fn t332_revoke_admin_option_for() {
 /// GRANT privilege to role
 #[test]
 fn grant_privilege_to_role() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT SELECT, INSERT ON person TO reporting_role",
         "T332",
         "GRANT privilege to role"
@@ -946,7 +946,7 @@ fn grant_privilege_to_role() {
 /// GRANT ALL PRIVILEGES to role
 #[test]
 fn grant_all_to_role() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "GRANT ALL PRIVILEGES ON person TO admin_role",
         "T332",
         "GRANT ALL to role"
@@ -956,7 +956,7 @@ fn grant_all_to_role() {
 /// REVOKE privilege from role
 #[test]
 fn revoke_privilege_from_role() {
-    assert_feature_supported!(
+    assert_utility_boundary!(
         "REVOKE SELECT ON person FROM reporting_role",
         "T332",
         "REVOKE privilege from role"
@@ -1049,66 +1049,145 @@ fn qualified_grantees() {
 #[test]
 fn e081_summary_basic_grants() {
     // Core privilege types
-    assert_plans!("GRANT SELECT ON person TO alice");
-    assert_plans!("GRANT INSERT ON person TO alice");
-    assert_plans!("GRANT UPDATE ON person TO alice");
-    assert_plans!("GRANT DELETE ON person TO alice");
+    assert_plan_error!(
+        "GRANT SELECT ON person TO alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT INSERT ON person TO alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT UPDATE ON person TO alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT DELETE ON person TO alice",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e081_summary_column_privileges() {
     // Column-level privileges
-    assert_plans!("GRANT UPDATE (salary) ON person TO alice");
-    assert_plans!("GRANT REFERENCES (id) ON person TO alice");
+    assert_plan_error!(
+        "GRANT UPDATE (salary) ON person TO alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT REFERENCES (id) ON person TO alice",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e081_summary_grant_options() {
     // WITH GRANT OPTION
-    assert_plans!("GRANT SELECT ON person TO alice WITH GRANT OPTION");
-    assert_plans!("GRANT ALL PRIVILEGES ON person TO alice WITH GRANT OPTION");
+    assert_plan_error!(
+        "GRANT SELECT ON person TO alice WITH GRANT OPTION",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT ALL PRIVILEGES ON person TO alice WITH GRANT OPTION",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e081_summary_special_privileges() {
     // USAGE and EXECUTE
-    assert_plans!("GRANT USAGE ON SEQUENCE person_id_seq TO alice");
-    assert_plans!("GRANT EXECUTE ON FUNCTION my_function TO alice");
+    assert_plan_error!(
+        "GRANT USAGE ON SEQUENCE person_id_seq TO alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT EXECUTE ON FUNCTION my_function TO alice",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e081_summary_revoke_statements() {
     // Revocation patterns
-    assert_plans!("REVOKE SELECT ON person FROM alice");
-    assert_plans!("REVOKE ALL PRIVILEGES ON person FROM alice");
-    assert_plans!("REVOKE SELECT ON person FROM alice CASCADE");
-    assert_plans!("REVOKE GRANT OPTION FOR SELECT ON person FROM alice");
+    assert_plan_error!(
+        "REVOKE SELECT ON person FROM alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "REVOKE ALL PRIVILEGES ON person FROM alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "REVOKE SELECT ON person FROM alice CASCADE",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "REVOKE GRANT OPTION FOR SELECT ON person FROM alice",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e081_summary_roles() {
     // Role management
-    assert_plans!("CREATE ROLE reporting_role");
-    assert_plans!("DROP ROLE reporting_role");
-    assert_plans!("GRANT reporting_role TO alice");
-    assert_plans!("REVOKE reporting_role FROM alice");
+    assert_plan_error!(
+        "CREATE ROLE reporting_role",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!("DROP ROLE reporting_role", "bypass relational SQL planning");
+    assert_plan_error!(
+        "GRANT reporting_role TO alice",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "REVOKE reporting_role FROM alice",
+        "bypass relational SQL planning"
+    );
 }
 
 #[test]
 fn e081_summary_all_features() {
     // Comprehensive privilege test combining all E081 features
-    assert_plans!("CREATE ROLE admin");
-    assert_plans!("CREATE ROLE read_only");
-    assert_plans!(
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON person TO admin WITH GRANT OPTION"
+    assert_plan_error!("CREATE ROLE admin", "bypass relational SQL planning");
+    assert_plan_error!("CREATE ROLE read_only", "bypass relational SQL planning");
+    assert_plan_error!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON person TO admin WITH GRANT OPTION",
+        "bypass relational SQL planning"
     );
-    assert_plans!("GRANT SELECT ON person TO read_only");
-    assert_plans!("GRANT UPDATE (salary) ON person TO admin");
-    assert_plans!("GRANT REFERENCES (id) ON person TO admin");
-    assert_plans!("GRANT USAGE ON SEQUENCE person_id_seq TO admin");
-    assert_plans!("GRANT EXECUTE ON FUNCTION calculate_bonus TO admin");
-    assert_plans!("GRANT admin TO alice WITH ADMIN OPTION");
-    assert_plans!("GRANT read_only TO PUBLIC");
-    assert_plans!("REVOKE SELECT ON person FROM PUBLIC");
-    assert_plans!("REVOKE admin FROM alice CASCADE");
+    assert_plan_error!(
+        "GRANT SELECT ON person TO read_only",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT UPDATE (salary) ON person TO admin",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT REFERENCES (id) ON person TO admin",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT USAGE ON SEQUENCE person_id_seq TO admin",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT EXECUTE ON FUNCTION calculate_bonus TO admin",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT admin TO alice WITH ADMIN OPTION",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "GRANT read_only TO PUBLIC",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "REVOKE SELECT ON person FROM PUBLIC",
+        "bypass relational SQL planning"
+    );
+    assert_plan_error!(
+        "REVOKE admin FROM alice CASCADE",
+        "bypass relational SQL planning"
+    );
 }

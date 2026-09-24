@@ -2221,6 +2221,35 @@ macro_rules! assert_psm_feature_supported {
     }};
 }
 
+/// [`assert_utility_boundary`] for a statement written in the PSM dialect.
+#[macro_export]
+macro_rules! assert_psm_utility_boundary {
+    ($sql:expr, $feature_id:expr, $description:expr) => {{
+        let parse_result = crate::parse_psm_sql($sql);
+        assert!(
+            parse_result.is_ok(),
+            "PSM utility feature {} ({}) should parse.\nSQL: {}\nError: {:?}",
+            $feature_id,
+            $description,
+            $sql,
+            parse_result.unwrap_err()
+        );
+
+        let plan_error = crate::logical_plan_psm($sql)
+            .expect_err("utility statement must not enter the relational plan");
+        assert!(
+            plan_error
+                .to_string()
+                .contains("bypass relational SQL planning"),
+            "PSM utility feature {} ({}) crossed the wrong boundary.\nSQL: {}\nError: {}",
+            $feature_id,
+            $description,
+            $sql,
+            plan_error
+        );
+    }};
+}
+
 /// Assert that a SQL/PSM feature parses but may not plan yet.
 ///
 /// Use this for features where parsing works but planning is not implemented.
