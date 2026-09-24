@@ -228,8 +228,8 @@ impl SqlToRel<'_> {
         let mut combined_schema = base_plan.schema().as_ref().clone();
         combined_schema.merge(projected_plan.schema());
 
-        // Order-by expressions prioritize referencing columns from the select list,
-        // then from the FROM clause.
+        // A bare output name is already a position; every other item is an
+        // expression over the FROM clause.
         let order_by_rex = self.order_by_to_sort_expr(
             order_by,
             projected_plan.schema().as_ref(),

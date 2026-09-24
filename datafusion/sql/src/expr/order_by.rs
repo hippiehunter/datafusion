@@ -28,12 +28,13 @@ use sqlparser::ast::{
 impl SqlToRel<'_> {
     /// Convert sql [OrderByExpr] to `Vec<Expr>`.
     ///
-    /// `input_schema` and `additional_schema` are used to resolve column references in the order-by expressions.
     /// `input_schema` is the schema of the input logical plan, typically derived from the SELECT list.
+    /// A number with `literal_to_column` set is a position in it.
     ///
-    /// Usually order-by expressions can only reference the input plan's columns.
-    /// But the `SELECT ... FROM ... ORDER BY ...` syntax is a special case. Besides the input schema,
-    /// it can reference an `additional_schema` derived from the `FROM` clause.
+    /// `from_schema` is the schema of a SELECT's `FROM` clause. When it is given, an item that is
+    /// not a position is an expression over the `FROM` clause's columns, as PostgreSQL reads it:
+    /// an output column is reached only by its position or by a bare output name, which the caller
+    /// rewrites to that position. `x + 0` over `SELECT x::text AS x` orders by the input `x`.
     ///
     /// If `literal_to_column` is true, treat any numeric literals (e.g. `2`) as a 1 based index into the
     /// SELECT list (e.g. `SELECT a, b FROM table ORDER BY 2`). Literals only reference the `input_schema`.
@@ -45,22 +46,14 @@ impl SqlToRel<'_> {
         input_schema: &DFSchema,
         planner_context: &mut PlannerContext,
         literal_to_column: bool,
-        additional_schema: Option<&DFSchema>,
+        from_schema: Option<&DFSchema>,
     ) -> Result<Vec<SortExpr>> {
         let order_by_exprs = order_by_exprs.as_ref();
         if order_by_exprs.is_empty() {
             return Ok(vec![]);
         }
 
-        let mut combined_schema;
-        let order_by_schema = match additional_schema {
-            Some(schema) => {
-                combined_schema = input_schema.clone();
-                combined_schema.merge(schema);
-                &combined_schema
-            }
-            None => input_schema,
-        };
+        let order_by_schema = from_schema.unwrap_or(input_schema);
 
         let mut sort_expr_vec = Vec::with_capacity(order_by_exprs.len());
 
