@@ -2192,7 +2192,7 @@ mod tests {
     use crate::simplify_expressions::SimplifyContext;
     use crate::test::test_table_scan_with_name;
     use arrow::datatypes::FieldRef;
-    use datafusion_common::{DFSchemaRef, ToDFSchema, assert_contains};
+    use datafusion_common::{DFSchemaRef, ToDFSchema};
     use datafusion_expr::{
         expr::WindowFunction,
         function::{
@@ -3156,13 +3156,8 @@ mod tests {
 
     #[test]
     fn test_simplify_regex() {
-        // malformed regex
-        assert_contains!(
-            try_simplify(regex_match(col("c1"), lit("foo{")))
-                .unwrap_err()
-                .to_string(),
-            "regex parse error"
-        );
+        // a pattern the simplifier cannot read is left for the regex engine
+        assert_no_change(regex_match(col("c1"), lit("foo{")));
 
         // unsupported cases
         assert_no_change(regex_match(col("c1"), lit("foo.*")));

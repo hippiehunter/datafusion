@@ -195,11 +195,12 @@ fn between_date32_plus_interval() -> Result<()> {
     assert_snapshot!(
     format!("{plan}"),
     @r#"
-Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
-  Projection:
-    Filter: test.col_date32 >= Date32("1998-03-18") AND test.col_date32 <= Date32("1998-06-16")
-      TableScan: test projection=[col_date32]
-"#
+    Projection: count(Int32(1)) AS count
+      Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
+        Projection:
+          Filter: test.col_date32 >= Date32("1998-03-18") AND test.col_date32 <= Date32("1998-06-16")
+            TableScan: test projection=[col_date32]
+    "#
     );
     Ok(())
 }
@@ -213,11 +214,12 @@ fn between_date64_plus_interval() -> Result<()> {
     assert_snapshot!(
     format!("{plan}"),
     @r#"
-        Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
-          Projection:
-            Filter: test.col_date64 >= Date64("1998-03-18") AND test.col_date64 <= Date64("1998-06-16")
-              TableScan: test projection=[col_date64]
-        "#
+    Projection: count(Int32(1)) AS count
+      Aggregate: groupBy=[[]], aggr=[[count(Int32(1))]]
+        Projection:
+          Filter: test.col_date64 >= Date64("1998-03-18") AND test.col_date64 <= Date64("1998-06-16")
+            TableScan: test projection=[col_date64]
+    "#
     );
     Ok(())
 }
@@ -285,12 +287,12 @@ fn push_down_filter_groupby_expr_contains_alias() {
 
     assert_snapshot!(
     format!("{plan}"),
-    @r#"
-        Projection: test.col_int32 + test.col_uint32 AS c, count(Int64(1)) AS count(*)
-          Aggregate: groupBy=[[CAST(test.col_int32 AS Int64) + CAST(test.col_uint32 AS Int64)]], aggr=[[count(Int64(1))]]
-            Filter: CAST(test.col_int32 AS Int64) + CAST(test.col_uint32 AS Int64) > Int64(3)
-              TableScan: test projection=[col_int32, col_uint32]
-        "#
+    @"
+    Projection: test.col_int32 + test.col_uint32 AS c, count(Int64(1)) AS count
+      Aggregate: groupBy=[[CAST(test.col_int32 AS Int64) + CAST(test.col_uint32 AS Int64)]], aggr=[[count(Int64(1))]]
+        Filter: CAST(test.col_int32 AS Int64) + CAST(test.col_uint32 AS Int64) > Int64(3)
+          TableScan: test projection=[col_int32, col_uint32]
+    "
     );
 }
 
