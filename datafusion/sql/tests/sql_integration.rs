@@ -1075,6 +1075,18 @@ fn a_definition_keeps_its_with_list_as_written() {
     );
 }
 
+/// Planned to be printed back, a FROM item's column alias list stays over the
+/// relation it renames, its columns past the list keeping their own names.
+#[test]
+fn a_definition_keeps_a_column_alias_list_over_its_relation() {
+    let plan = definition_plan("SELECT x.a, x.j1_string FROM j1 AS x(a)");
+    assert_snapshot!(plan, @r"
+    Projection: x.a, x.j1_string
+      AliasedRelation: x(a, j1_string)
+        TableScan: j1
+    ");
+}
+
 #[test]
 fn plan_inline_primary_key_preserves_quoted_column_identity() {
     let plan =

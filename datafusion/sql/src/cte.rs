@@ -1372,7 +1372,10 @@ impl Visitor for WithListReferences<'_> {
 }
 
 /// Whether `plan` reads `work_table`, the relation a recursive term's
-/// references to its item are planned as.
+/// references to its item are planned as: a scan of the work table's source,
+/// or planned as written, a reference to the item. Relation planning rebuilds
+/// an extension node it passes through, so a reference is recognized by what
+/// it reads rather than by the node it was cloned from.
 fn has_work_table_reference(plan: &LogicalPlan, work_table: &LogicalPlan) -> bool {
     let mut has_reference = false;
     plan.apply(|node| {
@@ -1381,7 +1384,7 @@ fn has_work_table_reference(plan: &LogicalPlan, work_table: &LogicalPlan) -> boo
                 Arc::ptr_eq(&scan.source, &work_table.source)
             }
             (LogicalPlan::Extension(extension), LogicalPlan::Extension(work_table)) => {
-                Arc::ptr_eq(&extension.node, &work_table.node)
+                extension.node.as_ref() == work_table.node.as_ref()
             }
             _ => false,
         };

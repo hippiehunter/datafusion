@@ -15,15 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Plan nodes that keep a query's `WITH` list as the query wrote it.
+//! Plan nodes that keep what a query wrote where execution planning keeps
+//! only its effect.
 //!
 //! Execution planning inlines a common table expression into every
 //! reference to it, which leaves nothing to tell a CTE reference from a
-//! derived table and drops a CTE nothing references. A provider that plans a
-//! stored definition to print it back as SQL
+//! derived table and drops a CTE nothing references, and it renames the
+//! columns of a `FROM` item written with a column alias list by a projection
+//! no different from a derived table's own. A provider that plans a stored
+//! definition to print it back as SQL
 //! ([`ContextProvider::plans_definitions_as_written`]) gets these nodes
-//! instead: [`WithQuery`] over the query that owns the list, and a
-//! [`CteReference`] leaf wherever the query reads one of its items. The plan
+//! instead: [`WithQuery`] over the query that owns a `WITH` list, a
+//! [`CteReference`] leaf wherever the query reads one of its items, and an
+//! [`AliasedRelation`] over a `FROM` item with a column alias list. The plan
 //! is for reading; nothing executes it.
 //!
 //! [`ContextProvider::plans_definitions_as_written`]: crate::planner::ContextProvider::plans_definitions_as_written
@@ -32,7 +36,8 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion_common::{DFSchemaRef, Result, internal_err};
+use arrow::datatypes::{Field, Schema};
+use datafusion_common::{DFSchema, DFSchemaRef, Result, TableReference, internal_err};
 use datafusion_expr::{
     Expr, Extension, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
 };
@@ -258,6 +263,124 @@ impl UserDefinedLogicalNodeCore for CteReference {
             return internal_err!("CteReference is a leaf without expressions");
         }
         Ok(self.clone())
+    }
+}
+
+/// A `FROM` item written `input AS alias(column, ...)`. Its schema names the
+/// input's columns by the list, the columns past its end by their own names
+/// (made distinct from the listed ones), all qualified by the alias.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AliasedRelation {
+    pub alias: TableReference,
+    input: LogicalPlan,
+    schema: DFSchemaRef,
+}
+
+impl AliasedRelation {
+    /// `input` under `alias`, its columns named `column_names` in order.
+    pub fn try_new(
+        alias: TableReference,
+        input: LogicalPlan,
+        column_names: Vec<String>,
+    ) -> Result<Self> {
+        let schema = renamed_schema(&alias, input.schema(), column_names)?;
+        Ok(Self {
+            alias,
+            input,
+            schema,
+        })
+    }
+
+    pub fn into_plan(self) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(self),
+        })
+    }
+
+    /// The relation the alias names.
+    pub fn input(&self) -> &LogicalPlan {
+        &self.input
+    }
+}
+
+fn renamed_schema(
+    alias: &TableReference,
+    input: &DFSchema,
+    column_names: Vec<String>,
+) -> Result<DFSchemaRef> {
+    if column_names.len() != input.fields().len() {
+        return internal_err!(
+            "a relation of {} columns named by {} names",
+            input.fields().len(),
+            column_names.len()
+        );
+    }
+    let fields = input
+        .fields()
+        .iter()
+        .zip(column_names)
+        .map(|(field, name)| Field::clone(field).with_name(name))
+        .collect::<Vec<_>>();
+    let schema = DFSchema::try_from_qualified_schema(
+        alias.clone(),
+        &Schema::new_with_metadata(fields, input.metadata().clone()),
+    )?
+    .with_functional_dependencies(input.functional_dependencies().clone())?;
+    Ok(Arc::new(schema))
+}
+
+impl PartialOrd for AliasedRelation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (&self.alias, &self.input)
+            .partial_cmp(&(&other.alias, &other.input))
+            .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+impl UserDefinedLogicalNodeCore for AliasedRelation {
+    fn name(&self) -> &str {
+        "AliasedRelation"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        Vec::new()
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let names = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        write!(f, "AliasedRelation: {}({})", self.alias, names.join(", "))
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        let (Some(input), true, true) =
+            (inputs.pop(), inputs.is_empty(), exprs.is_empty())
+        else {
+            return internal_err!("AliasedRelation has one input and no expressions");
+        };
+        let column_names = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        Self::try_new(self.alias.clone(), input, column_names)
     }
 }
 

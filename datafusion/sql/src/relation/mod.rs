@@ -18,6 +18,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::definition_plan::AliasedRelation;
 use crate::planner::{
     ContextProvider, PlannedRelation, PlannerContext, RelationPlannerContext,
     RelationPlanning, SqlToRel, TableSampleMethod as LogicalTableSampleMethod,
@@ -28,7 +29,7 @@ use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
     Column, DFSchema, DataFusionError, Diagnostic, Result, ScalarValue, Spans,
-    TableReference, UnnestOptions, not_impl_err, plan_err,
+    TableReference, UnnestOptions, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::{
@@ -42,7 +43,7 @@ use sqlparser::ast::{
     AstBox as SQLBox, Expr as SQLExpr, FunctionArg, FunctionArgExpr, Ident,
     JsonOnBehavior, JsonQueryWrapper, JsonQuotesBehavior, Spanned, SqlJsonTable,
     SqlJsonTableColumn, SqlJsonTableExistsColumn, SqlJsonTableNestedColumn,
-    SqlJsonTableRegularColumn, TableAliasColumnDef, TableFactor,
+    SqlJsonTableRegularColumn, TableAlias, TableAliasColumnDef, TableFactor,
 };
 
 mod join;
@@ -386,10 +387,36 @@ impl SqlToRel<'_> {
 
         let optimized_plan = optimize_subquery_sort(planned_relation.plan)?.data;
         if let Some(alias) = planned_relation.alias {
-            self.apply_table_alias(optimized_plan, alias)
+            self.apply_relation_alias(optimized_plan, alias)
         } else {
             Ok(optimized_plan)
         }
+    }
+
+    /// `plan` under the alias its FROM item wrote. Planned as written, a
+    /// column alias list stays an [`AliasedRelation`] over the relation it
+    /// renames.
+    fn apply_relation_alias(
+        &self,
+        plan: LogicalPlan,
+        alias: TableAlias,
+    ) -> Result<LogicalPlan> {
+        if alias.columns.is_empty()
+            || !self.context_provider.plans_definitions_as_written()
+        {
+            return self.apply_table_alias(plan, alias);
+        }
+        let renamed = self.apply_table_alias(plan.clone(), alias)?;
+        let LogicalPlan::SubqueryAlias(SubqueryAlias { alias, schema, .. }) = renamed
+        else {
+            return internal_err!("a relation alias planned as {}", renamed.display());
+        };
+        let column_names = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        Ok(AliasedRelation::try_new(alias, plan, column_names)?.into_plan())
     }
 
     fn create_relation_ref(
@@ -408,7 +435,7 @@ impl SqlToRel<'_> {
             self.create_default_relation_ref(relation, planner_context)?;
         let optimized_plan = optimize_subquery_sort(planned_relation.plan)?.data;
         if let Some(alias) = planned_relation.alias {
-            self.apply_table_alias(optimized_plan, alias)
+            self.apply_relation_alias(optimized_plan, alias)
         } else {
             Ok(optimized_plan)
         }
