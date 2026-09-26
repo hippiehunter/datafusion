@@ -22,7 +22,7 @@ use std::sync::Arc;
 use datafusion_expr::binary::BinaryTypeCoercer;
 use itertools::{Itertools as _, izip};
 
-use arrow::datatypes::{DataType, Field, IntervalUnit, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::analyzer::AnalyzerRule;
 use crate::utils::NamePreserver;
@@ -852,8 +852,18 @@ fn coerce_frame_bound(
     }
 }
 
-fn extract_window_frame_target_type(col_type: &DataType) -> Result<DataType> {
-    if col_type.is_numeric()
+/// The type a RANGE frame's value offsets coerce to over an ORDER BY key of
+/// `col_type`, or `None` for a key whose offsets stay as the query wrote
+/// them. An exact-numeric, date, time, timestamp or interval key measures
+/// its frame by an offset of another type (an unconstrained numeric, an
+/// interval) whose value the written literal defines under the input rules
+/// of the engine evaluating the frame. No Arrow type here holds that offset
+/// exactly: a declared-scale decimal key would round a finer offset to its
+/// own scale, and Arrow's interval parser reads only some of the interval
+/// spellings the literal may use.
+fn extract_window_frame_target_type(col_type: &DataType) -> Result<Option<DataType>> {
+    if col_type.is_integer()
+        || col_type.is_floating()
         || is_utf8_or_utf8view_or_large_utf8(col_type)
         || matches!(col_type, DataType::List(_))
         || matches!(col_type, DataType::LargeList(_))
@@ -861,9 +871,21 @@ fn extract_window_frame_target_type(col_type: &DataType) -> Result<DataType> {
         || matches!(col_type, DataType::Null)
         || matches!(col_type, DataType::Boolean)
     {
-        Ok(col_type.clone())
-    } else if is_datetime(col_type) {
-        Ok(DataType::Interval(IntervalUnit::MonthDayNano))
+        Ok(Some(col_type.clone()))
+    } else if is_datetime(col_type)
+        || matches!(
+            col_type,
+            DataType::Decimal32(_, _)
+                | DataType::Decimal64(_, _)
+                | DataType::Decimal128(_, _)
+                | DataType::Decimal256(_, _)
+                | DataType::LargeBinary
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+                | DataType::Interval(_)
+        )
+    {
+        Ok(None)
     } else if let DataType::Dictionary(_, value_type) = col_type {
         extract_window_frame_target_type(value_type)
     } else {
@@ -918,7 +940,10 @@ fn coerce_window_frame(
             {
                 return Ok(window_frame);
             }
-            extract_window_frame_target_type(&col_type)?
+            match extract_window_frame_target_type(&col_type)? {
+                Some(target_type) => target_type,
+                None => return Ok(window_frame),
+            }
         }
         WindowFrameUnits::Rows | WindowFrameUnits::Groups => DataType::UInt64,
     };
@@ -1307,7 +1332,7 @@ mod test {
     use insta::assert_snapshot;
 
     use crate::analyzer::type_coercion::{
-        TypeCoercion, TypeCoercionRewriter, coerce_case_expression,
+        TypeCoercion, TypeCoercionRewriter, coerce_case_expression, coerce_window_frame,
     };
     use crate::analyzer::{Analyzer, AnalyzerRule};
     use crate::assert_analyzed_plan_with_config_eq_snapshot;
@@ -1320,8 +1345,9 @@ mod test {
     use datafusion_expr::{
         AccumulatorFactoryFunction, AggregateUDF, BinaryExpr, Case, ColumnarValue, Expr,
         ExprSchemable, Filter, LogicalPlan, Operator, ScalarFunctionArgs, ScalarUDF,
-        ScalarUDFImpl, Signature, SimpleAggregateUDF, Subquery, Union, Volatility, cast,
-        col, create_udaf, is_true, lit,
+        ScalarUDFImpl, Signature, SimpleAggregateUDF, Subquery, Union, Volatility,
+        WindowFrame, WindowFrameBound, WindowFrameUnits, cast, col, create_udaf, is_true,
+        lit,
     };
     use datafusion_functions_aggregate::average::AvgAccumulator;
     use datafusion_sql::TableReference;
@@ -1505,6 +1531,57 @@ mod test {
             EmptyRelation: rows=1
         ");
         assert_eq!(printed.schema(), executed.schema());
+        Ok(())
+    }
+
+    /// A RANGE offset over an integer or floating-point key coerces to the
+    /// key's type. Over an exact-numeric, date, time, timestamp or interval
+    /// key it stays as the query wrote it, for the engine to read at the
+    /// precision the key's in-range arithmetic needs.
+    #[test]
+    fn range_offsets_coerce_to_the_key_or_stay_as_written() -> Result<()> {
+        let key_types = [
+            (DataType::Int32, ScalarValue::Int32(Some(2))),
+            (DataType::Float64, ScalarValue::Float64(Some(2.0))),
+            (DataType::Decimal128(10, 1), ScalarValue::from("2")),
+            (DataType::LargeBinary, ScalarValue::from("2")),
+            (DataType::Date32, ScalarValue::from("2")),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+                ScalarValue::from("2"),
+            ),
+            (
+                DataType::Time64(TimeUnit::Microsecond),
+                ScalarValue::from("2"),
+            ),
+            (
+                DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano),
+                ScalarValue::from("2"),
+            ),
+        ];
+        for (key_type, coerced) in key_types {
+            let schema = DFSchema::from_unqualified_fields(
+                vec![Field::new("k", key_type.clone(), true)].into(),
+                Default::default(),
+            )?;
+            let frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Range,
+                WindowFrameBound::Preceding(ScalarValue::from("2")),
+                WindowFrameBound::Following(ScalarValue::from("2")),
+            );
+            let order_by = [expr::Sort::new(col("k"), true, false)];
+            let frame = coerce_window_frame(frame, &schema, &order_by)?;
+            assert_eq!(
+                frame.start_bound,
+                WindowFrameBound::Preceding(coerced.clone()),
+                "{key_type}"
+            );
+            assert_eq!(
+                frame.end_bound,
+                WindowFrameBound::Following(coerced),
+                "{key_type}"
+            );
+        }
         Ok(())
     }
 
