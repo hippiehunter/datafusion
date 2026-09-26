@@ -238,8 +238,10 @@ fn row_offset(value: ast::Expr) -> Result<ScalarValue> {
 /// ORDER BY keys it can measure: a number as the exact numeric literal the
 /// expression planner makes of it, a quoted string as unknown-typed text
 /// the key's offset type reads, and an interval as `plan_interval` reads
-/// it. A cast of a number or a string keeps its operand's type; one to
-/// `interval` reads the string as an interval.
+/// it. The parser reads a quoted frame offset as an unqualified interval, so
+/// an unqualified `INTERVAL '...'` is that quoted text; a qualified interval,
+/// or a cast to `interval`, is an interval. A cast of a number or a string
+/// otherwise keeps its operand's type.
 fn range_offset(
     value: ast::Expr,
     plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
@@ -274,6 +276,28 @@ fn range_offset(
             value: ast::Value::SingleQuotedString(text),
             span: _,
         }) => Ok(ScalarValue::Utf8(Some(text))),
+        ast::Expr::Interval(ast::Interval {
+            value,
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        }) if matches!(
+            value.as_ref(),
+            ast::Expr::Value(ValueWithSpan {
+                value: ast::Value::SingleQuotedString(_),
+                span: _,
+            })
+        ) =>
+        {
+            match sqlparser::arena::AstBox::into_owned(value) {
+                ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(text),
+                    span: _,
+                }) => Ok(ScalarValue::Utf8(Some(text))),
+                _ => invalid(),
+            }
+        }
         ast::Expr::Interval(interval) => plan_interval(&interval),
         ast::Expr::Cast {
             expr, data_type, ..
@@ -422,8 +446,9 @@ mod tests {
     }
 
     /// A RANGE offset keeps the type of the literal it was written as: an
-    /// exact number, unknown-typed text, or the interval the interval
-    /// planner reads, also through a cast.
+    /// exact number, unknown-typed text (which is also what the parser makes
+    /// of a quoted offset, an unqualified interval), or the interval the
+    /// interval planner reads of a qualified interval or a cast.
     #[test]
     fn range_offsets_keep_their_literal_types() -> Result<()> {
         let number =
@@ -452,6 +477,16 @@ mod tests {
                 ast::Expr::Interval(ast::Interval {
                     value: ast::AstBox::new(string("1 day")),
                     leading_field: None,
+                    leading_precision: None,
+                    last_field: None,
+                    fractional_seconds_precision: None,
+                }),
+                ScalarValue::Utf8(Some("1 day".to_string())),
+            ),
+            (
+                ast::Expr::Interval(ast::Interval {
+                    value: ast::AstBox::new(string("1")),
+                    leading_field: Some(ast::DateTimeField::Day),
                     leading_precision: None,
                     last_field: None,
                     fractional_seconds_precision: None,

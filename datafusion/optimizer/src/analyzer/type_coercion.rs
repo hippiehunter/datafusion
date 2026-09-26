@@ -779,25 +779,16 @@ fn transform_schema_to_nonview(dfschema: &DFSchemaRef) -> Option<Result<DFSchema
     ))
 }
 
-/// Casts the given `value` to `target_type`. Note that this function
-/// only considers `Null` or `Utf8` values.
+/// Casts the given frame offset `value` to `target_type`: text through the
+/// target type's input, a typed number by a cast.
 fn coerce_scalar(target_type: &DataType, value: &ScalarValue) -> Result<ScalarValue> {
     match value {
-        // Coerce Utf8 values:
         ScalarValue::Utf8(Some(val)) => {
             ScalarValue::try_from_string(val.clone(), target_type)
         }
-        s => {
-            if s.is_null() {
-                // Coerce `Null` values:
-                ScalarValue::try_from(target_type)
-            } else {
-                // Values except `Utf8`/`Null` variants already have the right type
-                // (casted before) since we convert `sqlparser` outputs to `Utf8`
-                // for all possible cases. Therefore, we return a clone here.
-                Ok(s.clone())
-            }
-        }
+        s if s.is_null() => ScalarValue::try_from(target_type),
+        s if s.data_type() == *target_type => Ok(s.clone()),
+        s => s.cast_to(target_type),
     }
 }
 
