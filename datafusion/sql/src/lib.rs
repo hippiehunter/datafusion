@@ -46,6 +46,7 @@
 
 mod ast_walk;
 mod cte;
+pub mod definition_plan;
 mod dml_front;
 mod expr;
 mod outer_aggregates;

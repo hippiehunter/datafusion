@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::cte::under_with_list;
 use crate::planner::{PlannerContext, SqlToRel};
 
 use crate::stack::StackGuard;
@@ -77,11 +78,12 @@ impl SqlToRel<'_> {
             query.fetch.as_deref(),
         )?;
 
-        if let Some(with) = query.with.as_deref() {
-            self.plan_with_clause_ref(with, planner_context)?;
-        }
+        let with_items = match query.with.as_deref() {
+            Some(with) => self.plan_with_clause_ref(with, planner_context)?,
+            None => Vec::new(),
+        };
 
-        match query.body.as_ref() {
+        let plan = match query.body.as_ref() {
             SetExpr::Select(select) => {
                 let plan = self.select_to_plan_ref(
                     select.as_ref(),
@@ -114,7 +116,8 @@ impl SqlToRel<'_> {
                 let plan = self.limit(plan, limit_info, planner_context)?;
                 self.apply_query_locks(plan, &query.locks)
             }
-        }
+        }?;
+        Ok(under_with_list(query.with.as_deref(), with_items, plan))
     }
 
     fn apply_query_locks(

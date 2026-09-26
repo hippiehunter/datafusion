@@ -20,12 +20,13 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use crate::ast_walk::Walk;
+use crate::definition_plan::{CteCycle, CteItem, CteReference, CteSearch, WithQuery};
 use crate::planner::{IdentNormalizer, PlannerContext, SqlToRel};
 
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datafusion_common::{
-    Column, DFSchema, DataFusionError, Result, internal_err, not_impl_err, plan_err,
-    sqlstate_datafusion_err,
+    Column, DFSchema, DataFusionError, Result, TableReference, internal_err,
+    not_impl_err, plan_err, sqlstate_datafusion_err,
     tree_node::{TreeNode, TreeNodeRecursion},
 };
 use datafusion_expr::expr::{Alias, Case, Cast};
@@ -33,22 +34,61 @@ use datafusion_expr::type_coercion::other::get_coerce_type_for_case_expression;
 use datafusion_expr::utils::SYSTEM_COLUMN_METADATA_KEY;
 use datafusion_expr::{
     Distinct, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Projection,
-    TableSource, recursive_term_type_settles,
+    recursive_term_type_settles,
 };
 use sqlparser::ast::{
     AccessExpr, Array, AstBox as SQLBox, AttachedToken, BinaryOperator, CastKind, Cte,
-    CycleClause, DataType as SQLDataType, Expr as SQLExpr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName, Query,
-    SearchClause, SearchOrder, Select, SelectItem, SetExpr, SetOperator, TableFactor,
-    TableWithJoins, Value, Visitor, With,
+    CteAsMaterialized, CycleClause, DataType as SQLDataType, Expr as SQLExpr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident,
+    ObjectName, Query, SearchClause, SearchOrder, Select, SelectItem, SetExpr,
+    SetOperator, TableFactor, TableWithJoins, Value, Visitor, With,
 };
 
+/// A WITH item's plan. Planned as written, an item with a SEARCH or CYCLE
+/// clause also has the plan whose columns its references read, since its
+/// terms as written lack the columns those clauses add.
+struct PlannedCte {
+    plan: LogicalPlan,
+    read_as: Option<LogicalPlan>,
+}
+
+impl PlannedCte {
+    fn of(plan: LogicalPlan) -> Self {
+        Self {
+            plan,
+            read_as: None,
+        }
+    }
+}
+
+/// `plan` under the WITH list its query wrote, when the list was planned as
+/// written.
+pub(crate) fn under_with_list(
+    with: Option<&With>,
+    items: Vec<(CteItem, LogicalPlan)>,
+    plan: LogicalPlan,
+) -> LogicalPlan {
+    match with {
+        Some(with) if !items.is_empty() => {
+            WithQuery::new(with.recursive, items, plan).into_plan()
+        }
+        _ => plan,
+    }
+}
+
 impl SqlToRel<'_> {
+    /// Plan a WITH list's items into `planner_context`. Planning a query as
+    /// written ([`ContextProvider::plans_definitions_as_written`]) makes each
+    /// reference to an item a [`CteReference`] and returns the items with
+    /// their queries, in the order PostgreSQL keeps them; otherwise a
+    /// reference is the item's plan and nothing is returned.
+    ///
+    /// [`ContextProvider::plans_definitions_as_written`]: crate::planner::ContextProvider::plans_definitions_as_written
     pub(super) fn plan_with_clause_ref(
         &self,
         with: &With,
         planner_context: &mut PlannerContext,
-    ) -> Result<()> {
+    ) -> Result<Vec<(CteItem, LogicalPlan)>> {
         if !with.oracle_declarations.is_empty() {
             return not_impl_err!("Oracle PL/SQL declarations in WITH are not supported");
         }
@@ -80,11 +120,13 @@ impl SqlToRel<'_> {
         } else {
             (0..with.cte_tables.len()).collect()
         };
+        let as_written = self.context_provider.plans_definitions_as_written();
+        let mut items = Vec::new();
         for idx in order {
             let cte = &with.cte_tables[idx];
             let cte_name = cte_names[idx].clone();
 
-            let cte_plan = if is_recursive {
+            let planned = if is_recursive {
                 self.recursive_cte_ref(&cte_name, cte, planner_context)?
             } else {
                 let plan =
@@ -92,18 +134,75 @@ impl SqlToRel<'_> {
                 if cte.search.is_some() || cte.cycle.is_some() {
                     return Err(with_query_not_recursive());
                 }
-                plan
+                PlannedCte::of(plan)
             };
 
-            // Each `WITH` block can change the column names in the last
-            // projection (e.g. "WITH table(t1, t2) AS SELECT 1, 2").
-            // For recursive CTEs, column aliases have already been applied within recursive_cte(),
-            // but apply_table_alias will still apply the table name alias.
-            let final_plan = self.apply_table_alias(cte_plan, cte.alias.clone())?;
-            // Export the CTE to the outer query
-            planner_context.insert_cte(cte_name, final_plan);
+            if !as_written {
+                // Each `WITH` block can change the column names in the last
+                // projection (e.g. "WITH table(t1, t2) AS SELECT 1, 2").
+                // For recursive CTEs, column aliases have already been applied within recursive_cte(),
+                // but apply_table_alias will still apply the table name alias.
+                let final_plan =
+                    self.apply_table_alias(planned.plan, cte.alias.clone())?;
+                // Export the CTE to the outer query
+                planner_context.insert_cte(cte_name, final_plan);
+                continue;
+            }
+            let read = planned.read_as.unwrap_or_else(|| planned.plan.clone());
+            let read = self.apply_table_alias(read, cte.alias.clone())?;
+            let reference =
+                CteReference::new(cte_name.clone(), Arc::clone(read.schema()));
+            let item = self.written_cte_item(cte, cte_name.clone(), planner_context)?;
+            items.push((item, planned.plan));
+            planner_context.insert_cte(cte_name, reference.into_plan());
         }
-        Ok(())
+        Ok(items)
+    }
+
+    /// The clauses around a WITH item's query, as PostgreSQL keeps them.
+    fn written_cte_item(
+        &self,
+        cte: &Cte,
+        name: String,
+        planner_context: &mut PlannerContext,
+    ) -> Result<CteItem> {
+        let normalize = |ident: &Ident| self.ident_normalizer.normalize(ident.clone());
+        let search = cte.search.as_ref().map(|search| CteSearch {
+            breadth_first: matches!(search.order, SearchOrder::BreadthFirst),
+            columns: search.by_columns.iter().map(normalize).collect(),
+            sequence_column: normalize(&search.set_column),
+        });
+        let cycle = cte
+            .cycle
+            .as_ref()
+            .map(|cycle| -> Result<CteCycle> {
+                let Some(path) = cycle.using_column.as_ref() else {
+                    return not_impl_err!("CYCLE clause without a USING path column");
+                };
+                let marks = self.cycle_mark(cycle, planner_context)?;
+                Ok(CteCycle {
+                    columns: cycle.columns.iter().map(normalize).collect(),
+                    mark_column: normalize(&cycle.set_column),
+                    mark_value: marks.cycle,
+                    mark_default: marks.non_cycle,
+                    path_column: normalize(path),
+                })
+            })
+            .transpose()?;
+        Ok(CteItem {
+            name,
+            column_names: cte
+                .alias
+                .columns
+                .iter()
+                .map(|column| normalize(&column.name))
+                .collect(),
+            materialized: cte.materialized.as_ref().map(|materialized| {
+                matches!(materialized, CteAsMaterialized::Materialized)
+            }),
+            search,
+            cycle,
+        })
     }
 
     fn non_recursive_cte_ref(
@@ -119,7 +218,7 @@ impl SqlToRel<'_> {
         cte_name: &str,
         cte: &Cte,
         planner_context: &mut PlannerContext,
-    ) -> Result<LogicalPlan> {
+    ) -> Result<PlannedCte> {
         if !self
             .context_provider
             .options()
@@ -128,6 +227,7 @@ impl SqlToRel<'_> {
         {
             return not_impl_err!("Recursive CTEs are not enabled");
         }
+        let as_written = self.context_provider.plans_definitions_as_written();
         let cte_query = cte.query.as_ref();
         let column_aliases = cte
             .alias
@@ -140,9 +240,11 @@ impl SqlToRel<'_> {
         // and to nothing outside the CTE.
         let mut cte_planner_context = planner_context.clone();
         let planner_context = &mut cte_planner_context;
-        if let Some(with) = cte_query.with.as_deref() {
-            self.plan_with_clause_ref(with, planner_context)?;
-        }
+        let nested_items = match cte_query.with.as_deref() {
+            Some(with) => self.plan_with_clause_ref(with, planner_context)?,
+            None => Vec::new(),
+        };
+        let nested_with = cte_query.with.as_deref();
 
         // PostgreSQL types the cycle mark before it analyzes the item's query.
         let cycle_mark = cte
@@ -165,7 +267,7 @@ impl SqlToRel<'_> {
                 return if search_or_cycle {
                     Err(with_query_not_recursive())
                 } else {
-                    Ok(plan)
+                    Ok(PlannedCte::of(plan))
                 };
             }
         };
@@ -197,7 +299,8 @@ impl SqlToRel<'_> {
         // If column aliases are provided, inject them into the AST before compiling.
         // This ensures columns get unique names even if the SELECT has duplicate literals
         // (e.g., SELECT 1, 0, 1 with aliases (n, a, b) becomes SELECT 1 AS n, 0 AS a, 1 AS b).
-        let static_plan = if column_aliases.is_empty() {
+        // Planned as written, the term keeps the names it wrote.
+        let static_plan = if column_aliases.is_empty() || as_written {
             self.set_expr_to_plan_ref(left_expr, planner_context)?
         } else {
             let aliased = self
@@ -256,30 +359,45 @@ impl SqlToRel<'_> {
         } else {
             None
         };
-        let (static_plan, work_table_schema) = match &search_cycle {
+        // Planned as written, the terms keep the columns they wrote and the
+        // item's references read the extended non-recursive term's columns.
+        let (static_plan, work_table_schema, read_as) = match &search_cycle {
+            Some(search_cycle) if as_written => {
+                let extended = self.extend_static_term(
+                    static_plan.clone(),
+                    search_cycle,
+                    planner_context,
+                )?;
+                let work_table_schema = search_cycle.work_table_schema(extended.schema());
+                (static_plan, work_table_schema, Some(extended))
+            }
             Some(search_cycle) => {
                 let static_plan =
                     self.extend_static_term(static_plan, search_cycle, planner_context)?;
                 let work_table_schema =
                     search_cycle.work_table_schema(static_plan.schema());
-                (static_plan, work_table_schema)
+                (static_plan, work_table_schema, None)
             }
-            None => (static_plan, static_columns),
+            None => (static_plan, static_columns, None),
         };
 
-        // Step 2.2: Create a table source for the temporary relation
-        let work_table_source = self
-            .context_provider
-            .create_cte_work_table(cte_name, work_table_schema)?;
-
-        // Step 2.3: Create a temporary relation logical plan that will be used
-        // as the input to the recursive term
-        let work_table_plan = LogicalPlanBuilder::scan(
-            cte_name.to_string(),
-            Arc::clone(&work_table_source),
-            None,
-        )?
-        .build()?;
+        // Step 2.2 and 2.3: Create a temporary relation logical plan that will
+        // be used as the input to the recursive term: a scan of a table source
+        // standing for the work table, or planned as written, a reference to
+        // the item itself.
+        let work_table_plan = if as_written {
+            let schema = DFSchema::try_from_qualified_schema(
+                TableReference::bare(cte_name),
+                &work_table_schema,
+            )?;
+            CteReference::new(cte_name.to_string(), Arc::new(schema)).into_plan()
+        } else {
+            let work_table_source = self
+                .context_provider
+                .create_cte_work_table(cte_name, work_table_schema)?;
+            LogicalPlanBuilder::scan(cte_name.to_string(), work_table_source, None)?
+                .build()?
+        };
 
         let name = cte_name.to_string();
 
@@ -288,7 +406,7 @@ impl SqlToRel<'_> {
         // with the temporary relation we created above by temporarily registering
         // it as a CTE. This temporary relation in the planning context will be
         // replaced by the actual CTE plan once we're done with the planning.
-        planner_context.insert_cte(cte_name.to_string(), work_table_plan);
+        planner_context.insert_cte(cte_name.to_string(), work_table_plan.clone());
 
         // ---------- Step 3: Compile the recursive term ------------------
         // this uses the named_relation we inserted above to resolve the
@@ -298,19 +416,24 @@ impl SqlToRel<'_> {
 
         // Check if the recursive term references the CTE itself,
         // if not, it is a non-recursive CTE
-        if !has_work_table_reference(&recursive_plan, &work_table_source) {
+        if !has_work_table_reference(&recursive_plan, &work_table_plan) {
             if search_or_cycle {
                 return Err(with_query_not_recursive());
             }
             // Remove the work table plan from the context
             planner_context.remove_cte(cte_name);
             // Compile it as a non-recursive CTE
-            return self.set_operation_to_plan(
+            let plan = self.set_operation_to_plan(
                 SetOperator::Union,
                 static_plan,
                 recursive_plan,
                 *set_quantifier,
-            );
+            )?;
+            return Ok(PlannedCte::of(under_with_list(
+                nested_with,
+                nested_items,
+                plan,
+            )));
         }
         let recursive_plan = match &search_cycle {
             Some(search_cycle) => {
@@ -326,22 +449,40 @@ impl SqlToRel<'_> {
                             ),
                         )
                     })?;
-                self.extend_recursive_term(
-                    recursive_plan,
-                    &reference,
-                    static_plan.schema(),
-                    search_cycle,
-                    planner_context,
-                )?
+                if as_written {
+                    recursive_plan
+                } else {
+                    self.extend_recursive_term(
+                        recursive_plan,
+                        &reference,
+                        static_plan.schema(),
+                        search_cycle,
+                        planner_context,
+                    )?
+                }
             }
             None => recursive_plan,
         };
 
         // ---------- Step 4: Create the final plan ------------------
+        // Planned as written, the item's query is the UNION of its terms.
+        if as_written {
+            let plan = self.set_operation_to_plan(
+                SetOperator::Union,
+                static_plan,
+                recursive_plan,
+                *set_quantifier,
+            )?;
+            return Ok(PlannedCte {
+                plan: under_with_list(nested_with, nested_items, plan),
+                read_as,
+            });
+        }
         let distinct = !Self::is_union_all(*set_quantifier)?;
         LogicalPlanBuilder::from(static_plan)
             .to_recursive_query(name, recursive_plan, distinct)?
             .build()
+            .map(PlannedCte::of)
     }
 
     /// The values a CYCLE clause marks rows with (`TRUE` and `FALSE` when it
@@ -1136,7 +1277,8 @@ fn next_depth(sequence: &Ident) -> SQLExpr {
 }
 
 /// The order in which to plan the items of a recursive WITH list: each item
-/// after every other item it references. An item's reference to itself is its
+/// after every other item it references, as PostgreSQL's `TopologicalSort`
+/// orders the list it keeps and prints. An item's reference to itself is its
 /// recursion and imposes no order; a reference cycle between distinct items is
 /// mutual recursion, which PostgreSQL does not implement either.
 fn with_list_dependency_order(
@@ -1144,7 +1286,7 @@ fn with_list_dependency_order(
     cte_names: &[String],
     normalizer: &IdentNormalizer,
 ) -> Result<Vec<usize>> {
-    let dependencies: Vec<HashSet<usize>> = ctes
+    let mut dependencies: Vec<HashSet<usize>> = ctes
         .iter()
         .enumerate()
         .map(|(idx, cte)| {
@@ -1159,19 +1301,22 @@ fn with_list_dependency_order(
             referenced.referenced
         })
         .collect();
-    let mut order = Vec::with_capacity(ctes.len());
-    let mut planned = vec![false; ctes.len()];
-    while order.len() < ctes.len() {
-        let next = (0..ctes.len()).find(|&idx| {
-            !planned[idx] && dependencies[idx].iter().all(|&dep| planned[dep])
-        });
-        let Some(idx) = next else {
+    // Each position takes the first item from there on whose dependencies are
+    // all placed, swapping it with the item that held the position.
+    let mut order: Vec<usize> = (0..ctes.len()).collect();
+    for position in 0..order.len() {
+        let Some(found) = (position..order.len())
+            .find(|&candidate| dependencies[order[candidate]].is_empty())
+        else {
             return not_impl_err!(
                 "mutual recursion between WITH items is not implemented"
             );
         };
-        planned[idx] = true;
-        order.push(idx);
+        order.swap(position, found);
+        let placed = order[position];
+        for &later in &order[position + 1..] {
+            dependencies[later].remove(&placed);
+        }
     }
     Ok(order)
 }
@@ -1226,15 +1371,21 @@ impl Visitor for WithListReferences<'_> {
     }
 }
 
-fn has_work_table_reference(
-    plan: &LogicalPlan,
-    work_table_source: &Arc<dyn TableSource>,
-) -> bool {
+/// Whether `plan` reads `work_table`, the relation a recursive term's
+/// references to its item are planned as.
+fn has_work_table_reference(plan: &LogicalPlan, work_table: &LogicalPlan) -> bool {
     let mut has_reference = false;
     plan.apply(|node| {
-        if let LogicalPlan::TableScan(scan) = node
-            && Arc::ptr_eq(&scan.source, work_table_source)
-        {
+        let reads_work_table = match (node, work_table) {
+            (LogicalPlan::TableScan(scan), LogicalPlan::TableScan(work_table)) => {
+                Arc::ptr_eq(&scan.source, &work_table.source)
+            }
+            (LogicalPlan::Extension(extension), LogicalPlan::Extension(work_table)) => {
+                Arc::ptr_eq(&extension.node, &work_table.node)
+            }
+            _ => false,
+        };
+        if reads_work_table {
             has_reference = true;
             return Ok(TreeNodeRecursion::Stop);
         }

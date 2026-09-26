@@ -70,6 +70,7 @@ pub(crate) struct MockSessionState {
     pub values_coercion: Option<ValuesCoercion>,
     pub literal_planner: Option<fn(Expr, sqlparser::tokenizer::Span) -> Result<Expr>>,
     pub row_stream_function: Option<Arc<ScalarUDF>>,
+    pub plans_definitions_as_written: bool,
 }
 
 impl MockSessionState {
@@ -132,6 +133,10 @@ impl ContextProvider for MockContextProvider {
             Some(coerce) => coerce(rows),
             None => Ok(rows),
         }
+    }
+
+    fn plans_definitions_as_written(&self) -> bool {
+        self.state.plans_definitions_as_written
     }
 
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {

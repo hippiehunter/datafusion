@@ -270,7 +270,7 @@ impl<S: SimplifyInfo> ExprSimplifier<S> {
     /// See the [type coercion module](datafusion_expr::type_coercion)
     /// documentation for more details on type coercion
     pub fn coerce(&self, expr: Expr, schema: &DFSchema) -> Result<Expr> {
-        let mut expr_rewrite = TypeCoercionRewriter { schema };
+        let mut expr_rewrite = TypeCoercionRewriter::new(schema);
         expr.rewrite(&mut expr_rewrite).data()
     }
 

@@ -59,11 +59,23 @@ use datafusion_expr::{
 /// Performs type coercion by determining the schema
 /// and performing the expression rewrites.
 #[derive(Default, Debug)]
-pub struct TypeCoercion {}
+pub struct TypeCoercion {
+    set_operation_inputs_as_written: bool,
+}
 
 impl TypeCoercion {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
+    }
+
+    /// Coercion of a plan to be printed back as SQL rather than executed. As
+    /// in PostgreSQL's parse tree, the inputs of a set operation keep the
+    /// expressions and the column names their queries wrote; only the
+    /// operation's output takes their common types.
+    pub fn keeping_set_operation_inputs() -> Self {
+        Self {
+            set_operation_inputs_as_written: true,
+        }
     }
 }
 
@@ -95,7 +107,13 @@ impl AnalyzerRule for TypeCoercion {
 
         // recurse
         let transformed_plan = plan
-            .transform_up_with_subqueries(|plan| analyze_internal(&empty_schema, plan))?
+            .transform_up_with_subqueries(|plan| {
+                analyze_internal(
+                    &empty_schema,
+                    plan,
+                    self.set_operation_inputs_as_written,
+                )
+            })?
             .data;
 
         // finish
@@ -109,6 +127,7 @@ impl AnalyzerRule for TypeCoercion {
 fn analyze_internal(
     external_schema: &DFSchema,
     plan: LogicalPlan,
+    set_operation_inputs_as_written: bool,
 ) -> Result<Transformed<LogicalPlan>> {
     // get schema representing all available input fields. This is used for data type
     // resolution only, so order does not matter here
@@ -135,7 +154,10 @@ fn analyze_internal(
         plan
     };
 
-    let mut expr_rewrite = TypeCoercionRewriter::new(&schema);
+    let mut expr_rewrite = TypeCoercionRewriter {
+        schema: &schema,
+        set_operation_inputs_as_written,
+    };
 
     let name_preserver = NamePreserver::new(&plan);
     // apply coercion rewrite all expressions in the plan individually
@@ -153,13 +175,18 @@ fn analyze_internal(
 /// Rewrite expressions to apply type coercion.
 pub struct TypeCoercionRewriter<'a> {
     pub(crate) schema: &'a DFSchema,
+    /// See [`TypeCoercion::keeping_set_operation_inputs`].
+    set_operation_inputs_as_written: bool,
 }
 
 impl<'a> TypeCoercionRewriter<'a> {
     /// Create a new [`TypeCoercionRewriter`] with a provided schema
     /// representing both the inputs and output of the [`LogicalPlan`] node.
     pub fn new(schema: &'a DFSchema) -> Self {
-        Self { schema }
+        Self {
+            schema,
+            set_operation_inputs_as_written: false,
+        }
     }
 
     /// Coerce the [`LogicalPlan`].
@@ -169,6 +196,9 @@ impl<'a> TypeCoercionRewriter<'a> {
     pub fn coerce_plan(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
         match plan {
             LogicalPlan::Join(join) => self.coerce_join(join),
+            LogicalPlan::Union(union) if self.set_operation_inputs_as_written => {
+                Self::coerce_union_output(union)
+            }
             LogicalPlan::Union(union) => Self::coerce_union(union),
             LogicalPlan::Limit(limit) => Self::coerce_limit(limit),
             _ => Ok(plan),
@@ -239,6 +269,19 @@ impl<'a> TypeCoercionRewriter<'a> {
             .collect::<Result<Vec<_>>>()?;
         Ok(LogicalPlan::Union(Union {
             inputs: new_inputs,
+            schema: union_schema,
+        }))
+    }
+
+    /// The union's output coerced to a schema compatible with all inputs, the
+    /// inputs left as their queries wrote them.
+    fn coerce_union_output(union_plan: Union) -> Result<LogicalPlan> {
+        let union_schema = Arc::new(coerce_union_schema_with_schema(
+            &union_plan.inputs,
+            &union_plan.schema,
+        )?);
+        Ok(LogicalPlan::Union(Union {
+            inputs: union_plan.inputs,
             schema: union_schema,
         }))
     }
@@ -319,8 +362,12 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                 outer_ref_columns,
                 spans,
             }) => {
-                let new_plan =
-                    analyze_internal(self.schema, Arc::unwrap_or_clone(subquery))?.data;
+                let new_plan = analyze_internal(
+                    self.schema,
+                    Arc::unwrap_or_clone(subquery),
+                    self.set_operation_inputs_as_written,
+                )?
+                .data;
                 Ok(Transformed::yes(Expr::ScalarSubquery(Subquery {
                     subquery: Arc::new(new_plan),
                     outer_ref_columns,
@@ -331,6 +378,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                 let new_plan = analyze_internal(
                     self.schema,
                     Arc::unwrap_or_clone(subquery.subquery),
+                    self.set_operation_inputs_as_written,
                 )?
                 .data;
                 Ok(Transformed::yes(Expr::Exists(Exists {
@@ -350,6 +398,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                 let new_plan = analyze_internal(
                     self.schema,
                     Arc::unwrap_or_clone(subquery.subquery),
+                    self.set_operation_inputs_as_written,
                 )?
                 .data;
                 let expr_type = expr.get_type(self.schema)?;
@@ -596,6 +645,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                     let new_plan = analyze_internal(
                         self.schema,
                         Arc::unwrap_or_clone(subquery.subquery),
+                        self.set_operation_inputs_as_written,
                     )?
                     .data;
                     let expr_type = expr.get_type(self.schema)?;
@@ -630,6 +680,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                     let new_plan = analyze_internal(
                         self.schema,
                         Arc::unwrap_or_clone(subquery.subquery),
+                        self.set_operation_inputs_as_written,
                     )?
                     .data;
                     let expr_type = expr.get_type(self.schema)?;
@@ -1255,10 +1306,10 @@ mod test {
     use arrow::datatypes::{DataType, Field, Schema, SchemaBuilder, TimeUnit};
     use insta::assert_snapshot;
 
-    use crate::analyzer::Analyzer;
     use crate::analyzer::type_coercion::{
         TypeCoercion, TypeCoercionRewriter, coerce_case_expression,
     };
+    use crate::analyzer::{Analyzer, AnalyzerRule};
     use crate::assert_analyzed_plan_with_config_eq_snapshot;
     use datafusion_common::config::ConfigOptions;
     use datafusion_common::tree_node::{TransformedResult, TreeNode};
@@ -1413,6 +1464,48 @@ mod test {
             EmptyRelation: rows=0
         "
         )
+    }
+
+    /// Coerced for printing, a union's inputs keep the expressions and names
+    /// their queries wrote while the union's output takes the common type.
+    #[test]
+    fn a_union_coerced_for_printing_keeps_its_inputs_as_written() -> Result<()> {
+        let one_row = || {
+            Arc::new(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: true,
+                schema: Arc::new(DFSchema::empty()),
+            }))
+        };
+        let left = LogicalPlan::Projection(Projection::try_new(
+            vec![lit(1_i32).alias("a")],
+            one_row(),
+        )?);
+        let right =
+            LogicalPlan::Projection(Projection::try_new(vec![lit(2_i64)], one_row())?);
+        let union = LogicalPlan::Union(Union::try_new_with_loose_types(vec![
+            Arc::new(left),
+            Arc::new(right),
+        ])?);
+        let options = ConfigOptions::default();
+        let executed = TypeCoercion::new().analyze(union.clone(), &options)?;
+        assert_snapshot!(executed, @r"
+        Union
+          Projection: CAST(Int32(1) AS Int64) AS a
+            EmptyRelation: rows=1
+          Projection: Int64(2) AS a
+            EmptyRelation: rows=1
+        ");
+        let printed =
+            TypeCoercion::keeping_set_operation_inputs().analyze(union, &options)?;
+        assert_snapshot!(printed, @r"
+        Union
+          Projection: Int32(1) AS a
+            EmptyRelation: rows=1
+          Projection: Int64(2)
+            EmptyRelation: rows=1
+        ");
+        assert_eq!(printed.schema(), executed.schema());
+        Ok(())
     }
 
     #[test]
@@ -2209,7 +2302,7 @@ mod test {
             vec![Field::new("a", DataType::Int64, true)].into(),
             std::collections::HashMap::new(),
         )?);
-        let mut rewriter = TypeCoercionRewriter { schema: &schema };
+        let mut rewriter = TypeCoercionRewriter::new(&schema);
         let expr = is_true(lit(12i32).gt(lit(13i64)));
         let expected = is_true(cast(lit(12i32), DataType::Int64).gt(lit(13i64)));
         let result = expr.rewrite(&mut rewriter).data()?;
@@ -2220,7 +2313,7 @@ mod test {
             vec![Field::new("a", DataType::Int64, true)].into(),
             std::collections::HashMap::new(),
         )?);
-        let mut rewriter = TypeCoercionRewriter { schema: &schema };
+        let mut rewriter = TypeCoercionRewriter::new(&schema);
         let expr = is_true(lit(12i32).eq(lit(13i64)));
         let expected = is_true(cast(lit(12i32), DataType::Int64).eq(lit(13i64)));
         let result = expr.rewrite(&mut rewriter).data()?;
@@ -2231,7 +2324,7 @@ mod test {
             vec![Field::new("a", DataType::Int64, true)].into(),
             std::collections::HashMap::new(),
         )?);
-        let mut rewriter = TypeCoercionRewriter { schema: &schema };
+        let mut rewriter = TypeCoercionRewriter::new(&schema);
         let expr = is_true(lit(12i32).lt(lit(13i64)));
         let expected = is_true(cast(lit(12i32), DataType::Int64).lt(lit(13i64)));
         let result = expr.rewrite(&mut rewriter).data()?;

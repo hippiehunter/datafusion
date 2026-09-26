@@ -36,6 +36,7 @@ use datafusion_expr::{
     logical_plan::LogicalPlan, test::function_stub::sum_udaf,
 };
 use datafusion_sql::{
+    definition_plan::{WithQuery, as_definition_node},
     parser::DFParser,
     planner::{NullOrdering, ParserOptions, SqlToRel},
     unparser::plan_to_sql,
@@ -1010,6 +1011,68 @@ fn created_relations_reject_a_column_named_twice() {
             "column \"age\" specified more than once"
         );
     }
+}
+
+fn definition_plan(sql: &str) -> LogicalPlan {
+    let mut state = MockSessionState::default();
+    state.plans_definitions_as_written = true;
+    let context = MockContextProvider { state };
+    let planner = SqlToRel::new(&context);
+    let mut ast = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {}).unwrap();
+    planner.statement_to_plan(ast.pop_front().unwrap()).unwrap()
+}
+
+/// Planned to be printed back, a query keeps its WITH list: every item with
+/// the query it wrote, a recursive one as the UNION of its terms, each
+/// reference to an item a reference by name. A WITH RECURSIVE list puts each
+/// item after the items it reads, moving the first item whose dependencies
+/// are placed into the next position as PostgreSQL's topological sort does.
+#[test]
+fn a_definition_keeps_its_with_list_as_written() {
+    let plan = definition_plan(
+        "WITH RECURSIVE a AS (SELECT n FROM nums), b AS (SELECT n FROM nums), \
+         nums(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM nums WHERE n < 5), \
+         unread AS MATERIALIZED (SELECT 1 AS one) \
+         SELECT x.n FROM a x",
+    );
+    assert_snapshot!(plan, @r"
+    WithQuery: RECURSIVE nums, b, a, unread
+      Projection: x.n
+        SubqueryAlias: x
+          CteReference: a
+      Union
+        Values: (Int32(1))
+        Projection: nums.n + Int32(1)
+          Filter: nums.n < Int32(5)
+            CteReference: nums
+      Projection: nums.n
+        CteReference: nums
+      Projection: nums.n
+        CteReference: nums
+      Projection: Int32(1) AS one
+        EmptyRelation: rows=1
+    ");
+    let with = as_definition_node::<WithQuery>(&plan).unwrap();
+    let items = with
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.name.as_str(),
+                item.column_names.clone(),
+                item.materialized,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        items,
+        [
+            ("nums", vec!["n".to_string()], None),
+            ("b", vec![], None),
+            ("a", vec![], None),
+            ("unread", vec![], Some(true)),
+        ]
+    );
 }
 
 #[test]

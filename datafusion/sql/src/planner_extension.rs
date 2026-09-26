@@ -119,6 +119,14 @@ pub trait ContextProvider {
         Ok(name)
     }
 
+    /// Whether the planner plans a query to print it back as SQL rather than
+    /// to execute it. Such a plan keeps each `WITH` list as written, as the
+    /// nodes of [`crate::definition_plan`], instead of inlining its items
+    /// into their references.
+    fn plans_definitions_as_written(&self) -> bool {
+        false
+    }
+
     /// Returns a table by reference, if it exists
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
 
