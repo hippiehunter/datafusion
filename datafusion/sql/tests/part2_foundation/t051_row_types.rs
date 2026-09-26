@@ -66,6 +66,13 @@
 //! - OVERLAY with various data types
 //! - OVERLAY with expressions
 
+use std::sync::Arc;
+
+use datafusion_expr::{AggregateUDF, LogicalPlan, ScalarUDF, WindowUDF};
+use datafusion_sql::planner::ParserOptions;
+use sqlparser::dialect::PostgreSqlDialect;
+
+use crate::ConformanceFunctionProvider;
 use crate::assert_feature_supported;
 
 // ============================================================================
@@ -422,6 +429,60 @@ fn t051_nested_field_access() {
 // ============================================================================
 // T051: Row types in various contexts
 // ============================================================================
+
+/// The default functions and `named_struct`, which a frontend whose rows are
+/// records registers so that a relation named as a value is its whole row.
+struct WholeRowFunctions(crate::DataFusionFunctionProvider);
+
+impl ConformanceFunctionProvider for WholeRowFunctions {
+    fn get_aggregate_function(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+        self.0.get_aggregate_function(name)
+    }
+
+    fn get_scalar_function(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+        match name {
+            "named_struct" => Some(crate::named_struct_constructor_udf()),
+            _ => self.0.get_scalar_function(name),
+        }
+    }
+
+    fn get_window_function(&self, name: &str) -> Option<Arc<WindowUDF>> {
+        self.0.get_window_function(name)
+    }
+}
+
+fn whole_row_plan(sql: &str) -> LogicalPlan {
+    crate::logical_plan_with_provider(
+        sql,
+        &PostgreSqlDialect {},
+        ParserOptions::default(),
+        &WholeRowFunctions(crate::DataFusionFunctionProvider),
+    )
+    .unwrap_or_else(|error| panic!("{sql} plans: {error}"))
+}
+
+/// A `relation.*` in value position is the relation's whole-row value, the
+/// record a bare relation name also plans as; a parenthesized `relation.*`
+/// select item is still the select item `relation.*`, and its alias names
+/// nothing.
+#[test]
+fn t051_all_fields_reference_in_value_position_is_the_whole_row() {
+    let plan = whole_row_plan("SELECT a FROM t WHERE t.* IS DISTINCT FROM t");
+    let filter = plan.display_indent().to_string();
+    assert!(
+        filter.contains("named_struct(Utf8(\"a\"), t.a, Utf8(\"b\"), t.b")
+            && !filter.contains("t.*"),
+        "{filter}"
+    );
+    let columns = whole_row_plan("SELECT t.* FROM t").schema().fields().len();
+    for sql in ["SELECT (t.*) FROM t", "SELECT ((t.*)) AS q FROM t"] {
+        assert_eq!(
+            whole_row_plan(sql).schema().fields().len(),
+            columns,
+            "{sql}"
+        );
+    }
+}
 
 /// T051: ROW in SELECT list
 #[test]

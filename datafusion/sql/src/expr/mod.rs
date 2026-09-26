@@ -1207,13 +1207,23 @@ impl SqlToRel<'_> {
                 qualifier: None,
                 options: Box::new(WildcardOptions::default()),
             }),
-            #[expect(deprecated)]
-            SQLExpr::QualifiedWildcard(object_name, _token) => Ok(Expr::Wildcard {
-                qualifier: Some(
-                    self.object_name_to_table_reference(object_name.clone())?,
-                ),
-                options: Box::new(WildcardOptions::default()),
-            }),
+            SQLExpr::QualifiedWildcard(object_name, _token) => {
+                let qualifier =
+                    self.object_name_to_table_reference(object_name.clone())?;
+                // In value position PostgreSQL's `relation.*` is the relation's
+                // whole-row value, as in `old.* IS DISTINCT FROM new.*` or
+                // `(t.*).a`; only a select list expands it into columns.
+                if let Some(record) =
+                    self.try_plan_whole_row_reference(qualifier.table(), schema)
+                {
+                    return Ok(record);
+                }
+                #[expect(deprecated)]
+                Ok(Expr::Wildcard {
+                    qualifier: Some(qualifier),
+                    options: Box::new(WildcardOptions::default()),
+                })
+            }
             SQLExpr::Tuple(values) => self.parse_tuple(schema, planner_context, values),
             SQLExpr::JsonAccess { value, path } => {
                 self.plan_json_access(value.as_ref(), &path.path, schema, planner_context)

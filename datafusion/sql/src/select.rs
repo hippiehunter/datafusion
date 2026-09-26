@@ -1337,6 +1337,19 @@ impl SqlToRel<'_> {
         empty_from: bool,
         planner_context: &mut PlannerContext,
     ) -> Result<SelectExpr> {
+        // PostgreSQL's parentheses make no node, so a select item `(t.*)` is
+        // the select item `t.*`, expanded into the relation's columns; an
+        // alias on it names nothing.
+        if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } =
+            sql
+            && let Some(object_name) = parenthesized_relation_wildcard(expr)
+        {
+            let qualifier = self.object_name_to_table_reference(object_name.clone())?;
+            return Ok(SelectExpr::QualifiedWildcard(
+                qualifier,
+                WildcardOptions::default(),
+            ));
+        }
         match sql {
             SelectItem::UnnamedExpr(expr) => {
                 let expr = self.sql_to_expr_ref(expr, plan.schema(), planner_context)?;
@@ -1984,6 +1997,15 @@ fn check_conflicting_windows(window_defs: &[NamedWindowDefinition]) -> Result<()
         }
     }
     Ok(())
+}
+
+/// The relation of a select item that is `relation.*` inside parentheses.
+fn parenthesized_relation_wildcard(expr: &SQLExpr) -> Option<&ObjectName> {
+    match expr {
+        SQLExpr::Nested(inner) => parenthesized_relation_wildcard(inner),
+        SQLExpr::QualifiedWildcard(object_name, _) => Some(object_name),
+        _ => None,
+    }
 }
 
 /// Returns true if the expression recursively contains an `Expr::Unnest` expression
