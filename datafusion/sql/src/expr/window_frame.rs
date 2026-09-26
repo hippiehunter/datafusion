@@ -18,6 +18,7 @@
 //! SQL window-frame syntax lowering.
 
 use arrow::datatypes::DataType;
+use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::{DFSchema, Result, ScalarValue, exec_err, plan_err};
 use datafusion_expr::{
     Expr, WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnits,
@@ -56,10 +57,16 @@ pub(super) fn convert_window_frame(
     value: ast::WindowFrame,
     plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
 ) -> Result<WindowFrame> {
-    let start_bound =
-        convert_window_frame_bound(value.start_bound, &value.units, plan_interval)?;
+    let start_bound = convert_window_frame_bound(
+        value.start_bound,
+        &value.units,
+        "starting",
+        plan_interval,
+    )?;
     let end_bound = match value.end_bound {
-        Some(bound) => convert_window_frame_bound(bound, &value.units, plan_interval)?,
+        Some(bound) => {
+            convert_window_frame_bound(bound, &value.units, "ending", plan_interval)?
+        }
         None => WindowFrameBound::CurrentRow,
     };
     let exclude = value
@@ -85,16 +92,21 @@ pub(super) fn convert_window_frame(
     ))
 }
 
+/// One bound of a frame. `end` names the bound, `starting` or `ending`, for
+/// the error a null offset raises: a frame bound of no value would read as
+/// unbounded, so a null offset is rejected rather than lowered.
 fn convert_window_frame_bound(
     value: ast::WindowFrameBound,
     units: &ast::WindowFrameUnits,
+    end: &str,
     plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
 ) -> Result<WindowFrameBound> {
     Ok(match value {
         ast::WindowFrameBound::Preceding(Some(value)) => {
-            WindowFrameBound::Preceding(convert_frame_bound_to_scalar_value(
+            WindowFrameBound::Preceding(frame_bound_offset(
                 sqlparser::arena::AstBox::into_owned(value),
                 units,
+                end,
                 plan_interval,
             )?)
         }
@@ -102,9 +114,10 @@ fn convert_window_frame_bound(
             WindowFrameBound::Preceding(ScalarValue::UInt64(None))
         }
         ast::WindowFrameBound::Following(Some(value)) => {
-            WindowFrameBound::Following(convert_frame_bound_to_scalar_value(
+            WindowFrameBound::Following(frame_bound_offset(
                 sqlparser::arena::AstBox::into_owned(value),
                 units,
+                end,
                 plan_interval,
             )?)
         }
@@ -113,6 +126,34 @@ fn convert_window_frame_bound(
         }
         ast::WindowFrameBound::CurrentRow => WindowFrameBound::CurrentRow,
     })
+}
+
+fn frame_bound_offset(
+    value: ast::Expr,
+    units: &ast::WindowFrameUnits,
+    end: &str,
+    plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
+) -> Result<ScalarValue> {
+    if is_null_offset(&value) {
+        return Err(sqlstate_datafusion_err(
+            "22004",
+            format!("frame {end} offset must not be null"),
+        ));
+    }
+    convert_frame_bound_to_scalar_value(value, units, plan_interval)
+}
+
+fn is_null_offset(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Value(ValueWithSpan {
+            value: ast::Value::Null,
+            span: _,
+        }) => true,
+        ast::Expr::Nested(inner) | ast::Expr::Cast { expr: inner, .. } => {
+            is_null_offset(inner)
+        }
+        _ => false,
+    }
 }
 
 fn fold_integer_frame_offset(expr: &ast::Expr) -> Option<i128> {
@@ -288,6 +329,7 @@ fn convert_window_frame_units(value: ast::WindowFrameUnits) -> WindowFrameUnits 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion_common::{DataFusionError, DataFusionSqlStateError};
 
     fn no_intervals(interval: &ast::Interval) -> Result<ScalarValue> {
         plan_err!("unexpected interval {interval}")
@@ -354,6 +396,29 @@ mod tests {
             WindowFrameBound::Preceding(ScalarValue::UInt64(Some(1)))
         );
         Ok(())
+    }
+
+    /// A null offset is rejected with PostgreSQL's SQLSTATE, not read as the
+    /// unbounded bound a frame bound of no value means.
+    #[test]
+    fn a_null_offset_is_rejected_rather_than_read_as_unbounded() {
+        for units in [ast::WindowFrameUnits::Rows, ast::WindowFrameUnits::Range] {
+            let frame = ast::WindowFrame {
+                units,
+                start_bound: ast::WindowFrameBound::Preceding(Some(ast::AstBox::new(
+                    ast::Expr::value(ast::Value::Null),
+                ))),
+                end_bound: None,
+                exclude: None,
+            };
+            let sqlstate = match convert_window_frame(frame, &mut no_intervals) {
+                Err(DataFusionError::External(error)) => error
+                    .downcast_ref::<DataFusionSqlStateError>()
+                    .map(|error| error.sqlstate.clone()),
+                _ => None,
+            };
+            assert_eq!(sqlstate.as_deref(), Some("22004"));
+        }
     }
 
     /// A RANGE offset keeps the type of the literal it was written as: an
