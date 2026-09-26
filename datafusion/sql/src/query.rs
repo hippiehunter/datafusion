@@ -35,7 +35,7 @@ use datafusion_expr::{
 };
 use sqlparser::ast::{
     Expr as SQLExpr, Fetch, Ident, LimitClause, LockClause, LockType, NonBlock, OrderBy,
-    OrderByExpr, OrderByKind, Query, SelectInto, SetExpr,
+    OrderByExpr, OrderByKind, Query, SelectInto, SelectItem, SetExpr,
 };
 use sqlparser::tokenizer::Span;
 
@@ -91,7 +91,7 @@ impl SqlToRel<'_> {
                 let plan = self.limit(plan, limit_info, planner_context)?;
                 let plan = self.apply_query_locks(plan, &query.locks)?;
                 // Process the `SELECT INTO` after `LIMIT`.
-                self.select_into_ref(plan, select.into.as_ref())
+                self.select_into_ref(plan, &select.projection, select.into.as_ref())
             }
             other => {
                 // The functions called from `set_expr_to_plan_ref()` need more than 128KB
@@ -358,9 +358,11 @@ impl SqlToRel<'_> {
         }
     }
 
+    /// A `SELECT INTO` creates a table from the query `projection` names.
     fn select_into_ref(
         &self,
         plan: LogicalPlan,
+        projection: &[SelectItem],
         select_into: Option<&SelectInto>,
     ) -> Result<LogicalPlan> {
         match select_into {
@@ -380,7 +382,11 @@ impl SqlToRel<'_> {
                         partition_of: None,
                         inherits: Vec::new(),
                     },
-                    Arc::new(plan),
+                    Arc::new(self.name_created_relation_columns(
+                        plan,
+                        Some(projection),
+                        &[],
+                    )?),
                 ),
             ))),
             _ => Ok(plan),

@@ -1490,9 +1490,9 @@ impl SqlToRel<'_> {
                 if unlogged {
                     return not_impl_err!("UNLOGGED tables are not supported");
                 }
-                if !column_aliases.is_empty() {
-                    return not_impl_err!(
-                        "CREATE TABLE ... AS with a column name list is not supported"
+                if !column_aliases.is_empty() && query.is_none() {
+                    return plan_err!(
+                        "a column name list names the columns of CREATE TABLE ... AS a query"
                     );
                 }
                 if execute.is_some() {
@@ -1717,7 +1717,11 @@ impl SqlToRel<'_> {
                                 Arc::clone(&schema),
                             )?)
                         } else {
-                            plan
+                            self.name_created_relation_columns(
+                                plan,
+                                Self::naming_select_items(&query),
+                                &column_aliases,
+                            )?
                         };
 
                         let mut constraints = self
@@ -1828,13 +1832,15 @@ impl SqlToRel<'_> {
 
                 let query_definition = view.query.to_string();
                 let query = SQLBox::into_owned(view.query);
-                let mut plan =
-                    self.query_to_plan_ref(&query, &mut PlannerContext::new())?;
-                plan = self.apply_expr_alias(plan, &columns)?;
+                let plan = self.query_to_plan_ref(&query, &mut PlannerContext::new())?;
+                let plan = self.name_created_relation_columns(
+                    plan,
+                    Self::naming_select_items(&query),
+                    &columns,
+                )?;
                 let updatability = crate::view_analysis::analyze_updatable_view(
                     self,
                     &query,
-                    &columns,
                     plan.schema(),
                 )?;
 

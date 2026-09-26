@@ -32,19 +32,18 @@ use datafusion_expr::{
     Expr,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SelectItem,
+    Expr as SQLExpr, GroupByExpr, ObjectName, ObjectNamePart, Query, Select, SelectItem,
     SetExpr, TableFactor, Visitor,
 };
 use std::ops::ControlFlow;
 
 /// Consume the parser-owned part of one view level into catalog-safe meaning.
 ///
-/// `output_schema` is the schema of the already-planned defining query after
-/// any explicit CREATE VIEW column aliases have been applied.
+/// `output_schema` is the schema of the already-planned defining query under
+/// the view's column names.
 pub fn analyze_updatable_view(
     planner: &SqlToRel<'_>,
     query: &Query,
-    declared_columns: &[Ident],
     output_schema: &DFSchemaRef,
 ) -> Result<CreateViewUpdatability> {
     let select = match analyze_query_shape(query) {
@@ -87,18 +86,11 @@ pub fn analyze_updatable_view(
         table_source.schema().as_ref(),
     )?;
 
-    let output_names = if declared_columns.is_empty() {
-        output_schema
-            .fields()
-            .iter()
-            .map(|field| field.name().clone())
-            .collect::<Vec<_>>()
-    } else {
-        declared_columns
-            .iter()
-            .map(|column| column.value.clone())
-            .collect::<Vec<_>>()
-    };
+    let output_names = output_schema
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
 
     let columns = lower_projection_columns(planner, select, &source_schema, &output_names)?;
     if columns.len() != output_names.len() {

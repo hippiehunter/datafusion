@@ -42,6 +42,7 @@ use datafusion_expr::utils::find_column_exprs;
 use sqlparser::ast::{AccessExpr, ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
 use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption, ColumnOptionDef};
 use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
+use sqlparser::ast::{Expr as SQLExpr, Query, SelectItem, SetExpr};
 
 /// SQL parser options
 #[derive(Debug, Clone, Copy)]
@@ -717,6 +718,103 @@ impl<'a> SqlToRel<'a> {
             LogicalPlanBuilder::from(plan)
                 .project_with_validation(exprs)?
                 .build()
+        }
+    }
+
+    /// Name the columns of a relation a statement creates from a query: a
+    /// view, a table created `AS` a query, or a `SELECT INTO` target. The
+    /// `declared` names come first. Each remaining column keeps its alias or
+    /// the name of the column it references, and an unaliased expression
+    /// takes the name the provider's dialect gives it; `items` is the select
+    /// list naming the columns, `None` when it is not one item per column.
+    /// A relation cannot have two columns of one name.
+    pub(crate) fn name_created_relation_columns(
+        &self,
+        plan: LogicalPlan,
+        items: Option<&[SelectItem]>,
+        declared: &[Ident],
+    ) -> Result<LogicalPlan> {
+        let schema = Arc::clone(plan.schema());
+        let num_fields = schema.fields().len();
+        if declared.len() > num_fields {
+            return Err(datafusion_common::sqlstate_datafusion_err(
+                "42P10",
+                format!(
+                    "Source table contains {num_fields} columns but {} names given as column alias",
+                    declared.len()
+                ),
+            ));
+        }
+        let items = items.filter(|items| {
+            items.len() == num_fields
+                && items.iter().all(|item| {
+                    matches!(
+                        item,
+                        SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }
+                    )
+                })
+        });
+        let implicit_name = |index: usize| match items.map(|items| &items[index]) {
+            Some(SelectItem::UnnamedExpr(
+                SQLExpr::Identifier(_) | SQLExpr::CompoundIdentifier(_),
+            ))
+            | None => None,
+            Some(SelectItem::UnnamedExpr(expr)) => {
+                self.context_provider.implicit_output_column_name(expr)
+            }
+            Some(_) => None,
+        };
+        let names = (0..num_fields)
+            .map(|index| match declared.get(index) {
+                Some(ident) => self.ident_normalizer.normalize(ident.clone()),
+                None => implicit_name(index)
+                    .unwrap_or_else(|| schema.field(index).name().clone()),
+            })
+            .collect::<Vec<_>>();
+        let mut seen = std::collections::HashSet::with_capacity(num_fields);
+        if let Some(duplicate) = names.iter().find(|name| !seen.insert(name.as_str())) {
+            return Err(datafusion_common::sqlstate_datafusion_err(
+                "42701",
+                format!("column \"{duplicate}\" specified more than once"),
+            ));
+        }
+        if names
+            .iter()
+            .zip(schema.fields())
+            .all(|(name, field)| name == field.name())
+        {
+            return Ok(plan);
+        }
+        let exprs = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let (qualifier, field) = schema.qualified_field(index);
+                let column = Expr::Column(Column::from((qualifier, field)));
+                let expr = if &name == field.name() {
+                    column
+                } else {
+                    column.alias(name)
+                };
+                (expr, false)
+            })
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::from(plan)
+            .project_with_validation(exprs)?
+            .build()
+    }
+
+    /// The select list that names a query's columns: its own, or a set
+    /// operation's leftmost branch's.
+    pub(crate) fn naming_select_items(query: &Query) -> Option<&[SelectItem]> {
+        let mut body = query.body.as_ref();
+        loop {
+            match body {
+                SetExpr::Select(select) => return Some(&select.projection),
+                SetExpr::Query(query) => body = query.body.as_ref(),
+                SetExpr::SetOperation { left, .. } => body = left.as_ref(),
+                _ => return None,
+            }
         }
     }
 

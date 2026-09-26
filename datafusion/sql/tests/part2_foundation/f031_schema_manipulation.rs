@@ -936,7 +936,7 @@ fn create_table_as_select_where() {
 /// CREATE TABLE AS SELECT with column list
 #[test]
 fn create_table_as_select_columns() {
-    crate::assert_not_implemented!(
+    assert_feature_supported!(
         "CREATE TABLE person_summary (person_id, full_name)
          AS SELECT id, name FROM person",
         "F031",

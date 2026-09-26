@@ -973,6 +973,45 @@ fn plan_create_table_as_with_no_data_keeps_schema_and_limits_input_to_zero() {
     ));
 }
 
+/// A column name list names a created table's leading columns; the rest keep
+/// the names the query gives them.
+#[test]
+fn plan_create_table_as_names_its_leading_columns_from_the_column_list() {
+    let plan =
+        logical_plan("CREATE TABLE renamed (ident) AS SELECT id, first_name FROM person")
+            .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(CreateMemoryTable {
+        input,
+        ..
+    })) = plan
+    else {
+        panic!("expected CreateMemoryTable plan");
+    };
+    let names = input
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["ident", "first_name"]);
+}
+
+/// A view or a table created from a query cannot have two columns of one
+/// name, however the second came by it.
+#[test]
+fn created_relations_reject_a_column_named_twice() {
+    for sql in [
+        "CREATE VIEW twice (age) AS SELECT id, age FROM person",
+        "CREATE TABLE twice (age) AS SELECT id, age FROM person",
+    ] {
+        let error = logical_plan(sql).unwrap_err();
+        assert_contains!(
+            error.strip_backtrace(),
+            "column \"age\" specified more than once"
+        );
+    }
+}
+
 #[test]
 fn plan_inline_primary_key_preserves_quoted_column_identity() {
     let plan =
