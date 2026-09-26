@@ -71,6 +71,7 @@ pub(crate) struct MockSessionState {
     pub literal_planner: Option<fn(Expr, sqlparser::tokenizer::Span) -> Result<Expr>>,
     pub row_stream_function: Option<Arc<ScalarUDF>>,
     pub plans_definitions_as_written: bool,
+    pub implicit_output_names: Option<fn(&sqlparser::ast::Expr) -> Option<String>>,
 }
 
 impl MockSessionState {
@@ -137,6 +138,10 @@ impl ContextProvider for MockContextProvider {
 
     fn plans_definitions_as_written(&self) -> bool {
         self.state.plans_definitions_as_written
+    }
+
+    fn implicit_output_column_name(&self, expr: &sqlparser::ast::Expr) -> Option<String> {
+        self.state.implicit_output_names.and_then(|name| name(expr))
     }
 
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {

@@ -30,7 +30,7 @@ use common::MockContextProvider;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result, assert_contains};
 use datafusion_expr::{
-    ColumnarValue, CreateIndex, CreateMemoryTable, DdlStatement,
+    ColumnarValue, CreateIndex, CreateMemoryTable, CreateViewUpdatability, DdlStatement,
     MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
     Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy, Volatility, col,
     logical_plan::LogicalPlan, test::function_stub::sum_udaf,
@@ -1072,6 +1072,87 @@ fn a_definition_keeps_its_with_list_as_written() {
             ("a", vec![], None),
             ("unread", vec![], Some(true)),
         ]
+    );
+}
+
+/// A view over one relation read through a column alias list writes and
+/// reads the base column each listed name stands for.
+#[test]
+fn an_updatable_view_maps_a_column_alias_list_to_its_base_columns() {
+    let plan =
+        logical_plan("CREATE VIEW renamed AS SELECT x.a FROM j1 AS x(a) WHERE x.a > 1")
+            .unwrap();
+    let LogicalPlan::Ddl(DdlStatement::CreateView(create)) = plan else {
+        panic!("expected CreateView plan");
+    };
+    let CreateViewUpdatability::Updatable {
+        columns,
+        restriction,
+        ..
+    } = create.spec.updatability
+    else {
+        panic!("expected an updatable view");
+    };
+    let columns = columns
+        .iter()
+        .map(|column| {
+            (
+                column.name.as_str(),
+                column.write_source.as_deref(),
+                column.read_expression.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(columns, [("a", Some("j1_id"), "j1_id".to_string())]);
+    assert_eq!(
+        restriction.map(|restriction| restriction.to_string()),
+        Some("j1_id > Int32(1)".to_string())
+    );
+}
+
+/// A dialect's names for unaliased select items, as PostgreSQL names them in
+/// the cases the tests plan: a function call after the function, anything
+/// else `?column?`.
+fn postgres_output_name(expr: &sqlparser::ast::Expr) -> Option<String> {
+    match expr {
+        sqlparser::ast::Expr::Function(function) => Some(function.name.to_string()),
+        _ => Some("?column?".to_string()),
+    }
+}
+
+fn output_names(sql: &str) -> Vec<String> {
+    let mut state = MockSessionState::default().with_aggregate_function(count_udaf());
+    state.implicit_output_names = Some(postgres_output_name);
+    let context = MockContextProvider { state };
+    let planner = SqlToRel::new(&context);
+    let mut ast = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {}).unwrap();
+    let plan = planner.statement_to_plan(ast.pop_front().unwrap()).unwrap();
+    plan.schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect()
+}
+
+/// An unaliased item names its column as the dialect names a result column,
+/// beside a wildcard and inside a derived table alike, and a column reference
+/// keeps its column's name. Two items the dialect would give one name keep
+/// their distinct display names.
+#[test]
+fn unaliased_items_take_the_names_the_dialect_gives_them() {
+    assert_eq!(
+        output_names("SELECT *, j1_id + 1 FROM j1"),
+        ["j1_id", "j1_string", "?column?"]
+    );
+    assert_eq!(
+        output_names(
+            "SELECT * FROM (SELECT j1_id, j1_id + 1, count(*) FROM j1 GROUP BY j1_id) AS s"
+        ),
+        ["j1_id", "?column?", "count"]
+    );
+    assert_eq!(
+        output_names("SELECT j1_id + 1, j1_id + 2 FROM j1"),
+        ["j1.j1_id + Int32(1)", "j1.j1_id + Int32(2)"]
     );
 }
 

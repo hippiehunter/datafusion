@@ -25,6 +25,7 @@
 
 use crate::ast_walk::Walk as AstWalk;
 use crate::planner::{PlannerContext, SqlToRel};
+use arrow::datatypes::{Field, Schema};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{Column, DFSchema, DFSchemaRef, DataFusionError, Result, TableReference};
 use datafusion_expr::{
@@ -32,9 +33,10 @@ use datafusion_expr::{
     Expr,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, GroupByExpr, ObjectName, ObjectNamePart, Query, Select, SelectItem,
-    SetExpr, TableFactor, Visitor,
+    Expr as SQLExpr, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select,
+    SelectItem, SetExpr, TableFactor, Visitor,
 };
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 /// Consume the parser-owned part of one view level into catalog-safe meaning.
@@ -68,7 +70,7 @@ pub fn analyze_updatable_view(
             alias,
             args: None,
             ..
-        } => (name, alias.as_ref().map(|alias| &alias.name)),
+        } => (name, alias.as_ref()),
         _ => {
             return Ok(CreateViewUpdatability::NotUpdatable(
                 CreateViewNotUpdatable::NotARelation,
@@ -79,12 +81,20 @@ pub fn analyze_updatable_view(
     let source = planner.object_name_to_table_reference(source_name.clone())?;
     let table_source = planner.context_provider.get_table_source(source.clone())?;
     let qualifier = source_alias
-        .map(|alias| TableReference::bare(alias.value.clone()))
+        .map(|alias| {
+            TableReference::bare(planner.ident_normalizer.normalize(alias.name.clone()))
+        })
         .unwrap_or_else(|| source.clone());
-    let source_schema = DFSchema::try_from_qualified_schema(
-        qualifier,
-        table_source.schema().as_ref(),
-    )?;
+    let listed = source_alias
+        .map(|alias| {
+            alias
+                .columns
+                .iter()
+                .map(|column| planner.ident_normalizer.normalize(column.name.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let relation = SourceRelation::new(qualifier, &table_source.schema(), &listed)?;
 
     let output_names = output_schema
         .fields()
@@ -92,7 +102,7 @@ pub fn analyze_updatable_view(
         .map(|field| field.name().clone())
         .collect::<Vec<_>>();
 
-    let columns = lower_projection_columns(planner, select, &source_schema, &output_names)?;
+    let columns = lower_projection_columns(planner, select, &relation, &output_names)?;
     if columns.len() != output_names.len() {
         return Ok(CreateViewUpdatability::NotUpdatable(
             CreateViewNotUpdatable::UnreadableDefinition,
@@ -108,8 +118,8 @@ pub fn analyze_updatable_view(
         .as_deref()
         .map(|selection| {
             planner
-                .sql_to_expr_ref(selection, &source_schema, &mut PlannerContext::new())
-                .and_then(unqualify_expression)
+                .sql_to_expr_ref(selection, &relation.schema, &mut PlannerContext::new())
+                .and_then(|expression| relation.base_expression(expression))
                 .map(BoundSqlExpression::new)
         })
         .transpose()?;
@@ -121,10 +131,85 @@ pub fn analyze_updatable_view(
     })
 }
 
+/// The view's one relation as its query reads it: its columns under the
+/// names a column alias list gives them, qualified by the alias, and the
+/// base column each name stands for.
+struct SourceRelation {
+    schema: DFSchema,
+    /// The base column of each column of `schema`, in order.
+    base_names: Vec<String>,
+}
+
+impl SourceRelation {
+    /// The relation of `base` columns read under `qualifier`, the first of
+    /// them renamed `listed`. A column past the list whose own name the list
+    /// took is renamed apart, as the planner names it.
+    fn new(
+        qualifier: TableReference,
+        base: &Schema,
+        listed: &[String],
+    ) -> Result<Self> {
+        let mut taken: HashSet<String> = listed.iter().cloned().collect();
+        let mut fields = Vec::with_capacity(base.fields().len());
+        let mut base_names = Vec::with_capacity(base.fields().len());
+        for (index, field) in base.fields().iter().enumerate() {
+            let name = match listed.get(index) {
+                Some(name) => name.clone(),
+                None if taken.contains(field.name()) => {
+                    let mut suffix = 1;
+                    let mut name = format!("{}_{suffix}", field.name());
+                    while taken.contains(&name) {
+                        suffix += 1;
+                        name = format!("{}_{suffix}", field.name());
+                    }
+                    taken.insert(name.clone());
+                    name
+                }
+                None => {
+                    taken.insert(field.name().clone());
+                    field.name().clone()
+                }
+            };
+            fields.push(Field::clone(field).with_name(name));
+            base_names.push(field.name().clone());
+        }
+        let schema = DFSchema::try_from_qualified_schema(
+            qualifier,
+            &Schema::new_with_metadata(fields, base.metadata().clone()),
+        )?;
+        Ok(Self { schema, base_names })
+    }
+
+    /// The base column the relation's column `name` stands for.
+    fn base_name(&self, name: &str) -> Option<&str> {
+        self.schema
+            .fields()
+            .iter()
+            .position(|field| field.name() == name)
+            .map(|index| self.base_names[index].as_str())
+    }
+
+    /// `expression`, bound against the relation, over the base columns.
+    fn base_expression(&self, expression: Expr) -> Result<Expr> {
+        expression
+            .transform_down(|expression| match expression {
+                Expr::Column(column) => {
+                    let name = self.base_name(&column.name).unwrap_or(&column.name);
+                    Ok(Transformed::yes(Expr::Column(Column::new(
+                        None::<TableReference>,
+                        name,
+                    ))))
+                }
+                other => Ok(Transformed::no(other)),
+            })
+            .map(|transformed| transformed.data)
+    }
+}
+
 fn lower_projection_columns(
     planner: &SqlToRel<'_>,
     select: &Select,
-    source_schema: &DFSchema,
+    relation: &SourceRelation,
     output_names: &[String],
 ) -> Result<Vec<CreateViewColumn>> {
     let expands_whole_relation = select.projection.iter().any(|item| {
@@ -134,18 +219,19 @@ fn lower_projection_columns(
         )
     });
     if expands_whole_relation {
-        if select.projection.len() != 1 || source_schema.fields().len() != output_names.len() {
+        if select.projection.len() != 1 || relation.base_names.len() != output_names.len()
+        {
             return Ok(Vec::new());
         }
         return Ok(output_names
             .iter()
-            .zip(source_schema.fields())
-            .map(|(output_name, field)| CreateViewColumn {
+            .zip(&relation.base_names)
+            .map(|(output_name, base_name)| CreateViewColumn {
                 name: output_name.clone(),
-                write_source: Some(field.name().clone()),
+                write_source: Some(base_name.clone()),
                 read_expression: BoundSqlExpression::new(Expr::Column(Column::new(
                     None::<TableReference>,
-                    field.name(),
+                    base_name,
                 ))),
             })
             .collect());
@@ -165,31 +251,24 @@ fn lower_projection_columns(
                     ));
                 }
             };
-            let write_source = referenced_column(expression);
+            let write_source = referenced_column(expression).and_then(|column| {
+                let name = planner.ident_normalizer.normalize(column.clone());
+                relation.base_name(&name).map(str::to_string)
+            });
             let read_expression = planner.sql_to_expr_ref(
                 expression,
-                source_schema,
+                &relation.schema,
                 &mut PlannerContext::new(),
             )?;
             Ok(CreateViewColumn {
                 name: output_name.clone(),
                 write_source,
-                read_expression: BoundSqlExpression::new(unqualify_expression(read_expression)?),
+                read_expression: BoundSqlExpression::new(
+                    relation.base_expression(read_expression)?,
+                ),
             })
         })
         .collect()
-}
-
-fn unqualify_expression(expression: Expr) -> Result<Expr> {
-    expression
-        .transform_down(|expression| match expression {
-            Expr::Column(mut column) => {
-                column.relation = None;
-                Ok(Transformed::yes(Expr::Column(column)))
-            }
-            other => Ok(Transformed::no(other)),
-        })
-        .map(|transformed| transformed.data)
 }
 
 fn analyze_query_shape(query: &Query) -> std::result::Result<&Select, CreateViewNotUpdatable> {
@@ -316,10 +395,10 @@ fn is_aggregate_name(name: &ObjectName) -> bool {
     )
 }
 
-fn referenced_column(expression: &SQLExpr) -> Option<String> {
+fn referenced_column(expression: &SQLExpr) -> Option<&Ident> {
     match expression {
-        SQLExpr::Identifier(identifier) => Some(identifier.value.clone()),
-        SQLExpr::CompoundIdentifier(parts) => parts.last().map(|part| part.value.clone()),
+        SQLExpr::Identifier(identifier) => Some(identifier),
+        SQLExpr::CompoundIdentifier(parts) => parts.last(),
         SQLExpr::Nested(inner) => referenced_column(inner),
         _ => None,
     }

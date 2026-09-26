@@ -1180,6 +1180,8 @@ impl SqlToRel<'_> {
         planner_context: &mut PlannerContext,
     ) -> Result<Vec<SelectExpr>> {
         let mut prepared_select_exprs = vec![];
+        // The unaliased item each prepared expression plans, if it plans one.
+        let mut unaliased_items = vec![];
         let mut error_builder = DataFusionErrorBuilder::new();
 
         for expr in projection {
@@ -1191,68 +1193,56 @@ impl SqlToRel<'_> {
             {
                 match self.row_wildcard_to_exprs(row_expr, options, plan, planner_context)
                 {
-                    Ok(exprs) => prepared_select_exprs
-                        .extend(exprs.into_iter().map(SelectExpr::Expression)),
+                    Ok(exprs) => {
+                        unaliased_items.extend(exprs.iter().map(|_| None));
+                        prepared_select_exprs
+                            .extend(exprs.into_iter().map(SelectExpr::Expression));
+                    }
                     Err(err) => error_builder.add_error(err),
                 }
                 continue;
             }
             match self.sql_select_to_rex_ref(expr, plan, empty_from, planner_context) {
-                Ok(expr) => prepared_select_exprs.push(expr),
+                Ok(prepared) => {
+                    unaliased_items.push(match expr {
+                        SelectItem::UnnamedExpr(expression) => Some(expression),
+                        _ => None,
+                    });
+                    prepared_select_exprs.push(prepared);
+                }
                 Err(err) => error_builder.add_error(err),
             }
         }
         let mut prepared_select_exprs = error_builder.error_or(prepared_select_exprs)?;
-        self.label_unaliased_expressions(projection, &mut prepared_select_exprs);
+        self.label_unaliased_expressions(&unaliased_items, &mut prepared_select_exprs);
         Ok(prepared_select_exprs)
     }
 
-    /// PostgreSQL names an unaliased function call after the function and
-    /// retains the source column name through a cast. These are semantic
-    /// output names: bare ORDER BY identifiers prefer them to input columns.
-    /// `SELECT nextval('s')` is a column `nextval`, and an enclosing query can
-    /// refer to it by that name. The label is applied when it is unique within
-    /// the projection; two `count(...)` calls keep their distinct display
-    /// names so the projection schema stays unambiguous.
+    /// An unaliased select item names its column as the provider's dialect
+    /// names a result column (PostgreSQL's `FigureColname`), or where the
+    /// dialect gives no name, after the function it calls or the column it
+    /// casts. These are semantic output names: bare ORDER BY identifiers
+    /// prefer them to input columns, and an enclosing query refers to the
+    /// column by them, as `SELECT nextval('s')` is a column `nextval` and
+    /// `SELECT 1` one named `?column?`. A column reference keeps its column's
+    /// name and qualifier. A label is applied when it is unique within the
+    /// projection; two `count(...)` calls keep their distinct display names so
+    /// the projection schema stays unambiguous.
     fn label_unaliased_expressions(
         &self,
-        projection: &[SelectItem],
+        unaliased_items: &[Option<&SQLExpr>],
         prepared: &mut [SelectExpr],
     ) {
-        if projection.len() != prepared.len() {
-            return;
-        }
-        let labels: Vec<Option<String>> = projection
+        let labels: Vec<Option<String>> = unaliased_items
             .iter()
-            .map(|item| match item {
-                SelectItem::UnnamedExpr(expression) => {
-                    let mut expression = expression;
-                    let mut through_cast = false;
-                    loop {
-                        match expression {
-                            SQLExpr::Cast { expr, .. } => {
-                                through_cast = true;
-                                expression = expr.as_ref();
-                            }
-                            SQLExpr::Nested(expr) => expression = expr.as_ref(),
-                            _ => break,
-                        }
-                    }
-                    match expression {
-                        SQLExpr::Function(function) if function.over.is_none() => function
-                            .name
-                            .0
-                            .last()
-                            .and_then(|part| part.as_ident())
-                            .map(|ident| self.ident_normalizer.normalize(ident.clone())),
-                        SQLExpr::Identifier(ident) if through_cast => {
-                            Some(self.ident_normalizer.normalize(ident.clone()))
-                        }
-                        SQLExpr::CompoundIdentifier(parts) if through_cast => parts
-                            .last()
-                            .map(|ident| self.ident_normalizer.normalize(ident.clone())),
-                        _ => None,
-                    }
+            .zip(prepared.iter())
+            .map(|(item, prepared)| match (item, prepared) {
+                (Some(expression), SelectExpr::Expression(expr))
+                    if !matches!(expr, Expr::Column(_)) =>
+                {
+                    self.context_provider
+                        .implicit_output_column_name(expression)
+                        .or_else(|| self.written_call_or_cast_label(expression))
                 }
                 _ => None,
             })
@@ -1281,6 +1271,38 @@ impl SqlToRel<'_> {
             {
                 *expr = expr.clone().alias(label);
             }
+        }
+    }
+
+    /// The name of the function an unaliased item calls, or of the column it
+    /// casts.
+    fn written_call_or_cast_label(&self, expression: &SQLExpr) -> Option<String> {
+        let mut expression = expression;
+        let mut through_cast = false;
+        loop {
+            match expression {
+                SQLExpr::Cast { expr, .. } => {
+                    through_cast = true;
+                    expression = expr.as_ref();
+                }
+                SQLExpr::Nested(expr) => expression = expr.as_ref(),
+                _ => break,
+            }
+        }
+        match expression {
+            SQLExpr::Function(function) if function.over.is_none() => function
+                .name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .map(|ident| self.ident_normalizer.normalize(ident.clone())),
+            SQLExpr::Identifier(ident) if through_cast => {
+                Some(self.ident_normalizer.normalize(ident.clone()))
+            }
+            SQLExpr::CompoundIdentifier(parts) if through_cast => parts
+                .last()
+                .map(|ident| self.ident_normalizer.normalize(ident.clone())),
+            _ => None,
         }
     }
 
