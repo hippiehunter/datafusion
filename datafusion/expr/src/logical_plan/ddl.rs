@@ -693,10 +693,6 @@ pub struct CreateViewSpec {
     pub if_not_exists: bool,
     /// SQL used to create the view, if available
     pub definition: Option<String>,
-    /// SQL for the defining query only, without the surrounding `CREATE VIEW`
-    /// statement. Catalog consumers need this representation, but must not
-    /// recover it later by reparsing `definition`.
-    pub query_definition: Option<String>,
     /// Whether the view is ephemeral
     pub temporary: bool,
     /// Semantic scope of `WITH CHECK OPTION`, lowered at the SQL boundary.

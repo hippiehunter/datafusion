@@ -1830,7 +1830,6 @@ impl SqlToRel<'_> {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let query_definition = view.query.to_string();
                 let query = SQLBox::into_owned(view.query);
                 let plan = self.query_to_plan_ref(&query, &mut PlannerContext::new())?;
                 let plan = self.name_created_relation_columns(
@@ -1850,7 +1849,6 @@ impl SqlToRel<'_> {
                         or_replace: view.or_replace,
                         if_not_exists: false,
                         definition: Some(sql),
-                        query_definition: Some(query_definition),
                         temporary: false,
                         check_option,
                         updatability,
