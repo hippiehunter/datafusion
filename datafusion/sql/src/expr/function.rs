@@ -645,8 +645,12 @@ impl SqlToRel<'_> {
                 .window_frame
                 .as_ref()
                 .map(|window_frame| {
-                    let window_frame =
-                        super::window_frame::convert_window_frame(window_frame.clone())?;
+                    let window_frame = super::window_frame::convert_window_frame(
+                        window_frame.clone(),
+                        &mut |interval| {
+                            self.frame_offset_interval(interval, planner_context)
+                        },
+                    )?;
                     window_frame
                         .regularize_order_bys(&mut order_by)
                         .map(|_| window_frame)

@@ -18,16 +18,48 @@
 //! SQL window-frame syntax lowering.
 
 use arrow::datatypes::DataType;
-use datafusion_common::{Result, ScalarValue, exec_err, plan_err};
+use datafusion_common::{DFSchema, Result, ScalarValue, exec_err, plan_err};
 use datafusion_expr::{
-    WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnits,
+    Expr, WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnits,
 };
 use sqlparser::ast::{self, ValueWithSpan};
 
-pub(super) fn convert_window_frame(value: ast::WindowFrame) -> Result<WindowFrame> {
-    let start_bound = convert_window_frame_bound(value.start_bound, &value.units)?;
+use super::value::sql_number_literal;
+use crate::planner::{PlannerContext, SqlToRel};
+
+impl SqlToRel<'_> {
+    /// A RANGE offset written as an interval, as the interval the planner's
+    /// interval rules read: the registered expression planners first, then
+    /// the built-in grammar.
+    pub(super) fn frame_offset_interval(
+        &self,
+        interval: &ast::Interval,
+        planner_context: &mut PlannerContext,
+    ) -> Result<ScalarValue> {
+        match self.sql_interval_to_expr(
+            false,
+            interval,
+            &DFSchema::empty(),
+            planner_context,
+        )? {
+            Expr::Literal(value, _) => Ok(value),
+            other => plan_err!(
+                "Invalid window frame: a RANGE frame offset must be a constant, not {other}"
+            ),
+        }
+    }
+}
+
+/// Lower a window frame clause. `plan_interval` reads a RANGE offset written
+/// as an interval.
+pub(super) fn convert_window_frame(
+    value: ast::WindowFrame,
+    plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
+) -> Result<WindowFrame> {
+    let start_bound =
+        convert_window_frame_bound(value.start_bound, &value.units, plan_interval)?;
     let end_bound = match value.end_bound {
-        Some(bound) => convert_window_frame_bound(bound, &value.units)?,
+        Some(bound) => convert_window_frame_bound(bound, &value.units, plan_interval)?,
         None => WindowFrameBound::CurrentRow,
     };
     let exclude = value
@@ -56,12 +88,14 @@ pub(super) fn convert_window_frame(value: ast::WindowFrame) -> Result<WindowFram
 fn convert_window_frame_bound(
     value: ast::WindowFrameBound,
     units: &ast::WindowFrameUnits,
+    plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
 ) -> Result<WindowFrameBound> {
     Ok(match value {
         ast::WindowFrameBound::Preceding(Some(value)) => {
             WindowFrameBound::Preceding(convert_frame_bound_to_scalar_value(
                 sqlparser::arena::AstBox::into_owned(value),
                 units,
+                plan_interval,
             )?)
         }
         ast::WindowFrameBound::Preceding(None) => {
@@ -71,6 +105,7 @@ fn convert_window_frame_bound(
             WindowFrameBound::Following(convert_frame_bound_to_scalar_value(
                 sqlparser::arena::AstBox::into_owned(value),
                 units,
+                plan_interval,
             )?)
         }
         ast::WindowFrameBound::Following(None) => {
@@ -114,102 +149,120 @@ fn fold_integer_frame_offset(expr: &ast::Expr) -> Option<i128> {
 fn convert_frame_bound_to_scalar_value(
     value: ast::Expr,
     units: &ast::WindowFrameUnits,
+    plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
 ) -> Result<ScalarValue> {
-    if let Some(offset) = fold_integer_frame_offset(&value) {
-        return match units {
-            ast::WindowFrameUnits::Rows | ast::WindowFrameUnits::Groups => {
-                if offset < 0 {
-                    return plan_err!(
-                        "Invalid window frame: frame offsets for ROWS / GROUPS must be non negative integers"
-                    );
-                }
-                ScalarValue::try_from_string(offset.to_string(), &DataType::UInt64)
-            }
-            ast::WindowFrameUnits::Range => {
-                Ok(ScalarValue::Utf8(Some(offset.to_string())))
-            }
-        };
-    }
-
     match units {
-        ast::WindowFrameUnits::Rows | ast::WindowFrameUnits::Groups => match value {
-            ast::Expr::Value(ValueWithSpan {
-                value: ast::Value::Number(value, false),
-                span: _,
-            }) => ScalarValue::try_from_string(value, &DataType::UInt64),
-            ast::Expr::Interval(ast::Interval {
-                value,
-                leading_field: None,
-                leading_precision: None,
-                last_field: None,
-                fractional_seconds_precision: None,
-            }) => {
-                let value = match sqlparser::arena::AstBox::into_owned(value) {
-                    ast::Expr::Value(ValueWithSpan {
-                        value: ast::Value::SingleQuotedString(item),
-                        span: _,
-                    }) => item,
-                    expr => return exec_err!("INTERVAL expression cannot be {expr:?}"),
-                };
-                ScalarValue::try_from_string(value, &DataType::UInt64)
-            }
-            _ => plan_err!(
+        ast::WindowFrameUnits::Rows | ast::WindowFrameUnits::Groups => row_offset(value),
+        ast::WindowFrameUnits::Range => range_offset(value, plan_interval),
+    }
+}
+
+fn row_offset(value: ast::Expr) -> Result<ScalarValue> {
+    if let Some(offset) = fold_integer_frame_offset(&value) {
+        if offset < 0 {
+            return plan_err!(
                 "Invalid window frame: frame offsets for ROWS / GROUPS must be non negative integers"
-            ),
-        },
-        ast::WindowFrameUnits::Range => Ok(ScalarValue::Utf8(Some(match value {
-            ast::Expr::Value(ValueWithSpan {
-                value: ast::Value::Number(value, false),
-                span: _,
-            }) => value,
-            ast::Expr::Interval(ast::Interval {
-                value,
-                leading_field,
-                ..
-            }) => {
-                let result = match sqlparser::arena::AstBox::into_owned(value) {
-                    ast::Expr::Value(ValueWithSpan {
-                        value: ast::Value::SingleQuotedString(item),
-                        span: _,
-                    }) => item,
-                    expr => return exec_err!("INTERVAL expression cannot be {expr:?}"),
-                };
-                leading_field
-                    .map(|field| format!("{result} {field}"))
-                    .unwrap_or(result)
-            }
-            ast::Expr::Cast {
-                expr,
-                data_type: ast::DataType::Interval { .. },
-                ..
-            } => match sqlparser::arena::AstBox::into_owned(expr) {
+            );
+        }
+        return ScalarValue::try_from_string(offset.to_string(), &DataType::UInt64);
+    }
+    match value {
+        ast::Expr::Value(ValueWithSpan {
+            value: ast::Value::Number(value, false),
+            span: _,
+        }) => ScalarValue::try_from_string(value, &DataType::UInt64),
+        ast::Expr::Interval(ast::Interval {
+            value,
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        }) => {
+            let value = match sqlparser::arena::AstBox::into_owned(value) {
                 ast::Expr::Value(ValueWithSpan {
                     value: ast::Value::SingleQuotedString(item),
                     span: _,
                 }) => item,
                 expr => return exec_err!("INTERVAL expression cannot be {expr:?}"),
-            },
-            ast::Expr::Cast { expr, .. } => {
-                match sqlparser::arena::AstBox::into_owned(expr) {
-                    ast::Expr::Value(ValueWithSpan {
-                        value: ast::Value::Number(item, _),
-                        span: _,
-                    })
-                    | ast::Expr::Value(ValueWithSpan {
-                        value: ast::Value::SingleQuotedString(item),
-                        span: _,
-                    }) => item,
-                    expr => {
-                        return exec_err!(
-                            "frame offset cast expression cannot be {expr:?}"
-                        );
-                    }
-                }
-            }
-            _ => plan_err!(
-                "Invalid window frame: frame offsets for RANGE must be either a numeric value, a string value or an interval"
-            )?,
-        }))),
+            };
+            ScalarValue::try_from_string(value, &DataType::UInt64)
+        }
+        _ => plan_err!(
+            "Invalid window frame: frame offsets for ROWS / GROUPS must be non negative integers"
+        ),
+    }
+}
+
+/// A RANGE offset as a value of its literal's own type, which decides the
+/// ORDER BY keys it can measure: a number as the exact numeric literal the
+/// expression planner makes of it, a quoted string as unknown-typed text
+/// the key's offset type reads, and an interval as `plan_interval` reads
+/// it. A cast of a number or a string keeps its operand's type; one to
+/// `interval` reads the string as an interval.
+fn range_offset(
+    value: ast::Expr,
+    plan_interval: &mut dyn FnMut(&ast::Interval) -> Result<ScalarValue>,
+) -> Result<ScalarValue> {
+    if let Some(offset) = fold_integer_frame_offset(&value) {
+        return sql_number_literal(&offset.unsigned_abs().to_string(), offset < 0, true);
+    }
+    let invalid = || {
+        plan_err!(
+            "Invalid window frame: frame offsets for RANGE must be either a numeric value, a string value or an interval"
+        )
+    };
+    match value {
+        ast::Expr::Nested(inner) => {
+            range_offset(sqlparser::arena::AstBox::into_owned(inner), plan_interval)
+        }
+        ast::Expr::Value(ValueWithSpan {
+            value: ast::Value::Number(number, _),
+            span: _,
+        }) => sql_number_literal(&number, false, true),
+        ast::Expr::UnaryOp {
+            op: op @ (ast::UnaryOperator::Minus | ast::UnaryOperator::Plus),
+            expr,
+        } => match sqlparser::arena::AstBox::into_owned(expr) {
+            ast::Expr::Value(ValueWithSpan {
+                value: ast::Value::Number(number, _),
+                span: _,
+            }) => sql_number_literal(&number, op == ast::UnaryOperator::Minus, true),
+            _ => invalid(),
+        },
+        ast::Expr::Value(ValueWithSpan {
+            value: ast::Value::SingleQuotedString(text),
+            span: _,
+        }) => Ok(ScalarValue::Utf8(Some(text))),
+        ast::Expr::Interval(interval) => plan_interval(&interval),
+        ast::Expr::Cast {
+            expr, data_type, ..
+        } => match (sqlparser::arena::AstBox::into_owned(expr), data_type) {
+            (
+                ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(text),
+                    span,
+                }),
+                ast::DataType::Interval { .. },
+            ) => plan_interval(&ast::Interval {
+                value: sqlparser::arena::AstBox::new(ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(text),
+                    span,
+                })),
+                leading_field: None,
+                leading_precision: None,
+                last_field: None,
+                fractional_seconds_precision: None,
+            }),
+            (
+                ast::Expr::Value(ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(text),
+                    span: _,
+                }),
+                _,
+            ) => Ok(ScalarValue::Utf8(Some(text))),
+            (operand, _) => range_offset(operand, plan_interval),
+        },
+        _ => invalid(),
     }
 }
 
@@ -236,6 +289,19 @@ fn convert_window_frame_units(value: ast::WindowFrameUnits) -> WindowFrameUnits 
 mod tests {
     use super::*;
 
+    fn no_intervals(interval: &ast::Interval) -> Result<ScalarValue> {
+        plan_err!("unexpected interval {interval}")
+    }
+
+    fn range_frame(start: ast::Expr) -> ast::WindowFrame {
+        ast::WindowFrame {
+            units: ast::WindowFrameUnits::Range,
+            start_bound: ast::WindowFrameBound::Preceding(Some(ast::AstBox::new(start))),
+            end_bound: None,
+            exclude: None,
+        }
+    }
+
     #[test]
     fn rejects_invalid_unbounded_bounds() {
         let start = ast::WindowFrame {
@@ -245,7 +311,9 @@ mod tests {
             exclude: None,
         };
         assert_eq!(
-            convert_window_frame(start).unwrap_err().strip_backtrace(),
+            convert_window_frame(start, &mut no_intervals)
+                .unwrap_err()
+                .strip_backtrace(),
             "Error during planning: Invalid window frame: start bound cannot be UNBOUNDED FOLLOWING"
         );
 
@@ -256,7 +324,9 @@ mod tests {
             exclude: None,
         };
         assert_eq!(
-            convert_window_frame(end).unwrap_err().strip_backtrace(),
+            convert_window_frame(end, &mut no_intervals)
+                .unwrap_err()
+                .strip_backtrace(),
             "Error during planning: Invalid window frame: end bound cannot be UNBOUNDED PRECEDING"
         );
     }
@@ -273,7 +343,7 @@ mod tests {
             )))),
             exclude: None,
         };
-        let frame = convert_window_frame(input)?;
+        let frame = convert_window_frame(input, &mut no_intervals)?;
         assert_eq!(frame.units, WindowFrameUnits::Rows);
         assert_eq!(
             frame.start_bound,
@@ -283,6 +353,64 @@ mod tests {
             frame.end_bound,
             WindowFrameBound::Preceding(ScalarValue::UInt64(Some(1)))
         );
+        Ok(())
+    }
+
+    /// A RANGE offset keeps the type of the literal it was written as: an
+    /// exact number, unknown-typed text, or the interval the interval
+    /// planner reads, also through a cast.
+    #[test]
+    fn range_offsets_keep_their_literal_types() -> Result<()> {
+        let number =
+            |text: &str| ast::Expr::value(ast::Value::Number(text.to_string(), false));
+        let string = |text: &str| {
+            ast::Expr::value(ast::Value::SingleQuotedString(text.to_string()))
+        };
+        let interval = ScalarValue::IntervalMonthDayNano(Some(
+            arrow::datatypes::IntervalMonthDayNano::new(0, 1, 0),
+        ));
+        let cases = [
+            (number("2"), ScalarValue::Int32(Some(2))),
+            (number("1.50"), ScalarValue::Decimal128(Some(150), 3, 2)),
+            (
+                ast::Expr::UnaryOp {
+                    op: ast::UnaryOperator::Minus,
+                    expr: ast::AstBox::new(number("1.5")),
+                },
+                ScalarValue::Decimal128(Some(-15), 2, 1),
+            ),
+            (
+                string("1 day"),
+                ScalarValue::Utf8(Some("1 day".to_string())),
+            ),
+            (
+                ast::Expr::Interval(ast::Interval {
+                    value: ast::AstBox::new(string("1 day")),
+                    leading_field: None,
+                    leading_precision: None,
+                    last_field: None,
+                    fractional_seconds_precision: None,
+                }),
+                interval.clone(),
+            ),
+            (
+                ast::Expr::Cast {
+                    kind: ast::CastKind::DoubleColon,
+                    expr: ast::AstBox::new(string("1 day")),
+                    data_type: ast::DataType::Interval {
+                        fields: None,
+                        precision: None,
+                    },
+                    format: None,
+                },
+                interval.clone(),
+            ),
+        ];
+        for (offset, expected) in cases {
+            let frame =
+                convert_window_frame(range_frame(offset), &mut |_| Ok(interval.clone()))?;
+            assert_eq!(frame.start_bound, WindowFrameBound::Preceding(expected));
+        }
         Ok(())
     }
 }

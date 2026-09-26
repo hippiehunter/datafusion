@@ -893,6 +893,23 @@ fn extract_window_frame_target_type(col_type: &DataType) -> Result<Option<DataTy
     }
 }
 
+/// Whether an ORDER BY key of `key_type` measures a RANGE frame by an offset
+/// of `offset_type`: an integer key by an integer, a floating-point key by
+/// any number, and either by a string, which reads as the key's own type.
+/// An integer key cannot take a fractional offset, which a cast to the key
+/// would truncate. Offsets over other keys are the evaluating engine's to
+/// judge.
+fn range_offset_type_is_supported(key_type: &DataType, offset_type: &DataType) -> bool {
+    let string = is_utf8_or_utf8view_or_large_utf8(offset_type);
+    if key_type.is_integer() {
+        offset_type.is_integer() || string
+    } else if key_type.is_floating() {
+        offset_type.is_numeric() || string
+    } else {
+        true
+    }
+}
+
 // Coerces the given `window_frame` to use appropriate natural types.
 // For example, ROWS and GROUPS frames use `UInt64` during calculations.
 fn coerce_window_frame(
@@ -925,6 +942,18 @@ fn coerce_window_frame(
             let Some(col_type) = current_types else {
                 return internal_err!("ORDER BY column cannot be empty");
             };
+            for bound in [&window_frame.start_bound, &window_frame.end_bound] {
+                if let WindowFrameBound::Preceding(v) | WindowFrameBound::Following(v) =
+                    bound
+                    && !v.is_null()
+                    && !range_offset_type_is_supported(&col_type, &v.data_type())
+                {
+                    return not_impl_err!(
+                        "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {col_type} and offset type {}",
+                        v.data_type()
+                    );
+                }
+            }
             // Only a value offset of another type needs a target type: an
             // unbounded or CURRENT ROW bound is valid over any orderable key,
             // and an offset already of the key's type is coerced.
@@ -1579,6 +1608,29 @@ mod test {
             assert_eq!(
                 frame.end_bound,
                 WindowFrameBound::Following(coerced),
+                "{key_type}"
+            );
+        }
+        let fractional = ScalarValue::Decimal128(Some(15), 2, 1);
+        for (key_type, offset, supported) in [
+            (DataType::Int32, fractional.clone(), false),
+            (DataType::Int64, ScalarValue::Float64(Some(1.5)), false),
+            (DataType::Float64, fractional.clone(), true),
+            (DataType::Float64, ScalarValue::Int32(Some(1)), true),
+        ] {
+            let schema = DFSchema::from_unqualified_fields(
+                vec![Field::new("k", key_type.clone(), true)].into(),
+                Default::default(),
+            )?;
+            let frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Range,
+                WindowFrameBound::Preceding(offset),
+                WindowFrameBound::CurrentRow,
+            );
+            let order_by = [expr::Sort::new(col("k"), true, false)];
+            assert_eq!(
+                coerce_window_frame(frame, &schema, &order_by).is_ok(),
+                supported,
                 "{key_type}"
             );
         }
