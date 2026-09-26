@@ -740,16 +740,24 @@ pub(crate) fn find_columns_referenced_by_expr(e: &Expr) -> Vec<Column> {
     exprs
 }
 
-/// Convert any `Expr` to an `Expr::Column`.
+/// Convert any `Expr` to an `Expr::Column` naming the field a plan built over
+/// `expr` produces for it.
+///
+/// The reference carries the expression's qualified name, which is how a plan
+/// names the field it computes: a cast of a column keeps that column's
+/// qualifier and name, so an aggregate grouping by `CAST(t.a AS ...)` outputs
+/// the field `t.a`, and the projection above it must reference `t.a`, not an
+/// unqualified field spelled `"t.a"`.
 pub fn expr_as_column_expr(expr: &Expr, plan: &LogicalPlan) -> Result<Expr> {
     match expr {
         Expr::Column(col) => {
             let (qualifier, field) = plan.schema().qualified_field_from_column(col)?;
             Ok(Expr::from(Column::from((qualifier, field))))
         }
-        _ => Ok(Expr::Column(Column::from_name(
-            expr.schema_name().to_string(),
-        ))),
+        _ => {
+            let (relation, name) = expr.qualified_name();
+            Ok(Expr::Column(Column::new(relation, name)))
+        }
     }
 }
 

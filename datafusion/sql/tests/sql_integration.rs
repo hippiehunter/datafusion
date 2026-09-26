@@ -2742,6 +2742,30 @@ fn select_simple_aggregate_with_groupby_can_use_positions() {
 }
 
 #[test]
+fn select_grouped_by_a_cast_of_a_column_references_the_grouped_value() {
+    for sql in [
+        "SELECT CAST(age AS VARCHAR) AS a FROM person GROUP BY 1",
+        "SELECT CAST(age AS VARCHAR) AS a FROM person GROUP BY a",
+        "SELECT CAST(p.age AS VARCHAR) FROM person p GROUP BY CAST(p.age AS VARCHAR)",
+        "SELECT CAST(age AS DOUBLE) AS a, count(*) FROM person GROUP BY 1",
+    ] {
+        if let Err(error) = logical_plan(sql) {
+            panic!("{sql}: {error}");
+        }
+    }
+    let plan = logical_plan("SELECT CAST(age AS VARCHAR) AS a, count(*) FROM person GROUP BY 1")
+        .unwrap();
+    assert_snapshot!(
+        plan,
+        @"
+    Projection: person.age AS a, count(*) AS count
+      Aggregate: groupBy=[[CAST(person.age AS Utf8View)]], aggr=[[count(*)]]
+        TableScan: person
+    "
+    );
+}
+
+#[test]
 fn select_simple_aggregate_with_groupby_position_out_of_range() {
     let sql = "SELECT state, MIN(age) FROM person GROUP BY 0";
     let err = logical_plan(sql).expect_err("query should have failed");
