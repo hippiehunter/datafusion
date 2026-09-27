@@ -103,6 +103,16 @@ fn values_semantic_coercion_precedes_carrier_schema_inference() {
     );
 }
 
+/// A quoted literal takes the type of the column's other values; a string
+/// written with its type keeps it, and two types VALUES cannot match are an
+/// error, as in PostgreSQL 18.
+#[test]
+fn values_only_a_quoted_literal_takes_another_values_type() {
+    let plan = logical_plan("VALUES ('1'), (2)").unwrap();
+    assert_eq!(plan.schema().field(0).data_type(), &DataType::Int32);
+    assert!(logical_plan("VALUES ('1'::text), (2)").is_err());
+}
+
 #[test]
 fn postgres_bit_string_literal_plans_as_text() {
     let plan = logical_plan("SELECT B'1010'").unwrap();

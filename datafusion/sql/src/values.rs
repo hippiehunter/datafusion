@@ -25,10 +25,10 @@ use datafusion_common::{
     plan_err,
 };
 use datafusion_expr::{
-    EmptyRelation, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder,
+    Cast, EmptyRelation, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Value,
     Values as SQLValues,
 };
 
@@ -87,7 +87,8 @@ impl SqlToRel<'_> {
                     });
                     continue;
                 }
-                exprs.push(self.sql_to_expr_ref(value, &row_schema, planner_context)?);
+                let planned = self.sql_to_expr_ref(value, &row_schema, planner_context)?;
+                exprs.push(written_type_kept(value, planned));
             }
             let exprs = match &assembly {
                 Some(assembly) => self.assemble_values_row(
@@ -404,4 +405,45 @@ impl SqlToRel<'_> {
 /// an unquoted identifier. Quoting it makes it an ordinary column reference.
 pub(crate) fn is_default_identifier(ident: &Ident) -> bool {
     ident.quote_style.is_none() && ident.value.eq_ignore_ascii_case("default")
+}
+
+/// Whether `value` is written as a quoted literal, whose type is unknown until
+/// the column's other values settle it.
+fn is_quoted_literal(value: &SQLExpr) -> bool {
+    match value {
+        SQLExpr::Nested(inner) => is_quoted_literal(inner),
+        SQLExpr::Value(value) => matches!(
+            value.value,
+            Value::SingleQuotedString(_)
+                | Value::DoubleQuotedString(_)
+                | Value::EscapedStringLiteral(_)
+                | Value::UnicodeStringLiteral(_)
+                | Value::DollarQuotedString(_)
+                | Value::NationalStringLiteral(_)
+                | Value::AlternativeQuotedString(_)
+        ),
+        _ => false,
+    }
+}
+
+/// `planned`, the value of the VALUES slot written as `value`. A string
+/// constant written with its type (`text '1'`, `'1'::text`) is not of unknown
+/// type, though it plans as the same text literal a quoted literal does; a
+/// cast to its own type keeps the written type visible to the column's type
+/// inference.
+fn written_type_kept(value: &SQLExpr, planned: Expr) -> Expr {
+    let Expr::Literal(scalar, metadata) = &planned else {
+        return planned;
+    };
+    let untyped_text = matches!(
+        scalar,
+        ScalarValue::Utf8(Some(_))
+            | ScalarValue::LargeUtf8(Some(_))
+            | ScalarValue::Utf8View(Some(_))
+    ) && metadata.as_ref().is_none_or(|metadata| metadata.is_empty());
+    if !untyped_text || is_quoted_literal(value) {
+        return planned;
+    }
+    let data_type = scalar.data_type();
+    Expr::Cast(Cast::new(Box::new(planned), data_type))
 }

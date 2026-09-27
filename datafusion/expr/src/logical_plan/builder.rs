@@ -37,6 +37,7 @@ use crate::logical_plan::{
     Repartition, Sort, SubqueryAlias, TableScan, Union, Unnest, Values, Window,
 };
 use crate::select_expr::SelectExpr;
+use crate::type_coercion::is_utf8_or_utf8view_or_large_utf8;
 use crate::utils::{
     can_hash, columnize_expr, compare_sort_expr, expand_qualified_wildcard,
     expand_wildcard, expr_to_columns, find_valid_equijoin_key_pair,
@@ -531,6 +532,15 @@ impl LogicalPlanBuilder {
             if let Some(exact) = exact_numeric_union(&prev_type, &data_type) {
                 common_type = Some(exact);
                 continue;
+            }
+            // A string of a written type matches no value of another category:
+            // PostgreSQL reads text as nothing but text without a cast.
+            if is_utf8_or_utf8view_or_large_utf8(&prev_type)
+                != is_utf8_or_utf8view_or_large_utf8(&data_type)
+            {
+                return plan_err!(
+                    "VALUES types {prev_type} and {data_type} cannot be matched"
+                );
             }
             let data_types = vec![prev_type.clone(), data_type.clone()];
             let Some(new_type) = type_union_resolution(&data_types) else {
