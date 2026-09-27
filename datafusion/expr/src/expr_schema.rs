@@ -733,9 +733,12 @@ impl ExprSchemable for Expr {
 
         // A value the target type's own input function reads (see
         // `value_reads_into`) is cast nominally; the dialect's analysis
-        // replaces the cast with that read.
+        // replaces the cast with that read. An array cast between shapes
+        // converts only the elements (see `array_cast_target`).
         if can_cast_types(&this_type, cast_to_type)
             || crate::logical_plan::builder::value_reads_into(&this_type, cast_to_type)
+            || crate::type_coercion::binary::array_cast_target(&this_type, cast_to_type)
+                .is_some()
         {
             match self {
                 Expr::ScalarSubquery(subquery) => {

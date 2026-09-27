@@ -820,6 +820,10 @@ fn type_union_resolution_coercion(
     if lhs_type == rhs_type {
         return Some(lhs_type.clone());
     }
+    // `rhs_type` is the union so far, whose nesting the union keeps.
+    if let Some(array) = array_nesting_union(rhs_type, lhs_type) {
+        return Some(array);
+    }
 
     match (lhs_type, rhs_type) {
         // A NULL member of a struct or list takes the type it meets, as a
@@ -1034,6 +1038,7 @@ pub fn comparison_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<D
         .or_else(|| ree_comparison_coercion(lhs_type, rhs_type, true))
         .or_else(|| temporal_coercion_nonstrict_timezone(lhs_type, rhs_type))
         .or_else(|| string_coercion(lhs_type, rhs_type))
+        .or_else(|| array_nesting_union(lhs_type, rhs_type))
         .or_else(|| list_coercion(lhs_type, rhs_type))
         .or_else(|| null_coercion(lhs_type, rhs_type))
         .or_else(|| string_temporal_coercion(lhs_type, rhs_type))
@@ -1871,6 +1876,37 @@ fn array_nesting_comparison(
         rhs: with_list_leaf(rhs_type, leaf),
         ret: DataType::Boolean,
     })
+}
+
+/// Two list types of different nesting as one array type, taken at
+/// `lhs_type`'s nesting with their innermost element types coerced: a
+/// PostgreSQL array type names its element type, not its dimensions. A value
+/// converted to the other keeps its own nesting (see [`array_cast_target`]).
+fn array_nesting_union(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
+    let (lhs_depth, lhs_leaf) = list_nesting(lhs_type);
+    let (rhs_depth, rhs_leaf) = list_nesting(rhs_type);
+    if lhs_depth == 0 || rhs_depth == 0 || lhs_depth == rhs_depth {
+        return None;
+    }
+    let leaf = type_union_resolution(&[lhs_leaf.clone(), rhs_leaf.clone()])?;
+    Some(with_list_leaf(lhs_type, leaf))
+}
+
+/// The type a value of the list type `from` keeps when cast to the list type
+/// `to` whose shape differs: `to`'s innermost element type in `from`'s own
+/// nesting and item fields. A list's nesting and its item fields' metadata
+/// record the dimensions and bounds a PostgreSQL array value carries, which
+/// no array cast changes, so a cast between two such types converts only the
+/// elements. The shapes differ when the nesting does, or when the element
+/// types agree and the item fields do not. `None` for any other pair.
+pub fn array_cast_target(from: &DataType, to: &DataType) -> Option<DataType> {
+    let (from_depth, from_leaf) = list_nesting(from);
+    let (to_depth, to_leaf) = list_nesting(to);
+    if from_depth == 0 || to_depth == 0 || from == to {
+        return None;
+    }
+    (from_depth != to_depth || from_leaf == to_leaf)
+        .then(|| with_list_leaf(from, to_leaf.clone()))
 }
 
 /// Coercion rules for list types.

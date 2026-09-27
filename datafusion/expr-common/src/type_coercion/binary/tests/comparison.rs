@@ -682,6 +682,44 @@ fn lists_of_one_element_type_at_different_nesting_compare_in_their_own_shapes()
     Ok(())
 }
 
+/// A union of arrays of one element type at different nesting is one array
+/// type, and a value cast between the two keeps its own nesting and item
+/// fields, taking only the target's element type.
+#[test]
+fn arrays_of_one_element_type_unite_and_cast_in_their_own_shapes() {
+    let item = |data_type: DataType| Arc::new(Field::new("item", data_type, true));
+    let one = DataType::List(item(DataType::Int32));
+    let two = DataType::List(item(DataType::List(item(DataType::Int32))));
+    assert_eq!(comparison_coercion(&one, &two), Some(one.clone()));
+    assert_eq!(
+        type_union_resolution(&[two.clone(), one.clone()]),
+        Some(two.clone())
+    );
+    assert_eq!(array_cast_target(&two, &one), Some(two.clone()));
+    assert_eq!(
+        array_cast_target(&two, &DataType::List(item(DataType::Int64))),
+        Some(DataType::List(item(DataType::List(item(DataType::Int64)))))
+    );
+    let numbered_from_zero = DataType::List(Arc::new(
+        Field::new("item", DataType::Int32, true).with_metadata(
+            std::collections::HashMap::from([(
+                "pg_array_lower_bound".to_string(),
+                "0".to_string(),
+            )]),
+        ),
+    ));
+    assert_eq!(
+        array_cast_target(&numbered_from_zero, &one),
+        Some(numbered_from_zero.clone())
+    );
+    assert_eq!(
+        array_cast_target(&one, &DataType::List(item(DataType::Int64))),
+        None
+    );
+    assert_eq!(array_cast_target(&one, &one), None);
+    assert_eq!(array_cast_target(&DataType::Int32, &one), None);
+}
+
 #[test]
 fn test_map_coercion() -> Result<()> {
     let lhs = Field::new_map(

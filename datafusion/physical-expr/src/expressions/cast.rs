@@ -29,6 +29,7 @@ use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::format::DEFAULT_FORMAT_OPTIONS;
 use datafusion_common::{Result, not_impl_err};
 use datafusion_expr::expr_schema::{cast_output_field, is_type_only_cast_target};
+use datafusion_expr::type_coercion::binary::array_cast_target;
 use datafusion_expr_common::columnar_value::ColumnarValue;
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_expr_common::sort_properties::ExprProperties;
@@ -168,7 +169,13 @@ impl PhysicalExpr for CastExpr {
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let value = self.expr.evaluate(batch)?;
-        value.cast_to(self.cast_type(), Some(&self.cast_options))
+        // An array cast between shapes converts the elements and keeps each
+        // value's own shape.
+        match array_cast_target(&value.data_type(), self.cast_type()) {
+            Some(target) if target == value.data_type() => Ok(value),
+            Some(target) => value.cast_to(&target, Some(&self.cast_options)),
+            None => value.cast_to(self.cast_type(), Some(&self.cast_options)),
+        }
     }
 
     fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
@@ -252,7 +259,9 @@ pub fn cast_with_options(
     let expr_type = expr.data_type(input_schema)?;
     if expr_type == cast_type {
         Ok(Arc::clone(&expr))
-    } else if can_cast_types(&expr_type, &cast_type) {
+    } else if can_cast_types(&expr_type, &cast_type)
+        || array_cast_target(&expr_type, &cast_type).is_some()
+    {
         Ok(Arc::new(CastExpr::new(expr, cast_type, cast_options)))
     } else {
         not_impl_err!("Unsupported CAST from {expr_type} to {cast_type}")
@@ -271,7 +280,10 @@ pub fn cast_to_field(
     let cast_type = target_field.data_type();
     if expr_type == *cast_type && is_type_only_cast_target(&target_field) {
         Ok(Arc::clone(&expr))
-    } else if expr_type == *cast_type || can_cast_types(&expr_type, cast_type) {
+    } else if expr_type == *cast_type
+        || can_cast_types(&expr_type, cast_type)
+        || array_cast_target(&expr_type, cast_type).is_some()
+    {
         Ok(Arc::new(CastExpr::new_with_target_field(
             expr,
             target_field,
@@ -310,6 +322,38 @@ mod tests {
     };
     use datafusion_physical_expr_common::physical_expr::fmt_sql;
     use insta::assert_snapshot;
+
+    /// A cast between array types of different nesting converts the elements
+    /// and keeps each value's own nesting.
+    #[test]
+    fn an_array_cast_keeps_the_value_shape() -> Result<()> {
+        let item = |data_type| Arc::new(Field::new_list_field(data_type, true));
+        let rows = arrow::array::ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(3), Some(4)]),
+        ]);
+        let matrix = arrow::array::ListArray::new(
+            item(rows.data_type().clone()),
+            arrow::buffer::OffsetBuffer::from_lengths([2]),
+            Arc::new(rows),
+            None,
+        );
+        let schema = Schema::new(vec![Field::new("a", matrix.data_type().clone(), true)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![Arc::new(matrix.clone())],
+        )?;
+        for (target, expected) in [
+            (List(item(Int32)), matrix.data_type().clone()),
+            (List(item(Int64)), List(item(List(item(Int64))))),
+        ] {
+            let cast = cast_with_options(col("a", &schema)?, &schema, target, None)?;
+            let result = cast.evaluate(&batch)?.into_array(1)?;
+            assert_eq!(result.data_type(), &expected);
+            assert_eq!(result.len(), 1);
+        }
+        Ok(())
+    }
 
     // runs an end-to-end test of physical type cast
     // 1. construct a record batch with a column "a" of type A

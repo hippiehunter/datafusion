@@ -247,7 +247,8 @@ impl ScalarUDF {
             let result_data_type = result.data_type();
             let expected_type = return_field.data_type();
             assert_or_internal_err!(
-                result_data_type == *expected_type,
+                result_data_type == *expected_type
+                    || lists_of_one_element_type(&result_data_type, expected_type),
                 "Function '{}' returned value of type '{:?}' while the following type was promised at planning time and expected: '{:?}'",
                 self.name(),
                 result_data_type,
@@ -976,6 +977,29 @@ impl ScalarUDFImpl for AliasedScalarUDFImpl {
     }
 }
 
+/// Whether two list types have one innermost element type. A PostgreSQL
+/// array type names its element type only: each value carries its own
+/// dimensions and bounds, which its list's nesting and item fields record, so
+/// a function computing an array promises the element type, not the shape of
+/// the value it computes.
+#[cfg(debug_assertions)]
+fn lists_of_one_element_type(actual: &DataType, promised: &DataType) -> bool {
+    fn element_type(data_type: &DataType) -> Option<&DataType> {
+        let DataType::List(field) = data_type else {
+            return None;
+        };
+        let mut field: &FieldRef = field;
+        while let DataType::List(inner) = field.data_type() {
+            field = inner;
+        }
+        Some(field.data_type())
+    }
+    matches!(
+        (element_type(actual), element_type(promised)),
+        (Some(actual), Some(promised)) if actual == promised
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,5 +1077,62 @@ mod tests {
         let hasher = &mut DefaultHasher::new();
         value.hash(hasher);
         hasher.finish()
+    }
+
+    /// Returns its one argument whatever type it promised.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct Identity {
+        signature: Signature,
+    }
+
+    impl ScalarUDFImpl for Identity {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn name(&self) -> &str {
+            "identity"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+            Ok(arg_types[0].clone())
+        }
+
+        fn invoke_with_args(
+            &self,
+            mut args: ScalarFunctionArgs,
+        ) -> Result<ColumnarValue> {
+            Ok(args.args.remove(0))
+        }
+    }
+
+    /// A function promising an array returns arrays of that element type in
+    /// any shape, and nothing else.
+    #[test]
+    fn a_promised_array_type_admits_values_of_any_shape() {
+        let udf = ScalarUDF::from(Identity {
+            signature: Signature::any(1, Volatility::Immutable),
+        });
+        let list = |data_type: DataType| {
+            DataType::List(Arc::new(Field::new_list_field(data_type, true)))
+        };
+        let invoke = |value: ScalarValue, promised: DataType| {
+            udf.invoke_with_args(ScalarFunctionArgs {
+                arg_fields: vec![Arc::new(Field::new("a", value.data_type(), true))],
+                args: vec![ColumnarValue::Scalar(value)],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("r", promised, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+                session: None,
+            })
+        };
+        let matrix = ScalarValue::try_from(list(list(DataType::Int32))).unwrap();
+        assert!(invoke(matrix.clone(), list(DataType::Int32)).is_ok());
+        assert!(invoke(matrix, list(DataType::Int64)).is_err());
+        assert!(invoke(ScalarValue::from("x"), list(DataType::Utf8)).is_err());
     }
 }

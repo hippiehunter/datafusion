@@ -36,9 +36,10 @@ use datafusion_common::{
     metadata::FieldMetadata,
     tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRewriter},
 };
+use datafusion_expr::type_coercion::binary::array_cast_target;
 use datafusion_expr::{
-    BinaryExpr, Case, ColumnarValue, Expr, Like, Operator, Volatility, and,
-    binary::BinaryTypeCoercer, lit, or,
+    BinaryExpr, Case, ColumnarValue, Expr, ExprSchemable, Like, Operator, Volatility,
+    and, binary::BinaryTypeCoercer, lit, or,
 };
 use datafusion_expr::{Cast, TryCast, simplify::ExprSimplifyResult};
 use datafusion_expr::{expr::ScalarFunction, interval_arithmetic::NullableInterval};
@@ -674,6 +675,15 @@ impl<'a> ConstEvaluator<'a> {
                 false
             }
             Expr::SimilarTo { .. } => false,
+            // An array cast between shapes keeps each value's own shape, which
+            // a literal of the cast's type could not hold.
+            Expr::Cast(cast)
+                if cast.expr.get_type(&DFSchema::empty()).is_ok_and(|source| {
+                    array_cast_target(&source, cast.field.data_type()).is_some()
+                }) =>
+            {
+                false
+            }
             Expr::Literal(_, _)
             | Expr::Alias(..)
             | Expr::Unnest(_)
