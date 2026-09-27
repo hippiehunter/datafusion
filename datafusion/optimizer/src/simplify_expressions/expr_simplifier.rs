@@ -649,6 +649,33 @@ impl<'a> ConstEvaluator<'a> {
             | Expr::GroupingSet(_)
             | Expr::Wildcard { .. }
             | Expr::Placeholder(_) => false,
+            // Arrow's kernels compare lists by their element encodings, in
+            // floating total order and without their item fields, which is not
+            // PostgreSQL's array order (`'{1.0}'::numeric[] = '{1.00}'`,
+            // `-0 = 0`, arrays of different bounds are unequal); the execution
+            // engine's array comparison decides these instead.
+            Expr::ScalarFunction(ScalarFunction { func, args })
+                if matches!(func.name(), "nullif" | "greatest" | "least")
+                    && args.iter().any(Self::is_constant_array) =>
+            {
+                false
+            }
+            Expr::BinaryExpr(bin)
+                if matches!(
+                    bin.op,
+                    Operator::Eq
+                        | Operator::NotEq
+                        | Operator::Lt
+                        | Operator::LtEq
+                        | Operator::Gt
+                        | Operator::GtEq
+                        | Operator::IsDistinctFrom
+                        | Operator::IsNotDistinctFrom
+                ) && Self::is_constant_array(&bin.left) =>
+            {
+                false
+            }
+            Expr::InList(in_list) if Self::is_constant_array(&in_list.expr) => false,
             Expr::ScalarFunction(ScalarFunction { func, .. }) => {
                 Self::volatility_ok(func.signature().volatility)
             }
@@ -705,6 +732,14 @@ impl<'a> ConstEvaluator<'a> {
             | Expr::TryCast { .. }
             | Expr::InList { .. } => true,
         }
+    }
+
+    /// Whether the constant expression `expr` is a list, a PostgreSQL array.
+    fn is_constant_array(expr: &Expr) -> bool {
+        matches!(
+            expr.get_type(&DFSchema::empty()),
+            Ok(DataType::List(_) | DataType::LargeList(_))
+        )
     }
 
     fn is_decimal_expr(expr: &Expr) -> bool {
@@ -3162,6 +3197,30 @@ mod tests {
         let expr_eq = binary_expr(lit(1), Operator::Eq, lit(1));
 
         assert_eq!(simplify(expr_eq), lit(true));
+    }
+
+    /// Constant arrays are compared by the execution engine's array order,
+    /// not folded with Arrow's list comparison.
+    #[test]
+    fn constant_array_comparisons_are_not_folded() {
+        let array = |values: Vec<Option<f64>>| {
+            lit(ScalarValue::List(Arc::new(
+                arrow::array::ListArray::from_iter_primitive::<
+                    arrow::datatypes::Float64Type,
+                    _,
+                    _,
+                >(vec![Some(values)]),
+            )))
+        };
+        let negative_zero = array(vec![Some(-0.0)]);
+        let zero = array(vec![Some(0.0)]);
+        for op in [Operator::Eq, Operator::Lt, Operator::IsNotDistinctFrom] {
+            let comparison = binary_expr(negative_zero.clone(), op, zero.clone());
+            assert_eq!(simplify(comparison.clone()), comparison);
+        }
+        let in_list = negative_zero.clone().in_list(vec![zero.clone(), zero], false);
+        let simplified = simplify(in_list);
+        assert!(!matches!(simplified, Expr::Literal(..)), "{simplified}");
     }
 
     #[test]
