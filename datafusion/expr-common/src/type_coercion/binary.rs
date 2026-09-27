@@ -226,6 +226,9 @@ impl<'a> BinaryTypeCoercer<'a> {
         GtEq |
         IsDistinctFrom |
         IsNotDistinctFrom => {
+            if let Some(signature) = array_nesting_comparison(lhs, rhs) {
+                return Ok(signature);
+            }
             comparison_coercion(lhs, rhs).map(Signature::comparison).ok_or_else(|| {
                 plan_datafusion_err!(
                     "Cannot infer common argument type for comparison operation {} {} {}",
@@ -273,6 +276,9 @@ impl<'a> BinaryTypeCoercer<'a> {
             })
         }
         ArrayOverlap => {
+            if let Some(signature) = array_nesting_comparison(lhs, rhs) {
+                return Ok(signature);
+            }
             // ArrayOverlap checks if two arrays have any elements in common
             array_coercion(lhs, rhs)
                 .or_else(|| like_coercion(lhs, rhs)).map(Signature::comparison).ok_or_else(|| {
@@ -282,6 +288,9 @@ impl<'a> BinaryTypeCoercer<'a> {
                 })
         }
         AtArrow | ArrowAt => {
+            if let Some(signature) = array_nesting_comparison(lhs, rhs) {
+                return Ok(signature);
+            }
             // Array containment (@>, <@) or JSON/JSONB containment
             // Try array containment first (existing behavior)
             if let Some(t) = array_coercion(lhs, rhs) {
@@ -1843,24 +1852,30 @@ fn with_list_leaf(data_type: &DataType, leaf: DataType) -> DataType {
 
 /// A PostgreSQL array type names its element type, not a number of
 /// dimensions: each value carries its own, whatever nesting its static type
-/// spells. Two list types of different nesting are one array type when their
-/// innermost element types coerce, taken at the left side's nesting.
-fn array_nesting_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
+/// spells, so two list types of different nesting compare as arrays of one
+/// type when their innermost element types coerce. Each side keeps its
+/// nesting and takes the coerced element type: a cast that changes nesting
+/// would reshape the value itself (`{5,6}` into `{{5},{6}}`).
+fn array_nesting_comparison(
+    lhs_type: &DataType,
+    rhs_type: &DataType,
+) -> Option<Signature> {
     let (lhs_depth, lhs_leaf) = list_nesting(lhs_type);
     let (rhs_depth, rhs_leaf) = list_nesting(rhs_type);
     if lhs_depth == 0 || rhs_depth == 0 || lhs_depth == rhs_depth {
         return None;
     }
     let leaf = type_union_resolution(&[lhs_leaf.clone(), rhs_leaf.clone()])?;
-    Some(with_list_leaf(lhs_type, leaf))
+    Some(Signature {
+        lhs: with_list_leaf(lhs_type, leaf.clone()),
+        rhs: with_list_leaf(rhs_type, leaf),
+        ret: DataType::Boolean,
+    })
 }
 
 /// Coercion rules for list types.
 fn list_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
-    if let Some(coerced) = array_nesting_coercion(lhs_type, rhs_type) {
-        return Some(coerced);
-    }
     match (lhs_type, rhs_type) {
         // Coerce to the left side FixedSizeList type if the list lengths are the same,
         // otherwise coerce to list with the left type for dynamic length

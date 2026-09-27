@@ -662,19 +662,23 @@ fn test_list_coercion() {
 }
 
 #[test]
-fn lists_of_one_element_type_at_different_nesting_are_one_array_type() -> Result<()> {
+fn lists_of_one_element_type_at_different_nesting_compare_in_their_own_shapes()
+-> Result<()> {
     let item = |data_type: DataType| Arc::new(Field::new("item", data_type, true));
     let one = DataType::List(item(DataType::Int32));
     let two = DataType::List(item(DataType::List(item(DataType::Int32))));
-    test_coercion_binary_rule!(one, two, Operator::Eq, one.clone());
-    test_coercion_binary_rule!(two, one, Operator::Eq, two.clone());
+    for op in [Operator::Eq, Operator::AtArrow, Operator::ArrayOverlap] {
+        let (lhs, rhs) = BinaryTypeCoercer::new(&one, &op, &two).get_input_types()?;
+        assert_eq!((lhs, rhs), (one.clone(), two.clone()));
+    }
     let wider = DataType::List(item(DataType::List(item(DataType::Int64))));
+    let (lhs, rhs) =
+        BinaryTypeCoercer::new(&one, &Operator::Eq, &wider).get_input_types()?;
     assert_eq!(
-        list_coercion(&one, &wider),
-        Some(DataType::List(item(DataType::Int64)))
+        (lhs, rhs),
+        (DataType::List(item(DataType::Int64)), wider.clone())
     );
-    let text = DataType::List(item(DataType::List(item(DataType::Binary))));
-    assert_eq!(list_coercion(&one, &text), None);
+    assert_eq!(list_coercion(&one, &two), None);
     Ok(())
 }
 
