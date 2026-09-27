@@ -4375,13 +4375,14 @@ fn logical_plan(sql: &str) -> Result<LogicalPlan> {
 mod postgres_planning_semantics {
     use std::sync::Arc;
 
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, Field};
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
     use datafusion_common::{
         Constraint, DFSchema, DataFusionError, DataFusionSqlStateError, Result,
         ScalarValue,
     };
     use datafusion_expr::dml::ConflictTarget;
+    use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{
         CreateMemoryTable, DdlStatement, Distinct, DistinctOn, Expr, GetFieldAccess,
         InsertOp, LogicalPlan, ScalarUDF, WriteOp, col, lit,
@@ -4389,7 +4390,8 @@ mod postgres_planning_semantics {
     use datafusion_functions_aggregate::count::count_udaf;
     use datafusion_sql::parser::DFParser;
     use datafusion_sql::planner::{
-        ExprPlanner, PlannerResult, RawFieldAccessExpr, SqlToRel,
+        ExprPlanner, PlannerResult, RawFieldAccessExpr, RawSubscriptExpr, SqlToRel,
+        SubscriptStep,
     };
     use sqlparser::dialect::PostgreSqlDialect;
 
@@ -4586,6 +4588,82 @@ mod postgres_planning_semantics {
             matches!(node, LogicalPlan::Projection(projection)
                 if projection.expr.iter().any(|expr| expr.clone().unalias() == lit(i64::MIN)))
         }));
+    }
+
+    /// Plans a run of subscripts as `subscripts(value, run length, slices in
+    /// the run)`.
+    #[derive(Debug)]
+    struct SubscriptRunPlanner;
+
+    impl ExprPlanner for SubscriptRunPlanner {
+        fn plan_subscripts(
+            &self,
+            run: RawSubscriptExpr,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<RawSubscriptExpr>> {
+            let slices = run
+                .subscripts
+                .iter()
+                .filter(|subscript| matches!(subscript, SubscriptStep::Slice { .. }))
+                .count();
+            let list = DataType::List(Arc::new(Field::new_list_field(DataType::Int64, true)));
+            let udf = Arc::new(make_udf(
+                "subscripts",
+                vec![list.clone(), DataType::Int64, DataType::Int64],
+                list,
+            ));
+            Ok(PlannerResult::Planned(Expr::ScalarFunction(
+                ScalarFunction::new_udf(
+                    udf,
+                    vec![
+                        run.expr,
+                        lit(run.subscripts.len() as i64),
+                        lit(slices as i64),
+                    ],
+                ),
+            )))
+        }
+    }
+
+    fn plan_with_subscript_runs(sql: &str) -> Result<LogicalPlan> {
+        let state =
+            MockSessionState::default().with_expr_planner(Arc::new(SubscriptRunPlanner));
+        let context = MockContextProvider { state };
+        let planner = SqlToRel::new(&context);
+        let mut statements =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let statement = statements.pop_front().expect("one statement");
+        planner.statement_to_plan(statement)
+    }
+
+    /// Subscripts written together reach the planner as one run, whatever
+    /// mix of indexes and slices; parentheses end a run.
+    #[test]
+    fn subscripts_written_together_are_planned_as_one_run() {
+        let is_left =
+            |expr: &Expr| matches!(expr, Expr::Column(column) if column.name == "left");
+        let plan = plan_with_subscript_runs("SELECT \"left\"[1][2:3][:4] FROM \"array\"")
+            .unwrap();
+        let args = scalar_call_args(&plan, "subscripts").expect("the run is planned");
+        let [value, length, slices] =
+            <[Expr; 3]>::try_from(args).expect("three arguments");
+        assert!(is_left(&value), "{value}");
+        assert_eq!((length, slices), (lit(3i64), lit(2i64)));
+
+        let plan =
+            plan_with_subscript_runs("SELECT (\"left\"[1:2])[1] FROM \"array\"").unwrap();
+        let args =
+            scalar_call_args(&plan, "subscripts").expect("the outer run is planned");
+        let [inner, length, slices] =
+            <[Expr; 3]>::try_from(args).expect("three arguments");
+        assert_eq!((length, slices), (lit(1i64), lit(0i64)));
+        let Expr::ScalarFunction(inner) = inner else {
+            panic!("the parenthesized run is planned on its own: {inner}");
+        };
+        let [value, length, slices] =
+            <[Expr; 3]>::try_from(inner.args).expect("three arguments");
+        assert!(is_left(&value), "{value}");
+        assert_eq!((length, slices), (lit(1i64), lit(1i64)));
     }
 
     #[test]

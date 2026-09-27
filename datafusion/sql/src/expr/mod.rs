@@ -41,7 +41,7 @@ use datafusion_expr::{
 
 use crate::planner::{
     PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawDistinctFromExpr,
-    RawFieldAccessExpr, SqlToRel, claimed_cast,
+    RawFieldAccessExpr, RawSubscriptExpr, SqlToRel, SubscriptStep, claimed_cast,
 };
 
 mod binary_op;
@@ -1869,150 +1869,167 @@ impl SqlToRel<'_> {
             schema,
             planner_context,
         )?;
-        let fields = access_chain
-            .iter()
-            .map(|field| match field {
-                AccessExpr::Subscript(subscript) => {
-                    match subscript {
-                        Subscript::Index { index } => {
-                            // index can be a name, in which case it is a named field access
-                            match index {
-                                SQLExpr::Value(ValueWithSpan {
-                                    value:
-                                        Value::SingleQuotedString(s)
-                                        | Value::DoubleQuotedString(s),
-                                    span: _,
-                                }) => Ok(Some(GetFieldAccess::NamedStructField {
-                                    name: ScalarValue::from(s.clone()),
-                                })),
-                                // otherwise treat like a list index
-                                _ => Ok(Some(GetFieldAccess::ListIndex {
-                                    key: Box::new(self.sql_expr_to_logical_expr(
-                                        index,
-                                        schema,
-                                        planner_context,
-                                    )?),
-                                })),
-                            }
-                        }
-                        Subscript::Slice {
-                            lower_bound,
-                            upper_bound,
-                            stride,
-                        } => {
-                            // Handle array slice with optional bounds:
-                            // [:3] - slice from the array's first element (default start to i64::MIN)
-                            // [2:] - slice to end (default stop to i64::MAX for "to the end")
-                            // [::2] - slice with stride (both bounds default)
-                            let lower_bound = if let Some(lower_bound) = lower_bound {
-                                self.sql_expr_to_logical_expr(
-                                    lower_bound,
-                                    schema,
-                                    planner_context,
-                                )?
-                            } else {
-                                // An array's lower bound is not always 1
-                                // (`int2vector` starts at 0). i64::MIN is
-                                // "from the start", which `array_slice` clips
-                                // to the array's own lower bound, the way
-                                // i64::MAX below is "to the end".
-                                lit(i64::MIN)
-                            };
-
-                            let upper_bound = if let Some(upper_bound) = upper_bound {
-                                self.sql_expr_to_logical_expr(
-                                    upper_bound,
-                                    schema,
-                                    planner_context,
-                                )?
-                            } else {
-                                // Use i64::MAX to indicate "to the end"
-                                // The array_slice function will handle this appropriately
-                                lit(i64::MAX)
-                            };
-
-                            // stride, default to 1
-                            let stride = if let Some(stride) = stride {
-                                self.sql_expr_to_logical_expr(
-                                    stride,
-                                    schema,
-                                    planner_context,
-                                )?
-                            } else {
-                                lit(1i64)
-                            };
-
-                            // Validate stride is not zero (would cause infinite loop)
-                            if matches!(
-                                &stride,
-                                Expr::Literal(ScalarValue::Int8(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::Int16(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::Int32(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::Int64(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::UInt8(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::UInt16(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::UInt32(Some(0)), _)
-                                    | Expr::Literal(ScalarValue::UInt64(Some(0)), _)
-                            ) {
-                                return plan_err!("Array slice stride cannot be zero");
-                            }
-
-                            Ok(Some(GetFieldAccess::ListRange {
-                                start: Box::new(lower_bound),
-                                stop: Box::new(upper_bound),
-                                stride: Box::new(stride),
-                            }))
-                        }
-                        Subscript::Wildcard => {
-                            not_impl_err!("Wildcard subscript [*] not supported")
-                        }
-                        Subscript::IndexList { indexes } => {
-                            not_impl_err!(
-                                "Oracle multi-index subscript not supported: {indexes:?}"
-                            )
-                        }
-                    }
-                }
-                AccessExpr::Dot(expr) => match expr {
+        // Consecutive subscripts form one run, which PostgreSQL applies to
+        // the value at once; a parenthesized `(a[1:2])[1]` is two runs.
+        let mut accesses = Vec::with_capacity(access_chain.len());
+        for access in access_chain {
+            let subscript = match access {
+                AccessExpr::Subscript(Subscript::Index { index }) => match index {
+                    // A quoted name is a named field access.
                     SQLExpr::Value(ValueWithSpan {
                         value: Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
-                        span    : _
-                    }) => Ok(Some(GetFieldAccess::NamedStructField {
-                        name: ScalarValue::from(s.clone()),
-                    })),
-                    SQLExpr::Identifier(ident) => {
-                        // Support unquoted identifiers for struct field access
-                        let field_name = self.ident_normalizer.normalize(ident.clone());
-                        Ok(Some(GetFieldAccess::NamedStructField {
-                            name: ScalarValue::from(field_name.as_str()),
-                        }))
+                        span: _,
+                    }) => {
+                        accesses.push(ChainAccess::Field(
+                            GetFieldAccess::NamedStructField {
+                                name: ScalarValue::from(s.clone()),
+                            },
+                        ));
+                        continue;
                     }
-                    _ => {
-                        not_impl_err!(
-                            "Dot access not supported for non-string expr: {expr:?}"
-                        )
-                    }
+                    _ => SubscriptStep::Index(self.sql_expr_to_logical_expr(
+                        index,
+                        schema,
+                        planner_context,
+                    )?),
                 },
-            })
-            .collect::<Result<Vec<_>>>()?;
+                AccessExpr::Subscript(Subscript::Slice {
+                    lower_bound,
+                    upper_bound,
+                    stride: None,
+                }) => SubscriptStep::Slice {
+                    lower: lower_bound
+                        .as_ref()
+                        .map(|bound| {
+                            self.sql_expr_to_logical_expr(bound, schema, planner_context)
+                        })
+                        .transpose()?,
+                    upper: upper_bound
+                        .as_ref()
+                        .map(|bound| {
+                            self.sql_expr_to_logical_expr(bound, schema, planner_context)
+                        })
+                        .transpose()?,
+                },
+                AccessExpr::Subscript(Subscript::Slice {
+                    lower_bound,
+                    upper_bound,
+                    stride: Some(stride),
+                }) => {
+                    let mut bound = |bound: &Option<SQLExpr>, omitted: i64| match bound {
+                        Some(bound) => {
+                            self.sql_expr_to_logical_expr(bound, schema, planner_context)
+                        }
+                        None => Ok(lit(omitted)),
+                    };
+                    let start = bound(lower_bound, i64::MIN)?;
+                    let stop = bound(upper_bound, i64::MAX)?;
+                    let stride =
+                        self.sql_expr_to_logical_expr(stride, schema, planner_context)?;
+                    // Validate stride is not zero (would cause infinite loop)
+                    if matches!(
+                        &stride,
+                        Expr::Literal(ScalarValue::Int8(Some(0)), _)
+                            | Expr::Literal(ScalarValue::Int16(Some(0)), _)
+                            | Expr::Literal(ScalarValue::Int32(Some(0)), _)
+                            | Expr::Literal(ScalarValue::Int64(Some(0)), _)
+                            | Expr::Literal(ScalarValue::UInt8(Some(0)), _)
+                            | Expr::Literal(ScalarValue::UInt16(Some(0)), _)
+                            | Expr::Literal(ScalarValue::UInt32(Some(0)), _)
+                            | Expr::Literal(ScalarValue::UInt64(Some(0)), _)
+                    ) {
+                        return plan_err!("Array slice stride cannot be zero");
+                    }
+                    accesses.push(ChainAccess::Field(GetFieldAccess::ListRange {
+                        start: Box::new(start),
+                        stop: Box::new(stop),
+                        stride: Box::new(stride),
+                    }));
+                    continue;
+                }
+                AccessExpr::Subscript(Subscript::Wildcard) => {
+                    return not_impl_err!("Wildcard subscript [*] not supported");
+                }
+                AccessExpr::Subscript(Subscript::IndexList { indexes }) => {
+                    return not_impl_err!(
+                        "Oracle multi-index subscript not supported: {indexes:?}"
+                    );
+                }
+                AccessExpr::Dot(expr) => {
+                    let name = match expr {
+                        SQLExpr::Value(ValueWithSpan {
+                            value:
+                                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+                            span: _,
+                        }) => s.clone(),
+                        // Support unquoted identifiers for struct field access
+                        SQLExpr::Identifier(ident) => {
+                            self.ident_normalizer.normalize(ident.clone())
+                        }
+                        _ => {
+                            return not_impl_err!(
+                                "Dot access not supported for non-string expr: {expr:?}"
+                            );
+                        }
+                    };
+                    accesses.push(ChainAccess::Field(GetFieldAccess::NamedStructField {
+                        name: ScalarValue::from(name.as_str()),
+                    }));
+                    continue;
+                }
+            };
+            match accesses.last_mut() {
+                Some(ChainAccess::Subscripts(run)) => run.push(subscript),
+                _ => accesses.push(ChainAccess::Subscripts(vec![subscript])),
+            }
+        }
 
-        fields
+        accesses
             .into_iter()
-            .flatten()
-            .try_fold(root, |expr, field_access| {
-                let mut field_access_expr = RawFieldAccessExpr { expr, field_access };
-                for planner in self.context_provider.get_expr_planners() {
-                    match planner.plan_field_access(field_access_expr, schema)? {
-                        PlannerResult::Planned(expr) => return Ok(expr),
-                        PlannerResult::Original(expr) => {
-                            field_access_expr = expr;
+            .try_fold(root, |expr, access| match access {
+                ChainAccess::Field(field_access) => {
+                    self.plan_one_field_access(expr, field_access, schema)
+                }
+                ChainAccess::Subscripts(subscripts) => {
+                    let mut run = RawSubscriptExpr { expr, subscripts };
+                    for planner in self.context_provider.get_expr_planners() {
+                        match planner.plan_subscripts(run, schema)? {
+                            PlannerResult::Planned(expr) => return Ok(expr),
+                            PlannerResult::Original(original) => run = original,
                         }
                     }
+                    run.subscripts
+                        .into_iter()
+                        .try_fold(run.expr, |expr, subscript| {
+                            self.plan_one_field_access(
+                                expr,
+                                subscript_field_access(subscript),
+                                schema,
+                            )
+                        })
                 }
-                not_impl_err!(
-                    "GetFieldAccess not supported by ExprPlanner: {field_access_expr:?}"
-                )
             })
+    }
+
+    /// Plan one field access with the first planner that claims it.
+    fn plan_one_field_access(
+        &self,
+        expr: Expr,
+        field_access: GetFieldAccess,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        let mut field_access_expr = RawFieldAccessExpr { expr, field_access };
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_field_access(field_access_expr, schema)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(expr) => {
+                    field_access_expr = expr;
+                }
+            }
+        }
+        not_impl_err!(
+            "GetFieldAccess not supported by ExprPlanner: {field_access_expr:?}"
+        )
     }
 
     /// Convert a `JsonAccess` expression (bracket/dot notation on semi-structured data)
@@ -2044,6 +2061,29 @@ impl SqlToRel<'_> {
             ));
         }
         Ok(expr)
+    }
+}
+
+/// One access of a compound access chain as it is planned: a field access,
+/// or a run of subscripts written together on one value.
+enum ChainAccess {
+    Field(GetFieldAccess),
+    Subscripts(Vec<SubscriptStep>),
+}
+
+/// A subscript no planner claimed as part of its run, as a field access of
+/// its own. An omitted lower bound is `i64::MIN`, "from the start", and an
+/// omitted upper bound `i64::MAX`, "to the end", which `array_slice` clips to
+/// the array's own bounds (an array's lower bound is not always 1:
+/// `int2vector` starts at 0).
+fn subscript_field_access(subscript: SubscriptStep) -> GetFieldAccess {
+    match subscript {
+        SubscriptStep::Index(key) => GetFieldAccess::ListIndex { key: Box::new(key) },
+        SubscriptStep::Slice { lower, upper } => GetFieldAccess::ListRange {
+            start: Box::new(lower.unwrap_or_else(|| lit(i64::MIN))),
+            stop: Box::new(upper.unwrap_or_else(|| lit(i64::MAX))),
+            stride: Box::new(lit(1i64)),
+        },
     }
 }
 

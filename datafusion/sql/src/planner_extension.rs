@@ -478,6 +478,22 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plan a run of subscripts written together on one value, such as
+    /// `a[1][2]` or `a[1:2][3]`. PostgreSQL applies such a run to the value at
+    /// once, not one subscript to the result of the one before: `a[1][2]`
+    /// reads the element at `(1, 2)` of a two-dimensional value, and a slice
+    /// anywhere in the run makes the whole run one slice.
+    ///
+    /// Returns the original run if not possible; each subscript is then
+    /// planned on its own by [`Self::plan_field_access`].
+    fn plan_subscripts(
+        &self,
+        expr: RawSubscriptExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawSubscriptExpr>> {
+        Ok(PlannerResult::Original(expr))
+    }
+
     /// Plan an array literal, such as `[1, 2, 3]`
     ///
     /// Returns original expression arguments if not possible
@@ -806,6 +822,26 @@ pub struct RawDistinctFromExpr {
 pub struct RawFieldAccessExpr {
     pub field_access: GetFieldAccess,
     pub expr: Expr,
+}
+
+/// One subscript of a run written together on one value: `[i]`, or
+/// `[lo:hi]` with either bound possibly omitted.
+#[derive(Debug, Clone)]
+pub enum SubscriptStep {
+    Index(Expr),
+    Slice {
+        lower: Option<Expr>,
+        upper: Option<Expr>,
+    },
+}
+
+/// A run of subscripts written together on one value, `a[i][j:k]`, to plan.
+///
+/// This structure is used by [`ExprPlanner::plan_subscripts`].
+#[derive(Debug, Clone)]
+pub struct RawSubscriptExpr {
+    pub expr: Expr,
+    pub subscripts: Vec<SubscriptStep>,
 }
 
 /// One step of an assignment target's path below its column: `col[i]`,
