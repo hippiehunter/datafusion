@@ -477,72 +477,70 @@ impl LogicalPlanBuilder {
         j: usize,
         schema: &DFSchema,
     ) -> Result<(DataType, Option<FieldMetadata>)> {
+        // A quoted literal or a NULL no type names is of unknown type, as in
+        // PostgreSQL's `select_common_type`: the column takes the type its
+        // other values settle on, which the literal is then read as, and a
+        // column of quoted literals alone is text. An unknown value states no
+        // identity, so it leaves the column's metadata to the typed values.
         let mut common_type: Option<DataType> = None;
+        let mut quoted_type: Option<DataType> = None;
         let mut common_metadata: Option<FieldMetadata> = None;
-        // Whether every value typed so far is a quoted literal, whose type is
-        // the one the column's other values settle on.
-        let mut only_quoted_literals = true;
         for (i, row) in values.iter().enumerate() {
             let value = &row[j];
-            // A column's metadata is what every value written into it agrees
-            // on. A row that declares more than another does not conflict with
-            // it; the column simply does not carry the extra fact.
             let metadata = value.metadata(schema)?;
-            common_metadata = Some(match common_metadata {
-                Some(common) => FieldMetadata::new(
-                    common
-                        .inner()
-                        .iter()
-                        .filter(|(key, value)| metadata.inner().get(*key) == Some(*value))
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                ),
-                None => metadata.clone(),
-            });
             let data_type = value.get_type(schema)?;
+            let quoted_literal = metadata.is_empty()
+                && matches!(
+                    value,
+                    Expr::Literal(
+                        ScalarValue::Utf8(Some(_))
+                            | ScalarValue::LargeUtf8(Some(_))
+                            | ScalarValue::Utf8View(Some(_)),
+                        _
+                    )
+                );
+            let untyped_null = metadata.is_empty() && data_type == DataType::Null;
+            if !quoted_literal && !untyped_null {
+                // A column's metadata is what every typed value written into
+                // it agrees on. A row that declares more than another does
+                // not conflict with it; the column simply does not carry the
+                // extra fact.
+                common_metadata = Some(match common_metadata {
+                    Some(common) => FieldMetadata::new(
+                        common
+                            .inner()
+                            .iter()
+                            .filter(|(key, value)| metadata.inner().get(*key) == Some(*value))
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    ),
+                    None => metadata,
+                });
+            }
             if data_type == DataType::Null {
                 continue;
             }
-            let quoted_literal = matches!(
-                value,
-                Expr::Literal(
-                    ScalarValue::Utf8(Some(_))
-                        | ScalarValue::LargeUtf8(Some(_))
-                        | ScalarValue::Utf8View(Some(_)),
-                    _
-                )
-            );
-
-            if let Some(prev_type) = common_type {
-                // A quoted literal beside the exact-numeric payload is read
-                // as a payload, whichever comes first.
-                if prev_type == DataType::LargeBinary && quoted_literal {
-                    common_type = Some(prev_type);
-                    continue;
-                }
-                if data_type == DataType::LargeBinary && only_quoted_literals {
-                    common_type = Some(DataType::LargeBinary);
-                    only_quoted_literals = false;
-                    continue;
-                }
-                only_quoted_literals &= quoted_literal;
-                if let Some(exact) = exact_numeric_union(&prev_type, &data_type) {
-                    common_type = Some(exact);
-                    continue;
-                }
-                // get common type of each column values.
-                let data_types = vec![prev_type.clone(), data_type.clone()];
-                let Some(new_type) = type_union_resolution(&data_types) else {
-                    return plan_err!(
-                        "Inconsistent data type across values list at row {i} column {j}. Was {prev_type} but found {data_type}"
-                    );
-                };
-                common_type = Some(new_type);
-            } else {
-                only_quoted_literals = quoted_literal;
-                common_type = Some(data_type);
+            if quoted_literal {
+                quoted_type.get_or_insert(data_type);
+                continue;
             }
+            let Some(prev_type) = common_type else {
+                common_type = Some(data_type);
+                continue;
+            };
+            if let Some(exact) = exact_numeric_union(&prev_type, &data_type) {
+                common_type = Some(exact);
+                continue;
+            }
+            let data_types = vec![prev_type.clone(), data_type.clone()];
+            let Some(new_type) = type_union_resolution(&data_types) else {
+                return plan_err!(
+                    "Inconsistent data type across values list at row {i} column {j}. Was {prev_type} but found {data_type}"
+                );
+            };
+            common_type = Some(new_type);
         }
+        let common_type = common_type.or(quoted_type);
         // A column whose values are all NULL has no type of its own.
         Ok((common_type.unwrap_or(DataType::Null), common_metadata))
     }
@@ -2550,6 +2548,62 @@ mod tests {
             assert_eq!(values.values, vec![Vec::<Expr>::new()]);
             assert!(values.schema.fields().is_empty());
         }
+        Ok(())
+    }
+
+    fn values_column_type(rows: Vec<Vec<Expr>>) -> Result<DataType> {
+        let LogicalPlan::Values(values) = LogicalPlanBuilder::values(rows)?.build()? else {
+            panic!("expected VALUES plan");
+        };
+        Ok(values.schema.field(0).data_type().clone())
+    }
+
+    /// A quoted literal takes the type the column's other values settle on,
+    /// and a column of quoted literals and NULLs alone is text, as in
+    /// PostgreSQL 18: `VALUES ('1'), (2)` is an integer column and
+    /// `VALUES (NULL), ('y')` a text one.
+    #[test]
+    fn values_quoted_literals_take_the_type_of_the_other_values() -> Result<()> {
+        assert_eq!(
+            values_column_type(vec![vec![lit("1")], vec![lit(2i64)]])?,
+            DataType::Int64
+        );
+        assert_eq!(
+            values_column_type(vec![vec![lit(1i64)], vec![lit("a")]])?,
+            DataType::Int64
+        );
+        assert_eq!(
+            values_column_type(vec![vec![lit(ScalarValue::Null)], vec![lit("y")]])?,
+            DataType::Utf8
+        );
+        assert_eq!(
+            values_column_type(vec![vec![lit("x")], vec![lit("y")]])?,
+            DataType::Utf8
+        );
+        Ok(())
+    }
+
+    /// A column whose typed values carry an identity keeps it beside quoted
+    /// literals and NULLs, which state none of their own.
+    #[test]
+    fn values_unknown_values_keep_the_typed_values_identity() -> Result<()> {
+        let identity = FieldMetadata::from(HashMap::from([(
+            "pg_type".to_string(),
+            "bit".to_string(),
+        )]));
+        let LogicalPlan::Values(values) = LogicalPlanBuilder::values(vec![
+            vec![lit_with_metadata("1", Some(identity.clone()))],
+            vec![lit("0")],
+            vec![lit(ScalarValue::Null)],
+        ])?
+        .build()?
+        else {
+            panic!("expected VALUES plan");
+        };
+        assert_eq!(
+            values.schema.field(0).metadata().get("pg_type"),
+            Some(&"bit".to_string())
+        );
         Ok(())
     }
 

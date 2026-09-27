@@ -66,7 +66,13 @@ fn values_semantic_coercion_precedes_carrier_schema_inference() {
     use datafusion_expr::Expr;
 
     let sql = "VALUES (X'61'), ('b')";
-    assert!(logical_plan(sql).is_err());
+    // Without the hook the quoted literal is of unknown type, read as the
+    // column's other value's type through a cast.
+    let LogicalPlan::Values(inferred) = logical_plan(sql).unwrap() else {
+        panic!("expected VALUES")
+    };
+    assert_eq!(inferred.schema.field(0).data_type(), &DataType::Binary);
+    assert!(matches!(&inferred.values[1][0], Expr::Cast(_)));
     let mut context = MockContextProvider {
         state: MockSessionState::default(),
     };
