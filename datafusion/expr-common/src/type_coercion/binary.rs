@@ -1809,9 +1809,58 @@ fn coerce_list_children(lhs_field: &FieldRef, rhs_field: &FieldRef) -> Option<Fi
     ))
 }
 
+/// The number of `List` and `LargeList` levels of `data_type`, and the type
+/// beneath them.
+fn list_nesting(data_type: &DataType) -> (usize, &DataType) {
+    match data_type {
+        DataType::List(field) | DataType::LargeList(field) => {
+            let (depth, leaf) = list_nesting(field.data_type());
+            (depth + 1, leaf)
+        }
+        other => (0, other),
+    }
+}
+
+/// `data_type` with the type beneath its `List` and `LargeList` levels
+/// replaced by `leaf`.
+fn with_list_leaf(data_type: &DataType, leaf: DataType) -> DataType {
+    match data_type {
+        DataType::List(field) => DataType::List(Arc::new(
+            field
+                .as_ref()
+                .clone()
+                .with_data_type(with_list_leaf(field.data_type(), leaf)),
+        )),
+        DataType::LargeList(field) => DataType::LargeList(Arc::new(
+            field
+                .as_ref()
+                .clone()
+                .with_data_type(with_list_leaf(field.data_type(), leaf)),
+        )),
+        _ => leaf,
+    }
+}
+
+/// A PostgreSQL array type names its element type, not a number of
+/// dimensions: each value carries its own, whatever nesting its static type
+/// spells. Two list types of different nesting are one array type when their
+/// innermost element types coerce, taken at the left side's nesting.
+fn array_nesting_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
+    let (lhs_depth, lhs_leaf) = list_nesting(lhs_type);
+    let (rhs_depth, rhs_leaf) = list_nesting(rhs_type);
+    if lhs_depth == 0 || rhs_depth == 0 || lhs_depth == rhs_depth {
+        return None;
+    }
+    let leaf = type_union_resolution(&[lhs_leaf.clone(), rhs_leaf.clone()])?;
+    Some(with_list_leaf(lhs_type, leaf))
+}
+
 /// Coercion rules for list types.
 fn list_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<DataType> {
     use arrow::datatypes::DataType::*;
+    if let Some(coerced) = array_nesting_coercion(lhs_type, rhs_type) {
+        return Some(coerced);
+    }
     match (lhs_type, rhs_type) {
         // Coerce to the left side FixedSizeList type if the list lengths are the same,
         // otherwise coerce to list with the left type for dynamic length

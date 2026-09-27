@@ -662,6 +662,23 @@ fn test_list_coercion() {
 }
 
 #[test]
+fn lists_of_one_element_type_at_different_nesting_are_one_array_type() -> Result<()> {
+    let item = |data_type: DataType| Arc::new(Field::new("item", data_type, true));
+    let one = DataType::List(item(DataType::Int32));
+    let two = DataType::List(item(DataType::List(item(DataType::Int32))));
+    test_coercion_binary_rule!(one, two, Operator::Eq, one.clone());
+    test_coercion_binary_rule!(two, one, Operator::Eq, two.clone());
+    let wider = DataType::List(item(DataType::List(item(DataType::Int64))));
+    assert_eq!(
+        list_coercion(&one, &wider),
+        Some(DataType::List(item(DataType::Int64)))
+    );
+    let text = DataType::List(item(DataType::List(item(DataType::Binary))));
+    assert_eq!(list_coercion(&one, &text), None);
+    Ok(())
+}
+
+#[test]
 fn test_map_coercion() -> Result<()> {
     let lhs = Field::new_map(
         "lhs",
