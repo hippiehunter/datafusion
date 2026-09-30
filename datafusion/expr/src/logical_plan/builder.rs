@@ -416,13 +416,18 @@ impl LogicalPlanBuilder {
             // assignment that follows reads the difference from the column's
             // metadata. The identity is what every row agrees on, and it is
             // carried only while every row is already on the column's carrier,
-            // so it never describes a value of a different one.
+            // so it never describes a value of a different one. A NULL no type
+            // names is on every carrier and states no identity, so it takes no
+            // part in either decision, as in `infer_value_column`.
             let mut identity: Option<FieldMetadata> = None;
             let mut values_on_carrier = true;
             for row in values.iter() {
                 let value = &row[j];
                 let (_, value_field) = value.to_field(schema)?;
                 let data_type = value_field.data_type();
+                if data_type == &DataType::Null && value_field.metadata().is_empty() {
+                    continue;
+                }
 
                 if !data_type.equals_datatype(field_type)
                     && !can_cast_types(data_type, field_type)
@@ -2613,6 +2618,41 @@ mod tests {
         assert_eq!(
             values.schema.field(0).metadata().get("pg_type"),
             Some(&"bit".to_string())
+        );
+        Ok(())
+    }
+
+    /// Against a target schema, a row that writes an untyped NULL neither takes
+    /// the column off its carrier nor erases the identity the other rows share.
+    #[test]
+    fn values_with_schema_untyped_null_rows_keep_the_typed_rows_identity() -> Result<()> {
+        let identity = FieldMetadata::from(HashMap::from([(
+            "pg_type".to_string(),
+            "geometry".to_string(),
+        )]));
+        let schema = Arc::new(DFSchema::try_from(Schema::new(vec![Field::new(
+            "g",
+            DataType::Binary,
+            true,
+        )]))?);
+        let LogicalPlan::Values(values) = LogicalPlanBuilder::values_with_schema(
+            vec![
+                vec![lit_with_metadata(
+                    ScalarValue::Binary(Some(vec![1, 2])),
+                    Some(identity.clone()),
+                )],
+                vec![lit(ScalarValue::Null)],
+            ],
+            &schema,
+        )?
+        .build()?
+        else {
+            panic!("expected VALUES plan");
+        };
+        assert_eq!(values.schema.field(0).data_type(), &DataType::Binary);
+        assert_eq!(
+            values.schema.field(0).metadata().get("pg_type"),
+            Some(&"geometry".to_string())
         );
         Ok(())
     }
