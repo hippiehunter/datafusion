@@ -1831,7 +1831,10 @@ impl SqlToRel<'_> {
                     .collect::<Result<Vec<_>>>()?;
 
                 let query = SQLBox::into_owned(view.query);
-                let plan = self.query_to_plan_ref(&query, &mut PlannerContext::new())?;
+                let plan = self.query_to_plan_ref(
+                    &query,
+                    &mut PlannerContext::without_parameters(),
+                )?;
                 let plan = self.name_created_relation_columns(
                     plan,
                     Self::naming_select_items(&query),
@@ -2497,7 +2500,7 @@ impl SqlToRel<'_> {
             )?;
         }
 
-        let mut planner_context = PlannerContext::new();
+        let mut planner_context = PlannerContext::without_parameters();
 
         let column_defaults = self
             .build_column_defaults(&columns, &mut planner_context)?
@@ -2710,7 +2713,7 @@ impl SqlToRel<'_> {
         constraints: &[TableConstraint],
         df_schema: &DFSchemaRef,
     ) -> Result<Vec<BoundSqlExpression>> {
-        let mut planner_context = PlannerContext::new();
+        let mut planner_context = PlannerContext::without_parameters();
         constraints
             .iter()
             .filter_map(|constraint| match constraint {
@@ -2736,7 +2739,7 @@ impl SqlToRel<'_> {
         columns: &[ColumnDef],
         df_schema: &DFSchemaRef,
     ) -> Result<Vec<(String, BoundSqlExpression)>> {
-        let mut planner_context = PlannerContext::new();
+        let mut planner_context = PlannerContext::without_parameters();
         let mut generated = Vec::new();
         for column in columns {
             let Some(expression) = column.options.iter().find_map(|option| match &option
@@ -4718,45 +4721,62 @@ impl SqlToRel<'_> {
         );
         let source = adapted_source.as_ref().unwrap_or(source);
 
-        // infer types for Values clause... other types should be resolvable the regular way
-        let mut prepare_param_data_types = BTreeMap::new();
-        if let SetExpr::Values(ast::Values { rows, .. }) = source.body.as_ref() {
-            for row in rows.iter() {
-                for (idx, val) in row.iter().enumerate() {
-                    if let SQLExpr::Value(ValueWithSpan {
-                        value: Value::Placeholder(name),
-                        span: _,
-                    }) = val
-                    {
-                        let name =
-                            name.replace('$', "").parse::<usize>().map_err(|_| {
-                                plan_datafusion_err!("Can't parse placeholder: {name}")
-                            })? - 1;
-                        let field = fields.get(idx).ok_or_else(|| {
-                            plan_datafusion_err!(
-                                "Placeholder ${} refers to a non existent column",
-                                idx + 1
-                            )
-                        })?;
-                        let _ = prepare_param_data_types.insert(name, Arc::clone(field));
-                    }
-                }
-            }
-        }
-        let prepare_param_data_types: Vec<_> =
-            prepare_param_data_types.into_values().collect();
-
         // Projection
         // Create a new context with INSERT-specific settings, starting from the outer context to inherit CTEs
         let mut planner_context = outer_planner_context.clone();
-        // Only a VALUES source types its placeholders from the target columns
-        // above. A query source resolves them the ordinary way, and the types
-        // the caller already resolved -- an extended-protocol Parse, say --
-        // are the only ones it has: replacing them with an empty list leaves
-        // every placeholder in the select list untyped.
-        if !prepare_param_data_types.is_empty() {
-            planner_context =
-                planner_context.with_prepare_param_data_types(prepare_param_data_types);
+        // A caller that declared the statement's parameter list owns every
+        // parameter's type: a declared one keeps it and is converted by the
+        // assignment below, and an untyped one is settled by the context it
+        // appears in. Without such a list, a bare placeholder in a VALUES row
+        // takes the type of the column it writes, at its own ordinal.
+        if !planner_context.parameter_list_is_fixed()
+            && let SetExpr::Values(ast::Values { rows, .. }) = source.body.as_ref()
+        {
+            let mut param_fields = planner_context.prepare_param_data_types().to_vec();
+            let mut typed_from_target = false;
+            for row in rows.iter() {
+                for (idx, val) in row.iter().enumerate() {
+                    let SQLExpr::Value(ValueWithSpan {
+                        value: Value::Placeholder(name),
+                        span: _,
+                    }) = val
+                    else {
+                        continue;
+                    };
+                    let ordinal = name
+                        .strip_prefix('$')
+                        .and_then(|digits| digits.parse::<usize>().ok())
+                        .and_then(|ordinal| ordinal.checked_sub(1))
+                        .ok_or_else(|| {
+                            plan_datafusion_err!("Can't parse placeholder: {name}")
+                        })?;
+                    let field = fields.get(idx).ok_or_else(|| {
+                        plan_datafusion_err!(
+                            "Placeholder ${} refers to a non existent column",
+                            idx + 1
+                        )
+                    })?;
+                    while param_fields.len() <= ordinal {
+                        let unknown = format!("${}", param_fields.len() + 1);
+                        param_fields.push(Arc::new(Field::new(
+                            unknown,
+                            DataType::Null,
+                            true,
+                        )));
+                    }
+                    if param_fields[ordinal].data_type() == &DataType::Null {
+                        param_fields[ordinal] = Arc::new(
+                            Field::new(name.as_str(), field.data_type().clone(), true)
+                                .with_metadata(field.metadata().clone()),
+                        );
+                        typed_from_target = true;
+                    }
+                }
+            }
+            if typed_from_target {
+                planner_context =
+                    planner_context.with_prepare_param_data_types(param_fields);
+            }
         }
         // A source row is a row of the inserted relation, not of the target
         // table: several of its fields may write parts of one column, so they

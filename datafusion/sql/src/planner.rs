@@ -296,6 +296,9 @@ pub struct PlannerContext {
     /// Data types for numbered parameters ($1, $2, etc), if supplied
     /// in `PREPARE` statement
     prepare_param_data_types: Arc<Vec<FieldRef>>,
+    /// Whether `prepare_param_data_types` is the statement's complete
+    /// parameter list rather than the types some parameters were given.
+    parameter_list_fixed: bool,
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
     ctes: HashMap<String, Arc<LogicalPlan>>,
@@ -335,6 +338,7 @@ impl PlannerContext {
     pub fn new() -> Self {
         Self {
             prepare_param_data_types: Arc::new(vec![]),
+            parameter_list_fixed: false,
             ctes: HashMap::new(),
             outer_query_schema_stack: Vec::new(),
             outer_from_schema: None,
@@ -369,6 +373,28 @@ impl PlannerContext {
     ) -> Self {
         self.prepare_param_data_types = prepare_param_data_types.into();
         self
+    }
+
+    /// Declare the statement's complete parameter list, as PostgreSQL's fixed
+    /// parameters do. `$n` names the n-th field, a field of type `Null` is a
+    /// parameter whose type the context it appears in settles, and a
+    /// placeholder numbered beyond the list fails as "there is no parameter".
+    /// Nothing in planning replaces or extends the list.
+    pub fn with_fixed_parameter_list(mut self, parameters: Vec<FieldRef>) -> Self {
+        self.prepare_param_data_types = parameters.into();
+        self.parameter_list_fixed = true;
+        self
+    }
+
+    /// A context for text that takes no parameters, such as an object
+    /// definition: any placeholder in it names no parameter.
+    pub fn without_parameters() -> Self {
+        Self::new().with_fixed_parameter_list(Vec::new())
+    }
+
+    /// Whether the parameter list is the statement's complete one.
+    pub fn parameter_list_is_fixed(&self) -> bool {
+        self.parameter_list_fixed
     }
 
     /// Return a reference to the immediate outer query's schema (if any).

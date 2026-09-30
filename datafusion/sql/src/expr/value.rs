@@ -24,6 +24,7 @@ use arrow::datatypes::{
 };
 use bigdecimal::num_bigint::BigInt;
 use bigdecimal::{BigDecimal, Signed, ToPrimitive};
+use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     DFSchema, DataFusionError, Result, ScalarValue, internal_datafusion_err,
@@ -129,9 +130,19 @@ impl SqlToRel<'_> {
         let index = param[1..].parse::<usize>();
         let idx = match index {
             Ok(0) => {
-                return plan_err!(
-                    "Invalid placeholder, zero is not a valid index: {param}"
-                );
+                return Err(sqlstate_datafusion_err(
+                    "42P02",
+                    format!("there is no parameter {param}"),
+                ));
+            }
+            Ok(index)
+                if planner_context.parameter_list_is_fixed()
+                    && index > param_data_types.len() =>
+            {
+                return Err(sqlstate_datafusion_err(
+                    "42P02",
+                    format!("there is no parameter {param}"),
+                ));
             }
             Ok(index) => index - 1,
             Err(_) => {

@@ -4406,8 +4406,8 @@ mod postgres_planning_semantics {
     use datafusion_functions_aggregate::count::count_udaf;
     use datafusion_sql::parser::DFParser;
     use datafusion_sql::planner::{
-        ExprPlanner, PlannerResult, RawFieldAccessExpr, RawSubscriptExpr, SqlToRel,
-        SubscriptStep,
+        ExprPlanner, PlannerContext, PlannerResult, RawFieldAccessExpr, RawSubscriptExpr,
+        SqlToRel, SubscriptStep,
     };
     use sqlparser::dialect::PostgreSqlDialect;
 
@@ -4856,6 +4856,76 @@ mod postgres_planning_semantics {
             let err = logical_plan(sql).unwrap_err();
             assert_eq!(sqlstate(&err), Some("42803"), "{sql}: {err}");
         }
+    }
+
+    fn plan_with_planner_context(
+        sql: &str,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        let context = MockContextProvider {
+            state: MockSessionState::default(),
+        };
+        let planner = SqlToRel::new(&context);
+        let mut statements =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let Some(datafusion_sql::parser::Statement::Statement(statement)) =
+            statements.pop_front()
+        else {
+            panic!("expected one SQL statement");
+        };
+        planner.sql_statement_to_plan_with_context_ref(&statement, planner_context)
+    }
+
+    fn parameter_type(plan: &LogicalPlan, id: &str) -> Option<DataType> {
+        plan.get_parameter_fields()
+            .expect("parameter fields agree")
+            .get(id)
+            .cloned()
+            .flatten()
+            .map(|field| field.data_type().clone())
+    }
+
+    /// A caller's complete parameter list is the statement's: a VALUES row
+    /// does not retype a declared parameter to the column it writes, and an
+    /// undeclared one stays for the caller's resolution to settle.
+    #[test]
+    fn a_fixed_parameter_list_is_not_retyped_by_the_insert_target() -> Result<()> {
+        let mut planner_context = PlannerContext::new().with_fixed_parameter_list(vec![
+            Arc::new(Field::new("$1", DataType::Utf8, true)),
+            Arc::new(Field::new("$2", DataType::Null, true)),
+        ]);
+        let plan = plan_with_planner_context(
+            "INSERT INTO person (id, first_name, last_name) VALUES ($1, $2, 'x')",
+            &mut planner_context,
+        )?;
+        assert_eq!(parameter_type(&plan, "$1"), Some(DataType::Utf8));
+        assert_eq!(parameter_type(&plan, "$2"), Some(DataType::Null));
+        Ok(())
+    }
+
+    /// Against a fixed list, a placeholder numbered past its end names no
+    /// parameter, and neither does `$0`.
+    #[test]
+    fn a_placeholder_past_a_fixed_parameter_list_is_no_parameter() {
+        for sql in ["SELECT $2", "SELECT $0", "SELECT $2147483647"] {
+            let mut planner_context = PlannerContext::new().with_fixed_parameter_list(
+                vec![Arc::new(Field::new("$1", DataType::Int32, true))],
+            );
+            let err = plan_with_planner_context(sql, &mut planner_context).unwrap_err();
+            assert_eq!(sqlstate(&err), Some("42P02"), "{sql}: {err}");
+        }
+    }
+
+    /// Without a declared list, a VALUES placeholder takes its column's type
+    /// at its own ordinal, however the ordinals are spread over the row.
+    #[test]
+    fn an_inferred_values_placeholder_keeps_its_ordinal() -> Result<()> {
+        let plan = plan_with_planner_context(
+            "INSERT INTO person (id, first_name, last_name) VALUES (1, $2, 'x')",
+            &mut PlannerContext::new(),
+        )?;
+        assert_eq!(parameter_type(&plan, "$2"), Some(DataType::Utf8));
+        Ok(())
     }
 }
 
