@@ -112,14 +112,29 @@ pub(crate) struct MockContextProvider {
 
 impl ContextProvider for MockContextProvider {
     fn is_set_returning_function(&self, name: &str) -> bool {
-        self.state.row_stream_function.as_ref().is_some_and(|udf| udf.name() == name)
+        self.state
+            .row_stream_function
+            .as_ref()
+            .is_some_and(|udf| udf.name() == name)
     }
 
-    fn plan_set_returning_function(&self, name: &str, args: &[Expr],
-        _schema: &datafusion_common::DFSchema, _definitions: Option<&[FieldRef]>,
+    fn plan_set_returning_function(
+        &self,
+        name: &str,
+        args: &[Expr],
+        _schema: &datafusion_common::DFSchema,
+        _definitions: Option<&[FieldRef]>,
     ) -> Result<Option<datafusion_sql::planner::SetReturningColumns>> {
-        Ok(self.state.row_stream_function.as_ref().filter(|udf| udf.name() == name)
-            .map(|udf| datafusion_sql::planner::SetReturningColumns::Rows(udf.call(args.to_vec()))))
+        Ok(self
+            .state
+            .row_stream_function
+            .as_ref()
+            .filter(|udf| udf.name() == name)
+            .map(|udf| {
+                datafusion_sql::planner::SetReturningColumns::Rows(
+                    udf.call(args.to_vec()),
+                )
+            }))
     }
 
     fn plan_literal(&self, expr: Expr, span: sqlparser::tokenizer::Span) -> Result<Expr> {
@@ -367,15 +382,6 @@ impl ContextProvider for MockContextProvider {
             schema: Arc::new(Schema::new(fields)),
             constraints: Constraints::new_unverified(constraints),
             column_defaults,
-            check_expressions: if options.constraints {
-                {
-                    vec![datafusion_expr::BoundSqlExpression::new(
-                        datafusion_expr::col(names[0].0).is_not_null(),
-                    )]
-                }
-            } else {
-                Default::default()
-            },
             generated_expressions: Vec::new(),
         })
     }

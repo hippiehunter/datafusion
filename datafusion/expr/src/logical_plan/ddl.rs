@@ -27,7 +27,9 @@ use std::{
 
 use crate::expr::Sort;
 use arrow::datatypes::DataType;
-use datafusion_common::{Constraints, DFSchemaRef, DataFusionError, Result, TableReference};
+use datafusion_common::{
+    Constraints, DFSchemaRef, DataFusionError, Result, TableReference,
+};
 
 /// Various types of DDL  (CREATE / DROP) catalog manipulation
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
@@ -399,11 +401,6 @@ pub struct CreateMemoryTableSpec {
     pub or_replace: bool,
     /// Default values for columns
     pub column_defaults: Vec<(String, Expr)>,
-    /// Bound CHECK predicates, in the same order as the CHECK entries in
-    /// [`Self::constraints`]. The durable constraint source remains useful
-    /// for catalog display, but downstream planners and executors must consume
-    /// these semantic expressions instead of parsing that source again.
-    pub check_expressions: Vec<BoundSqlExpression>,
     /// Generated-column expressions bound while the CREATE statement's AST
     /// and final table schema are both in scope. Durable SQL spelling remains
     /// catalog metadata, but later planners and executors consume this
@@ -431,7 +428,10 @@ impl CreateMemoryTableSpec {
     /// must see catalog expressions just as they see predicates and
     /// projections in the relational child.
     pub(crate) fn expressions(&self) -> Vec<&Expr> {
-        fn collect_bound<'a>(bound: &'a CreateTablePartitionBound, out: &mut Vec<&'a Expr>) {
+        fn collect_bound<'a>(
+            bound: &'a CreateTablePartitionBound,
+            out: &mut Vec<&'a Expr>,
+        ) {
             match bound {
                 CreateTablePartitionBound::Range { lower, upper } => {
                     for value in lower.iter().chain(upper) {
@@ -449,11 +449,10 @@ impl CreateMemoryTableSpec {
         }
 
         let mut expressions = Vec::new();
-        expressions.extend(self.column_defaults.iter().map(|(_, expression)| expression));
         expressions.extend(
-            self.check_expressions
+            self.column_defaults
                 .iter()
-                .map(BoundSqlExpression::expression),
+                .map(|(_, expression)| expression),
         );
         expressions.extend(
             self.generated_expressions
@@ -508,11 +507,9 @@ impl CreateMemoryTableSpec {
         for (_, expression) in &mut rewritten.column_defaults {
             *expression = expressions.next().ok_or_else(missing)?;
         }
-        for expression in &mut rewritten.check_expressions {
-            *expression = BoundSqlExpression::new(expressions.next().ok_or_else(missing)?);
-        }
         for (_, expression) in &mut rewritten.generated_expressions {
-            *expression = BoundSqlExpression::new(expressions.next().ok_or_else(missing)?);
+            *expression =
+                BoundSqlExpression::new(expressions.next().ok_or_else(missing)?);
         }
         if let Some(partitioning) = &mut rewritten.partitioning {
             for key in &mut partitioning.keys {

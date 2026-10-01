@@ -378,7 +378,6 @@ impl SqlToRel<'_> {
                         or_replace: false,
                         temporary: false,
                         column_defaults: vec![],
-                        check_expressions: vec![],
                         generated_expressions: vec![],
                         storage_parameters: BTreeMap::new(),
                         partitioning: None,

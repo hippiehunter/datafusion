@@ -30,9 +30,8 @@ use crate::parser::{
 use crate::planner::{
     AssignmentStep, CreateTableLikeOptions, DmlGeneratedColumns, DmlViewEvent,
     IdentNormalizer, MergeRowAction, MergeRowActions, PlannerContext, PlannerResult,
-    RawAssignmentTarget,
-    SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlError, ViewDmlTarget,
-    object_name_to_qualifier,
+    RawAssignmentTarget, SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlError,
+    ViewDmlTarget, object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
@@ -348,7 +347,8 @@ fn mark_dml_result_relation(
     match plan {
         LogicalPlan::TableScan(scan) => Ok(LogicalPlan::TableScan(role(scan))),
         LogicalPlan::SubqueryAlias(alias) => {
-            let input = mark_dml_result_relation(Arc::unwrap_or_clone(alias.input), role)?;
+            let input =
+                mark_dml_result_relation(Arc::unwrap_or_clone(alias.input), role)?;
             datafusion_expr::SubqueryAlias::try_new(Arc::new(input), alias.alias)
                 .map(LogicalPlan::SubqueryAlias)
         }
@@ -364,7 +364,9 @@ fn dml_target_relation(
     alias: Option<&ast::TableAlias>,
 ) -> TableReference {
     match alias {
-        Some(alias) => TableReference::bare(ident_normalizer.normalize(alias.name.clone())),
+        Some(alias) => {
+            TableReference::bare(ident_normalizer.normalize(alias.name.clone()))
+        }
         None => table.clone(),
     }
 }
@@ -1566,7 +1568,6 @@ impl SqlToRel<'_> {
                 let mut fields =
                     explicit_schema.fields().iter().cloned().collect::<Vec<_>>();
                 let mut like_constraints = Constraints::default();
-                let mut like_check_expressions = Vec::new();
                 let mut like_generated_expressions = Vec::new();
 
                 if let Some(like) = like {
@@ -1585,7 +1586,6 @@ impl SqlToRel<'_> {
                         0,
                     ));
                     column_defaults.extend(source.column_defaults);
-                    like_check_expressions.extend(source.check_expressions);
                     like_generated_expressions.extend(source.generated_expressions);
                     fields.splice(0..0, source.schema.fields().iter().cloned());
                 }
@@ -1607,7 +1607,6 @@ impl SqlToRel<'_> {
                         at,
                     ));
                     column_defaults.extend(source.column_defaults);
-                    like_check_expressions.extend(source.check_expressions);
                     like_generated_expressions.extend(source.generated_expressions);
                     fields.splice(at..at, source.schema.fields().iter().cloned());
                     inserted = inserted.saturating_add(source_len);
@@ -1729,13 +1728,7 @@ impl SqlToRel<'_> {
                                 &all_constraints,
                                 plan.schema(),
                             )?;
-                        let mut check_expressions = self
-                            .new_check_expressions_from_table_constraints(
-                                &all_constraints,
-                                plan.schema(),
-                            )?;
                         constraints.extend(like_constraints.clone());
-                        check_expressions.extend(like_check_expressions.clone());
 
                         Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
                             CreateMemoryTable::new(
@@ -1745,7 +1738,6 @@ impl SqlToRel<'_> {
                                     if_not_exists,
                                     or_replace,
                                     column_defaults,
-                                    check_expressions,
                                     generated_expressions,
                                     temporary,
                                     storage_parameters: storage_parameters.clone(),
@@ -1769,13 +1761,7 @@ impl SqlToRel<'_> {
                                 &all_constraints,
                                 plan.schema(),
                             )?;
-                        let mut check_expressions = self
-                            .new_check_expressions_from_table_constraints(
-                                &all_constraints,
-                                plan.schema(),
-                            )?;
                         constraints.extend(like_constraints);
-                        check_expressions.extend(like_check_expressions);
                         Ok(LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(
                             CreateMemoryTable::new(
                                 CreateMemoryTableSpec {
@@ -1784,7 +1770,6 @@ impl SqlToRel<'_> {
                                     if_not_exists,
                                     or_replace,
                                     column_defaults,
-                                    check_expressions,
                                     generated_expressions,
                                     temporary,
                                     storage_parameters,
@@ -2705,32 +2690,6 @@ impl SqlToRel<'_> {
         Ok(Constraints::new_unverified(constraints))
     }
 
-    /// Bind every CHECK predicate while its parser-owned expression is still
-    /// in scope. The returned expressions are parallel to the CHECK entries
-    /// produced by [`Self::new_constraint_from_table_constraints`].
-    pub fn new_check_expressions_from_table_constraints(
-        &self,
-        constraints: &[TableConstraint],
-        df_schema: &DFSchemaRef,
-    ) -> Result<Vec<BoundSqlExpression>> {
-        let mut planner_context = PlannerContext::without_parameters();
-        constraints
-            .iter()
-            .filter_map(|constraint| match constraint {
-                TableConstraint::Check(check) => Some(&check.expr),
-                _ => None,
-            })
-            .map(|expression| {
-                self.sql_expr_to_logical_expr(
-                    expression.clone(),
-                    df_schema,
-                    &mut planner_context,
-                )
-                .map(BoundSqlExpression::new)
-            })
-            .collect()
-    }
-
     /// Bind generated-column expressions while the parser-owned declaration
     /// and the completed table schema are both available. This is the sole
     /// syntax-to-semantic crossing for a newly declared generated column.
@@ -3343,8 +3302,12 @@ impl SqlToRel<'_> {
         let mut row_actions = MergeRowActions::default();
         for clause in &clauses {
             match &clause.action {
-                ast::MergeAction::Insert(_) => row_actions.declare(MergeRowAction::Insert),
-                ast::MergeAction::Update { .. } => row_actions.declare(MergeRowAction::Update),
+                ast::MergeAction::Insert(_) => {
+                    row_actions.declare(MergeRowAction::Insert)
+                }
+                ast::MergeAction::Update { .. } => {
+                    row_actions.declare(MergeRowAction::Update)
+                }
                 ast::MergeAction::Delete => row_actions.declare(MergeRowAction::Delete),
                 ast::MergeAction::DoNothing => {}
             }
@@ -3636,12 +3599,20 @@ impl SqlToRel<'_> {
                     clause
                         .predicate
                         .iter()
-                        .chain(update.assignments.iter().map(|assignment| &assignment.value))
+                        .chain(
+                            update
+                                .assignments
+                                .iter()
+                                .map(|assignment| &assignment.value),
+                        )
                         .chain(update.update_predicate.iter())
                         .chain(update.delete_predicate.iter()),
                 )?,
                 MergeAction::Insert(_) | MergeAction::Delete => {
-                    TargetSelectRights::reading(&target_relation, clause.predicate.iter())?
+                    TargetSelectRights::reading(
+                        &target_relation,
+                        clause.predicate.iter(),
+                    )?
                 }
             };
             target_select_rights = target_select_rights.and(arm_rights);
@@ -3841,8 +3812,11 @@ impl SqlToRel<'_> {
             table_name.clone(),
             &table_source.schema(),
         )?);
-        let target_relation =
-            dml_target_relation(&self.ident_normalizer, &table_name, table_alias.as_ref());
+        let target_relation = dml_target_relation(
+            &self.ident_normalizer,
+            &table_name,
+            table_alias.as_ref(),
+        );
         let mut target_select_rights = TargetSelectRights::NotRequired;
 
         // Overwrite with assignment expressions
@@ -4202,9 +4176,8 @@ impl SqlToRel<'_> {
                                 table_schema.fields().len(),
                             )?;
                         }
-                        target_select_rights = target_select_rights.and(
-                            TargetSelectRights::reading(&target_relation, [&expr])?,
-                        );
+                        target_select_rights = target_select_rights
+                            .and(TargetSelectRights::reading(&target_relation, [&expr])?);
                         // Update placeholder's datatype to the type of the target column
                         if let Expr::Placeholder(placeholder) = &mut expr {
                             placeholder.field = placeholder
@@ -4884,8 +4857,8 @@ impl SqlToRel<'_> {
                     }
                     // The value is not specified. Fill in the default value for the column.
                     [] => {
-                        let default = column_default(target_field.name())
-                            .unwrap_or_else(|| {
+                        let default =
+                            column_default(target_field.name()).unwrap_or_else(|| {
                                 // If there is no default for the column, then the default is NULL
                                 Expr::Literal(ScalarValue::Null, None)
                             });
@@ -5072,17 +5045,18 @@ impl SqlToRel<'_> {
         table_source: &Arc<dyn TableSource>,
         planner_context: &mut PlannerContext,
     ) -> Result<TargetSelectRights> {
-        let row_schema =
-            DFSchema::try_from_qualified_schema(table_name.clone(), &table_source.schema())?;
+        let row_schema = DFSchema::try_from_qualified_schema(
+            table_name.clone(),
+            &table_source.schema(),
+        )?;
         let mut rights = TargetSelectRights::NotRequired;
         for item in returning {
             let expr = match item {
                 SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
                     return Ok(TargetSelectRights::Required);
                 }
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    expr
-                }
+                SelectItem::UnnamedExpr(expr)
+                | SelectItem::ExprWithAlias { expr, .. } => expr,
             };
             let expr = self.sql_to_expr_ref(expr, &row_schema, planner_context)?;
             rights = rights.and(TargetSelectRights::reading(table_name, [&expr])?);

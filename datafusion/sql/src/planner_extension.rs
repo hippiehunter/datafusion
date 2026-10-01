@@ -29,9 +29,9 @@ use datafusion_common::{
     config::ConfigOptions, file_options::file_type::FileType, not_impl_err,
 };
 use datafusion_expr::expr::NullTreatment;
-use datafusion_expr::expr_schema::is_type_only_cast_target;
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::expr_rewriter::NamePreserver;
+use datafusion_expr::expr_schema::is_type_only_cast_target;
 use datafusion_expr::logical_plan::LogicalPlan;
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
@@ -89,9 +89,6 @@ pub struct CreateTableLikeSource {
     pub constraints: Constraints,
     /// Included, already-planned defaults keyed by column name.
     pub column_defaults: Vec<(String, Expr)>,
-    /// Included CHECK predicates, already bound against `schema`, in the same
-    /// order as the CHECK entries in [`Self::constraints`].
-    pub check_expressions: Vec<BoundSqlExpression>,
     /// Included generated-column expressions, already bound against
     /// `schema`, keyed by their copied column name.
     pub generated_expressions: Vec<(String, BoundSqlExpression)>,
@@ -106,7 +103,11 @@ pub trait ContextProvider {
     /// Attach embedding-owned literal metadata while its original parser span
     /// is available. The default preserves the ordinary literal expression.
     /// Metadata can carry source provenance independently of its carrier type.
-    fn plan_literal(&self, expr: Expr, _span: sqlparser::tokenizer::Span) -> Result<Expr> {
+    fn plan_literal(
+        &self,
+        expr: Expr,
+        _span: sqlparser::tokenizer::Span,
+    ) -> Result<Expr> {
         Ok(expr)
     }
 
