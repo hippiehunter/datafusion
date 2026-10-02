@@ -37,7 +37,7 @@ use std::cmp::{Ordering, min};
 use std::collections::{HashMap, HashSet};
 use std::num::NonZero;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::available_parallelism;
 
 /// Applies an optional projection to a [`SchemaRef`], returning the
@@ -906,10 +906,20 @@ pub fn combine_limit(
 ///
 /// This is a wrapper around `std::thread::available_parallelism`, providing a default value
 /// of `1` if the system's parallelism cannot be determined.
+///
+/// The answer is computed once per process. On Linux the standard library
+/// reads the cgroup CPU quota on every call (it opens and parses
+/// `/proc/self/mountinfo` and the cgroup files), and this is reached from every
+/// `ConfigOptions::default()`, `SessionConfig::new()` and `SessionContext::new()`,
+/// which a caller may build per statement or even per expression. A process
+/// that changes its affinity or quota after the first call keeps the first answer.
 pub fn get_available_parallelism() -> usize {
-    available_parallelism()
-        .unwrap_or(NonZero::new(1).expect("literal value `1` shouldn't be zero"))
-        .get()
+    static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
+    *AVAILABLE_PARALLELISM.get_or_init(|| {
+        available_parallelism()
+            .unwrap_or(NonZero::new(1).expect("literal value `1` shouldn't be zero"))
+            .get()
+    })
 }
 
 /// Converts a collection of function arguments into a fixed-size array of length N
@@ -959,6 +969,15 @@ mod tests {
     use super::*;
     use crate::ScalarValue::Null;
     use arrow::array::Float64Array;
+
+    #[test]
+    fn available_parallelism_is_positive_and_does_not_change_between_calls() {
+        let first = get_available_parallelism();
+        assert!(first >= 1);
+        for _ in 0..8 {
+            assert_eq!(get_available_parallelism(), first);
+        }
+    }
 
     #[test]
     fn test_bisect_linear_left_and_right() -> Result<()> {

@@ -23,6 +23,8 @@ use crate::{
     expressions::{self, Column, Literal, binary, like, similar_to},
 };
 
+use std::sync::LazyLock;
+
 use arrow::datatypes::Schema;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::metadata::FieldMetadata;
@@ -36,6 +38,17 @@ use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{
     Between, BinaryExpr, Expr, Like, Operator, TryCast, binary_expr, lit,
 };
+
+/// The options a scalar function is planned with when the [ExecutionProps] carry
+/// none. They are the defaults and nothing mutates them, so every function node
+/// shares one value: `ConfigOptions::default()` is not free, and a caller that
+/// plans an expression per statement or per row would otherwise build one for
+/// each function node.
+fn default_config_options() -> Arc<ConfigOptions> {
+    static DEFAULT: LazyLock<Arc<ConfigOptions>> =
+        LazyLock::new(|| Arc::new(ConfigOptions::default()));
+    Arc::clone(&DEFAULT)
+}
 
 /// [PhysicalExpr] evaluate DataFusion expressions such as `A + 1`, or `CAST(c1
 /// AS int)`.
@@ -319,7 +332,7 @@ pub fn create_physical_expr(
                 create_physical_exprs(args, input_dfschema, execution_props)?;
             let config_options = match execution_props.config_options.as_ref() {
                 Some(config_options) => Arc::clone(config_options),
-                None => Arc::new(ConfigOptions::default()),
+                None => default_config_options(),
             };
 
             let scalar_expr = ScalarFunctionExpr::try_new(
@@ -422,6 +435,77 @@ mod tests {
     use datafusion_expr::{col, lit};
 
     use super::*;
+
+    use std::any::Any;
+
+    use datafusion_expr::{
+        ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+        Volatility,
+    };
+
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct Identity {
+        signature: Signature,
+    }
+
+    impl ScalarUDFImpl for Identity {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn name(&self) -> &str {
+            "identity"
+        }
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+        fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+            Ok(arg_types[0].clone())
+        }
+        fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+            Ok(args.args[0].clone())
+        }
+    }
+
+    fn identity_of(column: &str) -> Expr {
+        let udf = ScalarUDF::new_from_impl(Identity {
+            signature: Signature::any(1, Volatility::Immutable),
+        });
+        udf.call(vec![col(column)])
+    }
+
+    fn options_of(
+        physical: &Arc<dyn PhysicalExpr>,
+    ) -> *const ConfigOptions {
+        let function = physical
+            .as_any()
+            .downcast_ref::<ScalarFunctionExpr>()
+            .expect("a scalar function plans to a ScalarFunctionExpr");
+        function.config_options()
+    }
+
+    #[test]
+    fn scalar_functions_planned_without_options_share_one_default() -> Result<()> {
+        let schema = Schema::new(vec![Field::new("a", DataType::Int64, false)]);
+        let df_schema = DFSchema::try_from_qualified_schema("data", &schema)?;
+        let props = ExecutionProps::new();
+        let first = create_physical_expr(&identity_of("a"), &df_schema, &props)?;
+        let second = create_physical_expr(&identity_of("a"), &df_schema, &props)?;
+        assert!(std::ptr::eq(options_of(&first), options_of(&second)));
+
+        // Options the caller supplies still win.
+        let mut custom = ConfigOptions::default();
+        custom.execution.batch_size = 123;
+        let mut with_options = ExecutionProps::new();
+        with_options.mark_start_execution(Arc::new(custom));
+        let third = create_physical_expr(&identity_of("a"), &df_schema, &with_options)?;
+        assert!(!std::ptr::eq(options_of(&first), options_of(&third)));
+        let function = third
+            .as_any()
+            .downcast_ref::<ScalarFunctionExpr>()
+            .expect("a scalar function plans to a ScalarFunctionExpr");
+        assert_eq!(function.config_options().execution.batch_size, 123);
+        Ok(())
+    }
 
     #[test]
     fn test_create_physical_expr_scalar_input_output() -> Result<()> {
