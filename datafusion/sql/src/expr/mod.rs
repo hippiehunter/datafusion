@@ -36,7 +36,7 @@ use datafusion_expr::expr::{
     AllExpr, AnyExpr, InList, QuantifiedSource, WildcardOptions,
 };
 use datafusion_expr::{
-    Between, BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, lit,
+    BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, lit,
 };
 
 use crate::planner::{
@@ -329,6 +329,66 @@ impl SqlToRel<'_> {
             op,
             Box::new(right),
         )))
+    }
+
+    /// `subject BETWEEN low AND high` as PostgreSQL's parser transforms it:
+    /// `subject >= low AND subject <= high`, and NOT BETWEEN as
+    /// `subject < low OR subject > high`, each comparison planned as its
+    /// operator is. SYMMETRIC accepts either order of the bounds. The group
+    /// then goes through the registered expression planners' `plan_between`.
+    fn sql_between_to_expr(
+        &self,
+        subject: Expr,
+        low: Expr,
+        high: Expr,
+        negated: bool,
+        symmetric: sqlparser::ast::BetweenSymmetric,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        let compare = |op: BinaryOperator, bound: &Expr| {
+            self.build_logical_expr(op, subject.clone(), bound.clone(), schema)
+        };
+        let within = |low: &Expr, high: &Expr| {
+            self.build_logical_expr(
+                BinaryOperator::And,
+                compare(BinaryOperator::GtEq, low)?,
+                compare(BinaryOperator::LtEq, high)?,
+                schema,
+            )
+        };
+        let outside = |low: &Expr, high: &Expr| {
+            self.build_logical_expr(
+                BinaryOperator::Or,
+                compare(BinaryOperator::Lt, low)?,
+                compare(BinaryOperator::Gt, high)?,
+                schema,
+            )
+        };
+        let mut group = match (symmetric, negated) {
+            (sqlparser::ast::BetweenSymmetric::Symmetric, false) => self
+                .build_logical_expr(
+                    BinaryOperator::Or,
+                    within(&low, &high)?,
+                    within(&high, &low)?,
+                    schema,
+                )?,
+            (sqlparser::ast::BetweenSymmetric::Symmetric, true) => self
+                .build_logical_expr(
+                    BinaryOperator::And,
+                    outside(&low, &high)?,
+                    outside(&high, &low)?,
+                    schema,
+                )?,
+            (_, false) => within(&low, &high)?,
+            (_, true) => outside(&low, &high)?,
+        };
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_between(group)? {
+                PlannerResult::Planned(planned) => return Ok(planned),
+                PlannerResult::Original(original) => group = original,
+            }
+        }
+        Ok(group)
     }
 
     /// Run a search condition through the registered expression planners'
@@ -771,25 +831,19 @@ impl SqlToRel<'_> {
                 negated,
                 low,
                 high,
-                ..
-            } => Ok(Expr::Between(Between::new(
-                Box::new(self.sql_expr_to_logical_expr(
+                symmetric,
+            } => {
+                let subject = self.sql_expr_to_logical_expr(
                     expr.as_ref(),
                     schema,
                     planner_context,
-                )?),
-                *negated,
-                Box::new(self.sql_expr_to_logical_expr(
-                    low.as_ref(),
-                    schema,
-                    planner_context,
-                )?),
-                Box::new(self.sql_expr_to_logical_expr(
-                    high.as_ref(),
-                    schema,
-                    planner_context,
-                )?),
-            ))),
+                )?;
+                let low =
+                    self.sql_expr_to_logical_expr(low.as_ref(), schema, planner_context)?;
+                let high =
+                    self.sql_expr_to_logical_expr(high.as_ref(), schema, planner_context)?;
+                self.sql_between_to_expr(subject, low, high, *negated, *symmetric, schema)
+            }
 
             SQLExpr::InList {
                 expr,

@@ -19,7 +19,7 @@
 
 use arrow::datatypes::DataType;
 use datafusion_common::error::sqlstate_datafusion_err;
-use datafusion_common::{DFSchema, Result, ScalarValue, exec_err, plan_err};
+use datafusion_common::{DFSchema, Result, ScalarValue, plan_err};
 use datafusion_expr::{
     Expr, WindowFrame, WindowFrameBound, WindowFrameExclusion, WindowFrameUnits,
 };
@@ -207,40 +207,36 @@ fn row_offset(value: ast::Expr) -> Result<ScalarValue> {
         }
         return ScalarValue::try_from_string(offset.to_string(), &DataType::UInt64);
     }
+    let invalid = || {
+        plan_err!(
+            "Invalid window frame: frame offsets for ROWS / GROUPS must be non negative integers"
+        )
+    };
     match value {
         ast::Expr::Value(ValueWithSpan {
             value: ast::Value::Number(value, false),
             span: _,
         }) => ScalarValue::try_from_string(value, &DataType::UInt64),
-        ast::Expr::Interval(ast::Interval {
-            value,
-            leading_field: None,
-            leading_precision: None,
-            last_field: None,
-            fractional_seconds_precision: None,
-        }) => {
-            let value = match sqlparser::arena::AstBox::into_owned(value) {
-                ast::Expr::Value(ValueWithSpan {
-                    value: ast::Value::SingleQuotedString(item),
-                    span: _,
-                }) => item,
-                expr => return exec_err!("INTERVAL expression cannot be {expr:?}"),
-            };
-            ScalarValue::try_from_string(value, &DataType::UInt64)
-        }
-        _ => plan_err!(
-            "Invalid window frame: frame offsets for ROWS / GROUPS must be non negative integers"
-        ),
+        // A quoted offset is unknown-typed text, which a ROWS or GROUPS
+        // offset reads as `bigint`.
+        ast::Expr::Value(ValueWithSpan {
+            value: ast::Value::SingleQuotedString(text),
+            span: _,
+        }) => match text.trim().parse::<i128>() {
+            Ok(offset) if offset >= 0 => {
+                ScalarValue::try_from_string(offset.to_string(), &DataType::UInt64)
+            }
+            _ => invalid(),
+        },
+        _ => invalid(),
     }
 }
 
 /// A RANGE offset as a value of its literal's own type, which decides the
 /// ORDER BY keys it can measure: a number as the exact numeric literal the
 /// expression planner makes of it, a quoted string as unknown-typed text
-/// the key's offset type reads, and an interval as `plan_interval` reads
-/// it. The parser reads a quoted frame offset as an unqualified interval, so
-/// an unqualified `INTERVAL '...'` is that quoted text; a qualified interval,
-/// or a cast to `interval`, is an interval. A cast of a number or a string
+/// the key's offset type reads, and an interval literal or a cast to
+/// `interval` as `plan_interval` reads it. A cast of a number or a string
 /// otherwise keeps its operand's type.
 fn range_offset(
     value: ast::Expr,
@@ -276,28 +272,6 @@ fn range_offset(
             value: ast::Value::SingleQuotedString(text),
             span: _,
         }) => Ok(ScalarValue::Utf8(Some(text))),
-        ast::Expr::Interval(ast::Interval {
-            value,
-            leading_field: None,
-            leading_precision: None,
-            last_field: None,
-            fractional_seconds_precision: None,
-        }) if matches!(
-            value.as_ref(),
-            ast::Expr::Value(ValueWithSpan {
-                value: ast::Value::SingleQuotedString(_),
-                span: _,
-            })
-        ) =>
-        {
-            match sqlparser::arena::AstBox::into_owned(value) {
-                ast::Expr::Value(ValueWithSpan {
-                    value: ast::Value::SingleQuotedString(text),
-                    span: _,
-                }) => Ok(ScalarValue::Utf8(Some(text))),
-                _ => invalid(),
-            }
-        }
         ast::Expr::Interval(interval) => plan_interval(&interval),
         ast::Expr::Cast {
             expr, data_type, ..
@@ -422,6 +396,37 @@ mod tests {
         Ok(())
     }
 
+    /// A quoted ROWS or GROUPS offset reads as `bigint`, and an interval is
+    /// no row count.
+    #[test]
+    fn quoted_row_offsets_read_as_integers() -> Result<()> {
+        let rows = |offset: ast::Expr| ast::WindowFrame {
+            units: ast::WindowFrameUnits::Rows,
+            start_bound: ast::WindowFrameBound::Preceding(Some(ast::AstBox::new(offset))),
+            end_bound: None,
+            exclude: None,
+        };
+        let string = |text: &str| {
+            ast::Expr::value(ast::Value::SingleQuotedString(text.to_string()))
+        };
+        let frame = convert_window_frame(rows(string(" 3")), &mut no_intervals)?;
+        assert_eq!(
+            frame.start_bound,
+            WindowFrameBound::Preceding(ScalarValue::UInt64(Some(3)))
+        );
+        assert!(convert_window_frame(rows(string("-1")), &mut no_intervals).is_err());
+        assert!(convert_window_frame(rows(string("1 day")), &mut no_intervals).is_err());
+        let interval = ast::Expr::Interval(ast::Interval {
+            value: ast::AstBox::new(string("3")),
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        });
+        assert!(convert_window_frame(rows(interval), &mut no_intervals).is_err());
+        Ok(())
+    }
+
     /// A null offset is rejected with PostgreSQL's SQLSTATE, not read as the
     /// unbounded bound a frame bound of no value means.
     #[test]
@@ -446,9 +451,8 @@ mod tests {
     }
 
     /// A RANGE offset keeps the type of the literal it was written as: an
-    /// exact number, unknown-typed text (which is also what the parser makes
-    /// of a quoted offset, an unqualified interval), or the interval the
-    /// interval planner reads of a qualified interval or a cast.
+    /// exact number, unknown-typed text for a quoted offset, or the interval
+    /// the interval planner reads of an interval literal or a cast.
     #[test]
     fn range_offsets_keep_their_literal_types() -> Result<()> {
         let number =
@@ -481,7 +485,7 @@ mod tests {
                     last_field: None,
                     fractional_seconds_precision: None,
                 }),
-                ScalarValue::Utf8(Some("1 day".to_string())),
+                interval.clone(),
             ),
             (
                 ast::Expr::Interval(ast::Interval {

@@ -343,6 +343,19 @@ pub trait ContextProvider {
         Ok(rows)
     }
 
+    /// Resolve provider-owned semantic types across the two inputs of a set
+    /// operation (UNION, INTERSECT, EXCEPT, a recursive CTE's terms) before
+    /// the Arrow carrier types establish its schema. An embedding can cast a
+    /// column to the type PostgreSQL's common-type rules pick for it, or read
+    /// an untyped literal in it. The default keeps both inputs.
+    fn plan_set_operation_inputs(
+        &self,
+        left: LogicalPlan,
+        right: LogicalPlan,
+    ) -> Result<(LogicalPlan, LogicalPlan)> {
+        Ok((left, right))
+    }
+
     /// Gantry: construct the host's error for a statement that supplies a
     /// non-DEFAULT value for a generated column.
     fn generated_column_write_error(
@@ -663,6 +676,18 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plans the group of comparisons a `BETWEEN` is transformed into, once
+    /// its comparisons are planned: `x BETWEEN a AND b` is `x >= a AND x <= b`,
+    /// `NOT BETWEEN` is `x < a OR x > b`, and `SYMMETRIC` combines both orders
+    /// of the bounds. The group is a node of its own, unlike a chain of `AND`s
+    /// written out, which the grammar flattens into one, so a planner that
+    /// renders expressions back to SQL marks it here.
+    ///
+    /// Returns the original group if not possible
+    fn plan_between(&self, group: Expr) -> Result<PlannerResult<Expr>> {
+        Ok(PlannerResult::Original(group))
+    }
+
     /// Plans an assignment through a subscript or field path of a column:
     /// `UPDATE ... SET col[i] = v`, `SET col.f = v`, `INSERT (col[lo:hi])
     /// VALUES (v)`. The result is the column's whole new value.
@@ -689,12 +714,14 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(None)
     }
 
-    /// Plans aggregate functions, such as `COUNT(<expr>)`
+    /// Plans aggregate functions, such as `COUNT(<expr>)`, whose arguments
+    /// are expressions over `schema`
     ///
     /// Returns original expression arguments if not possible
     fn plan_aggregate(
         &self,
         expr: RawAggregateExpr,
+        _schema: &DFSchema,
     ) -> Result<PlannerResult<RawAggregateExpr>> {
         Ok(PlannerResult::Original(expr))
     }
@@ -716,6 +743,7 @@ impl ExprPlanner for AggregateFunctionPlanner {
     fn plan_aggregate(
         &self,
         raw_expr: RawAggregateExpr,
+        _schema: &DFSchema,
     ) -> Result<PlannerResult<RawAggregateExpr>> {
         let RawAggregateExpr {
             func,
@@ -932,7 +960,28 @@ impl RawCastExpr {
 /// written type names the cast's result, whatever the planner built it from.
 /// A constant takes the metadata itself, a bare-type cast takes the target
 /// field, and any other expression is cast to the target field.
+///
+/// An alias over a non-constant value that already yields the target
+/// annotates that value and is not a second value to cast: it is returned as
+/// it is. A constant keeps the cast that names its type.
 pub fn claimed_cast(planned: Expr, target: &FieldRef, schema: &DFSchema) -> Result<Expr> {
+    if let Expr::Alias(alias) = &planned {
+        let mut base = alias.expr.as_ref();
+        loop {
+            match base {
+                Expr::Alias(inner) => base = inner.expr.as_ref(),
+                Expr::Cast(inner) => base = inner.expr.as_ref(),
+                _ => break,
+            }
+        }
+        if !matches!(base, Expr::Literal(..)) {
+            let (_, inner) = alias.expr.to_field(schema)?;
+            if inner.data_type() == target.data_type() && inner.metadata() == target.metadata()
+            {
+                return Ok(planned);
+            }
+        }
+    }
     let (_, planned_field) = planned.to_field(schema)?;
     if planned_field.data_type() != target.data_type()
         || planned_field.metadata() == target.metadata()

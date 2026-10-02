@@ -152,6 +152,9 @@ impl SqlToRel<'_> {
         right_plan: LogicalPlan,
         set_quantifier: SetQuantifier,
     ) -> Result<LogicalPlan> {
+        let (left_plan, right_plan) = self
+            .context_provider
+            .plan_set_operation_inputs(left_plan, right_plan)?;
         match (op, set_quantifier) {
             (SetOperator::Union, SetQuantifier::All) => {
                 LogicalPlanBuilder::from(left_plan)

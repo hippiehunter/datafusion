@@ -513,11 +513,11 @@ fn test_infer_types_from_between_predicate() {
         @r"
     ** Initial Plan:
     Projection: person.id, person.age
-      Filter: person.age BETWEEN $1 AND $2
+      Filter: person.age >= $1 AND person.age <= $2
         TableScan: person
     ** Final Plan:
     Projection: person.id, person.age
-      Filter: person.age BETWEEN Int32(10) AND Int32(30)
+      Filter: person.age >= Int32(10) AND person.age <= Int32(30)
         TableScan: person
     "
     );
@@ -539,11 +539,11 @@ fn test_prepare_statement_infer_types_from_between_predicate() {
     ** Initial Plan:
     Prepare: "my_plan" [Int32, Int32]
       Projection: person.id, person.age
-        Filter: person.age BETWEEN $1 AND $2
+        Filter: person.age >= $1 AND person.age <= $2
           TableScan: person
     ** Final Plan:
     Projection: person.id, person.age
-      Filter: person.age BETWEEN Int32(10) AND Int32(30)
+      Filter: person.age >= Int32(10) AND person.age <= Int32(30)
         TableScan: person
     "#
     );

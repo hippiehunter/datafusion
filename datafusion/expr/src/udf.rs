@@ -27,7 +27,7 @@ use crate::{ColumnarValue, Documentation, Expr, Signature};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{
-    ExprSchema, Result, ScalarValue, assert_or_internal_err, not_impl_err,
+    ExprSchema, Result, ScalarValue, not_impl_err,
 };
 use datafusion_expr_common::dyn_eq::{DynEq, DynHash};
 use datafusion_expr_common::interval_arithmetic::Interval;
@@ -246,7 +246,7 @@ impl ScalarUDF {
         {
             let result_data_type = result.data_type();
             let expected_type = return_field.data_type();
-            assert_or_internal_err!(
+            datafusion_common::assert_or_internal_err!(
                 result_data_type == *expected_type
                     || lists_of_one_element_type(&result_data_type, expected_type),
                 "Function '{}' returned value of type '{:?}' while the following type was promised at planning time and expected: '{:?}'",
@@ -1080,11 +1080,13 @@ mod tests {
     }
 
     /// Returns its one argument whatever type it promised.
+    #[cfg(debug_assertions)]
     #[derive(Debug, PartialEq, Eq, Hash)]
     struct Identity {
         signature: Signature,
     }
 
+    #[cfg(debug_assertions)]
     impl ScalarUDFImpl for Identity {
         fn as_any(&self) -> &dyn Any {
             self
@@ -1111,7 +1113,9 @@ mod tests {
     }
 
     /// A function promising an array returns arrays of that element type in
-    /// any shape, and nothing else.
+    /// any shape, and nothing else. `invoke_with_args` checks the promise only
+    /// with debug assertions.
+    #[cfg(debug_assertions)]
     #[test]
     fn a_promised_array_type_admits_values_of_any_shape() {
         let udf = ScalarUDF::from(Identity {

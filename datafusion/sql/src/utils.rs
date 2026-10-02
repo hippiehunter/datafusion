@@ -42,6 +42,38 @@ use datafusion_expr::{
 use indexmap::IndexMap;
 use sqlparser::ast::{Ident, Value};
 
+/// PostgreSQL refuses a subquery, an aggregate and a window function in the
+/// expression of a CHECK constraint, with a SQLSTATE and message of its own
+/// for each. A constraint reads only the row it constrains.
+pub fn reject_check_constraint_expression(expr: &Expr) -> Result<()> {
+    let mut refusal = None;
+    expr.apply(|node| {
+        let found = match node {
+            Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_) => {
+                Some(("0A000", "cannot use subquery in check constraint"))
+            }
+            Expr::AggregateFunction(_) => Some((
+                "42803",
+                "aggregate functions are not allowed in check constraints",
+            )),
+            Expr::WindowFunction(_) => Some((
+                "42P20",
+                "window functions are not allowed in check constraints",
+            )),
+            _ => None,
+        };
+        if found.is_some() {
+            refusal = found;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    match refusal {
+        Some((sqlstate, message)) => Err(sqlstate_datafusion_err(sqlstate, message)),
+        None => Ok(()),
+    }
+}
+
 /// Convert a parser source span at the SQL frontend boundary. Empty parser
 /// spans represent missing location information and are not propagated.
 pub(crate) fn convert_parser_span(span: sqlparser::tokenizer::Span) -> Option<Span> {

@@ -1796,7 +1796,7 @@ fn select_between() {
         plan,
         @r#"
         Projection: person.state
-          Filter: person.age BETWEEN Int32(21) AND Int32(65)
+          Filter: person.age >= Int32(21) AND person.age <= Int32(65)
             TableScan: person
         "#
     );
@@ -1810,7 +1810,7 @@ fn select_between_negated() {
         plan,
         @r#"
         Projection: person.state
-          Filter: person.age NOT BETWEEN Int32(21) AND Int32(65)
+          Filter: person.age < Int32(21) OR person.age > Int32(65)
             TableScan: person
         "#
     );
@@ -5203,7 +5203,7 @@ fn date_plus_interval_in_filter() {
         plan,
         @r#"
 Projection: test.t_date64
-  Filter: test.t_date64 BETWEEN CAST(Utf8("1999-12-31") AS Date32) AND CAST(Utf8("1999-12-31") AS Date32) + IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 30, nanoseconds: 0 }")
+  Filter: test.t_date64 >= CAST(Utf8("1999-12-31") AS Date32) AND test.t_date64 <= CAST(Utf8("1999-12-31") AS Date32) + IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 30, nanoseconds: 0 }")
     TableScan: test
 "#
     );
