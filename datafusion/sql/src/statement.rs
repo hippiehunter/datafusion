@@ -1272,7 +1272,13 @@ impl SqlToRel<'_> {
                 analyze,
                 format,
                 statement,
-            }) => self.explain_to_plan(verbose, analyze, format, *statement),
+            }) => self.explain_to_plan(
+                verbose,
+                analyze,
+                format,
+                *statement,
+                &mut PlannerContext::new(),
+            ),
             DFStatement::Reset(_) => {
                 not_impl_err!("utility statements must bypass relational SQL planning")
             }
@@ -1446,7 +1452,7 @@ impl SqlToRel<'_> {
                 let format = format.map(|format| format.to_string());
                 let statement =
                     DFStatement::Statement(Box::new(SQLBox::into_owned(statement)));
-                self.explain_to_plan(verbose, analyze, format, statement)
+                self.explain_to_plan(verbose, analyze, format, statement, planner_context)
             }
             Statement::Query(query) => self.query_to_plan_ref(&query, planner_context),
             Statement::ShowVariable { variable, .. } => {
@@ -2812,8 +2818,16 @@ impl SqlToRel<'_> {
         analyze: bool,
         format: Option<String>,
         statement: DFStatement,
+        planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        let plan = self.statement_to_plan(statement)?;
+        // The explained statement's placeholders are the explain statement's
+        // own: it plans with the caller's parameter list.
+        let plan = match statement {
+            DFStatement::Statement(statement) => {
+                self.sql_statement_to_plan_with_context_impl(*statement, planner_context)?
+            }
+            statement => self.statement_to_plan(statement)?,
+        };
         if matches!(plan, LogicalPlan::Explain(_)) {
             return plan_err!("Nested EXPLAINs are not supported");
         }

@@ -4916,6 +4916,32 @@ mod postgres_planning_semantics {
         }
     }
 
+    /// The statement an EXPLAIN explains plans against the caller's parameter
+    /// list: a declared parameter keeps its type rather than taking the type of
+    /// the column it is compared with.
+    #[test]
+    fn a_fixed_parameter_list_reaches_the_explained_statement() -> Result<()> {
+        let mut planner_context = PlannerContext::new()
+            .with_fixed_parameter_list(vec![Arc::new(Field::new(
+                "$1",
+                DataType::Int16,
+                true,
+            ))]);
+        let context = MockContextProvider {
+            state: MockSessionState::default(),
+        };
+        let statement = sqlparser::parser::Parser::new(&PostgreSqlDialect {})
+            .try_with_sql("EXPLAIN SELECT first_name FROM person WHERE id = $1")
+            .expect("the SQL tokenizes")
+            .parse_statement()
+            .expect("the SQL parses");
+        let plan = SqlToRel::new(&context)
+            .sql_statement_to_plan_with_context_ref(&statement, &mut planner_context)?;
+        assert!(matches!(plan, LogicalPlan::Explain(_)));
+        assert_eq!(parameter_type(&plan, "$1"), Some(DataType::Int16));
+        Ok(())
+    }
+
     /// Without a declared list, a VALUES placeholder takes its column's type
     /// at its own ordinal, however the ordinals are spread over the row.
     #[test]
