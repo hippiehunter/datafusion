@@ -1401,6 +1401,23 @@ mod tests {
     }
 
     #[test]
+    fn a_key_written_twice_is_one_output_column_of_every_grouping_set_form() -> Result<()> {
+        let keys = vec![col("a"), col("b"), col("a")];
+        for set in [
+            rollup(keys.clone()),
+            cube(keys.clone()),
+            grouping_set(vec![keys.clone(), vec![]]),
+        ] {
+            let group_expr = vec![set];
+            let distinct = grouping_set_to_exprlist(&group_expr)?;
+            assert_eq!(distinct, vec![&col("a"), &col("b")]);
+            // The grouping id column follows the distinct keys.
+            assert_eq!(grouping_set_expr_count(&group_expr)?, 3);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_enumerate_grouping_sets() -> Result<()> {
         let multi_cols = vec![col("col1"), col("col2"), col("col3")];
         let simple_col = col("simple_col");

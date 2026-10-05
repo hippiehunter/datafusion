@@ -1271,24 +1271,23 @@ pub enum GroupingSet {
 }
 
 impl GroupingSet {
-    /// Return all distinct exprs in the grouping set. For `CUBE` and `ROLLUP` this
-    /// is just the underlying list of exprs. For `GROUPING SET` we need to deduplicate
-    /// the exprs in the underlying sets.
+    /// Return all distinct exprs in the grouping set, in first-written order. A key
+    /// written more than once (`ROLLUP (a, a)`, or `a` in two `GROUPING SETS`) is one
+    /// output column, while the grouping sets keep every written position.
     pub fn distinct_expr(&self) -> Vec<&Expr> {
-        match self {
+        let written: Vec<&Expr> = match self {
             GroupingSet::Rollup(exprs) | GroupingSet::Cube(exprs) => {
                 exprs.iter().collect()
             }
-            GroupingSet::GroupingSets(groups) => {
-                let mut exprs: Vec<&Expr> = vec![];
-                for exp in groups.iter().flatten() {
-                    if !exprs.contains(&exp) {
-                        exprs.push(exp);
-                    }
-                }
-                exprs
+            GroupingSet::GroupingSets(groups) => groups.iter().flatten().collect(),
+        };
+        let mut exprs: Vec<&Expr> = Vec::with_capacity(written.len());
+        for exp in written {
+            if !exprs.contains(&exp) {
+                exprs.push(exp);
             }
         }
+        exprs
     }
 }
 
