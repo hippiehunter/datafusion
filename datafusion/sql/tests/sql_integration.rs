@@ -323,6 +323,32 @@ fn insert_target_alias_hides_the_relation_name() {
 }
 
 #[test]
+fn insert_target_alias_names_the_target_row_in_returning() {
+    let plan = logical_plan(
+        "INSERT INTO person AS p (id, first_name, last_name) VALUES (1, 'A', 'B') \
+         RETURNING p.first_name",
+    )
+    .unwrap();
+    let LogicalPlan::Dml(dml) = plan else {
+        panic!("expected DML plan");
+    };
+    assert_eq!(
+        dml.returning_columns.as_deref(),
+        Some(["first_name".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn insert_target_alias_hides_the_relation_name_in_returning() {
+    let error = logical_plan(
+        "INSERT INTO person AS p (id, first_name, last_name) VALUES (1, 'A', 'B') \
+         RETURNING person.first_name",
+    )
+    .unwrap_err();
+    assert_contains!(error.to_string(), "person.first_name");
+}
+
+#[test]
 fn update_set_default_resolves_the_declared_column_default() {
     let plan = logical_plan("UPDATE column_defaults SET age = DEFAULT").unwrap();
     assert_contains!(format!("{plan}"), "Int32(42) AS age");

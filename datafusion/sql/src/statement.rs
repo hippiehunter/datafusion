@@ -5007,6 +5007,7 @@ impl SqlToRel<'_> {
                         target_select_rights.and(self.insert_returning_select_rights(
                             returning_items,
                             &table_name,
+                            table_alias,
                             &table_source,
                             &mut outer_planner_context.clone(),
                         )?);
@@ -5051,16 +5052,23 @@ impl SqlToRel<'_> {
 
     /// The rights an INSERT's RETURNING list needs, bound over the inserted row
     /// as the frontend binds a table INSERT's RETURNING: every column it names
-    /// outside a subquery's own relations is the inserted row's.
+    /// outside a subquery's own relations is the inserted row's. An authored
+    /// target alias names the row for the whole statement, so the relation's own
+    /// name no longer resolves.
     fn insert_returning_select_rights(
         &self,
         returning: &[SelectItem],
         table_name: &TableReference,
+        table_alias: Option<&Ident>,
         table_source: &Arc<dyn TableSource>,
         planner_context: &mut PlannerContext,
     ) -> Result<TargetSelectRights> {
+        let row_relation = table_alias.map_or_else(
+            || table_name.clone(),
+            |alias| TableReference::bare(self.ident_normalizer.normalize(alias.clone())),
+        );
         let row_schema = DFSchema::try_from_qualified_schema(
-            table_name.clone(),
+            row_relation.clone(),
             &table_source.schema(),
         )?;
         let mut rights = TargetSelectRights::NotRequired;
@@ -5073,7 +5081,7 @@ impl SqlToRel<'_> {
                 | SelectItem::ExprWithAlias { expr, .. } => expr,
             };
             let expr = self.sql_to_expr_ref(expr, &row_schema, planner_context)?;
-            rights = rights.and(TargetSelectRights::reading(table_name, [&expr])?);
+            rights = rights.and(TargetSelectRights::reading(&row_relation, [&expr])?);
         }
         Ok(rights)
     }
