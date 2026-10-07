@@ -16,6 +16,10 @@
 // under the License.
 
 //! [`SqlToRel`]: SQL Query Planner (produces [`LogicalPlan`] from SQL AST)
+use sqlparser::ast::{
+    GeneratedAs, GeneratedExpressionMode, IdentityPropertyFormatKind,
+    IdentityPropertyKind,
+};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -883,15 +887,12 @@ impl<'a> SqlToRel<'a> {
                         };
                         let mut diagnostic = if let Some(relation) = &col.relation {
                             Diagnostic::new_error(
-                                format!(
-                                    "column '{}' not found in '{}'",
-                                    &col.name, relation
-                                ),
+                                format!("column '{}' not found in '{}'", col.name, relation),
                                 col.spans().first(),
                             )
                         } else {
                             Diagnostic::new_error(
-                                format!("column '{}' not found", &col.name),
+                                format!("column '{}' not found", col.name),
                                 col.spans().first(),
                             )
                         };
@@ -1123,16 +1124,15 @@ impl<'a> SqlToRel<'a> {
             SQLDataType::Interval { fields, precision: _ } => {
                 // Map SQL interval field types to Arrow interval types
                 // MonthDayNano is the most flexible and can represent all SQL interval types
-                use sqlparser::ast::IntervalFields::*;
                 match fields {
                     None => Ok(DataType::Interval(IntervalUnit::MonthDayNano)),
-                    Some(Year) | Some(Month) | Some(YearToMonth) => {
+                    Some(sqlparser::ast::IntervalFields::Year) | Some(sqlparser::ast::IntervalFields::Month) | Some(sqlparser::ast::IntervalFields::YearToMonth) => {
                         // Year-month intervals use YearMonth for efficiency, or MonthDayNano for flexibility
                         Ok(DataType::Interval(IntervalUnit::MonthDayNano))
                     }
-                    Some(Day) | Some(Hour) | Some(Minute) | Some(Second)
-                    | Some(DayToHour) | Some(DayToMinute) | Some(DayToSecond)
-                    | Some(HourToMinute) | Some(HourToSecond) | Some(MinuteToSecond) => {
+                    Some(sqlparser::ast::IntervalFields::Day) | Some(sqlparser::ast::IntervalFields::Hour) | Some(sqlparser::ast::IntervalFields::Minute) | Some(sqlparser::ast::IntervalFields::Second)
+                    | Some(sqlparser::ast::IntervalFields::DayToHour) | Some(sqlparser::ast::IntervalFields::DayToMinute) | Some(sqlparser::ast::IntervalFields::DayToSecond)
+                    | Some(sqlparser::ast::IntervalFields::HourToMinute) | Some(sqlparser::ast::IntervalFields::HourToSecond) | Some(sqlparser::ast::IntervalFields::MinuteToSecond) => {
                         // Day-time intervals use MonthDayNano for flexibility
                         Ok(DataType::Interval(IntervalUnit::MonthDayNano))
                     }
@@ -1433,11 +1433,6 @@ fn extract_identity_metadata(
     options: &[ColumnOptionDef],
     data_type: &SQLDataType,
 ) -> HashMap<String, String> {
-    use sqlparser::ast::{
-        GeneratedAs, GeneratedExpressionMode, IdentityPropertyFormatKind,
-        IdentityPropertyKind,
-    };
-
     let mut meta = HashMap::new();
 
     // SERIAL / SMALLSERIAL / BIGSERIAL detection

@@ -282,7 +282,9 @@ impl SqlToRel<'_> {
 
         let mut names = Vec::new();
         let mut output_columns = Vec::new();
-        for (index, ((name, _), internal)) in columns.into_iter().zip(&internal).enumerate() {
+        for (index, ((name, _), internal)) in
+            columns.into_iter().zip(&internal).enumerate()
+        {
             if record_columns.contains(&index) {
                 let field = unnested.schema().field_with_unqualified_name(internal)?;
                 let DataType::Struct(fields) = field.data_type() else {
@@ -290,7 +292,8 @@ impl SqlToRel<'_> {
                 };
                 for field in fields {
                     names.push(field.name().clone());
-                    output_columns.push(Column::from_name(format!("{internal}.{}", field.name())));
+                    output_columns
+                        .push(Column::from_name(format!("{internal}.{}", field.name())));
                 }
             } else {
                 names.push(name);
@@ -298,19 +301,29 @@ impl SqlToRel<'_> {
             }
         }
         if !record_columns.is_empty() {
-            unnested = unnested.unnest_columns_with_options(record_columns.iter()
-                .map(|index| Column::from_name(&internal[*index])).collect(), UnnestOptions::new())?;
+            unnested = unnested.unnest_columns_with_options(
+                record_columns
+                    .iter()
+                    .map(|index| Column::from_name(&internal[*index]))
+                    .collect(),
+                UnnestOptions::new(),
+            )?;
         }
         let mut alias = alias;
         // A base-type result takes a bare table alias as its column name.
-        if single_call && record_columns.is_empty() && names.len() == 1
+        if single_call
+            && record_columns.is_empty()
+            && names.len() == 1
             && let Some(table_alias) = &alias
             && table_alias.columns.is_empty()
         {
             names[0] = self.ident_normalizer.normalize(table_alias.name.clone());
         }
-        let mut output: Vec<Expr> = output_columns.into_iter().zip(&names)
-            .map(|(column, name)| Expr::Column(column).alias(name)).collect();
+        let mut output: Vec<Expr> = output_columns
+            .into_iter()
+            .zip(&names)
+            .map(|(column, name)| Expr::Column(column).alias(name))
+            .collect();
         if with_ordinality {
             output.push(Expr::Column(Column::from_name(ORDINALITY_COLUMN)));
         }
@@ -348,7 +361,11 @@ impl SqlToRel<'_> {
     ) -> Result<(LogicalPlan, Option<TableAlias>)> {
         let provider = self
             .context_provider
-            .get_table_function_source_with_columns(resolved_name, args, column_definitions)?;
+            .get_table_function_source_with_columns(
+                resolved_name,
+                args,
+                column_definitions,
+            )?;
         let mut plan = if let Some(inline_plan) = provider.get_logical_plan() {
             let inline_plan = inline_plan.into_owned();
             if inline_plan.all_out_ref_exprs().is_empty() {

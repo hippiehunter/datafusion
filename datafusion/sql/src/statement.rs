@@ -15,6 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use sqlparser::ast::{
+    CheckConstraint, ForeignKeyConstraint, PrimaryKeyConstraint, UniqueConstraint,
+};
+use sqlparser::ast::{
+    CreateTableLikeDefaults, CreateTableLikeOption, TableLikeOptionKind,
+};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -257,8 +263,6 @@ fn check_referenced_columns(expression: &SQLExpr) -> Vec<String> {
 fn lower_create_table_like_options(
     like: &ast::CreateTableLike,
 ) -> CreateTableLikeOptions {
-    use ast::{CreateTableLikeDefaults, CreateTableLikeOption, TableLikeOptionKind};
-
     let mut options = CreateTableLikeOptions {
         defaults: matches!(like.defaults, Some(CreateTableLikeDefaults::Including)),
         ..CreateTableLikeOptions::default()
@@ -580,8 +584,8 @@ fn object_name_to_string(object_name: &ObjectName) -> String {
         .map(|object_name_part| {
             object_name_part
                 .as_ident()
-                // TODO: It might be better to return an error
-                // than to silently use a default value.
+                // This string-only helper substitutes an empty component for non-identifiers
+                // because its callers do not accept a fallible result.
                 .map_or_else(String::new, ident_to_string)
         })
         .collect::<Vec<String>>()
@@ -1009,10 +1013,6 @@ fn expression_without_alias(expression: &Expr) -> Expr {
 /// Construct `TableConstraint`(s) for the given columns by iterating over
 /// `columns` and extracting individual inline constraint definitions.
 fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConstraint> {
-    use ast::{
-        CheckConstraint, ForeignKeyConstraint, PrimaryKeyConstraint, UniqueConstraint,
-    };
-
     let mut constraints = vec![];
     for column in columns {
         for ast::ColumnOptionDef { name, option } in &column.options {
@@ -1446,7 +1446,6 @@ impl SqlToRel<'_> {
                 statement,
                 analyze,
                 format,
-                describe_alias: _,
                 ..
             } => {
                 let format = format.map(|format| format.to_string());
@@ -2033,8 +2032,8 @@ impl SqlToRel<'_> {
                     matches!(overriding, Some(OverridingKind::SystemValue));
 
                 // Handle INSERT DEFAULT VALUES
-                let mut plan = if source.is_none() {
-                    self.insert_default_values_to_plan(
+                let mut plan = match source {
+                    None => self.insert_default_values_to_plan(
                         table_name,
                         &columns,
                         overwrite,
@@ -2042,13 +2041,12 @@ impl SqlToRel<'_> {
                         on_conflict.as_ref(),
                         table_alias.as_ref(),
                         planner_context,
-                    )?
-                } else {
-                    self.insert_to_plan_ref(
+                    )?,
+                    Some(source) => self.insert_to_plan_ref(
                         &table_name,
                         &columns,
                         column_targets.as_deref(),
-                        &source.unwrap(),
+                        &source,
                         overwrite,
                         replace_into,
                         on_conflict.as_ref(),
@@ -2058,7 +2056,7 @@ impl SqlToRel<'_> {
                         &[],
                         None,
                         planner_context,
-                    )?
+                    )?,
                 };
 
                 if is_overriding_system && let LogicalPlan::Dml(ref mut dml) = plan {
@@ -2077,7 +2075,7 @@ impl SqlToRel<'_> {
                             UpdateTableFromKind::AfterSet(from_clauses) => from_clauses,
                         },
                     );
-                // TODO: support multiple tables in UPDATE SET FROM
+                // The current UPDATE FROM lowering accepts a single source table.
                 if from_clauses.as_ref().is_some_and(|f| f.len() > 1) {
                     plan_err!("Multiple tables in UPDATE SET FROM not yet supported")?;
                 }
@@ -4042,7 +4040,7 @@ impl SqlToRel<'_> {
                     }
 
                     // Add each column-value pair
-                    for (col, val) in columns.into_iter().zip(values.into_iter()) {
+                    for (col, val) in columns.into_iter().zip(values) {
                         if assign_map.contains_key(&col)
                             || path_assign_map.contains_key(&col)
                         {

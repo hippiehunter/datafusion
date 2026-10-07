@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use datafusion_expr::QuantifiedSource;
 use datafusion_expr::expr::{AggregateFunctionParams, Unnest, WindowFunctionParams};
 use sqlparser::arena::AstBox as SQLBox;
 use sqlparser::ast::Value::SingleQuotedString;
@@ -236,11 +237,9 @@ impl Unparser<'_> {
                     end_token: AttachedToken::empty(),
                 })
             }
-            Expr::Cast(Cast { expr, field }) => {
-                Ok(self.cast_to_sql(expr, field.data_type())?)
-            }
-            Expr::Literal(value, _) => Ok(self.scalar_to_sql(value)?),
-            Expr::Alias(Alias { expr, name: _, .. }) => self.expr_to_sql_inner(expr),
+            Expr::Cast(Cast { expr, field }) => self.cast_to_sql(expr, field.data_type()),
+            Expr::Literal(value, _) => self.scalar_to_sql(value),
+            Expr::Alias(Alias { expr, .. }) => self.expr_to_sql_inner(expr),
             Expr::WindowFunction(window_fun) => {
                 let WindowFunction {
                     fun,
@@ -532,7 +531,7 @@ impl Unparser<'_> {
                     format: None,
                 })
             }
-            // TODO: unparsing wildcard addition options
+            // Wildcard addition options are not included in this rendering.
             #[expect(deprecated)]
             Expr::Wildcard { qualifier, .. } => {
                 let attached_token = AttachedToken::empty();
@@ -592,7 +591,6 @@ impl Unparser<'_> {
     }
 
     fn any_expr_to_sql(&self, any_expr: &AnyExpr) -> Result<ast::Expr> {
-        use datafusion_expr::QuantifiedSource;
         let AnyExpr { expr, op, source } = any_expr;
         let left = SQLBox::new(self.expr_to_sql_inner(expr)?);
         let compare_op = self.op_to_ast_binary_op(op)?;
@@ -618,7 +616,6 @@ impl Unparser<'_> {
     }
 
     fn all_expr_to_sql(&self, all_expr: &AllExpr) -> Result<ast::Expr> {
-        use datafusion_expr::QuantifiedSource;
         let AllExpr { expr, op, source } = all_expr;
         let left = SQLBox::new(self.expr_to_sql_inner(expr)?);
         let compare_op = self.op_to_ast_binary_op(op)?;
@@ -665,7 +662,7 @@ impl Unparser<'_> {
             "named_struct" => self.named_struct_to_sql(args),
             "get_field" => self.get_field_to_sql(args),
             "map" => self.map_to_sql(args),
-            // TODO: support for the construct and access functions of the `map` type
+            // Other map operations use the generic scalar-function spelling.
             _ => self.scalar_function_to_sql_internal(func_name, args),
         }
     }
@@ -2109,14 +2106,17 @@ mod tests {
                 r#"CAST(a AS DATETIME)"#,
             ),
             (
-                Expr::Cast(Cast::new(Box::new(col("a")), DataType::Timestamp(
-                        TimeUnit::Nanosecond,
-                        Some("+08:00".into()),
-                    ))),
+                Expr::Cast(Cast::new(
+                    Box::new(col("a")),
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+08:00".into())),
+                )),
                 r#"CAST(a AS TIMESTAMP WITH TIME ZONE)"#,
             ),
             (
-                Expr::Cast(Cast::new(Box::new(col("a")), DataType::Timestamp(TimeUnit::Millisecond, None))),
+                Expr::Cast(Cast::new(
+                    Box::new(col("a")),
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                )),
                 r#"CAST(a AS TIMESTAMP)"#,
             ),
             (
@@ -2795,17 +2795,23 @@ mod tests {
     fn test_cast_value_to_binary_expr() {
         let tests = [
             (
-                Expr::Cast(Cast::new(Box::new(Expr::Literal(
+                Expr::Cast(Cast::new(
+                    Box::new(Expr::Literal(
                         ScalarValue::Utf8(Some("blah".to_string())),
                         None,
-                    )), DataType::Binary)),
+                    )),
+                    DataType::Binary,
+                )),
                 "'blah'",
             ),
             (
-                Expr::Cast(Cast::new(Box::new(Expr::Literal(
+                Expr::Cast(Cast::new(
+                    Box::new(Expr::Literal(
                         ScalarValue::Utf8(Some("blah".to_string())),
                         None,
-                    )), DataType::BinaryView)),
+                    )),
+                    DataType::BinaryView,
+                )),
                 "'blah'",
             ),
         ];
@@ -3017,10 +3023,13 @@ mod tests {
     #[test]
     fn test_cast_value_to_dict_expr() {
         let tests = [(
-            Expr::Cast(Cast::new(Box::new(Expr::Literal(
+            Expr::Cast(Cast::new(
+                Box::new(Expr::Literal(
                     ScalarValue::Utf8(Some("variation".to_string())),
                     None,
-                )), DataType::Dictionary(Box::new(Int8), Box::new(DataType::Utf8)))),
+                )),
+                DataType::Dictionary(Box::new(Int8), Box::new(DataType::Utf8)),
+            )),
             "'variation'",
         )];
         for (value, expected) in tests {
@@ -3106,13 +3115,19 @@ mod tests {
 
     #[test]
     fn test_custom_scalar_overrides_duckdb() -> Result<()> {
+        assert!(matches!(
+            crate::unparser::dialect::DefaultDialect {}
+                .with_custom_scalar_overrides(vec![]),
+            Err(datafusion_common::DataFusionError::NotImplemented(_))
+        ));
         let duckdb_default = DuckDBDialect::new();
-        let duckdb_extended = DuckDBDialect::new().with_custom_scalar_overrides(vec![(
-            "dummy_udf",
-            Box::new(|unparser: &Unparser, args: &[Expr]| {
-                unparser.scalar_function_to_sql("smart_udf", args).map(Some)
-            }) as ScalarFnToSqlHandler,
-        )]);
+        let duckdb_extended =
+            DuckDBDialect::new().with_custom_scalar_overrides(vec![(
+                "dummy_udf",
+                Box::new(|unparser: &Unparser, args: &[Expr]| {
+                    unparser.scalar_function_to_sql("smart_udf", args).map(Some)
+                }) as ScalarFnToSqlHandler,
+            )])?;
 
         for (dialect, expected) in [
             (duckdb_default, r#"dummy_udf("a", "b")"#),
@@ -3133,7 +3148,10 @@ mod tests {
         let dialect: Arc<dyn Dialect> = Arc::new(SqliteDialect {});
 
         let unparser = Unparser::new(dialect.as_ref());
-        let expr = Expr::Cast(Cast::new(Box::new(col("a")), DataType::Timestamp(TimeUnit::Nanosecond, None)));
+        let expr = Expr::Cast(Cast::new(
+            Box::new(col("a")),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+        ));
 
         let ast = unparser.expr_to_sql(&expr)?;
 

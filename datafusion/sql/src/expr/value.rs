@@ -149,7 +149,7 @@ impl SqlToRel<'_> {
                 return if param_data_types.is_empty() {
                     Ok(Expr::Placeholder(Placeholder::new_with_field(param, None)))
                 } else {
-                    // FIXME: This branch is shared by params from PREPARE and CREATE FUNCTION, but
+                    // This branch is shared by params from PREPARE and CREATE FUNCTION, but
                     // only CREATE FUNCTION currently supports named params. For now, we rewrite
                     // these to positional params.
                     let named_param_pos = param_data_types
@@ -166,7 +166,7 @@ impl SqlToRel<'_> {
             }
         };
         // Check if the placeholder is in the parameter list
-        // FIXME: In the CREATE FUNCTION branch, param_type = None should raise an error
+        // CREATE FUNCTION currently also carries an unresolved parameter type as a placeholder.
         let param_type = param_data_types.get(idx);
         // Data type of the parameter
         debug!("type of param {param} param_data_types[idx]: {param_type:?}");
@@ -514,10 +514,8 @@ fn parse_compound_interval(
     leading: &DateTimeField,
     last: &DateTimeField,
 ) -> Result<String> {
-    use DateTimeField::*;
-
     match (leading, last) {
-        (Year, Month) => {
+        (DateTimeField::Year, DateTimeField::Month) => {
             // Format: "Y-M" e.g., "1-6" -> "1 years 6 months"
             let parts: Vec<&str> = value.split('-').collect();
             if parts.len() != 2 {
@@ -530,7 +528,7 @@ fn parse_compound_interval(
             let months = parts[1].trim();
             Ok(format!("{years} years {months} months"))
         }
-        (Day, Hour) => {
+        (DateTimeField::Day, DateTimeField::Hour) => {
             // Format: "D H" e.g., "1 12" -> "1 days 12 hours"
             let parts: Vec<&str> = value.split_whitespace().collect();
             if parts.len() != 2 {
@@ -543,7 +541,7 @@ fn parse_compound_interval(
             let hours = parts[1].trim();
             Ok(format!("{days} days {hours} hours"))
         }
-        (Day, Minute) => {
+        (DateTimeField::Day, DateTimeField::Minute) => {
             // Format: "D H:M" e.g., "1 12:30" -> "1 days 12 hours 30 minutes"
             let space_parts: Vec<&str> = value.splitn(2, ' ').collect();
             if space_parts.len() != 2 {
@@ -564,7 +562,7 @@ fn parse_compound_interval(
             let minutes = time_parts[1].trim();
             Ok(format!("{days} days {hours} hours {minutes} minutes"))
         }
-        (Day, Second) => {
+        (DateTimeField::Day, DateTimeField::Second) => {
             // Format: "D H:M:S" or "D H:M:S.f" e.g., "1 12:30:45" -> "1 days 12 hours 30 minutes 45 seconds"
             let space_parts: Vec<&str> = value.splitn(2, ' ').collect();
             if space_parts.len() != 2 {
@@ -588,7 +586,7 @@ fn parse_compound_interval(
                 "{days} days {hours} hours {minutes} minutes {seconds} seconds"
             ))
         }
-        (Hour, Minute) => {
+        (DateTimeField::Hour, DateTimeField::Minute) => {
             // Format: "H:M" e.g., "2:30" -> "2 hours 30 minutes"
             let parts: Vec<&str> = value.split(':').collect();
             if parts.len() != 2 {
@@ -601,7 +599,7 @@ fn parse_compound_interval(
             let minutes = parts[1].trim();
             Ok(format!("{hours} hours {minutes} minutes"))
         }
-        (Hour, Second) => {
+        (DateTimeField::Hour, DateTimeField::Second) => {
             // Format: "H:M:S" or "H:M:S.f" e.g., "2:30:45" -> "2 hours 30 minutes 45 seconds"
             let parts: Vec<&str> = value.split(':').collect();
             if parts.len() != 3 {
@@ -615,7 +613,7 @@ fn parse_compound_interval(
             let seconds = parts[2].trim();
             Ok(format!("{hours} hours {minutes} minutes {seconds} seconds"))
         }
-        (Minute, Second) => {
+        (DateTimeField::Minute, DateTimeField::Second) => {
             // Format: "M:S" or "M:S.f" e.g., "30:45" -> "30 minutes 45 seconds"
             let parts: Vec<&str> = value.split(':').collect();
             if parts.len() != 2 {

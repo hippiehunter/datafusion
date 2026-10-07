@@ -321,7 +321,7 @@ impl SqlToRel<'_> {
         // For FETCH PERCENT: Currently we accept the syntax but treat it as a simple limit
         // The percentage value will be used directly as the limit count (not semantically correct,
         // but allows the query to plan for conformance testing)
-        // TODO: Implement proper FETCH PERCENT by calculating percentage of table rows
+        // Percentage row-count evaluation is not implemented by this planner.
 
         let limit_by_exprs = limit_by
             .iter()
@@ -532,7 +532,7 @@ pub(crate) fn to_order_by_exprs_with_select<'a>(
                         with_fill: None,
                         using: None,
                     }),
-                    // TODO: Support other types of expressions
+                    // The current ORDER BY ALL expansion accepts column expressions only.
                     _ => not_impl_err!(
                         "ORDER BY ALL is not supported for non-column expressions"
                     ),

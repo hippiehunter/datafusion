@@ -24,7 +24,7 @@ use super::{
 use arrow::array::timezone::Tz;
 use arrow::datatypes::TimeUnit;
 use chrono::DateTime;
-use datafusion_common::Result;
+use datafusion_common::{Result, not_impl_err};
 use datafusion_expr::Expr;
 use regex::Regex;
 use sqlparser::tokenizer::Span;
@@ -173,14 +173,15 @@ pub trait Dialect: Send + Sync {
 
     /// Extends the dialect's default rules for unparsing scalar functions.
     /// This is useful for supporting application-specific UDFs or custom engine extensions.
+    /// Returns an error when the dialect does not support custom overrides.
     fn with_custom_scalar_overrides(
         self,
         _handlers: Vec<(&str, ScalarFnToSqlHandler)>,
-    ) -> Self
+    ) -> Result<Self>
     where
         Self: Sized,
     {
-        unimplemented!("Custom scalar overrides are not supported by this dialect yet");
+        not_impl_err!("Custom scalar overrides are not supported by this dialect")
     }
 
     /// Allow to unparse a qualified column with a full qualified name
@@ -397,12 +398,12 @@ impl Dialect for DuckDBDialect {
     fn with_custom_scalar_overrides(
         mut self,
         handlers: Vec<(&str, ScalarFnToSqlHandler)>,
-    ) -> Self {
+    ) -> Result<Self> {
         for (func_name, handler) in handlers {
             self.custom_scalar_fn_overrides
                 .insert(func_name.to_string(), handler);
         }
-        self
+        Ok(self)
     }
 
     fn scalar_function_to_sql_overrides(

@@ -37,7 +37,7 @@ impl SqlToRel<'_> {
     ) -> Result<Expr> {
         let id_span = id.span;
         if id.value.starts_with('@') {
-            // TODO: figure out if ScalarVariables should be insensitive.
+            // Scalar variable names retain the spelling supplied to the provider.
             let var_names = vec![id.value.clone()];
             let field = self
                 .context_provider
@@ -260,7 +260,7 @@ impl SqlToRel<'_> {
                                 Some((field, qualifier, nested_names))
                                     if !nested_names.is_empty() =>
                                 {
-                                    // TODO: remove when can support nested identifiers for OuterReferenceColumn
+                                    // Nested outer-reference fields are rejected by the current expression carrier.
                                     return not_impl_err!(
                                         "Nested identifiers are not yet supported for OuterReferenceColumn {}",
                                         Column::from((qualifier, field))

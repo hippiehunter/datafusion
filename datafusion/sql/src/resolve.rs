@@ -180,9 +180,9 @@ fn visit_statement(statement: &DFStatement, visitor: &mut RelationVisitor) {
 /// assert_eq!(ctes.len(), 0);
 /// ```
 ///
-/// ## Example with CTEs  
-///  
-/// ```  
+/// ## Example with CTEs
+///
+/// ```
 /// # use datafusion_sql::parser::DFParser;
 /// # use datafusion_sql::resolve::resolve_table_references;
 /// let query = "with my_cte as (values (1), (2)) SELECT * from my_cte;";
@@ -220,11 +220,10 @@ pub fn resolve_table_references(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::DFParser;
 
     #[test]
     fn resolve_table_references_shadowed_cte() {
-        use crate::parser::DFParser;
-
         // An interesting edge case where the `t` name is used both as an ordinary table reference
         // and as a CTE reference.
         let query = "WITH t AS (SELECT * FROM t) SELECT * FROM t";
@@ -259,13 +258,11 @@ mod tests {
 
     #[test]
     fn resolve_table_references_recursive_cte() {
-        use crate::parser::DFParser;
-
         let query = "
-            WITH RECURSIVE nodes AS ( 
+            WITH RECURSIVE nodes AS (
                 SELECT 1 as id
-                UNION ALL 
-                SELECT id + 1 as id 
+                UNION ALL
+                SELECT id + 1 as id
                 FROM nodes
                 WHERE id < 10
             )

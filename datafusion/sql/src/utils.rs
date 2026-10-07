@@ -719,7 +719,7 @@ pub(crate) fn rewrite_recursive_unnest_bottom_up(
     // struct unnest is done at the root level, and at the later stage
     // because the syntax of TreeNode only support transform into 1 Expr, while
     // Unnest struct will be transformed into multiple Exprs
-    // TODO: This can be resolved after this issue is resolved: https://github.com/apache/datafusion/issues/10102
+    // TreeNode multi-expression rewrites are tracked in https://github.com/apache/datafusion/issues/10102.
     //
     // The transformation looks like:
     // - unnest(array_col) will be transformed into Column("unnest_place_holder(array_col)")
@@ -731,7 +731,7 @@ pub(crate) fn rewrite_recursive_unnest_bottom_up(
     } = original_expr.clone().rewrite(&mut rewriter)?;
 
     if !transformed {
-        // TODO: remove the next line after `Expr::Wildcard` is removed
+        // The wildcard carrier remains deprecated while existing callers still use it.
         #[expect(deprecated)]
         if matches!(&transformed_expr, Expr::Column(_))
             || matches!(&transformed_expr, Expr::Wildcard { .. })

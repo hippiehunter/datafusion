@@ -23,6 +23,7 @@
 use datafusion_common::DataFusionError;
 use datafusion_common::config::SqlParserOptions;
 use datafusion_common::{Diagnostic, sql_err};
+use sqlparser::ast::AttachedToken;
 use sqlparser::ast::{AstBox as SQLBox, ExprWithAlias, Ident, OrderByOptions};
 use sqlparser::tokenizer::TokenWithSpan;
 use sqlparser::{
@@ -30,10 +31,11 @@ use sqlparser::{
         ColumnDef, ColumnOptionDef, ObjectName, OrderByExpr, Query,
         Statement as SQLStatement, TableConstraint, Value,
     },
-    dialect::{Dialect, PostgreSqlDialect, keywords::Keyword},
+    dialect::{Dialect, keywords::Keyword},
     parser::{Parser, ParserError},
     tokenizer::{Token, Tokenizer, Word},
 };
+use sqlparser::dialect::PostgreSqlDialect;
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -1025,7 +1027,6 @@ impl<'a> DFParser<'a> {
         };
 
         // Create a Rollback statement (ABORT is equivalent to ROLLBACK in PostgreSQL)
-        use sqlparser::ast::AttachedToken;
 
         Ok(Statement::Statement(Box::new(SQLStatement::Rollback {
             rollback_token: AttachedToken::empty(),
@@ -1052,7 +1053,7 @@ impl<'a> DFParser<'a> {
 
     /// Parse a SQL `CREATE` statement handling `CREATE EXTERNAL TABLE`
     pub fn parse_create(&mut self) -> Result<Statement, DataFusionError> {
-        // TODO: Change sql parser to take in `or_replace: bool` inside parse_create()
+        // This wrapper owns `OR REPLACE`; the sqlparser entrypoint consumes `CREATE` itself.
         if self
             .parser
             .parse_keywords(&[Keyword::OR, Keyword::REPLACE, Keyword::EXTERNAL])
@@ -1797,7 +1798,7 @@ mod tests {
             (Some(true), Some(true)),
             (Some(true), Some(false)),
         ];
-        for (sql, (asc, nulls_first)) in sqls.iter().zip(expected.into_iter()) {
+        for (sql, (asc, nulls_first)) in sqls.iter().zip(expected) {
             let expected = Statement::CreateExternalTable(CreateExternalTable {
                 name: name.clone(),
                 columns: vec![make_column_def("c1", DataType::Int(None))],

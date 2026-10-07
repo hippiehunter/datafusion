@@ -15,10 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::definition_plan::{WithQuery, as_definition_node};
 use crate::planner::{
     ContextProvider, PlannerContext, PlannerResult, RawAggregateExpr, RawWindowExpr,
     SqlToRel,
 };
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_expr::{Distinct, DistinctOn, LogicalPlan, Projection};
 
 use arrow::datatypes::DataType;
 use datafusion_common::{
@@ -260,6 +263,175 @@ impl<'a> FunctionArgs<'a> {
 
 // Helper type for extracting WITHIN GROUP ordering and prepended args
 type WithinGroupExtraction = (Vec<SortExpr>, Vec<Expr>, Vec<Option<String>>);
+
+/// Expose the query's already-bound ordering to a scalar aggregate. Generated
+/// keys are evaluated once at the original Sort input and stay in scope through
+/// the final projection and row limit. Neither row selection nor deduplication
+/// moves across the aggregate.
+fn scalar_subquery_ordering(
+    plan: LogicalPlan,
+) -> Result<(LogicalPlan, Vec<SortExpr>)> {
+    let mut used_names = std::collections::HashSet::new();
+    plan.apply(|node| {
+        used_names.extend(
+            node.schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone()),
+        );
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    expose_scalar_subquery_ordering(plan, &mut used_names)
+}
+
+fn scalar_subquery_order_key(
+    used_names: &mut std::collections::HashSet<String>,
+) -> String {
+    let mut suffix = used_names.len();
+    loop {
+        let name = format!("__scalar_subquery_order_{suffix}");
+        if used_names.insert(name.clone()) {
+            return name;
+        }
+        suffix += 1;
+    }
+}
+
+fn materialize_scalar_subquery_ordering(
+    input: LogicalPlan,
+    ordering: &[SortExpr],
+    used_names: &mut std::collections::HashSet<String>,
+) -> Result<(LogicalPlan, Vec<SortExpr>)> {
+    let mut expressions = input
+        .schema()
+        .columns()
+        .into_iter()
+        .map(Expr::Column)
+        .collect::<Vec<_>>();
+    let mut exposed_ordering = Vec::with_capacity(ordering.len());
+    for sort in ordering {
+        let name = scalar_subquery_order_key(used_names);
+        expressions.push(sort.expr.clone().alias(name.clone()));
+        exposed_ordering
+            .push(sort.with_expr(Expr::Column(Column::new_unqualified(name))));
+    }
+    let projected = LogicalPlanBuilder::from(input)
+        .project(expressions)?
+        .build()?;
+    Ok((projected, exposed_ordering))
+}
+
+fn expose_scalar_subquery_ordering(
+    plan: LogicalPlan,
+    used_names: &mut std::collections::HashSet<String>,
+) -> Result<(LogicalPlan, Vec<SortExpr>)> {
+    if let Some(with) = as_definition_node::<WithQuery>(&plan) {
+        let (query, ordering) =
+            expose_scalar_subquery_ordering(with.query().clone(), used_names)?;
+        let items = with
+            .items_with_plans()
+            .map(|(item, input)| (item.clone(), input.clone()))
+            .collect();
+        return Ok((
+            WithQuery::new(with.recursive, items, query).into_plan(),
+            ordering,
+        ));
+    }
+
+    match plan {
+        LogicalPlan::Sort(mut sort) => {
+            let (input, ordering) = materialize_scalar_subquery_ordering(
+                std::sync::Arc::unwrap_or_clone(sort.input),
+                &sort.expr,
+                used_names,
+            )?;
+            sort.input = std::sync::Arc::new(input);
+            sort.expr = ordering.clone();
+            Ok((LogicalPlan::Sort(sort), ordering))
+        }
+        LogicalPlan::Projection(projection) => {
+            let (input, ordering) = expose_scalar_subquery_ordering(
+                std::sync::Arc::unwrap_or_clone(projection.input),
+                used_names,
+            )?;
+            let mut expressions = projection.expr;
+            expressions.extend(ordering.iter().map(|sort| sort.expr.clone()));
+            // Sort's final trim projection contains column references only.
+            // Keep Sort directly below LIMIT so correlated row-limit lowering
+            // can use the same keys for its per-domain ranking.
+            let columns_only = expressions
+                .iter()
+                .all(|expr| matches!(expr.clone().unalias(), Expr::Column(_)));
+            let projected = match input {
+                LogicalPlan::Sort(mut sort) if columns_only => {
+                    sort.input = std::sync::Arc::new(LogicalPlan::Projection(
+                        Projection::try_new(expressions, sort.input)?,
+                    ));
+                    LogicalPlan::Sort(sort)
+                }
+                input => LogicalPlanBuilder::from(input)
+                    .project(expressions)?
+                    .build()?,
+            };
+            Ok((projected, ordering))
+        }
+        LogicalPlan::Limit(mut limit) => {
+            let (input, ordering) = expose_scalar_subquery_ordering(
+                std::sync::Arc::unwrap_or_clone(limit.input),
+                used_names,
+            )?;
+            limit.input = std::sync::Arc::new(input);
+            Ok((LogicalPlan::Limit(limit), ordering))
+        }
+        LogicalPlan::Distinct(Distinct::On(distinct)) => {
+            let Some(ordering) = &distinct.sort_expr else {
+                return Ok((LogicalPlan::Distinct(Distinct::On(distinct)), vec![]));
+            };
+            let (input, exposed_ordering) = materialize_scalar_subquery_ordering(
+                distinct.input.as_ref().clone(),
+                ordering,
+                used_names,
+            )?;
+            let mut expressions = input.expressions();
+            let mut on_expr = Vec::with_capacity(distinct.on_expr.len());
+            for expr in &distinct.on_expr {
+                if let Some(position) =
+                    ordering.iter().position(|sort| sort.expr == *expr)
+                {
+                    on_expr.push(exposed_ordering[position].expr.clone());
+                } else {
+                    let name = scalar_subquery_order_key(used_names);
+                    expressions.push(expr.clone().alias(name.clone()));
+                    on_expr.push(Expr::Column(Column::new_unqualified(name)));
+                }
+            }
+            let input = match input {
+                LogicalPlan::Projection(projection) => LogicalPlanBuilder::from(
+                    std::sync::Arc::unwrap_or_clone(projection.input),
+                )
+                .project(expressions)?
+                .build()?,
+                _ => return internal_err!("ordering materialization did not project"),
+            };
+            let mut select_expr = distinct.select_expr;
+            select_expr.extend(exposed_ordering.iter().map(|sort| sort.expr.clone()));
+            let distinct = DistinctOn::try_new(
+                on_expr,
+                select_expr,
+                Some(exposed_ordering.clone()),
+                std::sync::Arc::new(input),
+            )?;
+            Ok((
+                LogicalPlan::Distinct(Distinct::On(distinct)),
+                exposed_ordering,
+            ))
+        }
+        // DISTINCT ALL retains its exact one-column comparison domain. Its
+        // query ORDER BY is a Sort above this node; do not reach into nested
+        // queries and widen the rows used for duplicate elimination.
+        other => Ok((other, vec![])),
+    }
+}
 
 impl SqlToRel<'_> {
     /// Catalog keys contain identifier values, not their SQL quoting syntax.
@@ -524,22 +696,22 @@ impl SqlToRel<'_> {
                     .context_provider
                     .plan_named_scalar_function(&fm, &args, &arg_names, schema)?
                 {
-                    written_arguments = chosen
-                        .signature()
-                        .parameter_names
-                        .as_deref()
-                        .and_then(|param_names| {
-                            written_argument_positions(param_names, &arg_names)
-                        });
+                    written_arguments =
+                        chosen.signature().parameter_names.as_deref().and_then(
+                            |param_names| {
+                                written_argument_positions(param_names, &arg_names)
+                            },
+                        );
                     (chosen, resolved)
                 } else if let Some(param_names) = &fm.signature().parameter_names {
                     let written = written_argument_positions(param_names, &arg_names);
-                    let resolved = datafusion_expr::arguments::resolve_function_arguments(
-                        param_names,
-                        fm.signature().parameter_defaults.as_deref(),
-                        args,
-                        arg_names,
-                    )?;
+                    let resolved =
+                        datafusion_expr::arguments::resolve_function_arguments(
+                            param_names,
+                            fm.signature().parameter_defaults.as_deref(),
+                            args,
+                            arg_names,
+                        )?;
                     written_arguments = written;
                     (fm, resolved)
                 } else {
@@ -1263,30 +1435,18 @@ impl SqlToRel<'_> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        use crate::query::to_order_by_exprs_with_select;
-
-        // Extract ORDER BY from the original query if present
-        let order_by_exprs =
-            to_order_by_exprs_with_select(query.order_by.as_ref(), None)?;
-
-        // Plan the subquery to get the logical plan.
-        // When ARRAY(SELECT ...) appears inside a trivial scalar subquery
-        // wrapper like (SELECT ARRAY(SELECT ... WHERE x = outer.col)),
-        // the wrapper's schema is empty. Preserve the existing outer
-        // query schema so correlation references resolve transitively.
-        let override_schema = !schema.fields().is_empty();
-        let old_outer_query_schema = if override_schema {
-            planner_context.set_outer_query_schema(Some(schema.clone().into()))
-        } else {
-            None
-        };
-        let sub_plan = self.query_to_plan_ref(query, planner_context)?;
-        let outer_ref_columns = sub_plan.all_out_ref_exprs();
-        if override_schema {
-            planner_context.set_outer_query_schema(old_outer_query_schema);
+        // A trivial scalar wrapper has an empty schema and must retain the
+        // outer scopes it inherited. A nonempty query adds a scope rather
+        // than replacing the previous one, so nested correlation still sees
+        // every enclosing query. Restore the stack even when planning fails.
+        let previous_scope = (!schema.fields().is_empty())
+            .then(|| planner_context.push_outer_query_schema(schema.clone().into()));
+        let sub_plan = self.query_to_plan_ref(query, planner_context);
+        if let Some(previous_scope) = previous_scope {
+            planner_context.pop_outer_query_schema(previous_scope);
         }
+        let sub_plan = sub_plan?;
 
-        // Validate that the subquery returns exactly one column
         if sub_plan.schema().fields().len() != 1 {
             return plan_err!(
                 "aggregated subquery must return exactly one column, but got {}",
@@ -1294,54 +1454,20 @@ impl SqlToRel<'_> {
             );
         }
 
-        // Convert ORDER BY to sort expressions if present. ORDER BY resolves
-        // against the subquery's projected output schema, so capture it before
-        // stripping the projection below.
-        let order_by_sort_exprs = if !order_by_exprs.is_empty() {
-            self.order_by_to_sort_expr(
-                order_by_exprs,
-                sub_plan.schema(),
-                planner_context,
-                false,
-                None,
-            )?
+        // SELECT has already resolved ORDER BY against its input, output
+        // aliases, and ordinals. Rebinding its SQL against the final single
+        // projected field loses unselected input columns. Keep that typed
+        // ordering and carry its keys through the query's final projection
+        // and row limit instead. The complete query remains below the
+        // aggregate, preserving DISTINCT and LIMIT/OFFSET semantics.
+        let (sub_plan, order_by_sort_exprs) = if query.order_by.is_some() {
+            scalar_subquery_ordering(sub_plan)?
         } else {
-            vec![]
+            (sub_plan, vec![])
         };
-
-        // Strip Sort and Projection from sub_plan so the Aggregate
-        // operates on the full schema. The Projection only selects the
-        // output column but hides correlation columns (like the join key)
-        // that the subquery decorrelator needs. The Sort is redundant since
-        // ORDER BY is embedded in the array_agg expression.
-        //
-        // When the projection is a single computed expression
-        // (e.g. ARRAY(SELECT f(x) FROM t)), the projection's output field is
-        // named after the expression ("f(x)"), but that name does not exist in
-        // the stripped input's schema. Aggregating a plain column reference to
-        // it would fail to resolve, so feed the projection's actual expression
-        // to ARRAY_AGG instead.
-        let mut sub_plan = sub_plan;
-        if let datafusion_expr::LogicalPlan::Sort(sort) = sub_plan {
-            sub_plan = std::sync::Arc::unwrap_or_clone(sort.input);
-        }
-        let agg_arg = if let datafusion_expr::LogicalPlan::Projection(proj) = &sub_plan {
-            if proj.expr.len() == 1 {
-                let projected = proj.expr[0].clone();
-                sub_plan = proj.input.as_ref().clone();
-                match projected {
-                    Expr::Column(_) => projected,
-                    Expr::Alias(alias) => *alias.expr,
-                    other => other,
-                }
-            } else {
-                let (qualifier, field) = sub_plan.schema().qualified_field(0);
-                Expr::Column(Column::new(qualifier.cloned(), field.name()))
-            }
-        } else {
-            let (qualifier, field) = sub_plan.schema().qualified_field(0);
-            Expr::Column(Column::new(qualifier.cloned(), field.name()))
-        };
+        let outer_ref_columns = sub_plan.all_out_ref_exprs();
+        let (qualifier, field) = sub_plan.schema().qualified_field(0);
+        let agg_arg = Expr::Column(Column::new(qualifier.cloned(), field.name()));
 
         let agg_arg = match value_wrapper {
             Some(name) => {
@@ -1576,4 +1702,242 @@ fn written_argument_positions(
             None => Some((position, None)),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod scalar_subquery_aggregate_tests {
+    use super::*;
+    use crate::parser::{DFParser, Statement};
+    use arrow::datatypes::{Field, Schema};
+    use datafusion_common::TableReference;
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::logical_plan::builder::LogicalTableSource;
+    use datafusion_expr::{AggregateUDF, LogicalPlan, ScalarUDF, TableSource, WindowUDF};
+    use datafusion_functions_aggregate::array_agg::array_agg_udaf;
+    use sqlparser::dialect::PostgreSqlDialect;
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct ArrayContext {
+        options: ConfigOptions,
+    }
+
+    impl ContextProvider for ArrayContext {
+        fn get_table_source(&self, _: TableReference) -> Result<Arc<dyn TableSource>> {
+            Ok(Arc::new(LogicalTableSource::new(Arc::new(Schema::new(
+                vec![
+                    Field::new("a", DataType::Int32, true),
+                    Field::new("b", DataType::Int32, true),
+                ],
+            )))))
+        }
+        fn get_function_meta(&self, _: &str) -> Option<Arc<ScalarUDF>> {
+            None
+        }
+        fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+            (name == "array_agg").then(array_agg_udaf)
+        }
+        fn get_window_meta(&self, _: &str) -> Option<Arc<WindowUDF>> {
+            None
+        }
+        fn get_variable_type(&self, _: &[String]) -> Option<DataType> {
+            None
+        }
+        fn options(&self) -> &ConfigOptions {
+            &self.options
+        }
+        fn udf_names(&self) -> Vec<String> {
+            vec![]
+        }
+        fn udaf_names(&self) -> Vec<String> {
+            vec!["array_agg".into()]
+        }
+        fn udwf_names(&self) -> Vec<String> {
+            vec![]
+        }
+    }
+
+    fn planned_array(sql: &str) -> Result<datafusion_expr::Aggregate> {
+        let context = ArrayContext::default();
+        let statement = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?
+            .pop_front()
+            .expect("one statement");
+        let plan = SqlToRel::new(&context).statement_to_plan(statement)?;
+        let LogicalPlan::Projection(projection) = plan else {
+            panic!("ARRAY query must project its result")
+        };
+        let Expr::ScalarSubquery(subquery) = projection.expr[0].clone().unalias() else {
+            panic!("ARRAY result must be a scalar subquery")
+        };
+        let LogicalPlan::Aggregate(aggregate) = subquery.subquery.as_ref() else {
+            panic!("ARRAY body must aggregate the complete query")
+        };
+        Ok(aggregate.clone())
+    }
+
+    fn aggregate_ordering(aggregate: &datafusion_expr::Aggregate) -> &[SortExpr] {
+        let Expr::AggregateFunction(function) = &aggregate.aggr_expr[0] else {
+            panic!("expected ARRAY_AGG")
+        };
+        for argument in &function.params.args {
+            for column in argument.column_refs() {
+                assert!(aggregate.input.schema().has_column(column), "{column}");
+            }
+        }
+        for sort in &function.params.order_by {
+            for column in sort.expr.column_refs() {
+                assert!(aggregate.input.schema().has_column(column), "{column}");
+            }
+        }
+        &function.params.order_by
+    }
+
+    #[test]
+    fn scalar_subquery_aggregate_orders_computed_projection_by_unselected_input()
+    -> Result<()> {
+        let aggregate = planned_array(
+            "SELECT ARRAY(SELECT a + 1 FROM t ORDER BY b DESC NULLS LAST)",
+        )?;
+        let ordering = aggregate_ordering(&aggregate);
+        assert_eq!(ordering.len(), 1);
+        assert!(!ordering[0].asc);
+        assert!(!ordering[0].nulls_first);
+        let mut materialized = 0;
+        aggregate.input.apply(|plan| {
+            if let LogicalPlan::Projection(projection) = plan {
+                materialized += projection.expr.iter().filter(|expr| {
+                    matches!(expr, Expr::Alias(alias) if alias.name.starts_with("__scalar_subquery_order_")
+                        && matches!(alias.expr.as_ref(), Expr::Column(column) if column.name == "b"))
+                }).count();
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        assert_eq!(
+            materialized, 1,
+            "ordering is evaluated once, before row selection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_subquery_aggregate_resolves_output_aliases_and_ordinals() -> Result<()> {
+        for sql in [
+            "SELECT ARRAY(SELECT a + 1 AS value FROM t ORDER BY value DESC)",
+            "SELECT ARRAY(SELECT a + 1 FROM t ORDER BY 1 DESC)",
+            "SELECT ARRAY(SELECT a + 1 AS b FROM t ORDER BY b DESC)",
+        ] {
+            let aggregate = planned_array(sql)?;
+            let ordering = aggregate_ordering(&aggregate);
+            assert_eq!(ordering.len(), 1, "{sql}");
+            assert!(!ordering[0].asc, "{sql}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_subquery_aggregate_preserves_limit_and_distinct() -> Result<()> {
+        for (sql, limits, distincts) in [
+            (
+                "SELECT ARRAY(SELECT a + 1 FROM t ORDER BY b LIMIT 2 OFFSET 1)",
+                1,
+                0,
+            ),
+            (
+                "SELECT ARRAY(SELECT DISTINCT a FROM t ORDER BY a DESC)",
+                0,
+                1,
+            ),
+            (
+                "SELECT ARRAY(SELECT DISTINCT a FROM t ORDER BY a DESC LIMIT 2)",
+                1,
+                1,
+            ),
+            (
+                "SELECT ARRAY(SELECT DISTINCT ON (a) a + 1 FROM t ORDER BY a, b DESC LIMIT 2)",
+                1,
+                1,
+            ),
+        ] {
+            let aggregate = planned_array(sql)?;
+            assert!(!aggregate_ordering(&aggregate).is_empty(), "{sql}");
+            let (mut found_limits, mut found_distincts) = (0, 0);
+            aggregate.input.apply(|plan| {
+                match plan {
+                    LogicalPlan::Limit(_) => found_limits += 1,
+                    LogicalPlan::Distinct(_) => found_distincts += 1,
+                    _ => {}
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })?;
+            assert_eq!(
+                (found_limits, found_distincts),
+                (limits, distincts),
+                "{sql}"
+            );
+        }
+        Ok(())
+    }
+
+    fn query(sql: &str) -> sqlparser::ast::AstBox<sqlparser::ast::Query> {
+        let Statement::Statement(statement) =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})
+                .expect("valid SQL")
+                .pop_front()
+                .expect("one statement")
+        else {
+            panic!("ordinary SQL statement")
+        };
+        let sqlparser::ast::Statement::Query(query) = *statement else {
+            panic!("query statement")
+        };
+        query
+    }
+
+    fn outer_schema(qualifier: &str) -> DFSchema {
+        DFSchema::try_from_qualified_schema(
+            qualifier,
+            &Schema::new(vec![Field::new("a", DataType::Int32, false)]),
+        )
+        .expect("qualified schema")
+    }
+
+    #[test]
+    fn scalar_subquery_aggregate_keeps_all_outer_correlation_scopes() -> Result<()> {
+        let context = ArrayContext::default();
+        let planner = SqlToRel::new(&context);
+        let mut scopes = PlannerContext::new();
+        let outer: Arc<DFSchema> = Arc::new(outer_schema("outer_row"));
+        scopes.push_outer_query_schema(Arc::clone(&outer));
+        let expr = planner.plan_array_subquery_constructor(
+            &query("SELECT i.a + middle_row.a FROM t i WHERE i.b = outer_row.a ORDER BY i.b LIMIT 1"),
+            &outer_schema("middle_row"), &mut scopes,
+        )?;
+        let Expr::ScalarSubquery(subquery) = expr else {
+            panic!("ARRAY subquery")
+        };
+        assert_eq!(subquery.outer_ref_columns.len(), 2);
+        assert_eq!(scopes.outer_query_schema_stack().len(), 1);
+        assert!(Arc::ptr_eq(&scopes.outer_query_schema_stack()[0], &outer));
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_subquery_aggregate_restores_scopes_after_planning_error() {
+        let context = ArrayContext::default();
+        let planner = SqlToRel::new(&context);
+        let mut scopes = PlannerContext::new();
+        let outer: Arc<DFSchema> = Arc::new(outer_schema("outer_row"));
+        scopes.push_outer_query_schema(Arc::clone(&outer));
+        assert!(
+            planner
+                .plan_array_subquery_constructor(
+                    &query("SELECT missing_column FROM t ORDER BY b"),
+                    &outer_schema("middle_row"),
+                    &mut scopes,
+                )
+                .is_err()
+        );
+        assert_eq!(scopes.outer_query_schema_stack().len(), 1);
+        assert!(Arc::ptr_eq(&scopes.outer_query_schema_stack()[0], &outer));
+    }
 }

@@ -15,6 +15,25 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use datafusion_expr::{
+    AfterMatchSkipOption, EmptyMatchesMode, MatchRecognize, MeasureExpr, Pattern,
+    PatternSymbol, RowsPerMatchOption, SubsetDef, SymbolDef,
+};
+use sqlparser::ast::EdgeDirection as SqlED;
+use sqlparser::ast::GraphPatternElement as SqlGraphPatternElement;
+use sqlparser::ast::GraphPatternExpr as SqlGraphPatternExpr;
+use sqlparser::ast::LabelExpression as SqlLE;
+use sqlparser::ast::PathFinding as SqlPF;
+use sqlparser::ast::PathMode as SqlPM;
+use sqlparser::ast::PathVariant;
+use sqlparser::ast::RepetitionQuantifier as SqlRQ;
+use sqlparser::ast::RowLimiting as SqlRL;
+use sqlparser::ast::{
+    AfterMatchSkip, EmptyMatchesMode as SqlEmptyMatchesMode, MatchRecognizePattern,
+    MatchRecognizeSymbol, Measure, RepetitionQuantifier as SqlRepetitionQuantifier,
+    RowsPerMatch, SubsetDefinition, SymbolDefinition,
+};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -151,7 +170,7 @@ impl RelationPlannerContext for SqlToRelRelationContext<'_, '_> {
 /// (excluding Start and End anchors). The symbols are normalized and deduplicated
 /// to prevent case-sensitivity issues (e.g., 'A' and 'a' are treated as the same).
 fn extract_pattern_symbols(
-    pattern: &sqlparser::ast::MatchRecognizePattern,
+    pattern: &MatchRecognizePattern,
     normalizer: &impl Fn(Ident) -> String,
 ) -> Vec<String> {
     let mut symbols = Vec::new();
@@ -164,14 +183,12 @@ fn extract_pattern_symbols(
 /// Normalizes identifiers during extraction to ensure deduplication works correctly
 /// with case-insensitive identifiers (e.g., PATTERN (A B a) should only have [a, b]).
 fn extract_pattern_symbols_recursive(
-    pattern: &sqlparser::ast::MatchRecognizePattern,
+    pattern: &MatchRecognizePattern,
     symbols: &mut Vec<String>,
     normalizer: &impl Fn(Ident) -> String,
 ) {
-    use sqlparser::ast::MatchRecognizePattern;
-
     match pattern {
-        MatchRecognizePattern::Symbol(sqlparser::ast::MatchRecognizeSymbol::Named(
+        MatchRecognizePattern::Symbol(MatchRecognizeSymbol::Named(
             ident,
         )) => {
             let name = normalizer(ident.clone());
@@ -182,7 +199,7 @@ fn extract_pattern_symbols_recursive(
         MatchRecognizePattern::Symbol(_) => {
             // Skip Start and End anchors
         }
-        MatchRecognizePattern::Exclude(sqlparser::ast::MatchRecognizeSymbol::Named(
+        MatchRecognizePattern::Exclude(MatchRecognizeSymbol::Named(
             ident,
         )) => {
             let name = normalizer(ident.clone());
@@ -195,7 +212,7 @@ fn extract_pattern_symbols_recursive(
         }
         MatchRecognizePattern::Permute(syms) => {
             for sym in syms {
-                if let sqlparser::ast::MatchRecognizeSymbol::Named(ident) = sym {
+                if let MatchRecognizeSymbol::Named(ident) = sym {
                     let name = normalizer(ident.clone());
                     if !symbols.contains(&name) {
                         symbols.push(name);
@@ -350,18 +367,19 @@ impl SqlToRel<'_> {
     ) -> Expr {
         expr.transform(|e| {
             if let Expr::Column(col) = &e
-                && let Some(qualifier) = &col.relation {
-                    // Check if this qualifier is a pattern variable
-                    if pattern_var_names
-                        .iter()
-                        .any(|pv| qualifier.table() == pv.as_str())
-                    {
-                        // Strip the pattern variable qualifier, making it unqualified
-                        return Ok(Transformed::yes(Expr::Column(
-                            Column::new_unqualified(&col.name),
-                        )));
-                    }
+                && let Some(qualifier) = &col.relation
+            {
+                // Check if this qualifier is a pattern variable
+                if pattern_var_names
+                    .iter()
+                    .any(|pv| qualifier.table() == pv.as_str())
+                {
+                    // Strip the pattern variable qualifier, making it unqualified
+                    return Ok(Transformed::yes(Expr::Column(Column::new_unqualified(
+                        &col.name,
+                    ))));
                 }
+            }
             Ok(Transformed::no(e))
         })
         .data()
@@ -591,8 +609,11 @@ impl SqlToRel<'_> {
                     None
                 };
                 let single_unnest_output = !*with_ordinality && unnest_exprs.len() == 1;
-                let logical_plan =
-                    self.try_process_unnest_with_options(input, unnest_exprs, options.as_ref())?;
+                let logical_plan = self.try_process_unnest_with_options(
+                    input,
+                    unnest_exprs,
+                    options.as_ref(),
+                )?;
                 let mut alias = alias.clone();
                 if single_unnest_output
                     && let Some(table_alias) = alias.as_mut()
@@ -825,8 +846,7 @@ impl SqlToRel<'_> {
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
-                let logical_plan =
-                    self.query_to_plan_ref(&subquery, planner_context)?;
+                let logical_plan = self.query_to_plan_ref(&subquery, planner_context)?;
                 (logical_plan, alias)
             }
             TableFactor::NestedJoin {
@@ -881,22 +901,25 @@ impl SqlToRel<'_> {
                 };
 
                 let single_unnest_output = !with_ordinality && unnest_exprs.len() == 1;
-                let logical_plan =
-                    self.try_process_unnest_with_options(input, unnest_exprs, options.as_ref())?;
+                let logical_plan = self.try_process_unnest_with_options(
+                    input,
+                    unnest_exprs,
+                    options.as_ref(),
+                )?;
 
                 // PostgreSQL compatibility: for a single-argument UNNEST with an alias but no
                 // explicit column alias list, treat the relation alias as the output column name.
                 // Example: `UNNEST(arr) AS x` exposes column `x`.
                 if single_unnest_output
                     && let Some(table_alias) = alias.as_mut()
-                        && table_alias.columns.is_empty()
-                    {
-                        table_alias.columns.push(TableAliasColumnDef {
-                            name: table_alias.name.clone(),
-                            data_type: None,
-                            collation: None,
-                        });
-                    }
+                    && table_alias.columns.is_empty()
+                {
+                    table_alias.columns.push(TableAliasColumnDef {
+                        name: table_alias.name.clone(),
+                        data_type: None,
+                        collation: None,
+                    });
+                }
 
                 (logical_plan, alias)
             }
@@ -917,18 +940,6 @@ impl SqlToRel<'_> {
                 symbols,
                 alias,
             } => {
-                use datafusion_expr::{
-                    AfterMatchSkipOption, EmptyMatchesMode, MatchRecognize, MeasureExpr,
-                    Pattern, PatternSymbol, RepetitionQuantifier, RowsPerMatchOption,
-                    SubsetDef, SymbolDef,
-                };
-                use sqlparser::ast::{
-                    AfterMatchSkip, EmptyMatchesMode as SqlEmptyMatchesMode,
-                    MatchRecognizePattern, MatchRecognizeSymbol, Measure,
-                    RepetitionQuantifier as SqlRepetitionQuantifier, RowsPerMatch,
-                    SubsetDefinition, SymbolDefinition,
-                };
-
                 // Plan the input table
                 let input_plan =
                     self.create_relation(SQLBox::into_owned(table), planner_context)?;
@@ -1803,8 +1814,6 @@ impl SqlToRel<'_> {
         &self,
         pf: sqlparser::ast::PathFinding,
     ) -> Result<PathFinding> {
-        use sqlparser::ast::PathFinding as SqlPF;
-        use sqlparser::ast::PathVariant;
         Ok(match pf {
             SqlPF::Any => PathFinding::Any,
             SqlPF::AnyShortest => PathFinding::AnyShortest,
@@ -1825,7 +1834,6 @@ impl SqlToRel<'_> {
 
     /// Convert sqlparser path mode to DataFusion PathMode
     fn convert_path_mode(&self, pm: &sqlparser::ast::PathMode) -> PathMode {
-        use sqlparser::ast::PathMode as SqlPM;
         match pm {
             SqlPM::Walk => PathMode::Walk,
             SqlPM::Trail => PathMode::Trail,
@@ -1836,7 +1844,6 @@ impl SqlToRel<'_> {
 
     /// Convert sqlparser row limiting to DataFusion RowLimiting
     fn convert_row_limiting(&self, rl: &sqlparser::ast::RowLimiting) -> RowLimiting {
-        use sqlparser::ast::RowLimiting as SqlRL;
         match rl {
             SqlRL::OneRowPerMatch => RowLimiting::OneRowPerMatch,
             SqlRL::OneRowPerVertex => RowLimiting::OneRowPerVertex,
@@ -1862,21 +1869,20 @@ impl SqlToRel<'_> {
         &self,
         expr: sqlparser::ast::GraphPatternExpr,
     ) -> Result<GraphPatternExpr> {
-        use sqlparser::ast::GraphPatternExpr as SqlGPE;
         Ok(match expr {
-            SqlGPE::Chain(elements) => GraphPatternExpr::Chain(
+            SqlGraphPatternExpr::Chain(elements) => GraphPatternExpr::Chain(
                 elements
                     .into_iter()
                     .map(|e| self.convert_graph_pattern_element(e))
                     .collect::<Result<Vec<_>>>()?,
             ),
-            SqlGPE::Alternation(patterns) => GraphPatternExpr::Alternation(
+            SqlGraphPatternExpr::Alternation(patterns) => GraphPatternExpr::Alternation(
                 patterns
                     .into_iter()
                     .map(|p| self.convert_graph_pattern_expr(p))
                     .collect::<Result<Vec<_>>>()?,
             ),
-            SqlGPE::Group {
+            SqlGraphPatternExpr::Group {
                 pattern,
                 quantifier,
             } => GraphPatternExpr::Group {
@@ -1893,17 +1899,16 @@ impl SqlToRel<'_> {
         &self,
         element: sqlparser::ast::GraphPatternElement,
     ) -> Result<GraphPatternElement> {
-        use sqlparser::ast::GraphPatternElement as SqlGPE;
         Ok(match element {
-            SqlGPE::Node(node) => {
+            SqlGraphPatternElement::Node(node) => {
                 GraphPatternElement::Node(self.convert_node_pattern(node)?)
             }
-            SqlGPE::Edge(edge) => {
+            SqlGraphPatternElement::Edge(edge) => {
                 GraphPatternElement::Edge(self.convert_edge_pattern(edge)?)
             }
-            SqlGPE::Subpattern(expr) => GraphPatternElement::Subpattern(Box::new(
-                self.convert_graph_pattern_expr(expr)?,
-            )),
+            SqlGraphPatternElement::Subpattern(expr) => GraphPatternElement::Subpattern(
+                Box::new(self.convert_graph_pattern_expr(expr)?),
+            ),
         })
     }
 
@@ -1988,7 +1993,6 @@ impl SqlToRel<'_> {
         &self,
         dir: &sqlparser::ast::EdgeDirection,
     ) -> EdgeDirection {
-        use sqlparser::ast::EdgeDirection as SqlED;
         match dir {
             SqlED::Right => EdgeDirection::Right,
             SqlED::Left => EdgeDirection::Left,
@@ -2002,7 +2006,6 @@ impl SqlToRel<'_> {
         &self,
         label: sqlparser::ast::LabelExpression,
     ) -> LabelExpression {
-        use sqlparser::ast::LabelExpression as SqlLE;
         match label {
             SqlLE::Label(ident) => {
                 LabelExpression::Label(self.ident_normalizer.normalize(ident))
@@ -2028,7 +2031,6 @@ impl SqlToRel<'_> {
         &self,
         q: &sqlparser::ast::RepetitionQuantifier,
     ) -> RepetitionQuantifier {
-        use sqlparser::ast::RepetitionQuantifier as SqlRQ;
         match q {
             SqlRQ::ZeroOrMore => RepetitionQuantifier::ZeroOrMore,
             SqlRQ::OneOrMore => RepetitionQuantifier::OneOrMore,
@@ -2046,9 +2048,6 @@ impl SqlToRel<'_> {
         columns: &[GraphColumn],
         _input_schema: &DFSchema,
     ) -> Result<DFSchema> {
-        use arrow::datatypes::DataType;
-        use std::collections::HashMap;
-
         // For now, create a schema with Utf8 columns (in practice, this would
         // need type inference from the property graph schema)
         let fields: Vec<Arc<Field>> = columns

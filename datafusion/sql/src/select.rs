@@ -364,7 +364,7 @@ impl SqlToRel<'_> {
                 .iter()
                 .filter(|select_expr| match select_expr {
                     Expr::AggregateFunction(_) => false,
-                    Expr::Alias(Alias { expr, name: _, .. }) => {
+                    Expr::Alias(Alias { expr, .. }) => {
                         !matches!(**expr, Expr::AggregateFunction(_))
                     }
                     _ => true,
@@ -1145,7 +1145,7 @@ impl SqlToRel<'_> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         match from.len() {
-            0 => Ok(LogicalPlanBuilder::empty(true).build()?),
+            0 => LogicalPlanBuilder::empty(true).build(),
             1 => self.plan_table_with_joins_ref(&from[0], planner_context),
             _ => {
                 let mut from = from.iter();
