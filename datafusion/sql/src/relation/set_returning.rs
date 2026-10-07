@@ -32,6 +32,7 @@
 
 use std::sync::Arc;
 
+use crate::definition_plan::{FunctionRelation, FunctionRelationCall};
 use crate::planner::{PlannerContext, SetReturningColumns, SqlToRel};
 
 use arrow::datatypes::{DataType, FieldRef};
@@ -182,6 +183,7 @@ impl SqlToRel<'_> {
         let mut columns: Vec<(String, Expr)> = Vec::new();
         let mut record_columns = Vec::new();
         let mut relation_name = None;
+        let mut definition_calls = Vec::new();
         // Earlier FROM items are correlated inputs, not columns of the
         // function relation's own one-row input. They are on the outer-query
         // stack above, so expression binding must use an empty local schema;
@@ -222,6 +224,13 @@ impl SqlToRel<'_> {
                     Ok(Arc::new(field.as_ref().clone().with_name(name)))
                 })
                 .collect::<Result<Vec<FieldRef>>>()?;
+            if self.context_provider.plans_definitions_as_written() {
+                definition_calls.push(FunctionRelationCall {
+                    name: resolved_name.clone(),
+                    args: args.clone(),
+                    column_definitions: column_definitions.clone(),
+                });
+            }
             match self.context_provider.plan_set_returning_function(
                 &resolved_name,
                 &args,
@@ -345,7 +354,10 @@ impl SqlToRel<'_> {
                 *expr = expr.clone().unalias().alias(name);
             }
         }
-        let plan = unnested.project(output)?.build()?;
+        let mut plan = unnested.project(output)?.build()?;
+        if self.context_provider.plans_definitions_as_written() {
+            plan = FunctionRelation::new(plan, definition_calls, with_ordinality).into_plan();
+        }
         self.qualify_function_relation(plan, alias, &relation_name)
     }
 
@@ -359,6 +371,13 @@ impl SqlToRel<'_> {
         with_ordinality: bool,
         alias: Option<TableAlias>,
     ) -> Result<(LogicalPlan, Option<TableAlias>)> {
+        let definition_call = self.context_provider.plans_definitions_as_written().then(|| {
+            FunctionRelationCall {
+                name: resolved_name.to_owned(),
+                args: args.clone(),
+                column_definitions: column_definitions.to_vec(),
+            }
+        });
         let provider = self
             .context_provider
             .get_table_function_source_with_columns(
@@ -396,6 +415,9 @@ impl SqlToRel<'_> {
                 .collect();
             output[0] = output[0].clone().alias(alias_name);
             plan = LogicalPlanBuilder::from(plan).project(output)?.build()?;
+        }
+        if let Some(call) = definition_call {
+            plan = FunctionRelation::new(plan, vec![call], with_ordinality).into_plan();
         }
         self.qualify_function_relation(plan, alias, name)
     }

@@ -27,8 +27,10 @@
 //! ([`ContextProvider::plans_definitions_as_written`]) gets these nodes
 //! instead: [`WithQuery`] over the query that owns a `WITH` list, a
 //! [`CteReference`] leaf wherever the query reads one of its items, and an
-//! [`AliasedRelation`] over a `FROM` item with a column alias list. The plan
-//! is for reading; nothing executes it.
+//! [`AliasedRelation`] over a `FROM` item with a column alias list, and a
+//! [`FunctionRelation`] over table functions before their expansion as lists
+//! and unnesting loses their SQL identities. The plan is for reading; nothing
+//! executes it.
 //!
 //! [`ContextProvider::plans_definitions_as_written`]: crate::planner::ContextProvider::plans_definitions_as_written
 
@@ -36,7 +38,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::{Field, FieldRef, Schema};
 use datafusion_common::{DFSchema, DFSchemaRef, Result, TableReference, internal_err};
 use datafusion_expr::{
     Expr, Extension, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
@@ -381,6 +383,113 @@ impl UserDefinedLogicalNodeCore for AliasedRelation {
             .map(|field| field.name().clone())
             .collect();
         Self::try_new(self.alias.clone(), input, column_names)
+    }
+}
+
+/// One bound table-function call, before its execution expansion as lists.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionRelationCall {
+    pub name: String,
+    pub args: Vec<Expr>,
+    pub column_definitions: Vec<FieldRef>,
+}
+
+/// The calls of one function FROM item. The input supplies the analyzed
+/// output schema; the calls retain the SQL identities that list expansion
+/// and a shared Unnest cannot recover. Calls of ROWS FROM must remain one
+/// item so their outputs are zipped and padded, rather than cross joined.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionRelation {
+    pub calls: Vec<FunctionRelationCall>,
+    pub with_ordinality: bool,
+    input: LogicalPlan,
+}
+
+impl FunctionRelation {
+    pub fn new(
+        input: LogicalPlan,
+        calls: Vec<FunctionRelationCall>,
+        with_ordinality: bool,
+    ) -> Self {
+        Self {
+            calls,
+            with_ordinality,
+            input,
+        }
+    }
+
+    pub fn into_plan(self) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(self),
+        })
+    }
+
+    fn call_arguments(&self) -> Vec<Expr> {
+        self.calls
+            .iter()
+            .flat_map(|call| call.args.iter().cloned())
+            .collect()
+    }
+}
+
+impl PartialOrd for FunctionRelation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let names = self.calls.iter().map(|call| &call.name).collect::<Vec<_>>();
+        let other_names = other.calls.iter().map(|call| &call.name).collect::<Vec<_>>();
+        (self.with_ordinality, names, self.call_arguments(), &self.input)
+            .partial_cmp(&(
+                other.with_ordinality,
+                other_names,
+                other.call_arguments(),
+                &other.input,
+            ))
+            .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+impl UserDefinedLogicalNodeCore for FunctionRelation {
+    fn name(&self) -> &str {
+        "FunctionRelation"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        self.call_arguments()
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let names = self.calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>();
+        write!(f, "FunctionRelation: {}", names.join(", "))
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        let (Some(input), true) = (inputs.pop(), inputs.is_empty()) else {
+            return internal_err!("FunctionRelation has one input");
+        };
+        let argument_count = self.calls.iter().map(|call| call.args.len()).sum::<usize>();
+        if exprs.len() != argument_count {
+            return internal_err!(
+                "FunctionRelation has {} arguments, not {}",
+                argument_count,
+                exprs.len()
+            );
+        }
+        let mut calls = self.calls.clone();
+        for (argument, expr) in calls.iter_mut().flat_map(|call| &mut call.args).zip(exprs) {
+            *argument = expr;
+        }
+        Ok(Self::new(input, calls, self.with_ordinality))
     }
 }
 
