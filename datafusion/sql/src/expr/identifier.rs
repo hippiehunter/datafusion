@@ -215,6 +215,17 @@ impl SqlToRel<'_> {
             match search_result {
                 // Found matching field with spare identifier(s) for nested field(s) in structure
                 Some((field, qualifier, nested_names)) if !nested_names.is_empty() => {
+                    // A name written `relation.column` is that relation's
+                    // column when an enclosing query ranges over a relation of
+                    // that name, even though this query has a column of the
+                    // same name as the relation: a relation ranks above a
+                    // column's field.
+                    if ids.len() - nested_names.len() == 1
+                        && let Some(reference) =
+                            outer_relation_reference(&ids, planner_context)
+                    {
+                        return Ok(reference);
+                    }
                     // Found matching field with spare identifier(s) for nested field(s) in structure
                     // A planner that recognizes the value but not the field
                     // names the missing field; only a planner that declines
@@ -371,6 +382,28 @@ fn form_identifier(idents: &[String]) -> Result<(Option<TableReference>, &String
         )),
         _ => internal_err!("Incorrect number of identifiers: {}", idents.len()),
     }
+}
+
+/// The outer reference `ids` names when an enclosing query's schema holds the
+/// column it spells as `relation.column`, searched from the innermost query
+/// outward. A match that reads a nested field of a column does not count.
+fn outer_relation_reference(
+    ids: &[String],
+    planner_context: &PlannerContext,
+) -> Option<Expr> {
+    planner_context
+        .outer_query_schema_stack()
+        .iter()
+        .rev()
+        .find_map(|outer| match search_dfschema(ids, outer) {
+            Some((field, Some(qualifier), nested_names)) if nested_names.is_empty() => {
+                Some(Expr::OuterReferenceColumn(
+                    Arc::clone(field),
+                    Column::from((Some(qualifier), field)),
+                ))
+            }
+            _ => None,
+        })
 }
 
 fn search_dfschema<'ids, 'schema>(

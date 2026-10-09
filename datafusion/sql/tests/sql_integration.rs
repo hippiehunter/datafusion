@@ -5284,6 +5284,29 @@ Projection: p.id
 }
 
 #[test]
+fn outer_relation_alias_ranks_above_a_column_of_the_same_name() {
+    // `person` has a `first_name` column, and the outer query ranges over
+    // `person` as `first_name`: `first_name.id` is the outer relation's column,
+    // not a field `id` of the subquery's own `first_name` column.
+    let sql = "SELECT id FROM person first_name WHERE EXISTS \
+            (SELECT 1 FROM person WHERE person.id = first_name.id)";
+    let plan = logical_plan(sql).unwrap();
+    assert_snapshot!(
+        plan,
+        @r#"
+Projection: first_name.id
+  Filter: EXISTS (<subquery>)
+    Subquery:
+      Projection: Int32(1)
+        Filter: person.id = outer_ref(first_name.id)
+          TableScan: person
+    SubqueryAlias: first_name
+      TableScan: person
+"#
+    );
+}
+
+#[test]
 fn exists_subquery_schema_outer_schema_overlap() {
     // both the outer query and the schema select from unaliased "person"
     let sql = "SELECT person.id FROM person, person p \
