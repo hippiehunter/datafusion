@@ -28,11 +28,14 @@ use datafusion_common::{
     Constraint, Constraints, GetExt, NullsDistinct, Result, ScalarValue, TableReference,
     plan_err,
 };
-use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_sql::planner::{
-    ContextProvider, CreateTableLikeOptions, CreateTableLikeSource, ExprPlanner,
-    TypePlanner,
+use datafusion_expr::{
+    AggregateUDF, BoundSqlExpression, Expr, ScalarUDF, TableSource, WindowUDF,
 };
+use datafusion_sql::planner::{
+    ContextProvider, CreateTableLikeOptions, CreateTableLikeSource, DmlGeneratedColumns,
+    ExprPlanner, TypePlanner,
+};
+use sqlparser::ast::ObjectName;
 
 // Note: make_array from datafusion_functions_nested was removed
 
@@ -110,7 +113,43 @@ pub(crate) struct MockContextProvider {
     pub(crate) state: MockSessionState,
 }
 
+/// What an explicit `DEFAULT` on `sequence_rows.id` draws: a stand-in for
+/// the host's `nextval`, recognizable in a plan.
+pub const SEQUENCE_ROWS_DRAW: i64 = 9001;
+
 impl ContextProvider for MockContextProvider {
+    fn dml_generated_columns(
+        &self,
+        table: &ObjectName,
+    ) -> Result<Option<DmlGeneratedColumns>> {
+        let is_sequence_rows = table
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .is_some_and(|ident| ident.value == "sequence_rows");
+        if !is_sequence_rows {
+            return Ok(None);
+        }
+        // `id` is sequence-backed: the host fills it when a write omits it,
+        // so it has no planner default, and an explicit DEFAULT draws the
+        // sequence through the override.
+        Ok(Some(DmlGeneratedColumns {
+            columns: Vec::new(),
+            generated_expressions: Vec::new(),
+            positional_columns: vec!["id".to_string(), "v".to_string()],
+            table_name: "sequence_rows".to_string(),
+            identity_always: Vec::new(),
+            identity: Vec::new(),
+            explicit_default_overrides: vec![(
+                "id".to_string(),
+                BoundSqlExpression::new(Expr::Literal(
+                    ScalarValue::Int64(Some(SEQUENCE_ROWS_DRAW)),
+                    None,
+                )),
+            )],
+        }))
+    }
+
     fn is_set_returning_function(&self, name: &str) -> bool {
         self.state
             .row_stream_function
@@ -185,6 +224,10 @@ impl ContextProvider for MockContextProvider {
                 Field::new("id", DataType::Int32, false),
                 Field::new("tag", DataType::Utf8, true),
                 Field::new("age", DataType::Int32, true),
+            ])),
+            "sequence_rows" => Ok(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("v", DataType::Utf8, true),
             ])),
             "test_decimal" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int32, false),

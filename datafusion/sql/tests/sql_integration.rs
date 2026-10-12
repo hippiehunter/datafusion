@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::vec;
 
 use arrow::datatypes::{TimeUnit::Nanosecond, *};
-use common::MockContextProvider;
+use common::{MockContextProvider, SEQUENCE_ROWS_DRAW};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result, assert_contains};
 use datafusion_expr::{
@@ -1003,6 +1003,39 @@ fn plan_insert_default_keeps_quoted_target_columns() {
         insert_target_columns(unquoted_named),
         Some(vec!["lower".to_string()])
     );
+}
+
+/// An explicit DEFAULT for a sequence-backed column evaluates the column's
+/// sequence draw wherever the write still provides the column: a VALUES
+/// slot of a column another row writes, and `SET col = DEFAULT`. A column
+/// every row leaves to DEFAULT drops out of the write, the host fills it,
+/// and its slots draw nothing.
+#[test]
+fn plan_explicit_default_draws_sequence_where_the_write_provides_the_column() {
+    let draw = format!("Int64({SEQUENCE_ROWS_DRAW})");
+    let plan_text = |sql: &str| logical_plan(sql).unwrap().display_indent().to_string();
+
+    let named_mixed =
+        "insert into sequence_rows (id, v) values (24, 'a'), (DEFAULT, 'b')";
+    assert_eq!(
+        insert_target_columns(named_mixed),
+        Some(vec!["id".to_string(), "v".to_string()])
+    );
+    assert_contains!(plan_text(named_mixed), &draw);
+
+    let positional_mixed = "insert into sequence_rows values (24, 'a'), (DEFAULT, 'b')";
+    assert_eq!(insert_target_columns(positional_mixed), None);
+    assert_contains!(plan_text(positional_mixed), &draw);
+
+    let every_row_default =
+        "insert into sequence_rows (id, v) values (DEFAULT, 'a'), (DEFAULT, 'b')";
+    assert_eq!(
+        insert_target_columns(every_row_default),
+        Some(vec!["v".to_string()])
+    );
+    assert!(!plan_text(every_row_default).contains(&draw));
+
+    assert_contains!(plan_text("update sequence_rows set id = DEFAULT"), &draw);
 }
 
 /// `DEFAULT VALUES` re-enters INSERT planning with the already-resolved

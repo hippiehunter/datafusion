@@ -1210,10 +1210,25 @@ pub struct DmlGeneratedColumns {
     /// Every identity column; `OVERRIDING USER VALUE` discards what the
     /// statement wrote for these in favor of the sequence's value.
     pub identity: Vec<String>,
-    /// For `SET col = DEFAULT` on a sequence-backed column, the already-bound
-    /// expression that draws the sequence — the resolution the column's
-    /// absent planner default cannot supply.
-    pub update_default_overrides: Vec<(String, BoundSqlExpression)>,
+    /// For an explicit `DEFAULT` on a sequence-backed column, the
+    /// already-bound expression that draws the sequence — the resolution the
+    /// column's absent planner default cannot supply. The host fills an
+    /// omitted sequence-backed column itself, so the planner default stays
+    /// absent; a `DEFAULT` written where the statement still provides the
+    /// column (`SET col = DEFAULT`, an `ON CONFLICT` assignment, or a VALUES
+    /// slot of a column other rows write) draws the sequence through this.
+    pub explicit_default_overrides: Vec<(String, BoundSqlExpression)>,
+}
+
+impl DmlGeneratedColumns {
+    /// The value an explicit `DEFAULT` written to `column` takes in place of
+    /// the column's planner default, if the column is sequence-backed.
+    pub fn explicit_default(&self, column: &str) -> Option<Expr> {
+        self.explicit_default_overrides
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(column))
+            .map(|(_, expression)| expression.expression().clone())
+    }
 }
 
 /// A view-write failure the SQL planner detects while retargeting; handed to

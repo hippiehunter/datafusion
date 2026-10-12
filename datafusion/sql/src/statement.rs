@@ -4160,13 +4160,7 @@ impl SqlToRel<'_> {
                         generated_columns
                             .as_ref()
                             .and_then(|generated| {
-                                generated.update_default_overrides.iter().find_map(
-                                    |(column, expression)| {
-                                        column
-                                            .eq_ignore_ascii_case(field.name())
-                                            .then(|| expression.expression().clone())
-                                    },
-                                )
+                                generated.explicit_default(field.name())
                             })
                             .or_else(|| {
                                 table_source.get_column_default(field.name()).cloned()
@@ -4621,6 +4615,10 @@ impl SqlToRel<'_> {
                     .any(|identity| identity == column)
             });
         }
+        // Without a recorded column list the write provides every column of
+        // the relation.
+        let records_target_columns =
+            written_columns.is_some() || !columns.is_empty() || overriding_user_value;
 
         // Per target table column, the source columns feeding it, each with
         // the subscript/field path below the column it writes (`a[2]`,
@@ -4797,9 +4795,23 @@ impl SqlToRel<'_> {
             for (column_index, sources) in value_sources.iter().enumerate() {
                 for (slot, path) in sources {
                     defaults[*slot] = match path.last() {
-                        None => ValuesDefault::Column(column_default(
-                            table_schema.field(column_index).name(),
-                        )),
+                        None => {
+                            let name = table_schema.field(column_index).name();
+                            // A DEFAULT slot of a column the write provides
+                            // (another row writes it) evaluates the column's
+                            // default here, drawing its sequence row by row.
+                            // A column the write omits is filled by the host,
+                            // so its slots draw nothing of their own.
+                            let provided = !records_target_columns
+                                || target_col_names.iter().any(|column| column == name);
+                            let explicit = generated_columns
+                                .as_ref()
+                                .filter(|_| provided)
+                                .and_then(|generated| generated.explicit_default(name));
+                            ValuesDefault::Column(
+                                explicit.or_else(|| column_default(name)),
+                            )
+                        }
                         Some(AccessExpr::Subscript(_)) => ValuesDefault::Refused(
                             "cannot set an array element to DEFAULT",
                         ),
@@ -5032,7 +5044,7 @@ impl SqlToRel<'_> {
             Arc::new(source),
             target_select_rights,
         );
-        if written_columns.is_some() || !columns.is_empty() || overriding_user_value {
+        if records_target_columns {
             dml = dml.with_target_columns(target_col_names);
         }
         if let Some(ret_cols) = returning_col_names {
@@ -5234,15 +5246,7 @@ impl SqlToRel<'_> {
                                 if is_default_identifier(identifier)
                         ) {
                             generated_columns
-                                .and_then(|generated| {
-                                    generated.update_default_overrides.iter().find_map(
-                                        |(column, expression)| {
-                                            column
-                                                .eq_ignore_ascii_case(&target)
-                                                .then(|| expression.expression().clone())
-                                        },
-                                    )
-                                })
+                                .and_then(|generated| generated.explicit_default(&target))
                                 .or_else(|| {
                                     table_source.get_column_default(&target).cloned()
                                 })
