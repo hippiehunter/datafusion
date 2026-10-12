@@ -24,7 +24,9 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{Column, DFSchemaRef, Result, TableReference};
+use datafusion_common::{
+    Column, DFSchema, DFSchemaRef, Result, TableReference, internal_err,
+};
 /// Target specification for ON CONFLICT clauses.
 ///
 /// Identifies which unique constraint should trigger the conflict handling.
@@ -227,7 +229,10 @@ impl TargetSelectRights {
     }
 }
 
-fn expr_reads_target(expr: &Expr, is_target_column: &dyn Fn(&Column) -> bool) -> Result<bool> {
+fn expr_reads_target(
+    expr: &Expr,
+    is_target_column: &dyn Fn(&Column) -> bool,
+) -> Result<bool> {
     let mut reads = false;
     expr.apply(|expr| {
         reads = match expr {
@@ -331,6 +336,34 @@ pub struct DmlStatement {
     /// Whether the statement's own expressions read the target's columns.
     pub target_select_rights: TargetSelectRights,
 }
+/// The row an INSERT's, UPDATE's or DELETE's `RETURNING` reads, over the
+/// statement's `input`: the input leads with the target's columns in table
+/// order, holding the values written to them (or, for DELETE, read from
+/// them), followed by any columns RETURNING reads from joined relations.
+/// RETURNING reads the row as stored, so a target column has the column's own
+/// field (its type and SQL identity), not the field of the expression
+/// assigned to it; a joined column keeps its own.
+pub fn written_row_schema(input: &DFSchema, target: &Schema) -> Result<DFSchema> {
+    let fields = input
+        .iter()
+        .enumerate()
+        .map(|(index, (qualifier, field))| {
+            let Some(column) = target.fields().get(index) else {
+                return Ok((qualifier.cloned(), Arc::clone(field)));
+            };
+            if column.name() != field.name() {
+                return internal_err!(
+                    "DML input column {index} is {}, not the target column {}",
+                    field.name(),
+                    column.name()
+                );
+            }
+            Ok((qualifier.cloned(), Arc::clone(column)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    DFSchema::new_with_metadata(fields, input.metadata().clone())
+}
+
 impl Eq for DmlStatement {}
 impl Hash for DmlStatement {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -454,6 +487,19 @@ impl DmlStatement {
     pub fn with_check_option(mut self, check_option: DmlCheckOption) -> Self {
         self.check_option = Some(check_option);
         self
+    }
+
+    /// The row a `RETURNING` list evaluates over: the explicit context's,
+    /// or the written row over the statement's input (see
+    /// [`written_row_schema`]).
+    pub fn returning_eval_schema(&self) -> Result<DFSchemaRef> {
+        match &self.returning_context {
+            Some(context) => Ok(Arc::clone(context.eval_schema())),
+            None => {
+                written_row_schema(self.input.schema(), self.target.schema().as_ref())
+                    .map(Arc::new)
+            }
+        }
     }
 
     /// Return a descriptive name of this [`DmlStatement`]

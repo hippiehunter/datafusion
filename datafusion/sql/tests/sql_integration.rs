@@ -1056,6 +1056,17 @@ fn plan_update_returning_describes_the_column_not_the_assigned_value() {
         "{j:?}"
     );
     assert_eq!(schema.field(1).name(), "next");
+
+    // The expressions evaluate over the same written row.
+    let LogicalPlan::Dml(dml) = &plan else {
+        panic!("Expected a DML plan, got {plan:?}");
+    };
+    let written = dml.returning_eval_schema().unwrap();
+    let (_, j) = written.qualified_field_with_unqualified_name("j").unwrap();
+    assert_eq!(
+        j.metadata().get("pg_type").map(String::as_str),
+        Some("json")
+    );
 }
 
 /// `DEFAULT VALUES` re-enters INSERT planning with the already-resolved
