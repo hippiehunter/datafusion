@@ -713,6 +713,35 @@ fn returning_columns_to_output_schema(
     )?)))
 }
 
+/// The row an INSERT's or UPDATE's RETURNING reads, over its projected DML
+/// input: the input leads with the target's columns in table order, each
+/// holding the value assigned to it, followed by any columns RETURNING reads
+/// from joined relations. RETURNING reads the row as stored, so a target
+/// column has the column's own type and SQL identity, not the type of the
+/// expression assigned to it; a joined column keeps its own.
+fn written_row_schema(input: &DFSchema, target: &DFSchema) -> Result<DFSchema> {
+    let target_width = target.fields().len();
+    let fields = input
+        .iter()
+        .enumerate()
+        .map(|(index, (qualifier, field))| {
+            if index >= target_width {
+                return Ok((qualifier.cloned(), Arc::clone(field)));
+            }
+            let column = target.field(index);
+            if column.name() != field.name() {
+                return internal_err!(
+                    "UPDATE input column {index} is {}, not the target column {}",
+                    field.name(),
+                    column.name()
+                );
+            }
+            Ok((qualifier.cloned(), Arc::clone(column)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    DFSchema::new_with_metadata(fields, input.metadata().clone())
+}
+
 /// Rewrite RETURNING expressions over the DML source into expressions over the
 /// written row. `target_relation` is the name the target's own columns carry
 /// in the source: its alias when it has one, which then hides the table's
@@ -4325,7 +4354,11 @@ impl SqlToRel<'_> {
             source = project(source, projected_exprs)?;
             source = project_with_lifted_exprs(source, lifted_exprs)?;
 
-            let fields = exprlist_to_fields(rewritten_returning_exprs.iter(), &source)?;
+            let written_row = written_row_schema(source.schema(), &table_schema)?;
+            let fields = rewritten_returning_exprs
+                .iter()
+                .map(|expr| expr.to_field(&written_row))
+                .collect::<Result<Vec<_>>>()?;
             let returning_output_schema = Arc::new(DFSchema::new_with_metadata(
                 fields,
                 source.schema().metadata().clone(),
@@ -4993,8 +5026,12 @@ impl SqlToRel<'_> {
                 )?;
                 target_select_rights = target_select_rights
                     .and(TargetSelectRights::reading(&table_name, &expressions)?);
-                let fields =
-                    exprlist_to_fields(expressions.iter(), &source).map_err(|error| {
+                let written_row = written_row_schema(source.schema(), &table_schema)?;
+                let fields = expressions
+                    .iter()
+                    .map(|expr| expr.to_field(&written_row))
+                    .collect::<Result<Vec<_>>>()
+                    .map_err(|error| {
                         DataFusionError::Context(
                             "derive INSERT-through-view RETURNING fields".to_string(),
                             Box::new(error),

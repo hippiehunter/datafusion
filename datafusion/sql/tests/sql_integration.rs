@@ -1038,6 +1038,24 @@ fn plan_explicit_default_draws_sequence_where_the_write_provides_the_column() {
     assert_contains!(plan_text("update sequence_rows set id = DEFAULT"), &draw);
 }
 
+/// UPDATE's RETURNING reads the row as stored: a target column it names has
+/// the column's own field, not the field of the value assigned to it.
+#[test]
+fn plan_update_returning_describes_the_column_not_the_assigned_value() {
+    let plan =
+        logical_plan("update typed_columns set j = 'x' returning j, id + 1 as next")
+            .unwrap();
+    let schema = plan.schema();
+    let j = schema.field(0);
+    assert_eq!(j.name(), "j");
+    assert_eq!(
+        j.metadata().get("pg_type").map(String::as_str),
+        Some("json"),
+        "{j:?}"
+    );
+    assert_eq!(schema.field(1).name(), "next");
+}
+
 /// `DEFAULT VALUES` re-enters INSERT planning with the already-resolved
 /// target relation, which must resolve to the same relation again.
 #[test]

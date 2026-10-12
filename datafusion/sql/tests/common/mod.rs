@@ -225,6 +225,15 @@ impl ContextProvider for MockContextProvider {
                 Field::new("tag", DataType::Utf8, true),
                 Field::new("age", DataType::Int32, true),
             ])),
+            // A column whose SQL type rides field metadata over its Arrow
+            // carrier, as a host's extension types do.
+            "typed_columns" => Ok(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("j", DataType::Utf8, true).with_metadata(HashMap::from([(
+                    "pg_type".to_string(),
+                    "json".to_string(),
+                )])),
+            ])),
             "sequence_rows" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("v", DataType::Utf8, true),
