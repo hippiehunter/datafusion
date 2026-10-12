@@ -33,9 +33,9 @@ use datafusion_common::{
 };
 use datafusion_expr::{
     ColumnarValue, CreateIndex, CreateMemoryTable, CreateViewUpdatability, DdlStatement,
-    ExprSchemable, MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
-    Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy, Volatility, col,
-    logical_plan::LogicalPlan, test::function_stub::sum_udaf,
+    ExprSchemable, MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy,
+    Volatility, col, logical_plan::LogicalPlan, test::function_stub::sum_udaf,
 };
 use datafusion_sql::{
     definition_plan::{WithQuery, as_definition_node},
@@ -4702,39 +4702,46 @@ fn locking_clause_locks_the_relations_its_target_reads() {
     assert_eq!(
         scan_lock_modes("SELECT order_id FROM orders, person FOR KEY SHARE OF orders"),
         vec![
-            ("orders".to_string(), Some(TableScanRowLockMode::ForKeyShare)),
+            (
+                "orders".to_string(),
+                Some(TableScanRowLockMode::ForKeyShare)
+            ),
             ("person".to_string(), None),
         ]
     );
 }
 
-/// A host that resolves prefix `+` itself: an untyped string operand takes
-/// the floating-point type, and a text operand has no such operator.
+/// A host that resolves the prefix arithmetic operators itself: an untyped
+/// string operand takes the floating-point type, and a text operand has no
+/// such operator.
 #[derive(Debug)]
-struct UnaryPlusPlanner;
+struct PrefixOperandPlanner;
 
-impl ExprPlanner for UnaryPlusPlanner {
-    fn plan_unary_plus(
+impl ExprPlanner for PrefixOperandPlanner {
+    fn plan_prefix_operand(
         &self,
+        op: &sqlparser::ast::UnaryOperator,
         operand: datafusion_expr::Expr,
         schema: &DFSchema,
     ) -> Result<PlannerResult<datafusion_expr::Expr>> {
         match &operand {
-            datafusion_expr::Expr::Literal(datafusion_common::ScalarValue::Utf8(_), _) => {
-                Ok(PlannerResult::Planned(
-                    operand.cast_to(&DataType::Float64, schema)?,
-                ))
-            }
+            datafusion_expr::Expr::Literal(
+                datafusion_common::ScalarValue::Utf8(_),
+                _,
+            ) => Ok(PlannerResult::Planned(
+                operand.cast_to(&DataType::Float64, schema)?,
+            )),
             _ if operand.get_type(schema)? == DataType::Utf8 => {
-                datafusion_common::plan_err!("operator does not exist: + text")
+                datafusion_common::plan_err!("operator does not exist: {op} text")
             }
             _ => Ok(PlannerResult::Original(operand)),
         }
     }
 }
 
-fn plan_with_unary_plus_planner(sql: &str) -> Result<LogicalPlan> {
-    let state = MockSessionState::default().with_expr_planner(Arc::new(UnaryPlusPlanner));
+fn plan_with_prefix_operand_planner(sql: &str) -> Result<LogicalPlan> {
+    let state =
+        MockSessionState::default().with_expr_planner(Arc::new(PrefixOperandPlanner));
     let context = MockContextProvider { state };
     let mut statements = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
     let statement = statements.pop_front().expect("one statement");
@@ -4742,22 +4749,28 @@ fn plan_with_unary_plus_planner(sql: &str) -> Result<LogicalPlan> {
 }
 
 #[test]
-fn unary_plus_resolves_through_the_host() {
+fn prefix_operators_resolve_their_operand_through_the_host() {
     assert_snapshot!(
-        plan_with_unary_plus_planner("SELECT +'1'").unwrap(),
+        plan_with_prefix_operand_planner("SELECT +'1', -'1'").unwrap(),
         @r#"
-    Projection: CAST(Utf8("1") AS Float64)
+    Projection: CAST(Utf8("1") AS Float64), (- CAST(Utf8("1") AS Float64))
       EmptyRelation: rows=1
     "#
     );
-    let error = plan_with_unary_plus_planner("SELECT +first_name FROM person")
-        .expect_err("text has no prefix +");
-    assert_contains!(error.to_string(), "operator does not exist: + text");
-    // An operand the host leaves alone takes the default check.
+    for sql in [
+        "SELECT +first_name FROM person",
+        "SELECT -first_name FROM person",
+    ] {
+        let error = plan_with_prefix_operand_planner(sql)
+            .expect_err("text has no prefix operator");
+        assert_contains!(error.to_string(), "operator does not exist");
+        assert_contains!(error.to_string(), " text");
+    }
+    // An operand the host leaves alone takes the default planning.
     assert_snapshot!(
-        plan_with_unary_plus_planner("SELECT +age FROM person").unwrap(),
+        plan_with_prefix_operand_planner("SELECT +age, -age FROM person").unwrap(),
         @r#"
-    Projection: person.age
+    Projection: person.age, (- person.age)
       TableScan: person
     "#
     );

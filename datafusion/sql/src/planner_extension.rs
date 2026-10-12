@@ -40,7 +40,9 @@ use datafusion_expr::{
     WindowUDF,
 };
 
-use sqlparser::ast::{Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor};
+use sqlparser::ast::{
+    Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor, UnaryOperator,
+};
 
 /// Row expansion supplied by an embedding. List columns zip by position;
 /// a list of records evaluates a multi-column function and its arguments once.
@@ -481,13 +483,16 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
-    /// Plan a prefix `+`, which yields its operand's value: resolve the
-    /// operator over the operand's type, typing an untyped operand and
-    /// refusing a type that declares no prefix `+`. Returns the operand the
-    /// operator yields, or the original operand for the default check, which
-    /// accepts numbers, intervals and timestamps.
-    fn plan_unary_plus(
+    /// Resolve a prefix arithmetic operator (`+`, `-`) over its operand:
+    /// type an untyped operand, take a value of a type derived from the
+    /// operator's operand type (a domain) as that type, and refuse a type
+    /// that declares no such operator. Returns the operand the operator
+    /// applies to, or the original operand for the default planning, which
+    /// accepts numbers, intervals and timestamps for `+` and negates any
+    /// operand for `-`.
+    fn plan_prefix_operand(
         &self,
+        _op: &UnaryOperator,
         operand: Expr,
         _schema: &DFSchema,
     ) -> Result<PlannerResult<Expr>> {

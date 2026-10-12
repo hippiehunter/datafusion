@@ -25,6 +25,25 @@ use datafusion_expr::{
 use sqlparser::ast::{Expr as SQLExpr, UnaryOperator, Value, ValueWithSpan};
 
 impl SqlToRel<'_> {
+    /// The operand a prefix arithmetic operator applies to, as the first
+    /// expression planner that resolves the operator types it.
+    fn plan_prefix_operand(
+        &self,
+        op: &UnaryOperator,
+        mut operand: Expr,
+        schema: &DFSchema,
+    ) -> Result<PlannerResult<Expr>> {
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_prefix_operand(op, operand, schema)? {
+                PlannerResult::Planned(resolved) => {
+                    return Ok(PlannerResult::Planned(resolved));
+                }
+                PlannerResult::Original(original) => operand = original,
+            }
+        }
+        Ok(PlannerResult::Original(operand))
+    }
+
     pub(crate) fn parse_sql_unary_op(
         &self,
         op: &UnaryOperator,
@@ -37,14 +56,12 @@ impl SqlToRel<'_> {
                 self.sql_expr_to_logical_expr(expr, schema, planner_context)?,
             ))),
             UnaryOperator::Plus => {
-                let mut operand =
+                let operand =
                     self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
-                for planner in self.context_provider.get_expr_planners() {
-                    match planner.plan_unary_plus(operand, schema)? {
-                        PlannerResult::Planned(planned) => return Ok(planned),
-                        PlannerResult::Original(original) => operand = original,
-                    }
-                }
+                let operand = match self.plan_prefix_operand(op, operand, schema)? {
+                    PlannerResult::Planned(resolved) => return Ok(resolved),
+                    PlannerResult::Original(operand) => operand,
+                };
                 let field = operand.to_field(schema)?.1;
                 let data_type = field.data_type();
                 if data_type.is_numeric()
@@ -79,11 +96,16 @@ impl SqlToRel<'_> {
                         self.sql_interval_to_expr(true, interval, schema, planner_context)
                     }
                     // Not a literal, apply negative operator on expression
-                    _ => Ok(Expr::Negative(Box::new(self.sql_expr_to_logical_expr(
-                        expr,
-                        schema,
-                        planner_context,
-                    )?))),
+                    _ => {
+                        let operand =
+                            self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                        let operand =
+                            match self.plan_prefix_operand(op, operand, schema)? {
+                                PlannerResult::Planned(resolved)
+                                | PlannerResult::Original(resolved) => resolved,
+                            };
+                        Ok(Expr::Negative(Box::new(operand)))
+                    }
                 }
             }
             UnaryOperator::BitwiseNot => {
