@@ -2043,16 +2043,25 @@ impl LogicalPlan {
                 Ok(self.clone())
             }
             LogicalPlan::Unnest(Unnest {
-                exec_columns: columns,
+                exec_columns,
                 options,
                 ..
             }) => {
-                self.assert_no_expressions(expr)?;
+                // `expressions()` yields the exec columns, so they come back
+                // here in the same order, as columns.
+                assert_eq_or_internal_err!(expr.len(), exec_columns.len());
+                let columns = expr
+                    .into_iter()
+                    .map(|expr| match expr {
+                        Expr::Column(column) => Ok(column),
+                        other => internal_err!(
+                            "Unnest takes its exec columns as columns, got {other}"
+                        ),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let input = self.only_input(inputs)?;
                 // Update schema with unnested column type.
-                let new_plan =
-                    unnest_with_options(input, columns.clone(), options.clone())?;
-                Ok(new_plan)
+                unnest_with_options(input, columns, options.clone())
             }
             LogicalPlan::MatchRecognize(MatchRecognize {
                 partition_by: _,
@@ -6640,6 +6649,23 @@ mod tests {
 
         let parameter_type = params.clone().get(placeholder_value).unwrap().clone();
         assert_eq!(parameter_type, None);
+    }
+
+    /// `with_new_exprs` takes back what `expressions()` hands out, for an
+    /// Unnest its exec columns, so a rewrite that rebuilds every node from its
+    /// own expressions passes through an Unnest unchanged.
+    #[test]
+    fn unnest_rebuilds_from_its_own_expressions() -> Result<()> {
+        let schema = Schema::new(vec![
+            Field::new("k", DataType::Int32, false),
+            Field::new_list("xs", Field::new_list_field(DataType::Int32, true), false),
+        ]);
+        let plan = table_scan(Some("t"), &schema, None)?
+            .unnest_column("xs")?
+            .build()?;
+        let inputs = plan.inputs().into_iter().cloned().collect();
+        assert_eq!(plan.with_new_exprs(plan.expressions(), inputs)?, plan);
+        Ok(())
     }
 
     #[test]

@@ -949,7 +949,23 @@ impl LogicalPlanBuilder {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                curr_plan.with_new_exprs(curr_plan.expressions(), new_inputs)
+                let rebuilt =
+                    curr_plan.with_new_exprs(curr_plan.expressions(), new_inputs)?;
+                // A projection over a node that passes its input's columns
+                // through (an Unnest, a Filter) reads the columns only once
+                // they were added below it: `SELECT unnest(a) FROM t ORDER BY
+                // t.b` adds `t.b` under the Unnest, and the select projection
+                // above it has to carry it on to the sort.
+                match &rebuilt {
+                    LogicalPlan::Projection(projection)
+                        if missing_cols
+                            .iter()
+                            .all(|c| projection.input.schema().has_column(c)) =>
+                    {
+                        Self::add_missing_columns(rebuilt, missing_cols, is_distinct)
+                    }
+                    _ => Ok(rebuilt),
+                }
             }
         }
     }
@@ -3142,6 +3158,28 @@ mod tests {
         ]);
 
         table_scan(Some(table_name), &schema, None)
+    }
+
+    /// A sort key the select list does not output reaches the sort through
+    /// the projection over an Unnest: it is added beneath the Unnest, passes
+    /// through it, and the projection above carries it on.
+    #[test]
+    fn a_sort_key_missing_above_an_unnest_is_carried_through_it() -> Result<()> {
+        let plan = nested_table_scan("test_table")?
+            .project(vec![col("test_table.strings")])?
+            .unnest_column("strings")?
+            .project(vec![col("strings")])?
+            .sort(vec![col("test_table.scalar").sort(true, false)])?
+            .build()?;
+        assert_snapshot!(plan, @r"
+        Projection: strings
+          Sort: test_table.scalar ASC NULLS LAST
+            Projection: strings, test_table.scalar
+              Unnest: lists[test_table.strings|depth=1] structs[]
+                Projection: test_table.strings, test_table.scalar
+                  TableScan: test_table
+        ");
+        Ok(())
     }
 
     #[test]

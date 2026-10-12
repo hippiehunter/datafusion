@@ -87,3 +87,45 @@ fn an_srf_aliased_after_a_table_column_is_its_own_sort_key() {
         vec![1, 0]
     );
 }
+
+/// A sort key the select list does not output, beside an SRF: it is carried
+/// through the expansion to the sort and projected away above it. An SRF
+/// aliased after the key's column is not the key.
+#[test]
+fn a_sort_key_the_select_list_does_not_output_reaches_the_sort() {
+    for (sql, relation) in [
+        (
+            "SELECT unnest(t.array_col) AS u FROM unnest_table t ORDER BY t.struct_col, 1",
+            "t",
+        ),
+        (
+            "SELECT unnest(t.array_col) AS struct_col FROM unnest_table t \
+             ORDER BY t.struct_col, 1",
+            "t",
+        ),
+        (
+            "SELECT unnest(a.array_col) FROM unnest_table a, unnest_table b \
+             ORDER BY b.struct_col",
+            "b",
+        ),
+    ] {
+        let plan = plan(sql);
+        assert_eq!(plan.schema().fields().len(), 1, "{}", plan.display_indent());
+        let LogicalPlan::Projection(output) = &plan else {
+            panic!("expected the select list over the sort:\n{}", plan.display_indent());
+        };
+        let LogicalPlan::Sort(sort) = output.input.as_ref() else {
+            panic!("expected the sort under the select list:\n{}", plan.display_indent());
+        };
+        let Expr::Column(key) = &sort.expr[0].expr else {
+            panic!("expected a column sort key:\n{}", plan.display_indent());
+        };
+        assert_eq!(
+            (key.relation.as_ref().map(|r| r.to_string()), key.name.as_str()),
+            (Some(relation.to_string()), "struct_col"),
+            "{}",
+            plan.display_indent()
+        );
+        assert!(sort.input.schema().has_column(key), "{}", plan.display_indent());
+    }
+}
