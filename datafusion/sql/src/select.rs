@@ -2074,8 +2074,13 @@ fn bind_unnest_order_by_to_output(
                         // can acquire a different qualifier when that expansion
                         // rebuilds the projection, not only the SRF's own slot.
                         // Bind the typed output identity to the same final slot.
+                        // The identity is the qualifier and the name together:
+                        // `a.id` and `b.id`, or `t.id` and an SRF aliased `id`,
+                        // are different output columns.
                         Expr::Column(order_column) => {
-                            select_expr.qualified_name().1 == order_column.name
+                            let (qualifier, name) = select_expr.qualified_name();
+                            qualifier == order_column.relation
+                                && name == order_column.name
                         }
                         _ => {
                             has_unnest_expr_recursively(select_expr)
