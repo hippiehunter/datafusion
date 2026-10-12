@@ -481,6 +481,19 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plan a prefix `+`, which yields its operand's value: resolve the
+    /// operator over the operand's type, typing an untyped operand and
+    /// refusing a type that declares no prefix `+`. Returns the operand the
+    /// operator yields, or the original operand for the default check, which
+    /// accepts numbers, intervals and timestamps.
+    fn plan_unary_plus(
+        &self,
+        operand: Expr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<Expr>> {
+        Ok(PlannerResult::Original(operand))
+    }
+
     /// Plan the field access expression, such as `foo.bar`
     ///
     /// returns original [`RawFieldAccessExpr`] if not possible

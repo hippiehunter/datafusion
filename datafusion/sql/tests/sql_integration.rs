@@ -29,18 +29,18 @@ use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::{MockContextProvider, SEQUENCE_ROWS_DRAW};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
-    DataFusionError, DataFusionSqlStateError, Result, assert_contains,
+    DFSchema, DataFusionError, DataFusionSqlStateError, Result, assert_contains,
 };
 use datafusion_expr::{
     ColumnarValue, CreateIndex, CreateMemoryTable, CreateViewUpdatability, DdlStatement,
-    MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    ExprSchemable, MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
     Signature, TableScanRowLockMode, TableScanRowLockWaitPolicy, Volatility, col,
     logical_plan::LogicalPlan, test::function_stub::sum_udaf,
 };
 use datafusion_sql::{
     definition_plan::{WithQuery, as_definition_node},
     parser::DFParser,
-    planner::{NullOrdering, ParserOptions, SqlToRel},
+    planner::{ExprPlanner, NullOrdering, ParserOptions, PlannerResult, SqlToRel},
     unparser::plan_to_sql,
 };
 
@@ -4694,6 +4694,66 @@ fn locking_clause_locks_the_relations_its_target_reads() {
             ("orders".to_string(), Some(TableScanRowLockMode::ForKeyShare)),
             ("person".to_string(), None),
         ]
+    );
+}
+
+/// A host that resolves prefix `+` itself: an untyped string operand takes
+/// the floating-point type, and a text operand has no such operator.
+#[derive(Debug)]
+struct UnaryPlusPlanner;
+
+impl ExprPlanner for UnaryPlusPlanner {
+    fn plan_unary_plus(
+        &self,
+        operand: datafusion_expr::Expr,
+        schema: &DFSchema,
+    ) -> Result<PlannerResult<datafusion_expr::Expr>> {
+        match &operand {
+            datafusion_expr::Expr::Literal(datafusion_common::ScalarValue::Utf8(_), _) => {
+                Ok(PlannerResult::Planned(
+                    operand.cast_to(&DataType::Float64, schema)?,
+                ))
+            }
+            _ if operand.get_type(schema)? == DataType::Utf8 => {
+                datafusion_common::plan_err!("operator does not exist: + text")
+            }
+            _ => Ok(PlannerResult::Original(operand)),
+        }
+    }
+}
+
+fn plan_with_unary_plus_planner(sql: &str) -> Result<LogicalPlan> {
+    let state = MockSessionState::default().with_expr_planner(Arc::new(UnaryPlusPlanner));
+    let context = MockContextProvider { state };
+    let mut statements = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+    let statement = statements.pop_front().expect("one statement");
+    SqlToRel::new(&context).statement_to_plan(statement)
+}
+
+#[test]
+fn unary_plus_resolves_through_the_host() {
+    assert_snapshot!(
+        plan_with_unary_plus_planner("SELECT +'1'").unwrap(),
+        @r#"
+    Projection: CAST(Utf8("1") AS Float64)
+      EmptyRelation: rows=1
+    "#
+    );
+    let error = plan_with_unary_plus_planner("SELECT +first_name FROM person")
+        .expect_err("text has no prefix +");
+    assert_contains!(error.to_string(), "operator does not exist: + text");
+    // An operand the host leaves alone takes the default check.
+    assert_snapshot!(
+        plan_with_unary_plus_planner("SELECT +age FROM person").unwrap(),
+        @r#"
+    Projection: person.age
+      TableScan: person
+    "#
+    );
+    let error = logical_plan("SELECT +'1'").expect_err("the default check refuses text");
+    assert_contains!(
+        error.to_string(),
+        "Unary operator '+' only supports numeric, interval and timestamp types"
     );
 }
 

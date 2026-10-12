@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
 use datafusion_common::{DFSchema, Diagnostic, Result, not_impl_err, plan_err};
 use datafusion_expr::{
     Expr, ExprSchemable,
@@ -37,8 +37,14 @@ impl SqlToRel<'_> {
                 self.sql_expr_to_logical_expr(expr, schema, planner_context)?,
             ))),
             UnaryOperator::Plus => {
-                let operand =
+                let mut operand =
                     self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                for planner in self.context_provider.get_expr_planners() {
+                    match planner.plan_unary_plus(operand, schema)? {
+                        PlannerResult::Planned(planned) => return Ok(planned),
+                        PlannerResult::Original(original) => operand = original,
+                    }
+                }
                 let field = operand.to_field(schema)?.1;
                 let data_type = field.data_type();
                 if data_type.is_numeric()
