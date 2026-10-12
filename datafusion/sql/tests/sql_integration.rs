@@ -28,7 +28,9 @@ use std::vec;
 use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::{MockContextProvider, SEQUENCE_ROWS_DRAW};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{DataFusionError, Result, assert_contains};
+use datafusion_common::{
+    DataFusionError, DataFusionSqlStateError, Result, assert_contains,
+};
 use datafusion_expr::{
     ColumnarValue, CreateIndex, CreateMemoryTable, CreateViewUpdatability, DdlStatement,
     MergeAction as LogicalMergeAction, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
@@ -4503,18 +4505,195 @@ fn for_share_without_of_annotates_all_table_scans() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn for_update_of_unknown_relation_errors() {
-    let err = logical_plan(
-        "SELECT o.order_id, l.l_item_id \
-         FROM orders o JOIN lineitem l ON o.o_item_id = l.l_item_id \
-         FOR UPDATE OF missing",
-    )
-    .expect_err("unknown lock target should fail planning");
+/// The SQLSTATE and message a statement's planning fails with.
+fn planning_sqlstate(sql: &str) -> (String, String) {
+    let error = logical_plan(sql).expect_err(sql);
+    let DataFusionError::External(external) = error.find_root() else {
+        panic!("{sql}: expected a SQLSTATE error, got {error}");
+    };
+    let Some(error) = external.downcast_ref::<DataFusionSqlStateError>() else {
+        panic!("{sql}: expected a SQLSTATE error, got {external}");
+    };
+    (error.sqlstate.clone(), error.message.clone())
+}
 
-    assert_contains!(
-        err.to_string(),
-        "FOR UPDATE OF missing did not match any table scan in the query"
+/// Each table scan of a plan with the lock mode it carries, by table name.
+fn scan_lock_modes(sql: &str) -> Vec<(String, Option<TableScanRowLockMode>)> {
+    let plan = logical_plan(sql).unwrap();
+    let mut scans = vec![];
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            scans.push((
+                scan.table_name.to_string(),
+                scan.row_lock.map(|lock| lock.mode),
+            ));
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    scans.sort_by(|left, right| left.0.cmp(&right.0));
+    scans
+}
+
+/// A locking clause resolves each `OF` target among the FROM items of its
+/// own query level by reference name, and refuses a target that is not a
+/// relation or derived table, as PostgreSQL's parse analysis does. Every
+/// target resolves before any lock is checked against the join tree.
+#[rstest]
+#[case::unknown(
+    "SELECT o.order_id FROM orders o FOR UPDATE OF missing",
+    "42P01",
+    "relation \"missing\" in FOR UPDATE clause not found in FROM clause"
+)]
+#[case::alias_hides_relation_name(
+    "SELECT o.order_id FROM orders o FOR KEY SHARE OF orders",
+    "42P01",
+    "relation \"orders\" in FOR KEY SHARE clause not found in FROM clause"
+)]
+#[case::relation_inside_derived_table(
+    "SELECT s.order_id FROM (SELECT order_id FROM orders) s FOR UPDATE OF orders",
+    "42P01",
+    "relation \"orders\" in FOR UPDATE clause not found in FROM clause"
+)]
+#[case::qualified(
+    "SELECT o.order_id FROM orders o FOR UPDATE OF public.o",
+    "42601",
+    "FOR UPDATE must specify unqualified relation names"
+)]
+#[case::common_table_expression(
+    "WITH k AS (SELECT order_id FROM orders) SELECT order_id FROM k FOR SHARE OF k",
+    "0A000",
+    "FOR SHARE cannot be applied to a WITH query"
+)]
+#[case::aliased_join(
+    "SELECT j.order_id FROM (orders o JOIN lineitem l ON o.o_item_id = l.l_item_id) AS j \
+     FOR UPDATE OF j",
+    "0A000",
+    "FOR UPDATE cannot be applied to a join"
+)]
+#[case::unresolved_target_before_null_extended_lock(
+    "SELECT o.order_id FROM orders o LEFT JOIN lineitem l ON o.o_item_id = l.l_item_id \
+     FOR UPDATE OF l FOR UPDATE OF missing",
+    "42P01",
+    "relation \"missing\" in FOR UPDATE clause not found in FROM clause"
+)]
+fn locking_clause_target_resolution(
+    #[case] sql: &str,
+    #[case] sqlstate: &str,
+    #[case] message: &str,
+) {
+    assert_eq!(
+        planning_sqlstate(sql),
+        (sqlstate.to_string(), message.to_string())
+    );
+}
+
+/// No locking clause locks a relation an outer join can null-extend: no row
+/// of it stands behind a null-extended result row. A locked derived table
+/// locks every relation it reads, so its own outer joins count too.
+#[rstest]
+#[case::left_join_target(
+    "SELECT o.order_id FROM orders o LEFT JOIN lineitem l ON o.o_item_id = l.l_item_id \
+     FOR UPDATE OF l",
+    "FOR UPDATE"
+)]
+#[case::left_join_every_relation(
+    "SELECT o.order_id FROM orders o LEFT JOIN lineitem l ON o.o_item_id = l.l_item_id \
+     FOR UPDATE",
+    "FOR UPDATE"
+)]
+#[case::right_join_left_side(
+    "SELECT o.order_id FROM lineitem l RIGHT JOIN orders o ON o.o_item_id = l.l_item_id \
+     FOR SHARE OF l",
+    "FOR SHARE"
+)]
+#[case::full_join(
+    "SELECT o.order_id FROM orders o FULL JOIN lineitem l ON o.o_item_id = l.l_item_id \
+     FOR NO KEY UPDATE OF o",
+    "FOR NO KEY UPDATE"
+)]
+#[case::nested_inner_join_on_nullable_side(
+    "SELECT o.order_id FROM orders o LEFT JOIN \
+     (lineitem l JOIN person p ON l.l_item_id = p.id) ON o.o_item_id = l.l_item_id \
+     FOR KEY SHARE OF p",
+    "FOR KEY SHARE"
+)]
+#[case::derived_table_on_nullable_side(
+    "SELECT o.order_id FROM orders o \
+     LEFT JOIN (SELECT l_item_id FROM lineitem) s ON o.o_item_id = s.l_item_id \
+     FOR UPDATE OF s",
+    "FOR UPDATE"
+)]
+#[case::outer_join_inside_derived_table(
+    "SELECT q.order_id FROM (SELECT o.order_id FROM orders o \
+     LEFT JOIN lineitem l ON o.o_item_id = l.l_item_id) q FOR UPDATE OF q",
+    "FOR UPDATE"
+)]
+#[case::strongest_lock_on_the_relation(
+    "SELECT o.order_id FROM orders o LEFT JOIN lineitem l ON o.o_item_id = l.l_item_id \
+     FOR SHARE OF l FOR UPDATE OF l",
+    "FOR UPDATE"
+)]
+fn locking_clause_refuses_null_extended_relations(
+    #[case] sql: &str,
+    #[case] strength: &str,
+) {
+    assert_eq!(
+        planning_sqlstate(sql),
+        (
+            "0A000".to_string(),
+            format!("{strength} cannot be applied to the nullable side of an outer join")
+        )
+    );
+}
+
+#[test]
+fn locking_clause_locks_the_relations_its_target_reads() {
+    // The preserved side of an outer join may be locked.
+    assert_eq!(
+        scan_lock_modes(
+            "SELECT o.order_id FROM orders o LEFT JOIN lineitem l ON o.o_item_id = l.l_item_id \
+             FOR UPDATE OF o"
+        ),
+        vec![
+            ("lineitem".to_string(), None),
+            ("orders".to_string(), Some(TableScanRowLockMode::ForUpdate)),
+        ]
+    );
+    // A derived table locks every relation it reads, aliased or not.
+    assert_eq!(
+        scan_lock_modes(
+            "SELECT q.order_id FROM (SELECT o.order_id FROM orders o \
+             JOIN lineitem l ON o.o_item_id = l.l_item_id) q, person \
+             FOR SHARE OF q"
+        ),
+        vec![
+            ("lineitem".to_string(), Some(TableScanRowLockMode::ForShare)),
+            ("orders".to_string(), Some(TableScanRowLockMode::ForShare)),
+            ("person".to_string(), None),
+        ]
+    );
+    // A member of an aliased join is a FROM item of the query level itself.
+    assert_eq!(
+        scan_lock_modes(
+            "SELECT j.order_id FROM (orders o JOIN lineitem l ON o.o_item_id = l.l_item_id) \
+             AS j FOR NO KEY UPDATE OF l"
+        ),
+        vec![
+            (
+                "lineitem".to_string(),
+                Some(TableScanRowLockMode::ForNoKeyUpdate)
+            ),
+            ("orders".to_string(), None),
+        ]
+    );
+    // An unaliased relation is addressed by its own name.
+    assert_eq!(
+        scan_lock_modes("SELECT order_id FROM orders, person FOR KEY SHARE OF orders"),
+        vec![
+            ("orders".to_string(), Some(TableScanRowLockMode::ForKeyShare)),
+            ("person".to_string(), None),
+        ]
     );
 }
 

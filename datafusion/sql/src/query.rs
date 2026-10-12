@@ -23,20 +23,18 @@ use crate::cte::under_with_list;
 use crate::planner::{PlannerContext, SqlToRel};
 
 use crate::stack::StackGuard;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{
-    Constraints, DFSchema, Result, ScalarValue, TableReference, not_impl_err, plan_err,
+    Constraints, DFSchema, Result, ScalarValue, not_impl_err, plan_err,
 };
 use datafusion_expr::expr::Sort;
 
 use datafusion_expr::{
     CreateMemoryTable, CreateMemoryTableSpec, DdlStatement, Distinct, Expr, LogicalPlan,
-    LogicalPlanBuilder, SubqueryAlias, TableScanRowLock, TableScanRowLockMode,
-    TableScanRowLockWaitPolicy,
+    LogicalPlanBuilder,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, Fetch, Ident, LimitClause, LockClause, LockType, NonBlock, OrderBy,
-    OrderByExpr, OrderByKind, Query, SelectInto, SelectItem, SetExpr,
+    Expr as SQLExpr, Fetch, Ident, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
+    SelectInto, SelectItem, SetExpr,
 };
 use sqlparser::tokenizer::Span;
 
@@ -52,12 +50,6 @@ struct LimitInfo<'a> {
     /// `FETCH FIRST ROW ONLY` names no row count, which the standard defines
     /// as one row.
     implicit_single_row: bool,
-}
-
-#[derive(Debug, Clone)]
-struct PlannedLockClause {
-    row_lock: TableScanRowLock,
-    target: Option<TableReference>,
 }
 
 impl SqlToRel<'_> {
@@ -91,7 +83,7 @@ impl SqlToRel<'_> {
                     planner_context,
                 )?;
                 let plan = self.limit(plan, limit_info, planner_context)?;
-                let plan = self.apply_query_locks(plan, &query.locks)?;
+                let plan = self.apply_query_locks(plan, query, planner_context)?;
                 // Process the `SELECT INTO` after `LIMIT`.
                 self.select_into_ref(plan, &select.projection, select.into.as_ref())
             }
@@ -114,50 +106,10 @@ impl SqlToRel<'_> {
                 )?;
                 let plan = self.order_by(plan, order_by_rex)?;
                 let plan = self.limit(plan, limit_info, planner_context)?;
-                self.apply_query_locks(plan, &query.locks)
+                self.apply_query_locks(plan, query, planner_context)
             }
         }?;
         Ok(under_with_list(query.with.as_deref(), with_items, plan))
-    }
-
-    fn apply_query_locks(
-        &self,
-        plan: LogicalPlan,
-        locks: &[LockClause],
-    ) -> Result<LogicalPlan> {
-        if locks.is_empty() {
-            return Ok(plan);
-        }
-
-        let planned_locks = locks
-            .iter()
-            .map(|lock| {
-                let row_lock = table_scan_row_lock(lock);
-                let target = lock
-                    .of
-                    .as_ref()
-                    .map(|name| self.object_name_to_table_reference(name.clone()))
-                    .transpose()?;
-                Ok(PlannedLockClause { row_lock, target })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut matched_targets = vec![false; planned_locks.len()];
-        let plan = apply_locks_to_plan(plan, None, &planned_locks, &mut matched_targets)?;
-
-        for (idx, lock) in planned_locks.iter().enumerate() {
-            if let Some(target) = &lock.target
-                && !matched_targets[idx]
-            {
-                return plan_err!(
-                    "{} OF {} did not match any table scan in the query",
-                    lock.row_lock,
-                    target
-                );
-            }
-        }
-
-        Ok(plan)
     }
 
     /// Combines FETCH clause with LIMIT/OFFSET into a single LimitInfo.
@@ -394,107 +346,6 @@ impl SqlToRel<'_> {
             _ => Ok(plan),
         }
     }
-}
-
-fn table_scan_row_lock(lock: &LockClause) -> TableScanRowLock {
-    let mode = match lock.lock_type {
-        LockType::KeyShare => TableScanRowLockMode::ForKeyShare,
-        LockType::Share => TableScanRowLockMode::ForShare,
-        LockType::NoKeyUpdate => TableScanRowLockMode::ForNoKeyUpdate,
-        LockType::Update => TableScanRowLockMode::ForUpdate,
-    };
-    let wait_policy = match lock.nonblock {
-        None => TableScanRowLockWaitPolicy::Block,
-        Some(NonBlock::Nowait) => TableScanRowLockWaitPolicy::Nowait,
-        Some(NonBlock::SkipLocked) => TableScanRowLockWaitPolicy::SkipLocked,
-        Some(NonBlock::Wait(seconds)) => TableScanRowLockWaitPolicy::Wait(seconds),
-    };
-    TableScanRowLock { mode, wait_policy }
-}
-
-fn apply_locks_to_plan(
-    plan: LogicalPlan,
-    visible_relation: Option<&TableReference>,
-    locks: &[PlannedLockClause],
-    matched_targets: &mut [bool],
-) -> Result<LogicalPlan> {
-    match plan {
-        LogicalPlan::SubqueryAlias(alias) => {
-            let input = apply_locks_to_plan(
-                Arc::unwrap_or_clone(alias.input),
-                Some(&alias.alias),
-                locks,
-                matched_targets,
-            )?;
-            SubqueryAlias::try_new(Arc::new(input), alias.alias)
-                .map(LogicalPlan::SubqueryAlias)
-        }
-        LogicalPlan::TableScan(mut scan) => {
-            let mut row_lock = scan.row_lock;
-            for (idx, lock) in locks.iter().enumerate() {
-                if lock_applies_to_scan(
-                    lock.target.as_ref(),
-                    visible_relation,
-                    &scan.table_name,
-                ) {
-                    matched_targets[idx] = true;
-                    row_lock = Some(match row_lock {
-                        None => lock.row_lock,
-                        Some(existing) => combine_row_locks(existing, lock.row_lock)?,
-                    });
-                }
-            }
-            scan.row_lock = row_lock;
-            Ok(LogicalPlan::TableScan(scan))
-        }
-        other => other
-            .map_children(|child| {
-                apply_locks_to_plan(child, visible_relation, locks, matched_targets)
-                    .map(Transformed::yes)
-            })
-            .map(|transformed| transformed.data),
-    }
-}
-
-fn lock_applies_to_scan(
-    target: Option<&TableReference>,
-    visible_relation: Option<&TableReference>,
-    scan_table: &TableReference,
-) -> bool {
-    let Some(target) = target else {
-        return true;
-    };
-    match visible_relation {
-        Some(alias) => target.resolved_eq(alias),
-        None => target.resolved_eq(scan_table),
-    }
-}
-
-fn combine_row_locks(
-    left: TableScanRowLock,
-    right: TableScanRowLock,
-) -> Result<TableScanRowLock> {
-    if left.wait_policy != TableScanRowLockWaitPolicy::Block
-        && right.wait_policy != TableScanRowLockWaitPolicy::Block
-        && left.wait_policy != right.wait_policy
-    {
-        return plan_err!(
-            "conflicting row lock wait policies for the same table scan: {} and {}",
-            left.wait_policy,
-            right.wait_policy
-        );
-    }
-
-    let wait_policy = if left.wait_policy != TableScanRowLockWaitPolicy::Block {
-        left.wait_policy
-    } else {
-        right.wait_policy
-    };
-
-    Ok(TableScanRowLock {
-        mode: left.mode.max(right.mode),
-        wait_policy,
-    })
 }
 
 /// Returns the order by expressions from the query.

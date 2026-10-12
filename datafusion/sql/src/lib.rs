@@ -49,6 +49,7 @@ mod cte;
 pub mod definition_plan;
 mod dml_front;
 mod expr;
+mod locking;
 mod outer_aggregates;
 pub mod parser;
 pub mod planner;
