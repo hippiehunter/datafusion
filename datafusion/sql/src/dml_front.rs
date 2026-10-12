@@ -204,6 +204,12 @@ fn reject_generated_assignments(
 /// is omitted from the storage write contract. The parsed VALUES rows remain
 /// untouched and are still planned in their declared target shape. `None`
 /// means every target position is provided.
+///
+/// The returned identifiers are normalized by the caller exactly as the
+/// statement's own column list is: a column the statement named keeps the
+/// identifier it was written with, and a positional column, whose name is
+/// already the relation's resolved spelling, is quoted so normalization
+/// leaves it as it is.
 pub(crate) fn insert_written_columns(
     columns: &[Ident],
     source: &Query,
@@ -214,15 +220,15 @@ pub(crate) fn insert_written_columns(
     };
     // The columns the values are positional against: the statement's own
     // list, or the relation's columns when it wrote none.
-    let target_columns: Vec<&str> = if columns.is_empty() {
-        positional_columns.iter().map(String::as_str).collect()
+    let width = if columns.is_empty() {
+        positional_columns.len()
     } else {
-        columns.iter().map(|ident| ident.value.as_str()).collect()
+        columns.len()
     };
-    if target_columns.is_empty() {
+    if width == 0 {
         return None;
     }
-    let written: Vec<usize> = (0..target_columns.len())
+    let written: Vec<usize> = (0..width)
         .filter(|&position| {
             values.rows.iter().any(|row| {
                 row.get(position)
@@ -230,13 +236,19 @@ pub(crate) fn insert_written_columns(
             })
         })
         .collect();
-    if written.len() == target_columns.len() {
+    if written.len() == width {
         return None;
     }
     Some(
         written
-            .iter()
-            .map(|&position| Ident::new(target_columns[position]))
+            .into_iter()
+            .map(|position| {
+                if columns.is_empty() {
+                    Ident::with_quote('"', positional_columns[position].as_str())
+                } else {
+                    columns[position].clone()
+                }
+            })
             .collect(),
     )
 }

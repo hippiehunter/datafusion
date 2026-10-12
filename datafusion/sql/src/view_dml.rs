@@ -132,7 +132,9 @@ pub(crate) struct RewrittenInsert {
 /// Retarget an INSERT's pieces onto the base relation. Without a column list
 /// the write covers the view's columns in order, as wide as the source is;
 /// naming them explicitly is what lets the base relation's own defaults fill
-/// the rest.
+/// the rest. Base column names are the catalog's resolved spellings, so the
+/// rewritten list quotes them and identifier normalization leaves them as
+/// they are.
 pub(crate) fn rewrite_insert(
     target: &ViewDmlTarget,
     _written_table: &ObjectName,
@@ -152,7 +154,7 @@ pub(crate) fn rewrite_insert(
                     column: view_column.clone(),
                 });
             };
-            rewritten.push(Ident::new(base_column.clone()));
+            rewritten.push(Ident::with_quote('"', base_column.as_str()));
         }
         rewritten
     } else {
@@ -167,6 +169,7 @@ pub(crate) fn rewrite_insert(
                 })?;
             let mut renamed = column.clone();
             renamed.value = base_column.to_string();
+            renamed.quote_style = Some('"');
             rewritten.push(renamed);
         }
         rewritten
@@ -257,7 +260,7 @@ pub(crate) fn rewrite_update(
         *name = target.base_relation.clone();
         if alias.is_none() && needs_alias {
             *alias = Some(TableAlias {
-                name: Ident::new(target.view_name.clone()),
+                name: Ident::with_quote('"', target.view_name.as_str()),
                 columns: Vec::new(),
                 implicit: false,
             });
@@ -309,7 +312,7 @@ pub(crate) fn rewrite_delete(
         *name = target.base_relation.clone();
         if alias.is_none() && needs_alias {
             *alias = Some(TableAlias {
-                name: Ident::new(target.view_name.clone()),
+                name: Ident::with_quote('"', target.view_name.as_str()),
                 columns: Vec::new(),
                 implicit: false,
             });
@@ -355,10 +358,12 @@ fn rewrite_assignment_target(
                     verb: "update",
                     column: written.value.clone(),
                 })?;
+        // The base column name is the catalog's resolved spelling; quoting
+        // it keeps identifier normalization from changing it again.
         let last = name.0.len().saturating_sub(1);
         name.0[last] = ObjectNamePart::Identifier(Ident {
             value: base_column.to_string(),
-            quote_style: written.quote_style,
+            quote_style: Some('"'),
             span: written.span,
         });
     }

@@ -958,6 +958,63 @@ fn plan_insert_default_values() {
     );
 }
 
+/// The provided-column contract a planned INSERT records on its DML node.
+fn insert_target_columns(sql: &str) -> Option<Vec<String>> {
+    match logical_plan(sql).unwrap() {
+        LogicalPlan::Dml(dml) => dml.target_columns,
+        other => panic!("Expected a DML plan, got {other:?}"),
+    }
+}
+
+/// A VALUES position every row leaves to DEFAULT is dropped from the
+/// provided-column contract; the columns that remain keep the spelling the
+/// statement or the relation gave them rather than being renormalized.
+#[test]
+fn plan_insert_default_keeps_quoted_target_columns() {
+    let named = "insert into person_quoted_cols (id, \"First Name\", \"Last Name\") \
+         values (DEFAULT, 'Alan', DEFAULT), (DEFAULT, 'Ada', DEFAULT)";
+    assert_eq!(
+        insert_target_columns(named),
+        Some(vec!["First Name".to_string()])
+    );
+
+    let positional = "insert into person_quoted_cols \
+         values (DEFAULT, 'Alan', 'Turing', 41, DEFAULT, 1.0, DEFAULT, DEFAULT)";
+    assert_eq!(
+        insert_target_columns(positional),
+        Some(vec![
+            "First Name".to_string(),
+            "Last Name".to_string(),
+            "Age".to_string(),
+            "Salary".to_string(),
+        ])
+    );
+
+    let short_positional =
+        "insert into person_quoted_cols values (DEFAULT, 'Alan', DEFAULT)";
+    assert_eq!(
+        insert_target_columns(short_positional),
+        Some(vec!["First Name".to_string()])
+    );
+
+    let unquoted_named =
+        "insert into \"UPPERCASE_test\" (\"Id\", lower) values (DEFAULT, 1)";
+    assert_eq!(
+        insert_target_columns(unquoted_named),
+        Some(vec!["lower".to_string()])
+    );
+}
+
+/// `DEFAULT VALUES` re-enters INSERT planning with the already-resolved
+/// target relation, which must resolve to the same relation again.
+#[test]
+fn plan_insert_default_values_into_quoted_table() {
+    assert_eq!(
+        insert_target_columns("insert into \"UPPERCASE_test\" default values"),
+        Some(Vec::new())
+    );
+}
+
 #[test]
 fn plan_insert_no_target_columns() {
     let sql = "INSERT INTO test_decimal VALUES (1, 2), (3, 4)";

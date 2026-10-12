@@ -5554,15 +5554,17 @@ impl SqlToRel<'_> {
             for_clause: None,
         });
 
-        // Convert TableReference back to ObjectName
+        // Convert TableReference back to ObjectName. Its parts are already
+        // normalized, so they are quoted to pass through normalization again
+        // unchanged.
         let mut parts = vec![];
         if let Some(catalog_name) = table_name.catalog() {
-            parts.push(Ident::new(catalog_name));
+            parts.push(Ident::with_quote('"', catalog_name));
         }
         if let Some(schema_name) = table_name.schema() {
-            parts.push(Ident::new(schema_name));
+            parts.push(Ident::with_quote('"', schema_name));
         }
-        parts.push(Ident::new(table_name.table()));
+        parts.push(Ident::with_quote('"', table_name.table()));
         let object_name = ObjectName::from(parts);
 
         self.insert_to_plan_ref(
