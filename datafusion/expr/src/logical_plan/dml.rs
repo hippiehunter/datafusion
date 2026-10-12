@@ -502,16 +502,35 @@ impl DmlStatement {
         }
     }
 
+    /// The statement's ON CONFLICT DO UPDATE action, if it has one.
+    pub fn conflict_update(&self) -> Option<&DoUpdateAction> {
+        match &self.op {
+            WriteOp::Insert(InsertOp::WithConflictClause(OnConflict {
+                action: OnConflictAction::DoUpdate(update),
+                ..
+            })) => Some(update),
+            _ => None,
+        }
+    }
+
+    /// The statement's ON CONFLICT DO UPDATE action, if it has one.
+    pub fn conflict_update_mut(&mut self) -> Option<&mut DoUpdateAction> {
+        match &mut self.op {
+            WriteOp::Insert(InsertOp::WithConflictClause(OnConflict {
+                action: OnConflictAction::DoUpdate(update),
+                ..
+            })) => Some(update),
+            _ => None,
+        }
+    }
+
     /// The row an ON CONFLICT DO UPDATE action's assignments and condition
     /// read, or `None` without such an action: the conflicting target row
     /// under the name the statement gives the target (its alias, else its
     /// table name) beside the proposed row as `excluded`, both with the
     /// target's columns.
     pub fn conflict_update_scope(&self) -> Result<Option<DFSchemaRef>> {
-        let WriteOp::Insert(InsertOp::WithConflictClause(conflict)) = &self.op else {
-            return Ok(None);
-        };
-        let OnConflictAction::DoUpdate(update) = &conflict.action else {
+        let Some(update) = self.conflict_update() else {
             return Ok(None);
         };
         let target_row = match update.target_row_relation()? {

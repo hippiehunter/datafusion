@@ -43,9 +43,7 @@ use crate::{
     MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Projection,
     RecursiveQuery, Repartition, Sort, Subquery, SubqueryAlias, TableScan, Union, Unnest,
     UserDefinedLogicalNode, Values, Window,
-    dml::{
-        CopyFrom, CopyTo, DoUpdateAction, InsertOp, OnConflict, OnConflictAction, WriteOp,
-    },
+    dml::{CopyFrom, CopyTo},
     logical_plan::plan::{GraphTable, JsonTable},
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
@@ -961,7 +959,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Dml(dml) => {
                 if let Some(scope) = dml.conflict_update_scope()?
-                    && let Some(update) = conflict_update(dml)
+                    && let Some(update) = dml.conflict_update()
                 {
                     let mut exprs = update
                         .assignments
@@ -1002,7 +1000,7 @@ impl LogicalPlan {
             LogicalPlan::Dml(mut dml) => {
                 let mut transformed = false;
                 if let Some(scope) = dml.conflict_update_scope()?
-                    && let Some(update) = conflict_update_mut(&mut dml)
+                    && let Some(update) = dml.conflict_update_mut()
                 {
                     for assignment in &mut update.assignments {
                         let value = f(assignment.value.clone(), &scope)?;
@@ -1195,27 +1193,6 @@ impl LogicalPlan {
                 _ => Ok(Transformed::no(expr)),
             })
         })
-    }
-}
-
-/// A DML statement's ON CONFLICT DO UPDATE action, if it has one.
-fn conflict_update(dml: &DmlStatement) -> Option<&DoUpdateAction> {
-    match &dml.op {
-        WriteOp::Insert(InsertOp::WithConflictClause(OnConflict {
-            action: OnConflictAction::DoUpdate(update),
-            ..
-        })) => Some(update),
-        _ => None,
-    }
-}
-
-fn conflict_update_mut(dml: &mut DmlStatement) -> Option<&mut DoUpdateAction> {
-    match &mut dml.op {
-        WriteOp::Insert(InsertOp::WithConflictClause(OnConflict {
-            action: OnConflictAction::DoUpdate(update),
-            ..
-        })) => Some(update),
-        _ => None,
     }
 }
 
