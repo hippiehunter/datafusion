@@ -502,6 +502,29 @@ impl DmlStatement {
         }
     }
 
+    /// The row an ON CONFLICT DO UPDATE action's assignments and condition
+    /// read, or `None` without such an action: the conflicting target row
+    /// under the name the statement gives the target (its alias, else its
+    /// table name) beside the proposed row as `excluded`, both with the
+    /// target's columns.
+    pub fn conflict_update_scope(&self) -> Result<Option<DFSchemaRef>> {
+        let WriteOp::Insert(InsertOp::WithConflictClause(conflict)) = &self.op else {
+            return Ok(None);
+        };
+        let OnConflictAction::DoUpdate(update) = &conflict.action else {
+            return Ok(None);
+        };
+        let target_row = match update.target_row_relation()? {
+            Some(relation) => relation,
+            None => TableReference::bare(self.table_name.table()),
+        };
+        let target = self.target.schema();
+        let target_row = DFSchema::try_from_qualified_schema(target_row, &target)?;
+        let excluded =
+            DFSchema::try_from_qualified_schema(TableReference::bare(EXCLUDED), &target)?;
+        Ok(Some(Arc::new(target_row.join(&excluded)?)))
+    }
+
     /// Return a descriptive name of this [`DmlStatement`]
     pub fn name(&self) -> &str {
         self.op.name()
@@ -728,7 +751,47 @@ impl DoUpdateAction {
             selection,
         }
     }
+
+    /// The name the action's expressions give the conflicting target row:
+    /// the one relation other than `excluded` their columns are qualified
+    /// with, or `None` when they read no column of it.
+    fn target_row_relation(&self) -> Result<Option<TableReference>> {
+        let mut relation: Option<TableReference> = None;
+        for expr in self
+            .assignments
+            .iter()
+            .map(|assignment| &assignment.value)
+            .chain(&self.selection)
+        {
+            expr.apply(|node| {
+                let Expr::Column(Column {
+                    relation: Some(qualifier),
+                    ..
+                }) = node
+                else {
+                    return Ok(TreeNodeRecursion::Continue);
+                };
+                if qualifier.table() == EXCLUDED && qualifier.schema().is_none() {
+                    return Ok(TreeNodeRecursion::Continue);
+                }
+                match &relation {
+                    Some(found) if found != qualifier => internal_err!(
+                        "ON CONFLICT DO UPDATE reads two target rows, {found} and {qualifier}"
+                    ),
+                    Some(_) => Ok(TreeNodeRecursion::Continue),
+                    None => {
+                        relation = Some(qualifier.clone());
+                        Ok(TreeNodeRecursion::Continue)
+                    }
+                }
+            })?;
+        }
+        Ok(relation)
+    }
 }
+
+/// The name an ON CONFLICT DO UPDATE action gives the proposed row.
+pub const EXCLUDED: &str = "excluded";
 
 /// A column assignment in an ON CONFLICT DO UPDATE clause.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]

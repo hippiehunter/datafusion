@@ -55,8 +55,8 @@ use datafusion_common::{
     unqualified_field_not_found,
 };
 use datafusion_expr::dml::{
-    ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, InsertOp,
-    OnConflict, OnConflictAction, TargetSelectRights, written_row_schema,
+    ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, EXCLUDED,
+    InsertOp, OnConflict, OnConflictAction, TargetSelectRights, written_row_schema,
 };
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -5151,7 +5151,7 @@ impl SqlToRel<'_> {
                 )?;
 
                 let excluded_schema = DFSchema::try_from_qualified_schema(
-                    TableReference::bare("excluded"),
+                    TableReference::bare(EXCLUDED),
                     &table_schema.as_arrow().clone(),
                 )?;
 
@@ -5276,6 +5276,23 @@ impl SqlToRel<'_> {
                             &[&[&combined_schema]],
                             &[using_columns.into()],
                         )?;
+                        // The value reaches the column by assignment, exactly
+                        // as an UPDATE's does.
+                        let field = table_schema
+                            .field_with_unqualified_name(&target)
+                            .map_err(|_| {
+                                plan_datafusion_err!(
+                                    "ON CONFLICT assignment targets unknown column {target}"
+                                )
+                            })?;
+                        let value = match self.context_provider.plan_assignment_coercion(
+                            &value,
+                            field,
+                            &combined_schema,
+                        )? {
+                            Some(coerced) => coerced,
+                            None => value.cast_to(field.data_type(), &combined_schema)?,
+                        };
 
                         assignments.push(ConflictAssignment { target, value });
                     }
@@ -5351,7 +5368,7 @@ impl SqlToRel<'_> {
 
                 // A sub-select is computed on the INSERT source and read back
                 // as a column of EXCLUDED.
-                let excluded_ref = TableReference::bare("excluded");
+                let excluded_ref = TableReference::bare(EXCLUDED);
                 let mut hoisted = Vec::new();
                 let assignments = assignments
                     .into_iter()

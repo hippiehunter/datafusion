@@ -43,19 +43,23 @@ use crate::{
     MatchRecognize, Merge, MergeAction, MergeInsertKind, Partitioning, Projection,
     RecursiveQuery, Repartition, Sort, Subquery, SubqueryAlias, TableScan, Union, Unnest,
     UserDefinedLogicalNode, Values, Window,
-    dml::{CopyFrom, CopyTo},
+    dml::{
+        CopyFrom, CopyTo, DoUpdateAction, InsertOp, OnConflict, OnConflictAction, WriteOp,
+    },
     logical_plan::plan::{GraphTable, JsonTable},
 };
 use datafusion_common::tree_node::TreeNodeRefContainer;
 
 use std::sync::Arc;
 
+use crate::ExprSchemable;
 use crate::expr::{Exists, InSubquery};
+use crate::expr_rewriter::NamePreserver;
 use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeContainer, TreeNodeIterator, TreeNodeRecursion,
     TreeNodeRewriter, TreeNodeVisitor,
 };
-use datafusion_common::{Result, internal_err};
+use datafusion_common::{DFSchema, DFSchemaRef, Result, internal_err};
 
 type LogicalPlanApply<'a> =
     dyn for<'plan> FnMut(&'plan LogicalPlan) -> Result<TreeNodeRecursion> + 'a;
@@ -930,6 +934,118 @@ impl LogicalPlan {
         })
     }
 
+    /// Calls `f` on each expression of this node that is evaluated over a row
+    /// of its own rather than over the node's inputs, with that row's schema:
+    /// a DML or MERGE `RETURNING` list (the row RETURNING reads, see
+    /// [`DmlStatement::returning_eval_schema`]), and an ON CONFLICT DO UPDATE
+    /// action's assignments and condition (the conflicting target row and
+    /// `excluded`, see [`DmlStatement::conflict_update_scope`]).
+    ///
+    /// [`Self::apply_expressions`] and [`Self::map_expressions`] do not visit
+    /// these: their callers read each expression against the node's input
+    /// schema, which does not hold the columns these read.
+    pub fn apply_scoped_expressions<
+        F: FnMut(&Expr, &DFSchema) -> Result<TreeNodeRecursion>,
+    >(
+        &self,
+        mut f: F,
+    ) -> Result<TreeNodeRecursion> {
+        let mut visit = |exprs: &mut dyn Iterator<Item = &Expr>, scope: &DFSchema| {
+            for expr in exprs {
+                if f(expr, scope)? == TreeNodeRecursion::Stop {
+                    return Ok(TreeNodeRecursion::Stop);
+                }
+            }
+            Ok(TreeNodeRecursion::Continue)
+        };
+        match self {
+            LogicalPlan::Dml(dml) => {
+                if let Some(scope) = dml.conflict_update_scope()?
+                    && let Some(update) = conflict_update(dml)
+                {
+                    let mut exprs = update
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.value)
+                        .chain(&update.selection);
+                    if visit(&mut exprs, &scope)? == TreeNodeRecursion::Stop {
+                        return Ok(TreeNodeRecursion::Stop);
+                    }
+                }
+                match &dml.returning_exprs {
+                    Some(exprs) => {
+                        let scope = dml.returning_eval_schema()?;
+                        visit(&mut exprs.iter(), &scope)
+                    }
+                    None => Ok(TreeNodeRecursion::Continue),
+                }
+            }
+            LogicalPlan::Merge(merge) => match &merge.returning_exprs {
+                Some(exprs) => visit(&mut exprs.iter(), &merge_returning_scope(merge)),
+                None => Ok(TreeNodeRecursion::Continue),
+            },
+            _ => Ok(TreeNodeRecursion::Continue),
+        }
+    }
+
+    /// Rewrites each expression [`Self::apply_scoped_expressions`] visits
+    /// with `f`, against the same schema. A rewritten `RETURNING` expression
+    /// keeps its output name, and the node's output schema takes the type a
+    /// rewrite gives one.
+    pub fn map_scoped_expressions<
+        F: FnMut(Expr, &DFSchema) -> Result<Transformed<Expr>>,
+    >(
+        self,
+        mut f: F,
+    ) -> Result<Transformed<Self>> {
+        match self {
+            LogicalPlan::Dml(mut dml) => {
+                let mut transformed = false;
+                if let Some(scope) = dml.conflict_update_scope()?
+                    && let Some(update) = conflict_update_mut(&mut dml)
+                {
+                    for assignment in &mut update.assignments {
+                        let value = f(assignment.value.clone(), &scope)?;
+                        transformed |= value.transformed;
+                        assignment.value = value.data;
+                    }
+                    if let Some(selection) = update.selection.take() {
+                        let selection = f(selection, &scope)?;
+                        transformed |= selection.transformed;
+                        update.selection = Some(selection.data);
+                    }
+                }
+                if dml.returning_exprs.is_some() {
+                    let scope = dml.returning_eval_schema()?;
+                    transformed |= map_returning(
+                        &mut dml.returning_exprs,
+                        &mut dml.output_schema,
+                        &scope,
+                        &mut f,
+                    )?;
+                }
+                Ok(Transformed::new_transformed(
+                    LogicalPlan::Dml(dml),
+                    transformed,
+                ))
+            }
+            LogicalPlan::Merge(mut merge) => {
+                let scope = merge_returning_scope(&merge);
+                let transformed = map_returning(
+                    &mut merge.returning_exprs,
+                    &mut merge.output_schema,
+                    &scope,
+                    &mut f,
+                )?;
+                Ok(Transformed::new_transformed(
+                    LogicalPlan::Merge(merge),
+                    transformed,
+                ))
+            }
+            other => Ok(Transformed::no(other)),
+        }
+    }
+
     /// Visits a plan similarly to [`Self::visit`], including subqueries that
     /// may appear in expressions such as `IN (SELECT ...)`.
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
@@ -1080,4 +1196,76 @@ impl LogicalPlan {
             })
         })
     }
+}
+
+/// A DML statement's ON CONFLICT DO UPDATE action, if it has one.
+fn conflict_update(dml: &DmlStatement) -> Option<&DoUpdateAction> {
+    match &dml.op {
+        WriteOp::Insert(InsertOp::WithConflictClause(OnConflict {
+            action: OnConflictAction::DoUpdate(update),
+            ..
+        })) => Some(update),
+        _ => None,
+    }
+}
+
+fn conflict_update_mut(dml: &mut DmlStatement) -> Option<&mut DoUpdateAction> {
+    match &mut dml.op {
+        WriteOp::Insert(InsertOp::WithConflictClause(OnConflict {
+            action: OnConflictAction::DoUpdate(update),
+            ..
+        })) => Some(update),
+        _ => None,
+    }
+}
+
+/// The row a MERGE's `RETURNING` reads: its context's images, else the
+/// target row.
+fn merge_returning_scope(merge: &Merge) -> DFSchemaRef {
+    match &merge.returning_context {
+        Some(context) => Arc::clone(context.eval_schema()),
+        None => Arc::clone(merge.target.schema()),
+    }
+}
+
+/// Rewrite a `RETURNING` list in place over `scope`, keeping each
+/// expression's output name and updating `output_schema` for a type a
+/// rewrite changes. Whether anything changed.
+fn map_returning<F: FnMut(Expr, &DFSchema) -> Result<Transformed<Expr>>>(
+    returning_exprs: &mut Option<Vec<Expr>>,
+    output_schema: &mut DFSchemaRef,
+    scope: &DFSchema,
+    f: &mut F,
+) -> Result<bool> {
+    let Some(exprs) = returning_exprs else {
+        return Ok(false);
+    };
+    let preserver = NamePreserver::new_for_projection();
+    let mut columns = output_schema
+        .iter()
+        .map(|(qualifier, field)| (qualifier.cloned(), Arc::clone(field)))
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    for (index, expr) in exprs.iter_mut().enumerate() {
+        let name = preserver.save(expr);
+        let rewritten = f(expr.clone(), scope)?;
+        if !rewritten.transformed {
+            continue;
+        }
+        changed = true;
+        *expr = name.restore(rewritten.data);
+        if let Some((_, column)) = columns.get_mut(index) {
+            let (_, field) = expr.to_field(scope)?;
+            if field.data_type() != column.data_type() {
+                *column = Arc::new(field.as_ref().clone().with_name(column.name()));
+            }
+        }
+    }
+    if changed {
+        *output_schema = Arc::new(DFSchema::new_with_metadata(
+            columns,
+            output_schema.metadata().clone(),
+        )?);
+    }
+    Ok(changed)
 }

@@ -314,6 +314,55 @@ fn insert_target_alias_names_the_target_row_in_the_conflict_update() {
     assert_eq!(column.name, "first_name");
 }
 
+/// An ON CONFLICT DO UPDATE value reaches its column by assignment, as an
+/// UPDATE's does, and the action's expressions are visited over the row
+/// they read: the conflicting target row and `excluded`, not the
+/// statement's input.
+#[test]
+fn conflict_update_values_are_assigned_and_visited_over_their_scope() {
+    let plan = logical_plan(
+        "INSERT INTO person AS p (id, first_name, last_name, age) \
+         VALUES (1, 'A', 'B', 3) \
+         ON CONFLICT (id) DO UPDATE SET age = 2.5, last_name = excluded.first_name \
+         WHERE p.age < excluded.age",
+    )
+    .unwrap();
+    let LogicalPlan::Dml(dml) = &plan else {
+        panic!("expected DML plan");
+    };
+    let scope = dml
+        .conflict_update_scope()
+        .unwrap()
+        .expect("a DO UPDATE scope");
+    let qualifiers = scope
+        .iter()
+        .map(|(qualifier, _)| qualifier.map(|q| q.table().to_string()))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        qualifiers,
+        [Some("excluded".to_string()), Some("person".to_string())]
+            .into_iter()
+            .collect()
+    );
+
+    let mut visited = vec![];
+    plan.apply_scoped_expressions(|expr, scope| {
+        visited.push((expr.to_string(), expr.get_type(scope).unwrap()));
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    assert_eq!(
+        visited,
+        vec![
+            ("CAST(Float64(2.5) AS Int32)".to_string(), DataType::Int32),
+            ("excluded.first_name".to_string(), DataType::Utf8),
+            ("person.age < excluded.age".to_string(), DataType::Boolean),
+        ]
+    );
+    // The input's own expression visitors leave them alone.
+    assert!(plan.expressions().is_empty());
+}
+
 #[test]
 fn insert_target_alias_hides_the_relation_name() {
     let error = logical_plan(
