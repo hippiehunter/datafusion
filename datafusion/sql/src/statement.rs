@@ -55,8 +55,9 @@ use datafusion_common::{
     unqualified_field_not_found,
 };
 use datafusion_expr::dml::{
-    ConflictAssignment, ConflictTarget, CopyFrom, CopyTo, DoUpdateAction, EXCLUDED,
-    InsertOp, OnConflict, OnConflictAction, TargetSelectRights, written_row_schema,
+    CONFLICT_SOURCE_COLUMN_PREFIX, ConflictAssignment, ConflictTarget, CopyFrom, CopyTo,
+    DoUpdateAction, EXCLUDED, InsertOp, OnConflict, OnConflictAction, TargetSelectRights,
+    written_row_schema,
 };
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
@@ -3177,6 +3178,25 @@ impl SqlToRel<'_> {
         Ok(plan)
     }
 
+    /// `value` as it reaches `column` by assignment: the provider's
+    /// assignment coercion, else a cast to the column's type. Every value a
+    /// statement writes into a column takes this one path, a default the
+    /// statement leaves to the column included.
+    fn assign_to_column(
+        &self,
+        value: Expr,
+        column: &FieldRef,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        match self
+            .context_provider
+            .plan_assignment_coercion(&value, column, schema)?
+        {
+            Some(coerced) => Ok(coerced),
+            None => value.cast_to(column.data_type(), schema),
+        }
+    }
+
     /// Restate one MERGE `INSERT` value row in the target row's own column
     /// order, filling every column the statement does not name from its
     /// declared default (NULL when it has none) — the resolution an omitted
@@ -3233,18 +3253,21 @@ impl SqlToRel<'_> {
 
         let mut row = Vec::with_capacity(target_schema.fields().len());
         for field in target_schema.fields() {
-            // Every value lands in the column's declared type, so an untyped
+            // Every value reaches its column by assignment, so an untyped
             // literal such as NULL reaches the writer as that column's value
             // rather than as an unresolved null.
             let expr = match positions.get(field.name().as_str()) {
-                Some(index) => values[*index]
-                    .clone()
-                    .cast_to(field.data_type(), value_schema)?,
-                None => table_source
-                    .get_column_default(field.name())
-                    .cloned()
-                    .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
-                    .cast_to(field.data_type(), &DFSchema::empty())?,
+                Some(index) => {
+                    self.assign_to_column(values[*index].clone(), field, value_schema)?
+                }
+                None => self.assign_to_column(
+                    table_source
+                        .get_column_default(field.name())
+                        .cloned()
+                        .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None)),
+                    field,
+                    &DFSchema::empty(),
+                )?,
             };
             row.push(expr);
         }
@@ -3559,12 +3582,22 @@ impl SqlToRel<'_> {
                 } => {
                     let mut assignments = Vec::with_capacity(update_assignments.len());
                     for assignment in update_assignments {
-                        let value = normalize_expr(assignment.value)?;
-                        assignments.push(MergeAssignment {
-                            target: self
-                                .lower_merge_assignment_target(assignment.target)?,
-                            value,
-                        });
+                        let target =
+                            self.lower_merge_assignment_target(assignment.target)?;
+                        let mut value = normalize_expr(assignment.value)?;
+                        // A column's value reaches it by assignment, exactly
+                        // as an UPDATE's does.
+                        if let Some(name) = target.column_name() {
+                            let (_, field) =
+                                target_schema.fields().find(name).ok_or_else(|| {
+                                    unqualified_field_not_found(
+                                        name,
+                                        target_plan.schema(),
+                                    )
+                                })?;
+                            value = self.assign_to_column(value, field, clause_schema)?;
+                        }
+                        assignments.push(MergeAssignment { target, value });
                     }
                     MergeAction::Update(MergeUpdateExpr {
                         assignments,
@@ -4102,17 +4135,11 @@ impl SqlToRel<'_> {
         // Build updated values for each column, using the previous value if not modified
         let mut projected_exprs = table_schema
             .iter()
-            .map(|(qualifier, field)| {
+            .map(|(_, field)| {
+                // The stored value is read under the relation the target was
+                // scanned as: its alias, else its own name.
                 let stored_column = || {
-                    // If the target table has an alias, use it to qualify the column name
-                    if let Some(alias) = &table_alias {
-                        Expr::Column(Column::new(
-                            Some(self.ident_normalizer.normalize(alias.name.clone())),
-                            field.name(),
-                        ))
-                    } else {
-                        Expr::Column(Column::from((qualifier, field)))
-                    }
+                    Expr::Column(Column::new(Some(target_relation.clone()), field.name()))
                 };
                 if let Some(path_assignments) = path_assign_map.remove(field.name()) {
                     let mut base = stored_column();
@@ -4191,15 +4218,7 @@ impl SqlToRel<'_> {
                                 .take()
                                 .or_else(|| Some(Arc::clone(field)));
                         }
-                        // Cast to target column type, if necessary
-                        match self.context_provider.plan_assignment_coercion(
-                            &expr,
-                            field,
-                            source.schema(),
-                        )? {
-                            Some(coerced) => coerced,
-                            None => expr.cast_to(field.data_type(), source.schema())?,
-                        }
+                        self.assign_to_column(expr, field, source.schema())?
                     }
                     None => stored_column(),
                 };
@@ -4229,28 +4248,15 @@ impl SqlToRel<'_> {
                     );
                 };
                 let value = substitute_bound_row_columns(expression, &row_values)?;
-                let value = match self.context_provider.plan_assignment_coercion(
-                    &value,
-                    field,
-                    source.schema(),
-                )? {
-                    Some(coerced) => coerced,
-                    None => value.cast_to(field.data_type(), source.schema())?,
-                };
+                let value = self.assign_to_column(value, field, source.schema())?;
                 projected_exprs[position] = value.alias(field.name());
             }
         }
         if preserve_view_old {
-            projected_exprs.extend(table_schema.iter().enumerate().map(
-                |(index, (qualifier, field))| {
-                    let column = match &table_alias {
-                        Some(alias) => Expr::Column(Column::new(
-                            Some(self.ident_normalizer.normalize(alias.name.clone())),
-                            field.name(),
-                        )),
-                        None => Expr::Column(Column::from((qualifier, field))),
-                    };
-                    column.alias(format!("__dbl_view_old_{index}"))
+            projected_exprs.extend(table_schema.fields().iter().enumerate().map(
+                |(index, field)| {
+                    Expr::Column(Column::new(Some(target_relation.clone()), field.name()))
+                        .alias(format!("__dbl_view_old_{index}"))
                 },
             ));
         }
@@ -4874,15 +4880,7 @@ impl SqlToRel<'_> {
                         let value = Expr::Column(Column::from(
                             source.schema().qualified_field(*v),
                         ));
-                        match self.context_provider.plan_assignment_coercion(
-                            &value,
-                            target_field,
-                            source.schema(),
-                        )? {
-                            Some(coerced) => coerced,
-                            None => value
-                                .cast_to(target_field.data_type(), source.schema())?,
-                        }
+                        self.assign_to_column(value, target_field, source.schema())?
                     }
                     // The value is not specified. Fill in the default value for the column.
                     [] => {
@@ -4895,15 +4893,7 @@ impl SqlToRel<'_> {
                         // a written value does, so it takes the same coercion: a
                         // dialect whose column carrier has no Arrow cast from the
                         // default expression's type resolves the pair here.
-                        match self.context_provider.plan_assignment_coercion(
-                            &default,
-                            target_field,
-                            &DFSchema::empty(),
-                        )? {
-                            Some(coerced) => coerced,
-                            None => default
-                                .cast_to(target_field.data_type(), &DFSchema::empty())?,
-                        }
+                        self.assign_to_column(default, target_field, &DFSchema::empty())?
                     }
                     // Written through paths: each applies to the result of the
                     // previous one, starting from a NULL of the column's type.
@@ -5285,14 +5275,8 @@ impl SqlToRel<'_> {
                                     "ON CONFLICT assignment targets unknown column {target}"
                                 )
                             })?;
-                        let value = match self.context_provider.plan_assignment_coercion(
-                            &value,
-                            field,
-                            &combined_schema,
-                        )? {
-                            Some(coerced) => coerced,
-                            None => value.cast_to(field.data_type(), &combined_schema)?,
-                        };
+                        let value =
+                            self.assign_to_column(value, field, &combined_schema)?;
 
                         assignments.push(ConflictAssignment { target, value });
                     }
@@ -5333,14 +5317,8 @@ impl SqlToRel<'_> {
                             })?;
                         let value =
                             substitute_bound_row_columns(expression, &row_values)?;
-                        let value = match self.context_provider.plan_assignment_coercion(
-                            &value,
-                            field,
-                            &combined_schema,
-                        )? {
-                            Some(coerced) => coerced,
-                            None => value.cast_to(field.data_type(), &combined_schema)?,
-                        };
+                        let value =
+                            self.assign_to_column(value, field, &combined_schema)?;
                         assignments.push(ConflictAssignment {
                             target: column.clone(),
                             value,
@@ -5799,7 +5777,7 @@ fn hoist_conflict_subqueries(
         ) {
             return Ok(Transformed::no(node));
         }
-        let name = format!("__conflict_src_{}", hoisted.len());
+        let name = format!("{CONFLICT_SOURCE_COLUMN_PREFIX}{}", hoisted.len());
         let computed = excluded_refs_to_source(node, target, excluded)?;
         hoisted.push(computed.alias(&name));
         Ok(Transformed::new(

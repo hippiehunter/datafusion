@@ -526,9 +526,11 @@ impl DmlStatement {
 
     /// The row an ON CONFLICT DO UPDATE action's assignments and condition
     /// read, or `None` without such an action: the conflicting target row
-    /// under the name the statement gives the target (its alias, else its
-    /// table name) beside the proposed row as `excluded`, both with the
-    /// target's columns.
+    /// under the name the action's expressions give it beside the proposed
+    /// row as `excluded`. Both carry the target's columns; `excluded` also
+    /// carries each sub-select the planner computed on the INSERT source
+    /// (the input columns named with [`CONFLICT_SOURCE_COLUMN_PREFIX`]),
+    /// which follow the target's columns in the input row.
     pub fn conflict_update_scope(&self) -> Result<Option<DFSchemaRef>> {
         let Some(update) = self.conflict_update() else {
             return Ok(None);
@@ -539,8 +541,20 @@ impl DmlStatement {
         };
         let target = self.target.schema();
         let target_row = DFSchema::try_from_qualified_schema(target_row, &target)?;
-        let excluded =
-            DFSchema::try_from_qualified_schema(TableReference::bare(EXCLUDED), &target)?;
+        let excluded = Schema::new(
+            target
+                .fields()
+                .iter()
+                .chain(self.input.schema().fields().iter().filter(|field| {
+                    field.name().starts_with(CONFLICT_SOURCE_COLUMN_PREFIX)
+                }))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let excluded = DFSchema::try_from_qualified_schema(
+            TableReference::bare(EXCLUDED),
+            &excluded,
+        )?;
         Ok(Some(Arc::new(target_row.join(&excluded)?)))
     }
 
@@ -811,6 +825,11 @@ impl DoUpdateAction {
 
 /// The name an ON CONFLICT DO UPDATE action gives the proposed row.
 pub const EXCLUDED: &str = "excluded";
+
+/// The name prefix of an INSERT source column the planner adds for a DO
+/// UPDATE sub-select. The sub-select is computed on the source and the action
+/// reads it back as a column of `excluded`.
+pub const CONFLICT_SOURCE_COLUMN_PREFIX: &str = "__conflict_src_";
 
 /// A column assignment in an ON CONFLICT DO UPDATE clause.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]

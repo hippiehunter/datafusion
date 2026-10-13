@@ -363,6 +363,28 @@ fn conflict_update_values_are_assigned_and_visited_over_their_scope() {
     assert!(plan.expressions().is_empty());
 }
 
+/// A DO UPDATE sub-select is computed on the INSERT source and read back as
+/// a column of `excluded`, so the action's scope carries that column too.
+#[test]
+fn conflict_update_scope_carries_a_sub_select_computed_on_the_source() {
+    let plan = logical_plan(
+        "INSERT INTO person (id, first_name, last_name) VALUES (1, 'A', 'B') \
+         ON CONFLICT (id) DO UPDATE SET \
+         last_name = (SELECT first_name FROM person WHERE id = excluded.id)",
+    )
+    .unwrap();
+    let mut visited = vec![];
+    plan.apply_scoped_expressions(|expr, scope| {
+        visited.push((expr.to_string(), expr.get_type(scope)?));
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    assert_eq!(
+        visited,
+        vec![("excluded.__conflict_src_0".to_string(), DataType::Utf8)]
+    );
+}
+
 #[test]
 fn insert_target_alias_hides_the_relation_name() {
     let error = logical_plan(
@@ -457,6 +479,40 @@ fn merge_insert_casts_values_to_the_target_column_type() {
     .unwrap();
     let row = merge_insert_row(&plan);
     assert_contains!(format!("{}", row[1]), "Utf8");
+}
+
+/// A MERGE UPDATE value reaches its column by assignment, as an UPDATE's
+/// does.
+#[test]
+fn merge_update_values_are_assigned_to_their_columns() {
+    let plan = logical_plan(
+        "MERGE INTO person p USING orders o ON p.id = o.order_id \
+         WHEN MATCHED THEN UPDATE SET age = 2.5",
+    )
+    .unwrap();
+    let LogicalPlan::Merge(merge) = &plan else {
+        panic!("expected MERGE plan");
+    };
+    let [clause] = merge.clauses.as_slice() else {
+        panic!("expected one clause");
+    };
+    let datafusion_expr::MergeAction::Update(update) = &clause.action else {
+        panic!("expected an UPDATE arm");
+    };
+    let [assignment] = update.assignments.as_slice() else {
+        panic!("expected one assignment");
+    };
+    assert_eq!(assignment.value.to_string(), "CAST(Float64(2.5) AS Int32)");
+}
+
+#[test]
+fn merge_update_of_a_missing_column_is_a_missing_field() {
+    let error = logical_plan(
+        "MERGE INTO person p USING orders o ON p.id = o.order_id \
+         WHEN MATCHED THEN UPDATE SET doesnotexist = 1",
+    )
+    .unwrap_err();
+    assert_field_not_found(error, "doesnotexist");
 }
 
 #[test]
@@ -1800,6 +1856,19 @@ fn plan_update() {
           TableScan: person, row_lock=[FOR UPDATE]
     "#
     );
+}
+
+/// A quoted target alias keeps its case: the columns the statement leaves
+/// alone are read under the alias as written, which is the relation the
+/// WHERE clause names.
+#[test]
+fn update_reads_unassigned_columns_under_a_quoted_mixed_case_alias() {
+    let plan =
+        logical_plan(r#"UPDATE person AS "P" SET last_name = 'Kay' WHERE "P".id = 1"#)
+            .unwrap();
+    let text = format!("{plan}");
+    assert_contains!(&text, "P.first_name AS first_name");
+    assert_contains!(&text, "Filter: P.id = Int32(1)");
 }
 
 #[rstest]
