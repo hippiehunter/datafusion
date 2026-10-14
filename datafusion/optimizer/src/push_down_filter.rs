@@ -933,8 +933,14 @@ impl OptimizerRule for PushDownFilter {
                         });
                     let contains_struct_columns =
                         unnest_struct_columns.iter().any(|c| accum.contains(c));
+                    // A column the unnest itself produces, such as its
+                    // ordinality column, does not exist below it.
+                    let reads_unnest_output = accum
+                        .iter()
+                        .any(|column| !unnest.input.schema().has_column(column));
 
-                    if contains_list_columns || contains_struct_columns {
+                    if contains_list_columns || contains_struct_columns || reads_unnest_output
+                    {
                         unnest_predicates.push(predicate);
                     } else {
                         non_unnest_predicates.push(predicate);
@@ -1518,6 +1524,36 @@ mod tests {
             assert_snapshot!(optimized_plan, @ $expected);
             Ok::<(), DataFusionError>(())
         }};
+    }
+
+    /// A predicate on the ordinality column the unnest produces stays above
+    /// the unnest; a predicate on its input's columns moves below it.
+    #[test]
+    fn filter_on_unnest_ordinality_stays_above_the_unnest() -> Result<()> {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::UInt32, false),
+            Field::new_list("l", Field::new_list_field(DataType::Int64, true), true),
+        ]);
+        let plan = table_scan(Some("t"), &schema, None)?
+            .unnest_column_with_options(
+                "l",
+                datafusion_common::UnnestOptions::new().with_ordinality(true),
+            )?
+            .filter(col("ordinality").gt(lit(1i64)).and(col("a").gt(lit(1u32))))?
+            .build()?;
+        let optimizer = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())]);
+        let optimized = optimizer.optimize(plan, &OptimizerContext::new(), observe)?;
+        let text = format!("{}", optimized.display_indent());
+        let position = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("no `{needle}` in\n{text}"))
+        };
+        assert!(
+            position("Filter: ordinality") < position("Unnest:")
+                && position("Unnest:") < position("full_filters=[t.a > UInt32(1)]"),
+            "{text}"
+        );
+        Ok(())
     }
 
     #[test]
