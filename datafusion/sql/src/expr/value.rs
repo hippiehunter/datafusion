@@ -54,6 +54,9 @@ impl SqlToRel<'_> {
         param_data_types: &[FieldRef],
         planner_context: &PlannerContext,
     ) -> Result<Expr> {
+        if let Some(expression) = self.context_provider.plan_literal_value(&value)? {
+            return Ok(expression);
+        }
         match value {
             Value::Number(n, _) => self.parse_sql_number(&n, false),
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(lit(s)),

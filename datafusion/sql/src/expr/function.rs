@@ -1126,6 +1126,22 @@ impl SqlToRel<'_> {
             }
         }
 
+        // All function families have declined the call. Let its owner report
+        // a dialect-specific error with the original argument identities.
+        let mut unresolved_args = || {
+            self.function_args_to_expr_with_names(args, schema, planner_context)
+                .map(|(arguments, _)| arguments)
+        };
+        if let Some(error) = self.context_provider.undefined_function_error(
+            &name,
+            &mut unresolved_args,
+            schema,
+        )? {
+            let span = crate::utils::convert_parser_span(sql_parser_span);
+            let message = error.to_string();
+            return Err(error.with_diagnostic(Diagnostic::new_error(message, span)));
+        }
+
         // Could not find the relevant function, so return an error
         if let Some(suggested_func_name) =
             suggest_valid_function(&name, is_function_window, self.context_provider)
@@ -1711,15 +1727,20 @@ mod scalar_subquery_aggregate_tests {
     use arrow::datatypes::{Field, Schema};
     use datafusion_common::TableReference;
     use datafusion_common::config::ConfigOptions;
+    use datafusion_common::error::{DataFusionSqlStateError, sqlstate_datafusion_err};
+    use datafusion_common::metadata::FieldMetadata;
     use datafusion_expr::logical_plan::builder::LogicalTableSource;
     use datafusion_expr::{AggregateUDF, LogicalPlan, ScalarUDF, TableSource, WindowUDF};
     use datafusion_functions_aggregate::array_agg::array_agg_udaf;
     use sqlparser::dialect::PostgreSqlDialect;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[derive(Default)]
     struct ArrayContext {
         options: ConfigOptions,
+        owns_missing_functions: bool,
+        owns_national_literals: bool,
     }
 
     impl ContextProvider for ArrayContext {
@@ -1730,6 +1751,46 @@ mod scalar_subquery_aggregate_tests {
                     Field::new("b", DataType::Int32, true),
                 ],
             )))))
+        }
+        fn plan_literal_value(&self, value: &Value) -> Result<Option<Expr>> {
+            if self.owns_national_literals
+                && let Value::NationalStringLiteral(value) = value
+            {
+                return Ok(Some(Expr::Literal(
+                    ScalarValue::Binary(Some(value.as_bytes().to_vec())),
+                    Some(FieldMetadata::from(HashMap::from([(
+                        "owner_type".to_owned(),
+                        "owned_text".to_owned(),
+                    )]))),
+                )));
+            }
+            Ok(None)
+        }
+        fn undefined_function_error(
+            &self,
+            name: &str,
+            args: &mut dyn FnMut() -> Result<Vec<Expr>>,
+            schema: &DFSchema,
+        ) -> Result<Option<DataFusionError>> {
+            if !self.owns_missing_functions {
+                return Ok(None);
+            }
+            let types = args()?
+                .iter()
+                .map(|argument| {
+                    let (_, field) = argument.to_field(schema)?;
+                    Ok(field
+                        .metadata()
+                        .get("owner_type")
+                        .cloned()
+                        .unwrap_or_else(|| field.data_type().to_string()))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(", ");
+            Ok(Some(sqlstate_datafusion_err(
+                "42883",
+                format!("function {name}({types}) does not exist"),
+            )))
         }
         fn get_function_meta(&self, _: &str) -> Option<Arc<ScalarUDF>> {
             None
@@ -1755,6 +1816,96 @@ mod scalar_subquery_aggregate_tests {
         fn udwf_names(&self) -> Vec<String> {
             vec![]
         }
+    }
+
+    fn plan_with_context(sql: &str, context: &ArrayContext) -> Result<LogicalPlan> {
+        let statement = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?
+            .pop_front()
+            .expect("one statement");
+        SqlToRel::new(context).statement_to_plan(statement)
+    }
+
+    #[test]
+    fn literal_owner_can_preserve_its_type_and_binary_carrier() -> Result<()> {
+        let context = ArrayContext {
+            owns_national_literals: true,
+            ..Default::default()
+        };
+        let plan = plan_with_context("SELECT N'é'", &context)?;
+        let LogicalPlan::Projection(projection) = plan else {
+            panic!("literal query projects its result")
+        };
+        let expression = projection.expr[0].clone().unalias();
+        assert!(
+            matches!(&expression, Expr::Literal(ScalarValue::Binary(Some(value)), _) if value == &[0xc3, 0xa9])
+        );
+        let (_, field) = expression.to_field(projection.input.schema())?;
+        assert_eq!(field.data_type(), &DataType::Binary);
+        assert_eq!(
+            field.metadata().get("owner_type").map(String::as_str),
+            Some("owned_text")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn declined_literal_preserves_default_types_and_unsupported_values() -> Result<()> {
+        let context = ArrayContext::default();
+        let plan = plan_with_context("SELECT 'ordinary', 3", &context)?;
+        assert_eq!(plan.schema().field(0).data_type(), &DataType::Utf8);
+        assert_eq!(plan.schema().field(1).data_type(), &DataType::Int32);
+        let error = plan_with_context("SELECT N'ordinary'", &context).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported Value 'NationalStringLiteral")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_function_owner_gets_original_fields_and_source_location() {
+        let context = ArrayContext {
+            owns_missing_functions: true,
+            owns_national_literals: true,
+            ..Default::default()
+        };
+        let error =
+            plan_with_context("SELECT absent(N'word', a) FROM t", &context).unwrap_err();
+        let DataFusionError::External(source) = error.find_root() else {
+            panic!("owner SQLSTATE must survive diagnostic attachment")
+        };
+        let state = source.downcast_ref::<DataFusionSqlStateError>().unwrap();
+        assert_eq!(state.sqlstate, "42883");
+        assert_eq!(
+            state.message,
+            "function absent(owned_text, Int32) does not exist"
+        );
+        assert_eq!(error.diagnostic().unwrap().span.unwrap().start.column, 8);
+    }
+
+    #[test]
+    fn declined_missing_function_does_not_plan_arguments() {
+        let context = ArrayContext::default();
+        let error = plan_with_context("SELECT absent(no_such_column) FROM t", &context)
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid function 'absent'"));
+        assert!(!error.to_string().contains("No field named"));
+    }
+
+    #[test]
+    fn missing_function_owner_preserves_argument_errors_and_registered_calls()
+    -> Result<()> {
+        let context = ArrayContext {
+            owns_missing_functions: true,
+            ..Default::default()
+        };
+        let error = plan_with_context("SELECT absent(no_such_column) FROM t", &context)
+            .unwrap_err();
+        assert!(error.to_string().contains("no_such_column"));
+        assert!(!error.to_string().contains("function absent("));
+        assert!(plan_with_context("SELECT array_agg(a) FROM t", &context).is_ok());
+        Ok(())
     }
 
     fn planned_array(sql: &str) -> Result<datafusion_expr::Aggregate> {

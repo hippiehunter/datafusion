@@ -41,7 +41,7 @@ use datafusion_expr::{
 };
 
 use sqlparser::ast::{
-    Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor, UnaryOperator,
+    Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor, UnaryOperator, Value,
 };
 
 /// Row expansion supplied by an embedding. List columns zip by position;
@@ -419,8 +419,29 @@ pub trait ContextProvider {
         None
     }
 
+    /// Lower a literal with an embedding-owned type or execution carrier.
+    /// The parser has already decoded the value; `None` keeps the ordinary
+    /// SQL planner lowering, including its unsupported-literal diagnostics.
+    fn plan_literal_value(&self, _value: &Value) -> Result<Option<Expr>> {
+        Ok(None)
+    }
+
     /// Return the scalar function with a given name, if any
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>>;
+
+    /// Shape a missing-function error after scalar, aggregate, window and
+    /// set-returning resolution have failed. Arguments retain their written
+    /// types and unknown-literal identities. Argument lowering is lazy so the
+    /// default implementation preserves the ordinary suggestion diagnostic
+    /// without inspecting arguments.
+    fn undefined_function_error(
+        &self,
+        _name: &str,
+        _args: &mut dyn FnMut() -> Result<Vec<Expr>>,
+        _schema: &DFSchema,
+    ) -> Result<Option<DataFusionError>> {
+        Ok(None)
+    }
 
     /// Resolve a named call when overloads have distinct parameter lists.
     /// Arguments have already been lowered against `schema`; the provider may
