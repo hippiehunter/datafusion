@@ -268,9 +268,7 @@ type WithinGroupExtraction = (Vec<SortExpr>, Vec<Expr>, Vec<Option<String>>);
 /// keys are evaluated once at the original Sort input and stay in scope through
 /// the final projection and row limit. Neither row selection nor deduplication
 /// moves across the aggregate.
-fn scalar_subquery_ordering(
-    plan: LogicalPlan,
-) -> Result<(LogicalPlan, Vec<SortExpr>)> {
+fn scalar_subquery_ordering(plan: LogicalPlan) -> Result<(LogicalPlan, Vec<SortExpr>)> {
     let mut used_names = std::collections::HashSet::new();
     plan.apply(|node| {
         used_names.extend(
@@ -1269,9 +1267,11 @@ impl SqlToRel<'_> {
                 // is what lets calls such as `row_to_json(t.*)` preserve the
                 // relation's field names. A bare `*` remains the special
                 // aggregate wildcard used by count(*).
-                if let Some(record) =
-                    self.try_plan_whole_row_reference(qualifier.table(), schema)
-                {
+                if let Some(record) = self.try_plan_whole_row_reference(
+                    &qualifier,
+                    schema,
+                    planner_context,
+                )? {
                     return Ok((record, None));
                 }
 

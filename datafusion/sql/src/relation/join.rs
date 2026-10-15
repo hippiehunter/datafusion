@@ -141,6 +141,9 @@ impl SqlToRel<'_> {
                 let keys = self.using_clause_keys(columns)?;
                 let alias =
                     TableReference::bare(self.ident_normalizer.normalize(alias.clone()));
+                // USING aliases name the merged join keys, not a base row.
+                // They can shadow an outer range variable of the same name.
+                planner_context.set_whole_row_source(alias.clone(), None);
                 self.plan_using_join(left, right, join_type, &keys, Some(&alias))
             }
             JoinConstraint::Using(object_names) => {

@@ -113,9 +113,11 @@ impl SqlToRel<'_> {
             // relation in scope (rather than a column) resolves to a record of
             // that relation's columns, e.g. `row_to_json(t)` over a subquery
             // aliased `t`.
-            if let Some(record) =
-                self.try_plan_whole_row_reference(normalize_ident.as_str(), schema)
-            {
+            if let Some(record) = self.try_plan_whole_row_reference(
+                &TableReference::bare(normalize_ident.clone()),
+                schema,
+                planner_context,
+            )? {
                 return Ok(record);
             }
 
@@ -138,28 +140,59 @@ impl SqlToRel<'_> {
     /// the caller falls back to plain column resolution.
     pub(super) fn try_plan_whole_row_reference(
         &self,
-        relation: &str,
+        relation: &TableReference,
         schema: &DFSchema,
-    ) -> Option<Expr> {
-        let named_struct = self.context_provider.get_function_meta("named_struct")?;
+        planner_context: &PlannerContext,
+    ) -> Result<Option<Expr>> {
+        let Some(named_struct) = self.context_provider.get_function_meta("named_struct")
+        else {
+            return Ok(None);
+        };
+        let mut qualifiers = schema.iter().filter_map(|(qualifier, _)| {
+            qualifier.filter(|qualifier| {
+                qualifier.table() == relation.table()
+                    && relation
+                        .schema()
+                        .is_none_or(|schema| qualifier.schema() == Some(schema))
+                    && relation
+                        .catalog()
+                        .is_none_or(|catalog| qualifier.catalog() == Some(catalog))
+            })
+        });
+        let Some(qualifier) = qualifiers.next() else {
+            return Ok(None);
+        };
+        if qualifiers.any(|candidate| candidate != qualifier) {
+            return Err(datafusion_common::sqlstate_datafusion_err(
+                "42P09",
+                format!("table reference \"{relation}\" is ambiguous"),
+            ));
+        }
         let mut args: Vec<Expr> = Vec::new();
-        for (qualifier, field) in schema.iter() {
-            if qualifier.map(|q| q.table()) != Some(relation) {
+        for (field_qualifier, field) in schema.iter() {
+            if field_qualifier != Some(qualifier)
+                || field
+                    .metadata()
+                    .get(datafusion_expr::utils::SYSTEM_COLUMN_METADATA_KEY)
+                    .is_some_and(|value| value == "true")
+            {
                 continue;
             }
             args.push(Expr::Literal(
                 ScalarValue::Utf8(Some(field.name().clone())),
                 None,
             ));
-            args.push(Expr::Column(Column::from((qualifier, field))));
+            args.push(Expr::Column(Column::from((field_qualifier, field))));
         }
-        if args.is_empty() {
-            return None;
-        }
-        Some(Expr::ScalarFunction(ScalarFunction::new_udf(
-            named_struct,
-            args,
-        )))
+        let record = Expr::ScalarFunction(ScalarFunction::new_udf(named_struct, args));
+        self.context_provider
+            .plan_whole_row_reference(
+                qualifier,
+                planner_context.whole_row_source(qualifier),
+                record,
+                schema,
+            )
+            .map(Some)
     }
 
     pub(crate) fn sql_compound_identifier_to_expr(

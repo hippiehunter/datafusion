@@ -113,6 +113,21 @@ pub trait ContextProvider {
         Ok(expr)
     }
 
+    /// Attach embedding-owned identity to an explicit whole-row reference.
+    /// `relation` is its range-table qualifier and `source` is the bound base
+    /// relation before aliasing. Derived queries, CTEs, functions and joined
+    /// aliases have no base source. Explicit ROW constructors do not call this
+    /// hook, even when their fields match a relation's row shape.
+    fn plan_whole_row_reference(
+        &self,
+        _relation: &TableReference,
+        _source: Option<&TableReference>,
+        record: Expr,
+        _schema: &DFSchema,
+    ) -> Result<Expr> {
+        Ok(record)
+    }
+
     /// Resolve the durable identity of a relation before the planner records
     /// it in a [`TableScan`]. Most providers use the SQL-written reference
     /// verbatim. Providers that plan stored objects can qualify a bare name
@@ -1015,7 +1030,8 @@ pub fn claimed_cast(planned: Expr, target: &FieldRef, schema: &DFSchema) -> Resu
         }
         if !matches!(base, Expr::Literal(..)) {
             let (_, inner) = alias.expr.to_field(schema)?;
-            if inner.data_type() == target.data_type() && inner.metadata() == target.metadata()
+            if inner.data_type() == target.data_type()
+                && inner.metadata() == target.metadata()
             {
                 return Ok(planned);
             }

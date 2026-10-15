@@ -35,9 +35,7 @@ use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::expr::{
     AllExpr, AnyExpr, InList, QuantifiedSource, WildcardOptions,
 };
-use datafusion_expr::{
-    BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, lit,
-};
+use datafusion_expr::{BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, lit};
 
 use crate::planner::{
     PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawDistinctFromExpr,
@@ -393,11 +391,7 @@ impl SqlToRel<'_> {
 
     /// Run a search condition through the registered expression planners'
     /// `plan_condition` before it becomes the predicate of a plan node.
-    pub fn plan_condition_expr(
-        &self,
-        expr: Expr,
-        schema: &DFSchema,
-    ) -> Result<Expr> {
+    pub fn plan_condition_expr(&self, expr: Expr, schema: &DFSchema) -> Result<Expr> {
         let mut condition = expr;
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_condition(condition, schema)? {
@@ -840,8 +834,11 @@ impl SqlToRel<'_> {
                 )?;
                 let low =
                     self.sql_expr_to_logical_expr(low.as_ref(), schema, planner_context)?;
-                let high =
-                    self.sql_expr_to_logical_expr(high.as_ref(), schema, planner_context)?;
+                let high = self.sql_expr_to_logical_expr(
+                    high.as_ref(),
+                    schema,
+                    planner_context,
+                )?;
                 self.sql_between_to_expr(subject, low, high, *negated, *symmetric, schema)
             }
 
@@ -1267,9 +1264,11 @@ impl SqlToRel<'_> {
                 // In value position PostgreSQL's `relation.*` is the relation's
                 // whole-row value, as in `old.* IS DISTINCT FROM new.*` or
                 // `(t.*).a`; only a select list expands it into columns.
-                if let Some(record) =
-                    self.try_plan_whole_row_reference(qualifier.table(), schema)
-                {
+                if let Some(record) = self.try_plan_whole_row_reference(
+                    &qualifier,
+                    schema,
+                    planner_context,
+                )? {
                     return Ok(record);
                 }
                 #[expect(deprecated)]
@@ -1805,11 +1804,18 @@ impl SqlToRel<'_> {
     /// The target of a cast the SQL wrote: the field the type declares, named
     /// by the written type so the cast states its output's metadata (none, for
     /// a type that declares none) instead of keeping the source's.
-    pub(crate) fn written_cast_target(&self, sql_data_type: &SQLDataType) -> Result<FieldRef> {
+    pub(crate) fn written_cast_target(
+        &self,
+        sql_data_type: &SQLDataType,
+    ) -> Result<FieldRef> {
         let declared = self.convert_data_type_to_field(sql_data_type)?;
         Ok(Arc::new(
-            Field::new(sql_data_type.to_string(), declared.data_type().clone(), true)
-                .with_metadata(declared.metadata().clone()),
+            Field::new(
+                sql_data_type.to_string(),
+                declared.data_type().clone(),
+                true,
+            )
+            .with_metadata(declared.metadata().clone()),
         ))
     }
 

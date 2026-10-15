@@ -188,9 +188,7 @@ fn extract_pattern_symbols_recursive(
     normalizer: &impl Fn(Ident) -> String,
 ) {
     match pattern {
-        MatchRecognizePattern::Symbol(MatchRecognizeSymbol::Named(
-            ident,
-        )) => {
+        MatchRecognizePattern::Symbol(MatchRecognizeSymbol::Named(ident)) => {
             let name = normalizer(ident.clone());
             if !symbols.contains(&name) {
                 symbols.push(name);
@@ -199,9 +197,7 @@ fn extract_pattern_symbols_recursive(
         MatchRecognizePattern::Symbol(_) => {
             // Skip Start and End anchors
         }
-        MatchRecognizePattern::Exclude(MatchRecognizeSymbol::Named(
-            ident,
-        )) => {
+        MatchRecognizePattern::Exclude(MatchRecognizeSymbol::Named(ident)) => {
             let name = normalizer(ident.clone());
             if !symbols.contains(&name) {
                 symbols.push(name);
@@ -395,20 +391,37 @@ impl SqlToRel<'_> {
         relation: TableFactor,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        let anonymous_source;
         let planned_relation =
             match self.create_extension_relation(relation, planner_context)? {
-                RelationPlanning::Planned(planned) => *planned,
+                RelationPlanning::Planned(planned) => {
+                    anonymous_source = true;
+                    *planned
+                }
                 RelationPlanning::Original(original) => {
+                    anonymous_source = !matches!(
+                        original.as_ref(),
+                        TableFactor::Table { args: None, .. }
+                            | TableFactor::NestedJoin { alias: None, .. }
+                    );
                     self.create_default_relation(*original, planner_context)?
                 }
             };
 
         let optimized_plan = optimize_subquery_sort(planned_relation.plan)?.data;
-        if let Some(alias) = planned_relation.alias {
-            self.apply_relation_alias(optimized_plan, alias)
+        let plan = if let Some(alias) = planned_relation.alias {
+            self.apply_relation_alias(optimized_plan, alias)?
         } else {
-            Ok(optimized_plan)
+            optimized_plan
+        };
+        if anonymous_source {
+            for (qualifier, _) in plan.schema().iter() {
+                if let Some(qualifier) = qualifier {
+                    planner_context.set_whole_row_source(qualifier.clone(), None);
+                }
+            }
         }
+        Ok(plan)
     }
 
     /// `plan` under the alias its FROM item wrote. Planned as written, a
@@ -449,14 +462,27 @@ impl SqlToRel<'_> {
             return self.create_relation(relation.clone(), planner_context);
         }
 
+        let anonymous_source = !matches!(
+            relation,
+            TableFactor::Table { args: None, .. }
+                | TableFactor::NestedJoin { alias: None, .. }
+        );
         let planned_relation =
             self.create_default_relation_ref(relation, planner_context)?;
         let optimized_plan = optimize_subquery_sort(planned_relation.plan)?.data;
-        if let Some(alias) = planned_relation.alias {
-            self.apply_relation_alias(optimized_plan, alias)
+        let plan = if let Some(alias) = planned_relation.alias {
+            self.apply_relation_alias(optimized_plan, alias)?
         } else {
-            Ok(optimized_plan)
+            optimized_plan
+        };
+        if anonymous_source {
+            for (qualifier, _) in plan.schema().iter() {
+                if let Some(qualifier) = qualifier {
+                    planner_context.set_whole_row_source(qualifier.clone(), None);
+                }
+            }
         }
+        Ok(plan)
     }
 
     fn create_default_relation_ref(
@@ -531,6 +557,18 @@ impl SqlToRel<'_> {
                         )))
                     }
                 }?;
+                let qualifier = alias.as_ref().map_or_else(
+                    || resolved_table_ref.clone(),
+                    |alias| {
+                        TableReference::bare(
+                            self.ident_normalizer.normalize(alias.name.clone()),
+                        )
+                    },
+                );
+                planner_context.set_whole_row_source(
+                    qualifier,
+                    (!is_cte).then(|| resolved_table_ref.clone()),
+                );
                 if let Some(sample) = sample {
                     plan = self.apply_table_sample(
                         plan,
@@ -832,6 +870,18 @@ impl SqlToRel<'_> {
                         Err(e)
                     }
                 }?;
+                let qualifier = alias.as_ref().map_or_else(
+                    || resolved_table_ref.clone(),
+                    |alias| {
+                        TableReference::bare(
+                            self.ident_normalizer.normalize(alias.name.clone()),
+                        )
+                    },
+                );
+                planner_context.set_whole_row_source(
+                    qualifier,
+                    (!is_cte).then(|| resolved_table_ref.clone()),
+                );
                 if let Some(sample) = sample.as_ref() {
                     plan = self.apply_table_sample(
                         plan,

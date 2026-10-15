@@ -291,7 +291,7 @@ pub struct ValuesAssembly {
 ///
 /// # Cloning
 ///
-/// Only the `ctes` are truly cloned when the `PlannerContext` is cloned.
+/// The CTE and whole-row source bindings are cloned with the query scope.
 /// This helps resolve scoping issues of CTEs.
 /// By using cloning, a subquery can inherit CTEs from the outer query
 /// and can also define its own private CTEs without affecting the outer query.
@@ -306,6 +306,9 @@ pub struct PlannerContext {
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
     ctes: HashMap<String, Arc<LogicalPlan>>,
+    /// Original base sources for the range variables in this query scope.
+    /// None marks an explicitly anonymous source that shadows an outer name.
+    whole_row_sources: HashMap<TableReference, Option<TableReference>>,
     /// Stack of outer query schemas for resolving columns in nested subqueries.
     /// The last element is the immediate outer query's schema.
     /// Earlier elements are schemas from further ancestor queries.
@@ -344,6 +347,7 @@ impl PlannerContext {
             prepare_param_data_types: Arc::new(vec![]),
             parameter_list_fixed: false,
             ctes: HashMap::new(),
+            whole_row_sources: HashMap::new(),
             outer_query_schema_stack: Vec::new(),
             outer_from_schema: None,
             create_table_schema: None,
@@ -368,6 +372,23 @@ impl PlannerContext {
                 .partition(|(target, _)| *target == level);
         self.outer_level_aggregates = kept;
         taken.into_iter().map(|(_, aggregate)| aggregate).collect()
+    }
+
+    pub(super) fn set_whole_row_source(
+        &mut self,
+        relation: TableReference,
+        source: Option<TableReference>,
+    ) {
+        self.whole_row_sources.insert(relation, source);
+    }
+
+    pub(super) fn whole_row_source(
+        &self,
+        relation: &TableReference,
+    ) -> Option<&TableReference> {
+        self.whole_row_sources
+            .get(relation)
+            .and_then(Option::as_ref)
     }
 
     /// Update the PlannerContext with provided prepare_param_data_types
@@ -887,7 +908,10 @@ impl<'a> SqlToRel<'a> {
                         };
                         let mut diagnostic = if let Some(relation) = &col.relation {
                             Diagnostic::new_error(
-                                format!("column '{}' not found in '{}'", col.name, relation),
+                                format!(
+                                    "column '{}' not found in '{}'",
+                                    col.name, relation
+                                ),
                                 col.spans().first(),
                             )
                         } else {
