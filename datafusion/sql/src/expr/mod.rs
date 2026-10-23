@@ -816,7 +816,7 @@ impl SqlToRel<'_> {
                 }
             }
 
-            SQLExpr::UnaryOp { op, expr } => {
+            SQLExpr::UnaryOp { op, expr, .. } => {
                 self.parse_sql_unary_op(op, expr.as_ref(), schema, planner_context)
             }
 

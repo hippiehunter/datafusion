@@ -2796,7 +2796,7 @@ impl SqlToRel<'_> {
                     plan_err!("Unsupported storage parameter value {:?}", value.value)
                 }
             },
-            SQLExpr::UnaryOp { op, expr } => match op {
+            SQLExpr::UnaryOp { op, expr, .. } => match op {
                 UnaryOperator::Plus => Ok(format!("+{expr}")),
                 UnaryOperator::Minus => Ok(format!("-{expr}")),
                 _ => {
@@ -3176,6 +3176,57 @@ impl SqlToRel<'_> {
         }
         let plan = LogicalPlan::Dml(dml);
         Ok(plan)
+    }
+
+    /// The query an INSERT reads its rows from, with each quoted literal its
+    /// select list writes into a target column read as a value of that
+    /// column where the literal is written: a literal's type is unknown
+    /// until the column settles it, and a literal the column's input
+    /// rejects is reported at the literal, as for `INSERT ... VALUES`.
+    fn assign_selected_literals(
+        &self,
+        source: LogicalPlan,
+        value_sources: &[Vec<(usize, &[AccessExpr])>],
+        table_schema: &DFSchema,
+    ) -> Result<LogicalPlan> {
+        let LogicalPlan::Projection(projection) = source else {
+            return Ok(source);
+        };
+        let mut exprs = projection.expr.clone();
+        let mut assigned = false;
+        for (index, sources) in value_sources.iter().enumerate() {
+            let [(slot, [])] = sources.as_slice() else {
+                continue;
+            };
+            let (name, written) = match &exprs[*slot] {
+                Expr::Alias(alias) => (Some(alias.name.clone()), alias.expr.as_ref()),
+                expr => (None, expr),
+            };
+            if !matches!(
+                written,
+                Expr::Literal(
+                    ScalarValue::Utf8(Some(_)) | ScalarValue::Utf8View(Some(_)) | ScalarValue::LargeUtf8(Some(_)),
+                    None
+                )
+            ) {
+                continue;
+            }
+            let output_name = name.unwrap_or_else(|| exprs[*slot].schema_name().to_string());
+            let value = self.assign_to_column(
+                written.clone(),
+                table_schema.field(index),
+                projection.input.schema(),
+            )?;
+            exprs[*slot] = value.alias(output_name);
+            assigned = true;
+        }
+        if !assigned {
+            return Ok(LogicalPlan::Projection(projection));
+        }
+        Ok(LogicalPlan::Projection(Projection::try_new(
+            exprs,
+            Arc::clone(&projection.input),
+        )?))
     }
 
     /// `value` as it reaches `column` by assignment: the provider's
@@ -4869,6 +4920,7 @@ impl SqlToRel<'_> {
         if fields.len() != source.schema().fields().len() {
             plan_err!("Column count doesn't match insert query!")?;
         }
+        let source = self.assign_selected_literals(source, &value_sources, &table_schema)?;
 
         let exprs = value_sources
             .into_iter()

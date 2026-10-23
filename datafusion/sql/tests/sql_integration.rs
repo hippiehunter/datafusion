@@ -6260,6 +6260,33 @@ Limit: skip=Int32(3), fetch=Int32(5)
 }
 
 #[test]
+fn test_limit_all_plans_as_limit_null() {
+    let limit_all = logical_plan("SELECT id FROM person LIMIT ALL").unwrap();
+    let limit_null = logical_plan("SELECT id FROM person LIMIT NULL").unwrap();
+    assert_eq!(limit_all, limit_null);
+    assert_snapshot!(
+        limit_all,
+        @r#"
+Limit: skip=0, fetch=NULL
+  Projection: person.id
+    TableScan: person
+"#
+    );
+
+    let limit_all = logical_plan("SELECT id FROM person LIMIT ALL OFFSET 3").unwrap();
+    let limit_null = logical_plan("SELECT id FROM person LIMIT NULL OFFSET 3").unwrap();
+    assert_eq!(limit_all, limit_null);
+    assert_snapshot!(
+        limit_all,
+        @r#"
+Limit: skip=Int32(3), fetch=NULL
+  Projection: person.id
+    TableScan: person
+"#
+    );
+}
+
+#[test]
 #[ignore = "DISTRIBUTE BY is Hive syntax, removed from sqlparser fork"]
 fn test_distribute_by() {
     let sql = "select id from person distribute by state";

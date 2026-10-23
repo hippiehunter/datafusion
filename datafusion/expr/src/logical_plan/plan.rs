@@ -5551,6 +5551,46 @@ impl Unnest {
 /// declared dimension count; unnesting consumes dimensions.
 const ARRAY_DIMENSIONS_METADATA: &str = "pg_array_dims";
 
+/// The metadata of the value unnesting `depth` levels of the list `field`
+/// yields. The unnested value is described by the traversed item field, not
+/// only by the outer projection field: dialects attach logical identities
+/// such as jsonb/composite types to that item field. Every consumed item's
+/// metadata is merged, with the innermost item winning, so a list-valued SRF
+/// keeps the type of the row it expands into even when an intervening
+/// projection did not copy the metadata onto the list itself; the declared
+/// dimension count drops by the levels consumed.
+pub(crate) fn unnested_list_metadata(
+    field: &Field,
+    depth: usize,
+) -> HashMap<String, String> {
+    let mut metadata = field.metadata().clone();
+    let mut nested_type = field.data_type();
+    for _ in 0..depth {
+        let item = match nested_type {
+            DataType::List(item)
+            | DataType::FixedSizeList(item, _)
+            | DataType::LargeList(item) => item,
+            _ => break,
+        };
+        metadata.extend(item.metadata().clone());
+        nested_type = item.data_type();
+    }
+    if let Some(dimensions) = metadata
+        .get(ARRAY_DIMENSIONS_METADATA)
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        if dimensions > depth {
+            metadata.insert(
+                ARRAY_DIMENSIONS_METADATA.to_string(),
+                (dimensions - depth).to_string(),
+            );
+        } else {
+            metadata.remove(ARRAY_DIMENSIONS_METADATA);
+        }
+    }
+    metadata
+}
+
 fn get_unnested_columns(
     col_name: &String,
     field: &Field,
@@ -5562,38 +5602,7 @@ fn get_unnested_columns(
     match data_type {
         DataType::List(_) | DataType::FixedSizeList(_, _) | DataType::LargeList(_) => {
             let data_type = get_unnested_list_datatype_recursive(data_type, depth)?;
-            // The unnested value is described by the traversed item field,
-            // not only by the outer projection field. Dialects attach logical
-            // identities such as jsonb/composite types to that item field.
-            // Merge every consumed item's metadata, with the innermost item
-            // winning, so a list-valued SRF keeps the type of the row it
-            // expands into even when an intervening projection did not copy
-            // the metadata onto the list itself.
-            let mut metadata = field.metadata().clone();
-            let mut nested_type = field.data_type();
-            for _ in 0..depth {
-                let item = match nested_type {
-                    DataType::List(item)
-                    | DataType::FixedSizeList(item, _)
-                    | DataType::LargeList(item) => item,
-                    _ => break,
-                };
-                metadata.extend(item.metadata().clone());
-                nested_type = item.data_type();
-            }
-            if let Some(dimensions) = metadata
-                .get(ARRAY_DIMENSIONS_METADATA)
-                .and_then(|value| value.parse::<usize>().ok())
-            {
-                if dimensions > depth {
-                    metadata.insert(
-                        ARRAY_DIMENSIONS_METADATA.to_string(),
-                        (dimensions - depth).to_string(),
-                    );
-                } else {
-                    metadata.remove(ARRAY_DIMENSIONS_METADATA);
-                }
-            }
+            let metadata = unnested_list_metadata(field, depth);
             let new_field = Arc::new(
                 Field::new(
                     col_name, data_type,

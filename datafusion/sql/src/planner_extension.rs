@@ -25,7 +25,7 @@ use arrow::datatypes::{DataType, Field, FieldRef, SchemaRef, TimeUnit};
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
-    Constraints, DFSchema, DataFusionError, Result, TableReference,
+    Constraints, DFSchema, DataFusionError, Result, Span, TableReference,
     config::ConfigOptions, file_options::file_type::FileType, not_impl_err,
 };
 use datafusion_expr::expr::NullTreatment;
@@ -802,12 +802,62 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
-    /// Plans window functions, such as `COUNT(<expr>)`
+    /// Plans window functions, such as `COUNT(<expr>) OVER ()`, whose
+    /// arguments are expressions over `schema`
     ///
     /// Returns original expression arguments if not possible
-    fn plan_window(&self, expr: RawWindowExpr) -> Result<PlannerResult<RawWindowExpr>> {
+    fn plan_window(
+        &self,
+        expr: RawWindowExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawWindowExpr>> {
         Ok(PlannerResult::Original(expr))
     }
+
+    /// Check a call's written form against the routine its name and
+    /// arguments resolve to, before the call is planned: a call that writes
+    /// `WITHIN GROUP`, a scalar function call that writes `OVER`, `FILTER`,
+    /// `DISTINCT` or an argument `ORDER BY`, and a window function call
+    /// without `OVER`. Returns the error the call is refused with; `Ok`
+    /// leaves the call to the default planning.
+    fn check_call_form(&self, _call: &RawCallForm, _schema: &DFSchema) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The kind of routine the engine resolved a call's name to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineCallKind {
+    Scalar,
+    Window,
+}
+
+/// A routine call as written, for [`ExprPlanner::check_call_form`].
+#[derive(Debug, Clone)]
+pub struct RawCallForm {
+    /// The routine name as the call wrote it, folded and joined as
+    /// [`RawAggregateExpr::name`] is.
+    pub name: String,
+    /// Where the written name starts in the statement.
+    pub name_span: Option<Span>,
+    /// The arguments a routine lookup takes the call to have: the written
+    /// arguments, then the `WITHIN GROUP` sort keys. A bare `*` argument
+    /// (`count(*)`) is no argument.
+    pub args: Vec<Expr>,
+    /// Where each of `args` is written.
+    pub arg_spans: Vec<Option<Span>>,
+    /// How many of `args`, at their end, are `WITHIN GROUP` sort keys.
+    pub within_group: usize,
+    /// Whether the call wrote a bare `*` argument.
+    pub star: bool,
+    pub distinct: bool,
+    /// Whether the argument list has an `ORDER BY` clause.
+    pub order_by: bool,
+    pub filter: bool,
+    pub over: bool,
+    /// What the engine resolved the name to, when the check runs after
+    /// that resolution.
+    pub resolved: Option<RoutineCallKind>,
 }
 
 /// Standard SQL lowering for aggregate-call syntax that is not representable
@@ -822,6 +872,8 @@ impl ExprPlanner for AggregateFunctionPlanner {
         _schema: &DFSchema,
     ) -> Result<PlannerResult<RawAggregateExpr>> {
         let RawAggregateExpr {
+            name,
+            name_span,
             func,
             args,
             distinct,
@@ -857,6 +909,8 @@ impl ExprPlanner for AggregateFunctionPlanner {
             unreachable!()
         };
         let raw_expr = RawAggregateExpr {
+            name,
+            name_span,
             func,
             args,
             distinct,
@@ -872,6 +926,8 @@ impl ExprPlanner for AggregateFunctionPlanner {
                 || raw_expr.args.is_empty())
         {
             let RawAggregateExpr {
+                name: _,
+                name_span: _,
                 func,
                 args: _,
                 distinct,
@@ -1108,10 +1164,21 @@ pub struct RawDictionaryExpr {
 /// custom expressions.
 #[derive(Debug, Clone)]
 pub struct RawAggregateExpr {
+    /// The routine name as the call wrote it, each part folded as an
+    /// identifier and the parts joined with `.`: `pg_catalog.stddev_samp`
+    /// for a call that `func` serves under its canonical name `stddev`.
+    pub name: String,
+    /// Where the written name starts in the statement: the position
+    /// PostgreSQL reports a failed lookup of the call at.
+    pub name_span: Option<Span>,
     pub func: Arc<AggregateUDF>,
     pub args: Vec<Expr>,
     pub distinct: bool,
     pub filter: Option<Box<Expr>>,
+    /// The aggregate's input ordering. For an ordered-set aggregate (`func`
+    /// supports `WITHIN GROUP`) these are the `WITHIN GROUP` sort keys, also
+    /// the first `order_by.len()` of `args`, and the list is empty when the
+    /// call wrote no `WITHIN GROUP`.
     pub order_by: Vec<SortExpr>,
     pub null_treatment: Option<NullTreatment>,
 }
@@ -1120,6 +1187,11 @@ pub struct RawAggregateExpr {
 /// custom expressions.
 #[derive(Debug, Clone)]
 pub struct RawWindowExpr {
+    /// The routine name as the call wrote it, folded and joined as
+    /// [`RawAggregateExpr::name`] is.
+    pub name: String,
+    /// Where the written name starts in the statement.
+    pub name_span: Option<Span>,
     pub func_def: WindowFunctionDefinition,
     pub args: Vec<Expr>,
     pub partition_by: Vec<Expr>,

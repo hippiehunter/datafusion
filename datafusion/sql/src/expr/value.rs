@@ -260,6 +260,7 @@ impl SqlToRel<'_> {
             SQLExpr::UnaryOp {
                 op: UnaryOperator::Minus,
                 expr,
+                ..
             } => match expr.as_ref() {
                 SQLExpr::Value(ValueWithSpan {
                     value: Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
@@ -413,7 +414,7 @@ fn interval_literal(interval_value: &SQLExpr, negative: bool) -> Result<String> 
                 v.to_string()
             }
         }
-        SQLExpr::UnaryOp { op, expr } => {
+        SQLExpr::UnaryOp { op, expr, .. } => {
             let negative = match op {
                 UnaryOperator::Minus => !negative,
                 UnaryOperator::Plus => negative,

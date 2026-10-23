@@ -25,7 +25,8 @@ use crate::type_coercion::functions::{
     data_types_with_scalar_udf, fields_with_aggregate_udf, fields_with_window_udf,
 };
 use crate::udf::ReturnFieldArgs;
-use crate::{LogicalPlan, Projection, Subquery, WindowFunctionDefinition, utils};
+use crate::logical_plan::unnested_list_metadata;
+use crate::{LogicalPlan, Projection, Signature, Subquery, WindowFunctionDefinition, utils};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
@@ -175,18 +176,7 @@ impl ExprSchemable for Expr {
                             .iter()
                             .map(|f| f.data_type().clone())
                             .collect::<Vec<_>>();
-                        plan_datafusion_err!(
-                            "{} {}",
-                            match err {
-                                DataFusionError::Plan(msg) => msg,
-                                err => err.to_string(),
-                            },
-                            utils::generate_signature_error_msg(
-                                func.name(),
-                                func.signature().clone(),
-                                &data_types
-                            )
-                        )
+                        coercion_error(err, func.name(), func.signature().clone(), &data_types)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -572,18 +562,7 @@ impl ExprSchemable for Expr {
                             .map(|f| f.data_type())
                             .cloned()
                             .collect::<Vec<_>>();
-                        plan_datafusion_err!(
-                            "{} {}",
-                            match err {
-                                DataFusionError::Plan(msg) => msg,
-                                err => err.to_string(),
-                            },
-                            utils::generate_signature_error_msg(
-                                func.name(),
-                                func.signature().clone(),
-                                &arg_types,
-                            )
-                        )
+                        coercion_error(err, func.name(), func.signature().clone(), &arg_types)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -601,18 +580,7 @@ impl ExprSchemable for Expr {
                 // Verify that function is invoked with correct number and type of arguments as defined in `TypeSignature`
                 let new_data_types = data_types_with_scalar_udf(&arg_types, func)
                     .map_err(|err| {
-                        plan_datafusion_err!(
-                            "{} {}",
-                            match err {
-                                DataFusionError::Plan(msg) => msg,
-                                err => err.to_string(),
-                            },
-                            utils::generate_signature_error_msg(
-                                func.name(),
-                                func.signature().clone(),
-                                &arg_types,
-                            )
-                        )
+                        coercion_error(err, func.name(), func.signature().clone(), &arg_types)
                     })?;
                 let new_fields = fields
                     .into_iter()
@@ -700,12 +668,29 @@ impl ExprSchemable for Expr {
             | Expr::InSubquery(_)
             | Expr::Wildcard { .. }
             | Expr::GroupingSet(_)
-            | Expr::Placeholder(_)
-            | Expr::Unnest(_) => Ok(Arc::new(Field::new(
+            | Expr::Placeholder(_) => Ok(Arc::new(Field::new(
                 &schema_name,
                 self.get_type(schema)?,
                 self.nullable(schema)?,
             ))),
+            // An unnested list element keeps the logical identity of the
+            // list's items, as the Unnest plan node's columns do.
+            Expr::Unnest(Unnest { expr }) => {
+                let (_, list) = expr.to_field(schema)?;
+                let field = Field::new(
+                    &schema_name,
+                    self.get_type(schema)?,
+                    self.nullable(schema)?,
+                );
+                Ok(Arc::new(match list.data_type() {
+                    DataType::List(_)
+                    | DataType::LargeList(_)
+                    | DataType::FixedSizeList(_, _) => {
+                        field.with_metadata(unnested_list_metadata(&list, 1))
+                    }
+                    _ => field,
+                }))
+            }
         }?;
 
         Ok((
@@ -838,18 +823,7 @@ impl Expr {
                     .collect::<Vec<_>>();
                 let new_fields = fields_with_aggregate_udf(&fields, udaf)
                     .map_err(|err| {
-                        plan_datafusion_err!(
-                            "{} {}",
-                            match err {
-                                DataFusionError::Plan(msg) => msg,
-                                err => err.to_string(),
-                            },
-                            utils::generate_signature_error_msg(
-                                fun.name(),
-                                fun.signature(),
-                                &data_types
-                            )
-                        )
+                        coercion_error(err, fun.name(), fun.signature(), &data_types)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -866,18 +840,7 @@ impl Expr {
                     .collect::<Vec<_>>();
                 let new_fields = fields_with_window_udf(&fields, udwf)
                     .map_err(|err| {
-                        plan_datafusion_err!(
-                            "{} {}",
-                            match err {
-                                DataFusionError::Plan(msg) => msg,
-                                err => err.to_string(),
-                            },
-                            utils::generate_signature_error_msg(
-                                fun.name(),
-                                fun.signature(),
-                                &data_types
-                            )
-                        )
+                        coercion_error(err, fun.name(), fun.signature(), &data_types)
                     })?
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -928,6 +891,27 @@ pub fn cast_subquery(subquery: Subquery, cast_to_type: &DataType) -> Result<Subq
         outer_ref_columns: subquery.outer_ref_columns,
         spans: Spans::new(),
     })
+}
+
+/// A call's argument coercion failure as the planner reports it: an error
+/// the function raised itself with its own diagnostic, which travels as
+/// `External`, as it is; any other with the function's signatures.
+fn coercion_error(
+    err: DataFusionError,
+    name: &str,
+    signature: Signature,
+    arg_types: &[DataType],
+) -> DataFusionError {
+    let message = match err {
+        DataFusionError::External(_) => return err,
+        DataFusionError::Plan(msg) => msg,
+        err => err.to_string(),
+    };
+    plan_datafusion_err!(
+        "{} {}",
+        message,
+        utils::generate_signature_error_msg(name, signature, arg_types)
+    )
 }
 
 #[cfg(test)]

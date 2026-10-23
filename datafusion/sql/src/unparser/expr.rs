@@ -498,6 +498,7 @@ impl Unparser<'_> {
                 Ok(AstExpr::UnaryOp {
                     op: UnaryOperator::Not,
                     expr: SQLBox::new(sql_parser_expr),
+                    op_token: AttachedToken::empty(),
                 })
             }
             Expr::Negative(expr) => {
@@ -505,6 +506,7 @@ impl Unparser<'_> {
                 Ok(AstExpr::UnaryOp {
                     op: UnaryOperator::Minus,
                     expr: SQLBox::new(sql_parser_expr),
+                    op_token: AttachedToken::empty(),
                 })
             }
             Expr::ScalarVariable(_, ids) => {

@@ -24,6 +24,7 @@ pub(crate) mod invariants;
 mod merge;
 pub use invariants::{InvariantLevel, assert_expected_schema, check_subquery_expr};
 mod plan;
+pub(crate) use plan::unnested_list_metadata;
 pub mod tree_node;
 
 pub use builder::{
