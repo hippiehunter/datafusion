@@ -517,58 +517,68 @@ pub enum GraphPatternExpr {
     },
 }
 
-/// A graph pattern with optional path variable binding
+/// A path pattern with its optional path variable, selector and path mode
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub struct GraphPattern {
     /// Optional path variable binding (e.g., `p` in `p = (a)-[]->(b)`)
     pub path_variable: Option<String>,
+    /// The path search prefix (selector) of this path pattern
+    pub path_finding: Option<PathFinding>,
+    /// The path mode of this path pattern
+    pub path_mode: Option<PathMode>,
     /// The pattern expression
     pub expr: GraphPatternExpr,
 }
 
-/// Path finding algorithm for MATCH clause
+/// Path search prefix (selector) of a path pattern. A selector partitions a
+/// path pattern's matches by their first and last vertex and keeps the named
+/// paths of each partition.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum PathFinding {
-    /// ANY - any path
-    Any,
-    /// ANY SHORTEST - any shortest path
-    AnyShortest,
-    /// ALL SHORTEST - all shortest paths
-    AllShortest,
-    /// SHORTEST k [PATHS|PATH GROUPS]
-    Shortest { k: u64, groups: bool },
-    /// ANY CHEAPEST - any cheapest path
-    AnyCheapest,
-    /// ALL CHEAPEST - all cheapest paths
-    AllCheapest,
-    /// CHEAPEST k [PATHS|PATH GROUPS]
-    Cheapest { k: u64, groups: bool },
-    /// ALL - all paths
+    /// `ALL` - every path
     All,
+    /// `ANY [k]` - any one path, or any `k` paths
+    Any { k: Option<u64> },
+    /// `ANY SHORTEST` - one path of minimum length
+    AnyShortest,
+    /// `ALL SHORTEST` - every path of minimum length
+    AllShortest,
+    /// `SHORTEST k` - the `k` shortest paths
+    Shortest { k: u64 },
+    /// `SHORTEST [k] GROUPS` - every path whose length is among the `k`
+    /// smallest lengths; one group when `k` is omitted
+    ShortestGroups { k: Option<u64> },
 }
 
-/// Path mode for MATCH clause
+/// Path mode of a path pattern
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum PathMode {
-    /// WALK - allows repeated vertices and edges
+    /// WALK - repeated vertices and edges are allowed
     Walk,
-    /// TRAIL - no repeated edges
+    /// TRAIL - no edge repeats
     Trail,
-    /// ACYCLIC - no repeated vertices (except start = end for cycles)
+    /// ACYCLIC - no vertex repeats
     Acyclic,
-    /// SIMPLE - no repeated vertices at all
+    /// SIMPLE - no vertex repeats, except that the last vertex may be the
+    /// first
     Simple,
 }
 
 /// Row limiting mode for graph pattern matching results
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum RowLimiting {
-    /// ONE ROW PER MATCH - return one row per complete match
+    /// ONE ROW PER MATCH - one row per complete match
     OneRowPerMatch,
-    /// ONE ROW PER VERTEX - return one row per vertex in the path
-    OneRowPerVertex,
-    /// ONE ROW PER STEP - return one row per edge in the path
-    OneRowPerStep,
+    /// ONE ROW PER VERTEX (v) - one row per vertex of each match's path,
+    /// bound to the iterator variable `vertex`
+    OneRowPerVertex { vertex: String },
+    /// ONE ROW PER STEP (v1, e, v2) - one row per edge of each match's path,
+    /// with the edge and its two vertices bound to the iterator variables
+    OneRowPerStep {
+        source: String,
+        edge: String,
+        destination: String,
+    },
 }
 
 /// Column output specification for GRAPH_TABLE
@@ -598,10 +608,6 @@ pub struct GraphColumn {
 pub struct GraphTable {
     /// The name of the property graph to query
     pub graph_name: TableReference,
-    /// Path finding algorithm
-    pub path_finding: Option<PathFinding>,
-    /// Path mode
-    pub path_mode: Option<PathMode>,
     /// Row limiting mode
     pub row_limiting: Option<RowLimiting>,
     /// The graph patterns to match
@@ -616,11 +622,8 @@ pub struct GraphTable {
 
 impl GraphTable {
     /// Create a new GraphTable node
-    #[expect(clippy::too_many_arguments)]
     pub fn try_new(
         graph_name: TableReference,
-        path_finding: Option<PathFinding>,
-        path_mode: Option<PathMode>,
         row_limiting: Option<RowLimiting>,
         patterns: Vec<GraphPattern>,
         where_clause: Option<Expr>,
@@ -629,8 +632,6 @@ impl GraphTable {
     ) -> Result<Self> {
         Ok(Self {
             graph_name,
-            path_finding,
-            path_mode,
             row_limiting,
             patterns,
             where_clause,
@@ -1503,8 +1504,6 @@ impl LogicalPlan {
             }
             LogicalPlan::GraphTable(GraphTable {
                 graph_name,
-                path_finding,
-                path_mode,
                 row_limiting,
                 patterns,
                 where_clause,
@@ -1514,8 +1513,6 @@ impl LogicalPlan {
                 // GraphTable schema is determined by COLUMNS clause, not inputs
                 GraphTable::try_new(
                     graph_name,
-                    path_finding,
-                    path_mode,
                     row_limiting,
                     patterns,
                     where_clause,
@@ -2170,8 +2167,6 @@ impl LogicalPlan {
             }
             LogicalPlan::GraphTable(GraphTable {
                 graph_name,
-                path_finding,
-                path_mode,
                 row_limiting,
                 patterns,
                 where_clause: _,
@@ -2197,8 +2192,6 @@ impl LogicalPlan {
                     .collect();
                 GraphTable::try_new(
                     graph_name.clone(),
-                    path_finding.clone(),
-                    path_mode.clone(),
                     row_limiting.clone(),
                     patterns.clone(),
                     where_clause,

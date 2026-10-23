@@ -32,7 +32,7 @@ use datafusion_expr::expr::NullTreatment;
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::expr_rewriter::NamePreserver;
 use datafusion_expr::expr_schema::is_type_only_cast_target;
-use datafusion_expr::logical_plan::LogicalPlan;
+use datafusion_expr::logical_plan::{GraphPattern, GraphTable, LogicalPlan, RowLimiting};
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
     AggregateUDF, BoundSqlExpression, Cast, Expr, ExprSchemable, GetFieldAccess,
@@ -126,6 +126,28 @@ pub trait ContextProvider {
         _schema: &DFSchema,
     ) -> Result<Expr> {
         Ok(record)
+    }
+
+    /// Compile a GRAPH_TABLE into the relational plan that computes it. The
+    /// embedding knows the property graph's element tables, so it can type
+    /// the COLUMNS clause and resolve those tables like any other relation
+    /// of the statement. The default leaves the GraphTable node for a later
+    /// rewrite.
+    fn plan_graph_table(&self, graph_table: GraphTable) -> Result<LogicalPlan> {
+        Ok(LogicalPlan::GraphTable(graph_table))
+    }
+
+    /// The schema a GRAPH_TABLE's WHERE and COLUMNS clauses are planned in:
+    /// one qualifier per element variable of `patterns` (and per iterator
+    /// variable of `row_limiting`), holding the properties that variable
+    /// can read with their types. `None` plans the clauses untyped.
+    fn graph_table_scope(
+        &self,
+        _graph_name: &TableReference,
+        _patterns: &[GraphPattern],
+        _row_limiting: Option<&RowLimiting>,
+    ) -> Result<Option<DFSchema>> {
+        Ok(None)
     }
 
     /// Resolve the durable identity of a relation before the planner records

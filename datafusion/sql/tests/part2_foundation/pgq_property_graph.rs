@@ -593,7 +593,8 @@ fn pgq008_one_row_per_match() {
     assert_plans!(
         "SELECT * FROM GRAPH_TABLE (
            social_network
-           MATCH ONE ROW PER MATCH (a:Person)-[e:KNOWS*]->(b:Person)
+           MATCH ANY SHORTEST (a:Person)-[e:KNOWS*]->(b:Person)
+           ONE ROW PER MATCH
            COLUMNS (a.name, b.name)
          ) AS gt"
     );
@@ -605,8 +606,9 @@ fn pgq008_one_row_per_vertex() {
     assert_plans!(
         "SELECT * FROM GRAPH_TABLE (
            social_network
-           MATCH ONE ROW PER VERTEX (a:Person)-[e:KNOWS*]->(b:Person)
-           COLUMNS (a.name)
+           MATCH ANY SHORTEST (a:Person)-[e:KNOWS*]->(b:Person)
+           ONE ROW PER VERTEX (v)
+           COLUMNS (v.name)
          ) AS gt"
     );
 }
@@ -617,8 +619,9 @@ fn pgq008_one_row_per_step() {
     assert_plans!(
         "SELECT * FROM GRAPH_TABLE (
            social_network
-           MATCH ONE ROW PER STEP (a:Person)-[e:KNOWS*]->(b:Person)
-           COLUMNS (a.name, e.since)
+           MATCH ANY SHORTEST (a:Person)-[e:KNOWS*]->(b:Person)
+           ONE ROW PER STEP (v1, ed, v2)
+           COLUMNS (v1.name, ed.since, element_number(ed))
          ) AS gt"
     );
 }

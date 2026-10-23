@@ -332,6 +332,10 @@ pub struct PlannerContext {
     /// its own expressions). The enclosing query evaluates them alongside
     /// its own aggregates; the subquery reads each as an outer reference.
     outer_level_aggregates: Vec<(usize, Expr)>,
+    /// Whether the planner is inside a GRAPH_TABLE's MATCH or COLUMNS
+    /// clause, where the graph functions (`MATCHNUM`, `ELEMENT_NUMBER`) are
+    /// in scope.
+    in_graph_table: bool,
 }
 
 impl Default for PlannerContext {
@@ -355,7 +359,19 @@ impl PlannerContext {
             values_assembly: None,
             next_anonymous_placeholder: Cell::new(1),
             outer_level_aggregates: Vec::new(),
+            in_graph_table: false,
         }
+    }
+
+    /// Whether the graph functions of a GRAPH_TABLE are in scope.
+    pub fn in_graph_table(&self) -> bool {
+        self.in_graph_table
+    }
+
+    /// Enter or leave a GRAPH_TABLE's MATCH and COLUMNS clauses, returning
+    /// the previous scope.
+    pub fn set_in_graph_table(&mut self, in_graph_table: bool) -> bool {
+        std::mem::replace(&mut self.in_graph_table, in_graph_table)
     }
 
     /// Hand an aggregate whose arguments belong to the query at `level` to

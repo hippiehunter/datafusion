@@ -21,6 +21,7 @@ use crate::planner::{
     SqlToRel,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_expr::graph_functions::GraphFunction;
 use datafusion_expr::{Distinct, DistinctOn, LogicalPlan, Projection};
 
 use arrow::datatypes::DataType;
@@ -603,6 +604,31 @@ impl SqlToRel<'_> {
                     PlannerResult::Original(args) => fn_args = args,
                 }
             }
+        }
+
+        if planner_context.in_graph_table()
+            && let Some(function) = GraphFunction::from_name(&name)
+        {
+            // ELEMENT_NUMBER names an element variable, not a value: its
+            // argument stays the bare name the compiler resolves.
+            let args = if function == GraphFunction::ElementNumber {
+                args.iter()
+                    .map(|arg| match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Identifier(ident))) => {
+                            Ok(Expr::Column(Column::from_name(
+                                self.ident_normalizer.normalize(ident.clone()),
+                            )))
+                        }
+                        other => plan_err!("ELEMENT_NUMBER takes an element variable, not {other}"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                self.function_args_to_expr(args, schema, planner_context)?
+            };
+            return Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                function.udf(),
+                args,
+            )));
         }
 
         // A set-returning function multiplies the row it is written in: each
