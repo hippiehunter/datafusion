@@ -563,7 +563,7 @@ impl SqlToRel<'_> {
                 clauses.order_by.clone(),
                 schema,
                 planner_context,
-                true,
+                false,
                 None,
             )?
         };

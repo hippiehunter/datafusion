@@ -17,8 +17,8 @@
 
 use crate::definition_plan::{WithQuery, as_definition_node};
 use crate::planner::{
-    ContextProvider, PlannerContext, PlannerResult, RawAggregateExpr, RawWindowExpr,
-    SqlToRel,
+    ContextProvider, PlannerContext, PlannerResult, RawAggregateExpr, RawCallForm,
+    RawWindowExpr, RoutineCallKind, SqlToRel,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Distinct, DistinctOn, LogicalPlan, Projection};
@@ -27,7 +27,7 @@ use arrow::datatypes::DataType;
 use datafusion_common::{
     Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, ScalarValue,
     Spans, internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err,
-    plan_err,
+    plan_err, sqlstate_datafusion_err,
 };
 use datafusion_expr::{
     Expr, ExprSchemable, LogicalPlanBuilder, Operator, SortExpr, Subquery, WindowFrame,
@@ -540,13 +540,6 @@ impl SqlToRel<'_> {
             function_without_parentheses,
         } = function_args;
 
-        if over.is_some() && !within_group.is_empty() {
-            return plan_err!(
-                "OVER and WITHIN GROUP clause cannot be used together. \
-                OVER is for window functions, whereas WITHIN GROUP is for ordered set aggregate functions"
-            );
-        }
-
         if !order_by.is_empty() && !within_group.is_empty() {
             return plan_err!(
                 "ORDER BY and WITHIN GROUP clauses cannot be used together in the same aggregate function"
@@ -559,6 +552,37 @@ impl SqlToRel<'_> {
         let is_function_window = over.is_some();
         let sql_parser_span = object_name.0[0].span();
         let name = self.normalized_function_name(object_name)?;
+        let call_form = |resolved| RawCallForm {
+            name: name.clone(),
+            name_span: crate::utils::convert_parser_span(sql_parser_span),
+            args: Vec::new(),
+            arg_spans: Vec::new(),
+            within_group: 0,
+            star: false,
+            distinct,
+            order_by: !order_by.is_empty(),
+            filter: filter.is_some(),
+            over: over.is_some(),
+            resolved,
+        };
+
+        // A call that writes WITHIN GROUP is checked against the routine its
+        // arguments and sort keys select before any family plans it.
+        if !within_group.is_empty() {
+            self.check_call_form(
+                call_form(None),
+                args,
+                within_group,
+                schema,
+                planner_context,
+            )?;
+            if over.is_some() {
+                return plan_err!(
+                    "OVER and WITHIN GROUP clause cannot be used together. \
+                    OVER is for window functions, whereas WITHIN GROUP is for ordered set aggregate functions"
+                );
+            }
+        }
 
         // handle make_map and map functions
         // make_map always uses plan_make_map: make_map(k1, v1, k2, v2, ...)
@@ -656,8 +680,30 @@ impl SqlToRel<'_> {
             other => other,
         };
         if let Some(fm) = scalar_udf {
+            if !within_group.is_empty() {
+                return plan_err!(
+                    "WITHIN GROUP is only supported for ordered-set aggregate functions"
+                );
+            }
             let normal_form_args = unicode_normal_form_args(&name, args);
             let args = normal_form_args.as_deref().unwrap_or(args);
+            // The clauses of an aggregate or window call, and the `*` of
+            // `count(*)`, are the routine's to accept, and a scalar function
+            // takes none of them.
+            if over.is_some()
+                || filter.is_some()
+                || distinct
+                || !order_by.is_empty()
+                || args.iter().any(is_star_argument)
+            {
+                self.check_call_form(
+                    call_form(Some(RoutineCallKind::Scalar)),
+                    args,
+                    &[],
+                    schema,
+                    planner_context,
+                )?;
+            }
             let (args, arg_names) =
                 self.function_args_to_expr_with_names(args, schema, planner_context)?;
 
@@ -772,9 +818,13 @@ impl SqlToRel<'_> {
         }
 
         if !order_by.is_empty() && is_function_window {
-            return plan_err!(
-                "Aggregate ORDER BY is not implemented for window functions"
-            );
+            let message = "aggregate ORDER BY is not implemented for window functions";
+            return Err(sqlstate_datafusion_err("0A000", message).with_diagnostic(
+                Diagnostic::new_error(
+                    message,
+                    crate::utils::convert_parser_span(sql_parser_span),
+                ),
+            ));
         }
         // Then, window function
         if let Some(WindowType::WindowSpec(window)) = over {
@@ -871,6 +921,8 @@ impl SqlToRel<'_> {
                     .map(Box::new);
 
                 let mut window_expr = RawWindowExpr {
+                    name: name.clone(),
+                    name_span: crate::utils::convert_parser_span(sql_parser_span),
                     func_def: fun,
                     args: resolved_args,
                     partition_by,
@@ -882,13 +934,15 @@ impl SqlToRel<'_> {
                 };
 
                 for planner in self.context_provider.get_expr_planners().iter() {
-                    match planner.plan_window(window_expr)? {
+                    match planner.plan_window(window_expr, schema)? {
                         PlannerResult::Planned(expr) => return Ok(expr),
                         PlannerResult::Original(expr) => window_expr = expr,
                     }
                 }
 
                 let RawWindowExpr {
+                    name: _,
+                    name_span: _,
                     func_def,
                     args,
                     partition_by,
@@ -940,12 +994,24 @@ impl SqlToRel<'_> {
                     );
                 }
 
-                let (mut args, mut arg_names) =
-                    self.function_args_to_expr_with_names(args, schema, planner_context)?;
-
                 // UDAFs must opt-in via `supports_within_group_clause()` to
                 // accept a WITHIN GROUP clause.
                 let supports_within_group = fm.supports_within_group_clause();
+
+                // `f(*)` passes an ordered-set aggregate no argument.
+                let (mut args, mut arg_names): (Vec<Expr>, Vec<Option<String>>) = args
+                    .iter()
+                    .filter(|arg| !(supports_within_group && is_star_argument(arg)))
+                    .map(|arg| {
+                        self.sql_fn_arg_to_logical_expr_with_name(
+                            arg,
+                            schema,
+                            planner_context,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .unzip();
 
                 if !within_group.is_empty() && !supports_within_group {
                     return plan_err!(
@@ -953,12 +1019,20 @@ impl SqlToRel<'_> {
                     );
                 }
 
+                // The written sort items, one per entry of `order_by` below.
+                // ORDER BY and WITHIN GROUP are exclusive, so at most one of
+                // the two lists is non-empty.
+                let written_order = if supports_within_group || order_by.is_empty() {
+                    within_group
+                } else {
+                    order_by
+                };
                 // If the UDAF supports WITHIN GROUP, convert the ordering into
                 // sort expressions and prepend them as unnamed function args.
                 let order_by = if supports_within_group {
                     let (within_group_sorts, new_args, new_arg_names) = self
                         .extract_and_prepend_within_group_args(
-                            within_group,
+                            written_order,
                             args,
                             arg_names,
                             schema,
@@ -968,16 +1042,14 @@ impl SqlToRel<'_> {
                     arg_names = new_arg_names;
                     within_group_sorts
                 } else {
-                    let order_by = if !order_by.is_empty() {
-                        order_by
-                    } else {
-                        within_group
-                    };
+                    // An aggregate's ORDER BY sorts its input rows by
+                    // expressions; an integer there is a constant, not an
+                    // output column position.
                     self.order_by_to_sort_expr(
-                        order_by,
+                        written_order,
                         schema,
                         planner_context,
-                        true,
+                        false,
                         None,
                     )?
                 };
@@ -1041,17 +1113,21 @@ impl SqlToRel<'_> {
                     // outside the argument list no longer names anything.
                     if let Some(foreign) = order_by
                         .iter()
-                        .find(|sort| !resolved_args.contains(&sort.expr))
+                        .position(|sort| !resolved_args.contains(&sort.expr))
                     {
-                        return plan_err!(
-                            "in an aggregate with DISTINCT, ORDER BY expressions must \
-                             appear in argument list, but '{}' does not",
-                            foreign.expr
+                        let message = "in an aggregate with DISTINCT, ORDER BY \
+                                       expressions must appear in argument list";
+                        let span = crate::utils::convert_parser_span(
+                            written_order[foreign].expr.span(),
                         );
+                        return Err(sqlstate_datafusion_err("42P10", message)
+                            .with_diagnostic(Diagnostic::new_error(message, span)));
                     }
                 }
 
                 let mut aggregate_expr = RawAggregateExpr {
+                    name: name.clone(),
+                    name_span: crate::utils::convert_parser_span(sql_parser_span),
                     func: fm,
                     args: resolved_args,
                     distinct,
@@ -1067,6 +1143,8 @@ impl SqlToRel<'_> {
                 }
 
                 let RawAggregateExpr {
+                    name: _,
+                    name_span: _,
                     func,
                     args,
                     distinct,
@@ -1122,6 +1200,21 @@ impl SqlToRel<'_> {
                     );
                 }
             }
+        }
+
+        // A window function called without OVER plans as nothing. A call
+        // with WITHIN GROUP has had its check.
+        if over.is_none()
+            && within_group.is_empty()
+            && self.context_provider.get_window_meta(&name).is_some()
+        {
+            self.check_call_form(
+                call_form(Some(RoutineCallKind::Window)),
+                args,
+                &[],
+                schema,
+                planner_context,
+            )?;
         }
 
         // All function families have declined the call. Let its owner report
@@ -1345,6 +1438,48 @@ impl SqlToRel<'_> {
             }
             _ => not_impl_err!("Unsupported qualified wildcard argument: {sql:?}"),
         }
+    }
+
+    /// Run [`crate::planner::ExprPlanner::check_call_form`] over `call`
+    /// with the written arguments `args` and `WITHIN GROUP` sort keys
+    /// `within_group` lowered against `schema`.
+    fn check_call_form(
+        &self,
+        mut call: RawCallForm,
+        args: &[FunctionArg],
+        within_group: &[OrderByExpr],
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<()> {
+        let planners = self.context_provider.get_expr_planners();
+        if planners.is_empty() {
+            return Ok(());
+        }
+        for arg in args {
+            if is_star_argument(arg) {
+                call.star = true;
+                continue;
+            }
+            let (expr, _) =
+                self.sql_fn_arg_to_logical_expr_with_name(arg, schema, planner_context)?;
+            call.args.push(expr);
+            call.arg_spans
+                .push(crate::utils::convert_parser_span(arg.span()));
+        }
+        for sort in within_group {
+            call.args.push(self.sql_expr_to_logical_expr(
+                &sort.expr,
+                schema,
+                planner_context,
+            )?);
+            call.arg_spans
+                .push(crate::utils::convert_parser_span(sort.expr.span()));
+        }
+        call.within_group = within_group.len();
+        for planner in planners {
+            planner.check_call_form(&call, schema)?;
+        }
+        Ok(())
     }
 
     pub(super) fn function_args_to_expr(
@@ -1671,6 +1806,11 @@ impl SqlToRel<'_> {
 /// according to the callee's variadic parameter before execution.
 pub const VARIADIC_MARKER_FUNCTION: &str = "__dbl_variadic";
 
+/// Whether `arg` is the bare `*` of `count(*)`.
+fn is_star_argument(arg: &FunctionArg) -> bool {
+    matches!(arg, FunctionArg::Unnamed(FunctionArgExpr::Wildcard))
+}
+
 /// PostgreSQL spells the Unicode normal form of `normalize(text, NFC)` as a
 /// bare keyword. The parser hands it over as an identifier; lower it to the
 /// string literal the function takes.
@@ -1724,6 +1864,7 @@ fn written_argument_positions(
 mod scalar_subquery_aggregate_tests {
     use super::*;
     use crate::parser::{DFParser, Statement};
+    use crate::planner::ExprPlanner;
     use arrow::datatypes::{Field, Schema};
     use datafusion_common::TableReference;
     use datafusion_common::config::ConfigOptions;
@@ -1741,9 +1882,31 @@ mod scalar_subquery_aggregate_tests {
         options: ConfigOptions,
         owns_missing_functions: bool,
         owns_national_literals: bool,
+        planners: Vec<Arc<dyn ExprPlanner>>,
+    }
+
+    /// Records every call form it is asked to check, refusing each with
+    /// `refusal` when one is set.
+    #[derive(Debug, Default)]
+    struct CallFormRecorder {
+        calls: std::sync::Mutex<Vec<RawCallForm>>,
+        refusal: Option<&'static str>,
+    }
+
+    impl ExprPlanner for CallFormRecorder {
+        fn check_call_form(&self, call: &RawCallForm, _: &DFSchema) -> Result<()> {
+            self.calls.lock().unwrap().push(call.clone());
+            match self.refusal {
+                Some(message) => Err(sqlstate_datafusion_err("42809", message)),
+                None => Ok(()),
+            }
+        }
     }
 
     impl ContextProvider for ArrayContext {
+        fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
+            &self.planners
+        }
         fn get_table_source(&self, _: TableReference) -> Result<Arc<dyn TableSource>> {
             Ok(Arc::new(LogicalTableSource::new(Arc::new(Schema::new(
                 vec![
@@ -1882,6 +2045,86 @@ mod scalar_subquery_aggregate_tests {
             "function absent(owned_text, Int32) does not exist"
         );
         assert_eq!(error.diagnostic().unwrap().span.unwrap().start.column, 8);
+    }
+
+    fn recording_context(refusal: Option<&'static str>) -> (ArrayContext, Arc<CallFormRecorder>) {
+        let recorder = Arc::new(CallFormRecorder {
+            refusal,
+            ..Default::default()
+        });
+        let context = ArrayContext {
+            planners: vec![Arc::clone(&recorder) as Arc<dyn ExprPlanner>],
+            ..Default::default()
+        };
+        (context, recorder)
+    }
+
+    #[test]
+    fn within_group_calls_are_checked_with_their_sort_keys_as_trailing_arguments() {
+        let (context, recorder) = recording_context(None);
+        let error = plan_with_context(
+            "SELECT array_agg(a) WITHIN GROUP (ORDER BY b DESC) FROM t",
+            &context,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("WITHIN GROUP is only supported for ordered-set aggregate functions"),
+            "{error}"
+        );
+        let calls = recorder.calls.lock().unwrap();
+        let [call] = calls.as_slice() else {
+            panic!("one call form is checked: {calls:?}")
+        };
+        assert_eq!(call.name, "array_agg");
+        assert_eq!(call.args.len(), 2);
+        assert_eq!(call.within_group, 1);
+        assert!(matches!(&call.args[1], Expr::Column(column) if column.name == "b"));
+        assert_eq!(
+            call.arg_spans
+                .iter()
+                .map(|span| span.map(|span| span.start.column))
+                .collect::<Vec<_>>(),
+            vec![Some(18), Some(44)]
+        );
+        assert_eq!(call.name_span.unwrap().start.column, 8);
+        assert!(!call.over && !call.star && call.resolved.is_none());
+    }
+
+    #[test]
+    fn a_star_argument_is_no_argument_of_the_checked_call() {
+        let (context, recorder) = recording_context(None);
+        let error = plan_with_context(
+            "SELECT array_agg(*) WITHIN GROUP (ORDER BY a) OVER () FROM t",
+            &context,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("OVER and WITHIN GROUP"),
+            "{error}"
+        );
+        let calls = recorder.calls.lock().unwrap();
+        let [call] = calls.as_slice() else {
+            panic!("one call form is checked: {calls:?}")
+        };
+        assert!(call.star && call.over);
+        assert_eq!((call.args.len(), call.within_group), (1, 1));
+    }
+
+    #[test]
+    fn a_refused_call_form_reports_the_planner_error() {
+        let (context, _) = recording_context(Some("refused"));
+        let error = plan_with_context(
+            "SELECT array_agg(a) WITHIN GROUP (ORDER BY b) FROM t",
+            &context,
+        )
+        .unwrap_err();
+        let DataFusionError::External(source) = error.find_root() else {
+            panic!("the refusal keeps its SQLSTATE: {error}")
+        };
+        let state = source.downcast_ref::<DataFusionSqlStateError>().unwrap();
+        assert_eq!((state.sqlstate.as_str(), state.message.as_str()), ("42809", "refused"));
     }
 
     #[test]

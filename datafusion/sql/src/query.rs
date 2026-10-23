@@ -33,15 +33,32 @@ use datafusion_expr::{
     LogicalPlanBuilder,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, Fetch, Ident, LimitClause, OrderBy, OrderByExpr, OrderByKind, Query,
-    SelectInto, SelectItem, SetExpr,
+    Expr as SQLExpr, Fetch, Ident, LimitClause, LimitValue, OrderBy, OrderByExpr,
+    OrderByKind, Query, SelectInto, SelectItem, SetExpr,
 };
 use sqlparser::tokenizer::Span;
+
+/// The row count a LIMIT or FETCH clause names.
+#[derive(Debug, Clone, Copy)]
+enum RowCount<'a> {
+    /// `LIMIT ALL`
+    All,
+    Expr(&'a SQLExpr),
+}
+
+impl<'a> From<&'a LimitValue> for RowCount<'a> {
+    fn from(value: &'a LimitValue) -> Self {
+        match value {
+            LimitValue::All(_) => RowCount::All,
+            LimitValue::Expr(expr) => RowCount::Expr(expr),
+        }
+    }
+}
 
 /// Internal representation of limit/offset with WITH TIES support
 #[derive(Debug, Clone, Copy)]
 struct LimitInfo<'a> {
-    limit: Option<&'a SQLExpr>,
+    limit: Option<RowCount<'a>>,
     offset: Option<&'a SQLExpr>,
     limit_by: &'a [SQLExpr],
     with_ties: bool,
@@ -139,7 +156,8 @@ impl SqlToRel<'_> {
             None => {
                 // Only FETCH, no LIMIT/OFFSET
                 // Convert FETCH to LimitClause
-                fetch_quantity.map(|quantity| (Some(quantity), None, &[][..]))
+                fetch_quantity
+                    .map(|quantity| (Some(RowCount::Expr(quantity)), None, &[][..]))
             }
             Some(LimitClause::LimitOffset {
                 limit,
@@ -155,7 +173,7 @@ impl SqlToRel<'_> {
                 // OFFSET with FETCH - combine them
                 match fetch_quantity {
                     Some(quantity) => Some((
-                        Some(quantity),
+                        Some(RowCount::Expr(quantity)),
                         offset.as_ref().map(|offset| &offset.value),
                         limit_by.as_slice(),
                     )),
@@ -206,12 +224,12 @@ impl SqlToRel<'_> {
                 offset,
                 limit_by,
             }) => (
-                limit.as_ref(),
+                limit.as_ref().map(RowCount::from),
                 offset.as_ref().map(|offset| &offset.value),
                 limit_by.as_slice(),
             ),
             Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
-                (Some(limit), Some(offset), &[][..])
+                (Some(RowCount::Expr(limit)), Some(offset), &[][..])
             }
         };
         Ok(LimitInfo {
@@ -260,9 +278,12 @@ impl SqlToRel<'_> {
             .transpose()?;
 
         let fetch = match limit {
-            Some(expr) => {
+            Some(RowCount::Expr(expr)) => {
                 Some(self.sql_to_expr_ref(expr, &empty_schema, planner_context)?)
             }
+            // `LIMIT ALL` is a LIMIT clause that bounds nothing; PostgreSQL
+            // plans it as `LIMIT NULL`.
+            Some(RowCount::All) => Some(Expr::Literal(ScalarValue::Null, None)),
             // `FETCH FIRST ROW ONLY` spells a row count of one.
             None if implicit_single_row => {
                 Some(Expr::Literal(ScalarValue::Int64(Some(1)), None))

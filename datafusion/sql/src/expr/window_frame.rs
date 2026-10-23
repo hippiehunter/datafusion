@@ -163,7 +163,7 @@ fn fold_integer_frame_offset(expr: &ast::Expr) -> Option<i128> {
             value: ast::Value::Number(text, false),
             span: _,
         }) => text.parse::<i128>().ok(),
-        ast::Expr::UnaryOp { op, expr } => {
+        ast::Expr::UnaryOp { op, expr, .. } => {
             let value = fold_integer_frame_offset(expr)?;
             match op {
                 ast::UnaryOperator::Plus => Some(value),
@@ -261,6 +261,7 @@ fn range_offset(
         ast::Expr::UnaryOp {
             op: op @ (ast::UnaryOperator::Minus | ast::UnaryOperator::Plus),
             expr,
+            ..
         } => match sqlparser::arena::AstBox::into_owned(expr) {
             ast::Expr::Value(ValueWithSpan {
                 value: ast::Value::Number(number, _),
@@ -470,6 +471,7 @@ mod tests {
                 ast::Expr::UnaryOp {
                     op: ast::UnaryOperator::Minus,
                     expr: ast::AstBox::new(number("1.5")),
+                    op_token: ast::AttachedToken::empty(),
                 },
                 ScalarValue::Decimal128(Some(-15), 2, 1),
             ),

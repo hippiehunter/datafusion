@@ -102,7 +102,7 @@ impl QueryBuilder {
             },
             order_by,
             limit_clause: Some(SQLBox::new(LimitClause::LimitOffset {
-                limit: self.limit.clone(),
+                limit: self.limit.clone().map(ast::LimitValue::Expr),
                 offset: self.offset.clone(),
                 limit_by: self.limit_by.clone(),
             })),

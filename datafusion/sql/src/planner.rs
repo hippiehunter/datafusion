@@ -1585,6 +1585,7 @@ fn expr_to_i64(expr: &sqlparser::ast::Expr) -> Result<i64> {
         sqlparser::ast::Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Minus,
             expr,
+            ..
         } => Ok(-expr_to_i64(expr)?),
         _ => plan_err!("Expected numeric identity value"),
     }
