@@ -1004,25 +1004,6 @@ fn substitute_bound_row_columns(
         .map(|transformed| transformed.data)
 }
 
-/// Whether a stored generation expression reads any of `columns`. An UPDATE,
-/// or an `ON CONFLICT DO UPDATE` action, computes a stored generated column
-/// again only when it assigns a column the expression reads, as PostgreSQL
-/// prepares the statement.
-fn bound_expression_reads_any(
-    expression: &BoundSqlExpression,
-    columns: &[String],
-) -> bool {
-    expression
-        .expression()
-        .column_refs()
-        .into_iter()
-        .any(|column| {
-            columns
-                .iter()
-                .any(|assigned| assigned.eq_ignore_ascii_case(&column.name))
-        })
-}
-
 fn expression_without_alias(expression: &Expr) -> Expr {
     match expression {
         Expr::Alias(alias) => alias.expr.as_ref().clone(),
@@ -4331,14 +4312,17 @@ impl SqlToRel<'_> {
                         "stored generated expression targets unknown column {column}"
                     );
                 };
-                // A generated column whose expression reads no assigned
-                // column keeps its stored value, `SET g = DEFAULT` included.
-                let value = if bound_expression_reads_any(expression, &assigned_columns) {
-                    let value = substitute_bound_row_columns(expression, &row_values)?;
-                    self.assign_to_column(value, field, source.schema())?
-                } else {
-                    Expr::Column(Column::new(Some(target_relation.clone()), field.name()))
-                };
+                let value =
+                    if generated.update_computes(column, expression, &assigned_columns) {
+                        let value =
+                            substitute_bound_row_columns(expression, &row_values)?;
+                        self.assign_to_column(value, field, source.schema())?
+                    } else {
+                        Expr::Column(Column::new(
+                            Some(target_relation.clone()),
+                            field.name(),
+                        ))
+                    };
                 projected_exprs[position] = value.alias(field.name());
             }
         }
@@ -5322,9 +5306,8 @@ impl SqlToRel<'_> {
                             ) {
                                 // DEFAULT on a generated column writes its
                                 // expression's value: the assignment below
-                                // computes it when the action assigns a
-                                // column it reads, and otherwise the stored
-                                // value stands.
+                                // computes it when the action reaches it,
+                                // and otherwise the stored value stands.
                                 continue;
                             }
                             return Err(self
@@ -5413,7 +5396,11 @@ impl SqlToRel<'_> {
                                     "stored generated expression targets unknown column {column}"
                                 )
                             })?;
-                        if !bound_expression_reads_any(expression, &assigned_columns) {
+                        if !generated.update_computes(
+                            column,
+                            expression,
+                            &assigned_columns,
+                        ) {
                             continue;
                         }
                         let value =

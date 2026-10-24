@@ -1337,7 +1337,8 @@ impl ViewDmlTarget {
 /// [`ContextProvider::dml_generated_columns`]. A generated column's value is
 /// its generation expression's, so a statement supplying any other value is
 /// refused, and an UPDATE recomputes, as part of the statement, every stored
-/// generated column whose expression reads a column the statement assigns.
+/// generated column whose expression reads a column the statement assigns,
+/// and every virtual one the host computes on write.
 #[derive(Debug, Clone)]
 pub struct DmlGeneratedColumns {
     /// Every generated column name; writing one with a non-DEFAULT value is
@@ -1348,6 +1349,13 @@ pub struct DmlGeneratedColumns {
     /// restoration. A write that changes the column's inputs recomputes it
     /// through this expression.
     pub generated_expressions: Vec<(String, BoundSqlExpression)>,
+    /// The virtual columns among `generated_expressions`: those the host
+    /// computes on write, for a constraint that reads them. Every read
+    /// computes a virtual column from its expression, so what the row holds
+    /// for one is no value a later write may keep: an UPDATE computes each of
+    /// these whatever it assigns, as PostgreSQL checks a constraint over a
+    /// virtual column on every write.
+    pub virtual_columns: Vec<String>,
     /// The relation's full positional column list, for rejecting a
     /// positional VALUES row that reaches a generated column.
     pub positional_columns: Vec<String>,
@@ -1377,6 +1385,31 @@ impl DmlGeneratedColumns {
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(column))
             .map(|(_, expression)| expression.expression().clone())
+    }
+
+    /// Whether an UPDATE that assigns `assigned` computes the generated
+    /// `column` again through `expression`: a virtual column always, a
+    /// stored one when its expression reads an assigned column. A stored
+    /// column the statement does not reach keeps its value, `SET g =
+    /// DEFAULT` included, as PostgreSQL prepares the statement.
+    pub fn update_computes(
+        &self,
+        column: &str,
+        expression: &BoundSqlExpression,
+        assigned: &[String],
+    ) -> bool {
+        self.virtual_columns
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(column))
+            || expression
+                .expression()
+                .column_refs()
+                .into_iter()
+                .any(|read| {
+                    assigned
+                        .iter()
+                        .any(|assigned| assigned.eq_ignore_ascii_case(&read.name))
+                })
     }
 }
 

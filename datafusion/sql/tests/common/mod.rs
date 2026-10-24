@@ -137,12 +137,36 @@ impl ContextProvider for MockContextProvider {
                         col("a") + Expr::Literal(ScalarValue::Int32(Some(1)), None),
                     ),
                 )],
+                virtual_columns: Vec::new(),
                 positional_columns: vec![
                     "a".to_string(),
                     "b".to_string(),
                     "s".to_string(),
                 ],
                 table_name: "generated_rows".to_string(),
+                identity_always: Vec::new(),
+                identity: Vec::new(),
+                explicit_default_overrides: Vec::new(),
+            }));
+        }
+        if table_name == Some("virtual_rows") {
+            // `v` is virtual as `a + 1`, computed on write for a constraint
+            // that reads it; it reads `a` and not `b`.
+            return Ok(Some(DmlGeneratedColumns {
+                columns: vec!["v".to_string()],
+                generated_expressions: vec![(
+                    "v".to_string(),
+                    BoundSqlExpression::new(
+                        col("a") + Expr::Literal(ScalarValue::Int32(Some(1)), None),
+                    ),
+                )],
+                virtual_columns: vec!["v".to_string()],
+                positional_columns: vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                    "v".to_string(),
+                ],
+                table_name: "virtual_rows".to_string(),
                 identity_always: Vec::new(),
                 identity: Vec::new(),
                 explicit_default_overrides: Vec::new(),
@@ -157,6 +181,7 @@ impl ContextProvider for MockContextProvider {
         Ok(Some(DmlGeneratedColumns {
             columns: Vec::new(),
             generated_expressions: Vec::new(),
+            virtual_columns: Vec::new(),
             positional_columns: vec!["id".to_string(), "v".to_string()],
             table_name: "sequence_rows".to_string(),
             identity_always: Vec::new(),
@@ -263,6 +288,11 @@ impl ContextProvider for MockContextProvider {
                 Field::new("a", DataType::Int32, true),
                 Field::new("b", DataType::Int32, true),
                 Field::new("s", DataType::Int32, true),
+            ])),
+            "virtual_rows" => Ok(Schema::new(vec![
+                Field::new("a", DataType::Int32, true),
+                Field::new("b", DataType::Int32, true),
+                Field::new("v", DataType::Int32, true),
             ])),
             "test_decimal" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int32, false),

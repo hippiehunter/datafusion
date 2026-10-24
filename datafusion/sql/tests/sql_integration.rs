@@ -1207,6 +1207,37 @@ fn plan_upsert_computes_only_the_generated_columns_its_assignments_reach() {
     );
 }
 
+/// A virtual column the host computes on write holds no value in the row a
+/// later write may keep, so an UPDATE and an `ON CONFLICT DO UPDATE` action
+/// compute it whatever they assign.
+#[test]
+fn plan_update_computes_every_virtual_column() {
+    let projection = match logical_plan("update virtual_rows set b = 7").unwrap() {
+        LogicalPlan::Dml(dml) => dml.input.display().to_string(),
+        other => panic!("Expected a DML plan, got {other:?}"),
+    };
+    assert_contains!(&projection, "virtual_rows.a + Int32(1) AS v");
+
+    let LogicalPlan::Dml(dml) = logical_plan(
+        "insert into virtual_rows (a, b) values (1, 2) \
+         on conflict (a) do update set b = excluded.b",
+    )
+    .unwrap() else {
+        panic!("Expected a DML plan");
+    };
+    let Some(update) = dml.conflict_update() else {
+        panic!("Expected an ON CONFLICT DO UPDATE action");
+    };
+    assert_eq!(
+        update
+            .assignments
+            .iter()
+            .map(|assignment| assignment.target.clone())
+            .collect::<Vec<_>>(),
+        vec!["b".to_string(), "v".to_string()]
+    );
+}
+
 /// UPDATE's RETURNING reads the row as stored: a target column it names has
 /// the column's own field, not the field of the value assigned to it.
 #[test]
