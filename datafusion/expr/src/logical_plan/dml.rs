@@ -320,7 +320,11 @@ pub struct DmlStatement {
     pub input: Arc<LogicalPlan>,
     /// The schema of the output relation
     pub output_schema: DFSchemaRef,
-    /// Explicit target columns for INSERT (e.g. `INSERT INTO t (a, b) ...`)
+    /// The columns the statement names as its targets: an INSERT's column
+    /// list (e.g. `INSERT INTO t (a, b) ...`), or the columns an UPDATE's SET
+    /// list assigns, in table order, self-assignments and `DEFAULT` included.
+    /// An UPDATE's projection cannot say which columns it assigns, since
+    /// `SET a = a` projects the stored column unchanged.
     pub target_columns: Option<Vec<String>>,
     /// Columns requested by a RETURNING clause
     pub returning_columns: Option<Vec<String>>,
@@ -443,7 +447,7 @@ impl DmlStatement {
         }
     }
 
-    /// Set explicit INSERT target columns.
+    /// Set the statement's target columns (see [`Self::target_columns`]).
     pub fn with_target_columns(mut self, columns: Vec<String>) -> Self {
         self.target_columns = Some(columns);
         self

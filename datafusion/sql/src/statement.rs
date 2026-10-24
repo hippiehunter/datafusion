@@ -1004,6 +1004,25 @@ fn substitute_bound_row_columns(
         .map(|transformed| transformed.data)
 }
 
+/// Whether a stored generation expression reads any of `columns`. An UPDATE,
+/// or an `ON CONFLICT DO UPDATE` action, computes a stored generated column
+/// again only when it assigns a column the expression reads, as PostgreSQL
+/// prepares the statement.
+fn bound_expression_reads_any(
+    expression: &BoundSqlExpression,
+    columns: &[String],
+) -> bool {
+    expression
+        .expression()
+        .column_refs()
+        .into_iter()
+        .any(|column| {
+            columns
+                .iter()
+                .any(|assigned| assigned.eq_ignore_ascii_case(&column.name))
+        })
+}
+
 fn expression_without_alias(expression: &Expr) -> Expr {
     match expression {
         Expr::Alias(alias) => alias.expr.as_ref().clone(),
@@ -3879,10 +3898,10 @@ impl SqlToRel<'_> {
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
             return crate::view_dml::stamp_check_option(plan, check_option);
         }
-        // Reject writes to generated columns and recompute the stored ones as
-        // part of the statement that changes their inputs, so the new row the
-        // plan produces — `RETURNING new.*` included — already carries their
-        // values.
+        // Reject writes to generated columns and recompute the stored ones the
+        // statement's assignments reach as part of the statement, so the new
+        // row the plan produces — `RETURNING new.*` included — already
+        // carries their values.
         let generated_columns = if let TableFactor::Table { name, .. } = &table.relation {
             self.context_provider.dml_generated_columns(name)?
         } else {
@@ -4183,6 +4202,20 @@ impl SqlToRel<'_> {
             .as_ref()
             .map_or_else(|| source.schema(), LogicalPlan::schema);
 
+        // The columns the SET list assigns, self-assignments and DEFAULT
+        // included, in table order: PostgreSQL's updated columns, which
+        // decide the stored generated columns the statement computes again
+        // and the `UPDATE OF` triggers it fires.
+        let assigned_columns = table_schema
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .filter(|name| {
+                assign_map.contains_key(*name) || path_assign_map.contains_key(*name)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Build updated values for each column, using the previous value if not modified
         let mut projected_exprs = table_schema
             .iter()
@@ -4298,8 +4331,14 @@ impl SqlToRel<'_> {
                         "stored generated expression targets unknown column {column}"
                     );
                 };
-                let value = substitute_bound_row_columns(expression, &row_values)?;
-                let value = self.assign_to_column(value, field, source.schema())?;
+                // A generated column whose expression reads no assigned
+                // column keeps its stored value, `SET g = DEFAULT` included.
+                let value = if bound_expression_reads_any(expression, &assigned_columns) {
+                    let value = substitute_bound_row_columns(expression, &row_values)?;
+                    self.assign_to_column(value, field, source.schema())?
+                } else {
+                    Expr::Column(Column::new(Some(target_relation.clone()), field.name()))
+                };
                 projected_exprs[position] = value.alias(field.name());
             }
         }
@@ -4411,7 +4450,8 @@ impl SqlToRel<'_> {
             WriteOp::Update,
             Arc::new(source),
             target_select_rights,
-        );
+        )
+        .with_target_columns(assigned_columns);
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }
@@ -5280,9 +5320,11 @@ impl SqlToRel<'_> {
                                 SQLExpr::Identifier(identifier)
                                     if is_default_identifier(identifier)
                             ) {
-                                // DEFAULT on a generated column means
-                                // recompute it; the semantic assignment below
-                                // supplies that value directly.
+                                // DEFAULT on a generated column writes its
+                                // expression's value: the assignment below
+                                // computes it when the action assigns a
+                                // column it reads, and otherwise the stored
+                                // value stands.
                                 continue;
                             }
                             return Err(self
@@ -5343,6 +5385,10 @@ impl SqlToRel<'_> {
                             (assignment.target.clone(), assignment.value.clone())
                         })
                         .collect::<HashMap<_, _>>();
+                    // A generated column never reads another, so the
+                    // `SET g = DEFAULT` targets the loop above leaves out
+                    // reach no generated column.
+                    let assigned_columns = assigned.keys().cloned().collect::<Vec<_>>();
                     let row_values = table_schema
                         .fields()
                         .iter()
@@ -5367,6 +5413,9 @@ impl SqlToRel<'_> {
                                     "stored generated expression targets unknown column {column}"
                                 )
                             })?;
+                        if !bound_expression_reads_any(expression, &assigned_columns) {
+                            continue;
+                        }
                         let value =
                             substitute_bound_row_columns(expression, &row_values)?;
                         let value =

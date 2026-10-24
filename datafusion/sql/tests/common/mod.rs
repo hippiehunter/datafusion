@@ -29,7 +29,7 @@ use datafusion_common::{
     plan_err,
 };
 use datafusion_expr::{
-    AggregateUDF, BoundSqlExpression, Expr, ScalarUDF, TableSource, WindowUDF,
+    AggregateUDF, BoundSqlExpression, Expr, ScalarUDF, TableSource, WindowUDF, col,
 };
 use datafusion_sql::planner::{
     ContextProvider, CreateTableLikeOptions, CreateTableLikeSource, DmlGeneratedColumns,
@@ -122,12 +122,33 @@ impl ContextProvider for MockContextProvider {
         &self,
         table: &ObjectName,
     ) -> Result<Option<DmlGeneratedColumns>> {
-        let is_sequence_rows = table
+        let table_name = table
             .0
             .last()
             .and_then(|part| part.as_ident())
-            .is_some_and(|ident| ident.value == "sequence_rows");
-        if !is_sequence_rows {
+            .map(|ident| ident.value.as_str());
+        if table_name == Some("generated_rows") {
+            // `s` is stored as `a + 1`; it reads `a` and not `b`.
+            return Ok(Some(DmlGeneratedColumns {
+                columns: vec!["s".to_string()],
+                generated_expressions: vec![(
+                    "s".to_string(),
+                    BoundSqlExpression::new(
+                        col("a") + Expr::Literal(ScalarValue::Int32(Some(1)), None),
+                    ),
+                )],
+                positional_columns: vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                    "s".to_string(),
+                ],
+                table_name: "generated_rows".to_string(),
+                identity_always: Vec::new(),
+                identity: Vec::new(),
+                explicit_default_overrides: Vec::new(),
+            }));
+        }
+        if table_name != Some("sequence_rows") {
             return Ok(None);
         }
         // `id` is sequence-backed: the host fills it when a write omits it,
@@ -237,6 +258,11 @@ impl ContextProvider for MockContextProvider {
             "sequence_rows" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("v", DataType::Utf8, true),
+            ])),
+            "generated_rows" => Ok(Schema::new(vec![
+                Field::new("a", DataType::Int32, true),
+                Field::new("b", DataType::Int32, true),
+                Field::new("s", DataType::Int32, true),
             ])),
             "test_decimal" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int32, false),

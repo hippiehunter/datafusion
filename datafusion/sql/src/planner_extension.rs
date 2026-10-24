@@ -1336,8 +1336,8 @@ impl ViewDmlTarget {
 /// A DML target relation's generated columns, resolved by
 /// [`ContextProvider::dml_generated_columns`]. A generated column's value is
 /// its generation expression's, so a statement supplying any other value is
-/// refused, and an UPDATE recomputes every stored generated column as part
-/// of the statement that changes its inputs.
+/// refused, and an UPDATE recomputes, as part of the statement, every stored
+/// generated column whose expression reads a column the statement assigns.
 #[derive(Debug, Clone)]
 pub struct DmlGeneratedColumns {
     /// Every generated column name; writing one with a non-DEFAULT value is

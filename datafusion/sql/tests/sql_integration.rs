@@ -1145,6 +1145,68 @@ fn plan_explicit_default_draws_sequence_where_the_write_provides_the_column() {
     assert_contains!(plan_text("update sequence_rows set id = DEFAULT"), &draw);
 }
 
+/// An UPDATE records the columns its SET list assigns, in table order, and
+/// computes a stored generated column again only when it assigns a column
+/// the column's expression reads; otherwise the stored value stands, as
+/// PostgreSQL prepares the statement. A self-assignment is an assignment.
+#[test]
+fn plan_update_computes_only_the_generated_columns_its_assignments_reach() {
+    let update = |sql: &str| match logical_plan(sql).unwrap() {
+        LogicalPlan::Dml(dml) => (dml.target_columns, dml.input.display().to_string()),
+        other => panic!("Expected a DML plan, got {other:?}"),
+    };
+
+    let (assigned, projection) = update("update generated_rows set b = 7");
+    assert_eq!(assigned, Some(vec!["b".to_string()]));
+    assert_contains!(&projection, "generated_rows.s AS s");
+
+    let (assigned, projection) = update("update generated_rows set b = b, a = 2");
+    assert_eq!(assigned, Some(vec!["a".to_string(), "b".to_string()]));
+    assert_contains!(&projection, "+ Int32(1) AS s");
+
+    let (assigned, projection) = update("update generated_rows set a = a");
+    assert_eq!(assigned, Some(vec!["a".to_string()]));
+    assert_contains!(&projection, "generated_rows.a + Int32(1) AS s");
+
+    let (assigned, projection) = update("update generated_rows set s = DEFAULT");
+    assert_eq!(assigned, Some(vec!["s".to_string()]));
+    assert_contains!(&projection, "generated_rows.s AS s");
+}
+
+/// An `ON CONFLICT DO UPDATE` action computes a stored generated column only
+/// when it assigns a column the column's expression reads.
+#[test]
+fn plan_upsert_computes_only_the_generated_columns_its_assignments_reach() {
+    let assigned_targets = |sql: &str| match logical_plan(sql).unwrap() {
+        LogicalPlan::Dml(dml) => {
+            let Some(update) = dml.conflict_update() else {
+                panic!("Expected an ON CONFLICT DO UPDATE action");
+            };
+            update
+                .assignments
+                .iter()
+                .map(|assignment| assignment.target.clone())
+                .collect::<Vec<_>>()
+        }
+        other => panic!("Expected a DML plan, got {other:?}"),
+    };
+
+    assert_eq!(
+        assigned_targets(
+            "insert into generated_rows (a, b) values (1, 2) \
+             on conflict (a) do update set b = excluded.b"
+        ),
+        vec!["b".to_string()]
+    );
+    assert_eq!(
+        assigned_targets(
+            "insert into generated_rows (a, b) values (1, 2) \
+             on conflict (a) do update set a = excluded.a"
+        ),
+        vec!["a".to_string(), "s".to_string()]
+    );
+}
+
 /// UPDATE's RETURNING reads the row as stored: a target column it names has
 /// the column's own field, not the field of the value assigned to it.
 #[test]
