@@ -275,10 +275,25 @@ fn optimize_projections(
     // For other plan node types, calculate indices for columns they use and
     // try to rewrite their children
     let mut child_required_indices: Vec<RequiredIndices> = match &plan {
-        LogicalPlan::Sort(_)
-        | LogicalPlan::Filter(_)
-        | LogicalPlan::Repartition(_)
-        | LogicalPlan::Union(_)
+        LogicalPlan::Sort(_) | LogicalPlan::Filter(_) | LogicalPlan::Repartition(_) => {
+            // Pass index requirements from the parent as well as column indices
+            // that appear in this plan's expressions to its child. These
+            // operators output their input's columns, so a junk column passes
+            // through them to the row-lock or write operator above, which
+            // reads it whether or not a parent names it. They benefit from
+            // "small" inputs, so the projection_beneficial flag is `true`.
+            plan.inputs()
+                .into_iter()
+                .map(|input| {
+                    indices
+                        .clone()
+                        .append(&junk_positions(input.schema()))
+                        .with_projection_beneficial()
+                        .with_plan_exprs(&plan, input.schema())
+                })
+                .collect::<Result<_>>()?
+        }
+        LogicalPlan::Union(_)
         | LogicalPlan::SubqueryAlias(_)
         | LogicalPlan::Distinct(Distinct::On(_)) => {
             // Pass index requirements from the parent as well as column indices
@@ -297,12 +312,18 @@ fn optimize_projections(
         }
         LogicalPlan::Limit(_) => {
             // Pass index requirements from the parent as well as column indices
-            // that appear in this plan's expressions to its child. These operators
-            // do not benefit from "small" inputs, so the projection_beneficial
-            // flag is `false`.
+            // that appear in this plan's expressions to its child, and the
+            // junk columns of its input, which a LIMIT passes through. These
+            // operators do not benefit from "small" inputs, so the
+            // projection_beneficial flag is `false`.
             plan.inputs()
                 .into_iter()
-                .map(|input| indices.clone().with_plan_exprs(&plan, input.schema()))
+                .map(|input| {
+                    indices
+                        .clone()
+                        .append(&junk_positions(input.schema()))
+                        .with_plan_exprs(&plan, input.schema())
+                })
                 .collect::<Result<_>>()?
         }
         LogicalPlan::Copy(_)
@@ -515,6 +536,19 @@ fn merge_consecutive_projections(proj: Projection) -> Result<Transformed<Project
     let LogicalPlan::Projection(prev_projection) = input.as_ref() else {
         return Projection::try_new_with_schema(expr, input, schema).map(Transformed::no);
     };
+
+    // A projection that drops a junk column of the projection below it ends
+    // the query level whose row-lock operator reads that column, which goes
+    // between the two: merged, the column would be gone.
+    let drops_junk = prev_projection.schema.fields().iter().any(|field| {
+        is_junk_column_metadata(field.metadata())
+            && !schema.fields().iter().any(|kept| {
+                kept.name() == field.name() && is_junk_column_metadata(kept.metadata())
+            })
+    });
+    if drops_junk {
+        return Projection::try_new_with_schema(expr, input, schema).map(Transformed::no);
+    }
 
     // A fast path: if the previous projection is same as the current projection
     // we can directly remove the current projection and return child projection.
@@ -1055,8 +1089,10 @@ mod tests {
     };
     use crate::{OptimizerContext, OptimizerRule};
     use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_common::metadata::FieldMetadata;
     use datafusion_common::{
-        Column, DFSchema, DFSchemaRef, JoinType, Result, TableReference,
+        Column, DFSchema, DFSchemaRef, JUNK_COLUMN_METADATA_KEY, JoinType, Result,
+        TableReference,
     };
     use datafusion_expr::ExprFunctionExt;
     use datafusion_expr::{
@@ -1132,6 +1168,64 @@ mod tests {
 
         assert_eq!(left.into_inner(), vec![0, 2]);
         assert_eq!(right.into_inner(), vec![3]);
+    }
+
+    /// `test.b` as a junk column a row-lock operator above its query level
+    /// reads.
+    fn junk_b() -> Expr {
+        col("test.b").alias_with_metadata(
+            "__carried_0_b",
+            Some(FieldMetadata::from(HashMap::from([(
+                JUNK_COLUMN_METADATA_KEY.to_string(),
+                "true".to_string(),
+            )]))),
+        )
+    }
+
+    fn has_junk(schema: &DFSchema) -> bool {
+        schema
+            .fields()
+            .iter()
+            .any(|field| field.name() == "__carried_0_b")
+    }
+
+    #[test]
+    fn a_junk_column_passes_through_the_sort_its_level_ends_with() -> Result<()> {
+        let plan = LogicalPlanBuilder::from(test_table_scan()?)
+            .project(vec![col("test.a"), junk_b()])?
+            .sort(vec![col("test.a").sort(true, false)])?
+            .project(vec![col("test.a")])?
+            .build()?;
+
+        let optimized = optimize(plan)?;
+
+        let LogicalPlan::Projection(output) = &optimized else {
+            panic!("expected the level's output projection at the root");
+        };
+        assert!(!has_junk(&output.schema));
+        let LogicalPlan::Sort(sort) = output.input.as_ref() else {
+            panic!("expected the sort below the output projection");
+        };
+        assert!(has_junk(sort.input.schema()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_projection_dropping_junk_columns_is_not_merged_into_the_one_making_them()
+    -> Result<()> {
+        let plan = LogicalPlanBuilder::from(test_table_scan()?)
+            .project(vec![col("test.a"), junk_b()])?
+            .project(vec![col("test.a")])?
+            .build()?;
+
+        let optimized = optimize(plan)?;
+
+        let LogicalPlan::Projection(output) = &optimized else {
+            panic!("expected the level's output projection at the root");
+        };
+        assert!(!has_junk(&output.schema));
+        assert!(has_junk(output.input.schema()));
+        Ok(())
     }
 
     #[test]

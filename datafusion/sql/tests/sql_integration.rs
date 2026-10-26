@@ -6416,6 +6416,19 @@ fn test_fetch_with_ties_requires_order_by() {
 }
 
 #[test]
+fn test_fetch_with_ties_orders_by_a_column_the_select_list_omits() {
+    // The sort key is projected away above the sort; the limit still compares
+    // the rows it returns by it.
+    let sql = "SELECT id FROM person ORDER BY age FETCH FIRST 5 ROWS WITH TIES";
+    let plan = logical_plan(sql).unwrap();
+    let LogicalPlan::Limit(limit) = &plan else {
+        panic!("expected a limit, got {plan}");
+    };
+    assert!(limit.with_ties);
+    assert!(matches!(limit.input.as_ref(), LogicalPlan::Projection(_)));
+}
+
+#[test]
 fn test_limit_and_fetch_conflict() {
     // Cannot use both LIMIT and FETCH
     let sql = "SELECT id FROM person LIMIT 5 FETCH FIRST 3 ROWS ONLY";

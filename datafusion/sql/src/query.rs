@@ -102,7 +102,12 @@ impl SqlToRel<'_> {
                     query.order_by.as_ref(),
                     planner_context,
                 )?;
-                let plan = self.limit(plan, limit_info, planner_context)?;
+                let plan = self.limit(
+                    plan,
+                    limit_info,
+                    query.order_by.is_some(),
+                    planner_context,
+                )?;
                 let plan = self.apply_query_locks(plan, query, planner_context)?;
                 let plan = self.plan_locking_level(plan, query)?;
                 // Process the `SELECT INTO` after `LIMIT`.
@@ -126,7 +131,12 @@ impl SqlToRel<'_> {
                     None,
                 )?;
                 let plan = self.order_by(plan, order_by_rex)?;
-                let plan = self.limit(plan, limit_info, planner_context)?;
+                let plan = self.limit(
+                    plan,
+                    limit_info,
+                    query.order_by.is_some(),
+                    planner_context,
+                )?;
                 let plan = self.apply_query_locks(plan, query, planner_context)?;
                 self.plan_locking_level(plan, query)
             }
@@ -305,11 +315,15 @@ impl SqlToRel<'_> {
         })
     }
 
-    /// Wrap a plan in a limit
+    /// Wrap a plan in a limit. `ordered` tells whether the query has an
+    /// ORDER BY, which a `WITH TIES` limit compares rows by. The ordered plan
+    /// is not always a `Sort`: a sort key the select list does not output is
+    /// projected away above the sort.
     fn limit(
         &self,
         input: LogicalPlan,
         limit_info: LimitInfo<'_>,
+        ordered: bool,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let LimitInfo {
@@ -321,8 +335,7 @@ impl SqlToRel<'_> {
             implicit_single_row,
         } = limit_info;
 
-        // WITH TIES requires ORDER BY
-        if with_ties && !matches!(input, LogicalPlan::Sort(_)) {
+        if with_ties && !ordered {
             return plan_err!("FETCH WITH TIES requires an ORDER BY clause");
         }
 
