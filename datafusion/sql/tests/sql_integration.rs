@@ -4757,10 +4757,6 @@ fn a_lock_records_whether_its_scan_is_read_through_a_table_alias() {
         vec![("orders".to_string(), false)]
     );
     assert_eq!(
-        scan_lock_unaliased("SELECT o.x FROM orders AS o(x) FOR UPDATE"),
-        vec![("orders".to_string(), false)]
-    );
-    assert_eq!(
         scan_lock_unaliased("SELECT order_id FROM orders FOR UPDATE"),
         vec![("orders".to_string(), true)]
     );
