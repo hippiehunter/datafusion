@@ -29,8 +29,15 @@
 //! A positive `IN` over an uncorrelated subquery and a correlated `EXISTS` of
 //! the WHERE clause are pulled up into [`JoinType::LeftSemiCarry`] joins, the
 //! sublinks PostgreSQL's `pull_up_sublinks` turns into semi joins, so the
-//! partner row a target row matched first is carried with it. Every other
-//! sublink stays a sub-plan the recheck evaluates again.
+//! partner row a target row matched first is carried with it.
+//!
+//! An uncorrelated scalar or `EXISTS` sublink of the WHERE clause or the SET
+//! list is computed once per statement, PostgreSQL's initplan, and
+//! EvalPlanQual reads the value the statement computed. Each one is computed
+//! in a projection below the clause that reads it, read there as a column,
+//! and carried as a column of one more carried relation, so the recheck reads
+//! the main plan's value. Every other sublink stays a sub-plan the recheck
+//! evaluates again.
 //!
 //! Each locking query level (`SELECT ... FOR UPDATE OF t`, at the statement's
 //! top or inside it) pulls up the same sublinks and carries the columns of
@@ -52,12 +59,23 @@ use datafusion_common::{
 use datafusion_expr::expr::{AllExpr, AnyExpr, Exists, InSubquery, QuantifiedSource};
 use datafusion_expr::utils::{conjunction, split_conjunction, split_conjunction_owned};
 use datafusion_expr::{
-    CarriedJunkColumns, Expr, Filter, Join, LogicalPlan, LogicalPlanBuilder, Projection,
-    Subquery, SubqueryAlias, carried_junk_column_name, carried_presence_column_name, lit,
+    BinaryExpr, CarriedJunkColumns, Expr, Filter, Join, LogicalPlan, LogicalPlanBuilder,
+    Operator, Projection, Subquery, SubqueryAlias, carried_junk_column_name,
+    carried_presence_column_name, lit,
 };
 
 /// The column a pulled-up `IN` subquery's output is carried under.
 const SEMI_IN_COLUMN: &str = "__c_in";
+
+/// The carried relation whose columns are the values of a DML statement's
+/// uncorrelated sublinks.
+const INIT_PLAN_RELATION: &str = "__carried_initplan";
+
+/// The column the value of the uncorrelated sublink numbered `ordinal` is
+/// computed and carried under.
+fn init_plan_column_name(ordinal: usize) -> String {
+    format!("__initplan_{ordinal}")
+}
 
 /// The metadata of a junk column carrying column `source_column` of
 /// `relation`, or of `relation`'s presence column when `source_column` is
@@ -95,27 +113,44 @@ pub(crate) struct CarriedDmlInput {
 /// `set_exprs` are the values the SET list assigns (empty for a DELETE). The
 /// WHERE clause's pullable sublinks become [`JoinType::LeftSemiCarry`] joins,
 /// and each relation of the result other than the target is carried with
-/// the columns of it the WHERE clause and the SET list read.
+/// the columns of it the WHERE clause and the SET list read. Each
+/// uncorrelated scalar or `EXISTS` sublink of the WHERE clause and of
+/// `set_exprs` is computed below the clause, read as a column there (in
+/// `set_exprs` too), and carried.
 pub(crate) fn carry_dml_input(
     source: LogicalPlan,
     target: &TableReference,
-    set_exprs: &[Expr],
+    set_exprs: &mut [Expr],
 ) -> Result<CarriedDmlInput> {
+    let mut init_plans = InitPlans::default();
     let (source, filter, semi_conditions) = match source {
         LogicalPlan::Filter(filter) => {
             let pulled =
                 pull_up_semi_joins(Arc::unwrap_or_clone(filter.input), filter.predicate)?;
-            let source = match &pulled.filter {
-                Some(predicate) => LogicalPlan::Filter(Filter::try_new(
-                    predicate.clone(),
-                    Arc::new(pulled.plan),
-                )?),
-                None => pulled.plan,
+            let (source, filter) = match pulled.filter {
+                Some(predicate) => {
+                    let first = init_plans.values.len();
+                    let predicate = init_plans.hoist_from_where(predicate)?;
+                    let input = init_plans.compute_from(first, pulled.plan)?;
+                    (
+                        LogicalPlan::Filter(Filter::try_new(
+                            predicate.clone(),
+                            Arc::new(input),
+                        )?),
+                        Some(predicate),
+                    )
+                }
+                None => (pulled.plan, None),
             };
-            (source, pulled.filter, pulled.conditions)
+            (source, filter, pulled.conditions)
         }
         other => (other, None, Vec::new()),
     };
+    let first = init_plans.values.len();
+    for expr in set_exprs.iter_mut() {
+        *expr = init_plans.hoist(std::mem::replace(expr, lit(true)))?;
+    }
+    let source = init_plans.compute_from(first, source)?;
 
     let mut reads: Vec<Column> = Vec::new();
     for expr in set_exprs
@@ -164,11 +199,117 @@ pub(crate) fn carry_dml_input(
             presence: presence_name,
         });
     }
+    if !init_plans.values.is_empty() {
+        let relation = TableReference::bare(INIT_PLAN_RELATION);
+        let ordinal = carried.len();
+        let mut junk_names = Vec::with_capacity(init_plans.values.len());
+        for (column, _) in &init_plans.values {
+            let name = carried_junk_column_name(ordinal, column);
+            junk.push(
+                Expr::Column(Column::new_unqualified(column)).alias_with_metadata(
+                    name.clone(),
+                    Some(junk_metadata(&relation, Some(column.as_str()))),
+                ),
+            );
+            junk_names.push(name);
+        }
+        let presence_name = carried_presence_column_name(ordinal);
+        junk.push(lit(true).alias_with_metadata(
+            presence_name.clone(),
+            Some(junk_metadata(&relation, None)),
+        ));
+        carried.push(CarriedJunkColumns {
+            relation,
+            columns: junk_names,
+            presence: presence_name,
+        });
+    }
     Ok(CarriedDmlInput {
         source,
         junk,
         carried,
     })
+}
+
+/// The uncorrelated sublinks of a DML statement's WHERE clause and SET list,
+/// each with the column its value is computed under.
+#[derive(Default)]
+struct InitPlans {
+    values: Vec<(String, Expr)>,
+}
+
+impl InitPlans {
+    /// `predicate`, a WHERE clause, with its uncorrelated sublinks read as
+    /// columns. A conjunct that is itself an `EXISTS` keeps its sublink: it
+    /// holds on every row the statement writes, so the recheck has no value
+    /// to read for it.
+    fn hoist_from_where(&mut self, predicate: Expr) -> Result<Expr> {
+        match predicate {
+            Expr::BinaryExpr(BinaryExpr {
+                left,
+                op: Operator::And,
+                right,
+            }) => Ok(self
+                .hoist_from_where(*left)?
+                .and(self.hoist_from_where(*right)?)),
+            exists @ Expr::Exists(_) => Ok(exists),
+            Expr::Not(inner) if matches!(inner.as_ref(), Expr::Exists(_)) => {
+                Ok(Expr::Not(inner))
+            }
+            other => self.hoist(other),
+        }
+    }
+
+    /// `expr` with each uncorrelated scalar or `EXISTS` sublink in it read as
+    /// the column its value is computed under.
+    fn hoist(&mut self, expr: Expr) -> Result<Expr> {
+        expr.transform_down(|expr| {
+            if !is_init_plan(&expr)? {
+                return Ok(Transformed::no(expr));
+            }
+            let column = init_plan_column_name(self.values.len());
+            self.values.push((column.clone(), expr));
+            Ok(Transformed::new(
+                Expr::Column(Column::new_unqualified(column)),
+                true,
+                TreeNodeRecursion::Jump,
+            ))
+        })
+        .data()
+    }
+
+    /// `input` with the values hoisted since the `first`-th computed in a
+    /// projection over it, beside every column of it.
+    fn compute_from(&self, first: usize, input: LogicalPlan) -> Result<LogicalPlan> {
+        let Some(values) = self.values.get(first..).filter(|values| !values.is_empty())
+        else {
+            return Ok(input);
+        };
+        let exprs = input
+            .schema()
+            .columns()
+            .into_iter()
+            .map(Expr::Column)
+            .chain(
+                values
+                    .iter()
+                    .map(|(column, value)| value.clone().alias(column.as_str())),
+            )
+            .collect::<Vec<_>>();
+        Projection::try_new(exprs, Arc::new(input)).map(LogicalPlan::Projection)
+    }
+}
+
+/// Whether `expr` is a sublink PostgreSQL computes once per statement as an
+/// initplan: a scalar or `EXISTS` subquery that reads no column of the query
+/// around it.
+fn is_init_plan(expr: &Expr) -> Result<bool> {
+    match expr {
+        Expr::ScalarSubquery(subquery) | Expr::Exists(Exists { subquery, .. }) => {
+            Ok(!plan_has_outer_reference(&subquery.subquery)?)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// What pulling the WHERE clause's sublinks up produced.

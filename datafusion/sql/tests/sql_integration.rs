@@ -7701,6 +7701,65 @@ fn not_exists_stays_a_sub_plan_and_carries_nothing() {
 }
 
 #[test]
+fn uncorrelated_sublinks_are_computed_below_their_clause_and_carried() {
+    let plan = logical_plan(
+        "UPDATE person SET salary = (SELECT max(p2.salary) FROM person p2) \
+         WHERE age < (SELECT min(p3.age) FROM person p3) AND EXISTS (SELECT 1 FROM orders)",
+    )
+    .unwrap();
+    let (input, carried) = dml_input_and_carried(&plan);
+    assert_eq!(
+        carried,
+        &[datafusion_expr::CarriedJunkColumns {
+            relation: TableReference::bare("__carried_initplan"),
+            columns: vec![
+                "__carried_0___initplan_0".to_string(),
+                "__carried_0___initplan_1".to_string(),
+            ],
+            presence: "__carried_0_present".to_string(),
+        }]
+    );
+    assert_eq!(
+        junk_fields(input.schema()),
+        vec![
+            (
+                "__carried_0___initplan_0".into(),
+                "__carried_initplan".into(),
+                Some("__initplan_0".into())
+            ),
+            (
+                "__carried_0___initplan_1".into(),
+                "__carried_initplan".into(),
+                Some("__initplan_1".into())
+            ),
+            ("__carried_0_present".into(), "__carried_initplan".into(), None),
+        ]
+    );
+    let text = format!("{}", plan.display_indent());
+    // The WHERE clause reads its sublink's value as a column computed below
+    // it, the EXISTS conjunct holds on every row written and keeps its
+    // sublink, and the SET list reads its own sublink's value computed above
+    // the WHERE clause.
+    assert_contains!(&text, "< __initplan_0 AND EXISTS (<subquery>)");
+    assert_contains!(&text, "__initplan_1 AS salary");
+    assert_contains!(&text, "(<subquery>) AS __initplan_0");
+    assert_contains!(&text, "(<subquery>) AS __initplan_1");
+}
+
+#[test]
+fn correlated_sublinks_stay_sub_plans_and_carry_nothing() {
+    let plan = logical_plan(
+        "UPDATE person SET salary = \
+         (SELECT max(o.price) FROM orders o WHERE o.customer_id = person.id)",
+    )
+    .unwrap();
+    let (input, carried) = dml_input_and_carried(&plan);
+    assert!(carried.is_empty());
+    assert!(junk_fields(input.schema()).is_empty());
+    assert!(!format!("{}", plan.display_indent()).contains("__initplan"));
+}
+
+#[test]
 fn locking_query_carries_the_joined_columns_linking_an_unlocked_relation() {
     let plan = logical_plan(
         "SELECT o.order_id FROM orders o JOIN person p ON o.customer_id = p.id \

@@ -3147,7 +3147,7 @@ impl SqlToRel<'_> {
                 )?;
                 let (rewritten, lifted_exprs) =
                     lift_subquery_returning_exprs(rewritten, passthrough_exprs.len())?;
-                let carried_input = carry_dml_input(source, &target_relation, &[])?;
+                let carried_input = carry_dml_input(source, &target_relation, &mut [])?;
                 source = carried_input.source;
                 projected_exprs.extend(carried_input.junk);
                 carried = Some(carried_input.carried);
@@ -3170,7 +3170,7 @@ impl SqlToRel<'_> {
         let carried = match carried {
             Some(carried) => carried,
             None => {
-                let carried_input = carry_dml_input(source, &target_relation, &[])?;
+                let carried_input = carry_dml_input(source, &target_relation, &mut [])?;
                 source = carried_input.source;
                 if !carried_input.junk.is_empty() {
                     let mut exprs = table_schema
@@ -4439,7 +4439,7 @@ impl SqlToRel<'_> {
 
             if !preserve_view_old {
                 let carried_input =
-                    carry_dml_input(source, &target_relation, &projected_exprs)?;
+                    carry_dml_input(source, &target_relation, &mut projected_exprs)?;
                 source = carried_input.source;
                 projected_exprs.extend(carried_input.junk);
                 carried = carried_input.carried;
@@ -4470,7 +4470,7 @@ impl SqlToRel<'_> {
         } else {
             if !preserve_view_old {
                 let carried_input =
-                    carry_dml_input(source, &target_relation, &projected_exprs)?;
+                    carry_dml_input(source, &target_relation, &mut projected_exprs)?;
                 source = carried_input.source;
                 projected_exprs.extend(carried_input.junk);
                 carried = carried_input.carried;
