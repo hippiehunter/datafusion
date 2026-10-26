@@ -4923,6 +4923,34 @@ fn locking_clause_locks_the_relations_its_target_reads() {
     );
 }
 
+/// A locking clause locks no row of a common table expression: one without
+/// `OF` passes over CTE references at its own level and inside the derived
+/// tables it locks, as PostgreSQL's `transformLockingClause` skips `RTE_CTE`.
+#[test]
+fn locking_clause_without_of_skips_common_table_expressions() {
+    assert_eq!(
+        scan_lock_modes(
+            "WITH k AS (SELECT order_id FROM orders) \
+             SELECT p.id FROM k JOIN person p ON k.order_id = p.id FOR UPDATE"
+        ),
+        vec![
+            ("orders".to_string(), None),
+            ("person".to_string(), Some(TableScanRowLockMode::ForUpdate)),
+        ]
+    );
+    assert_eq!(
+        scan_lock_modes(
+            "WITH k AS (SELECT order_id FROM orders) \
+             SELECT q.id FROM (SELECT p.id FROM k AS r JOIN person p ON r.order_id = p.id) q \
+             FOR SHARE"
+        ),
+        vec![
+            ("orders".to_string(), None),
+            ("person".to_string(), Some(TableScanRowLockMode::ForShare)),
+        ]
+    );
+}
+
 /// A host that resolves the prefix arithmetic operators itself: an untyped
 /// string operand takes the floating-point type, and a text operand has no
 /// such operator.

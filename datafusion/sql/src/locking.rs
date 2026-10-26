@@ -20,7 +20,11 @@
 //! clause's own query level by reference name, as PostgreSQL's parse analysis
 //! resolves it; a clause may not lock a relation an outer join can
 //! null-extend, since no row of that relation stands behind a null-extended
-//! result row; and the lock is recorded on every table scan it reaches.
+//! result row; and the lock is recorded on every table scan it reaches. A
+//! clause locks no row of a common table expression: one without `OF` passes
+//! over CTE references, at its own level and in the derived tables it locks,
+//! and one whose `OF` names a CTE is refused, as PostgreSQL's
+//! `transformLockingClause` treats `RTE_CTE`.
 
 use std::sync::Arc;
 
@@ -110,6 +114,12 @@ impl SqlToRel<'_> {
             .map(|lock| self.plan_lock(lock))
             .collect::<Result<Vec<_>>>()?;
 
+        let ctes = match query.body.as_ref() {
+            SetExpr::Select(select) => {
+                Some(self.cte_references(select, planner_context, &[]))
+            }
+            _ => None,
+        };
         let join_aliases = match query.body.as_ref() {
             SetExpr::Select(select) => {
                 let range = self.lock_range(select, planner_context, &[]);
@@ -137,6 +147,7 @@ impl SqlToRel<'_> {
             plan,
             &LockScope::Level,
             &join_aliases,
+            ctes.as_ref(),
             &locks,
             &mut matched,
         )?;
@@ -328,6 +339,62 @@ impl SqlToRel<'_> {
         });
     }
 
+    /// The CTE references among `select`'s FROM items and those of the
+    /// derived tables it reads. `ctes` names the common table expressions an
+    /// enclosing nested query declares, beside the planner context's.
+    fn cte_references(
+        &self,
+        select: &Select,
+        planner_context: &PlannerContext,
+        ctes: &[String],
+    ) -> CteReferences {
+        let mut references = CteReferences::default();
+        for entry in self.lock_range(select, planner_context, ctes) {
+            match entry.kind {
+                EntryKind::Cte => references.names.extend(entry.name),
+                EntryKind::Subquery(query) => {
+                    let inner = self.query_cte_references(query, planner_context, ctes);
+                    match entry.name {
+                        Some(name) => references.derived.push((name, inner)),
+                        None => {
+                            references.names.extend(inner.names);
+                            references.derived.extend(inner.derived);
+                        }
+                    }
+                }
+                EntryKind::Relation
+                | EntryKind::Function
+                | EntryKind::TableFunction
+                | EntryKind::Join => {}
+            }
+        }
+        references
+    }
+
+    /// [`Self::cte_references`] of the body of `query`, a derived table,
+    /// with the common table expressions it declares in scope.
+    fn query_cte_references(
+        &self,
+        query: &Query,
+        planner_context: &PlannerContext,
+        enclosing_ctes: &[String],
+    ) -> CteReferences {
+        let mut ctes = enclosing_ctes.to_vec();
+        if let Some(with) = &query.with {
+            ctes.extend(
+                with.cte_tables
+                    .iter()
+                    .map(|cte| self.alias_name(&cte.alias)),
+            );
+        }
+        match query.body.as_ref() {
+            SetExpr::Select(select) => {
+                self.cte_references(select, planner_context, &ctes)
+            }
+            _ => CteReferences::default(),
+        }
+    }
+
     fn alias_name(&self, alias: &TableAlias) -> String {
         self.ident_normalizer.normalize(alias.name.clone())
     }
@@ -517,6 +584,26 @@ fn table_scan_row_lock(lock: &LockClause) -> TableScanRowLock {
     TableScanRowLock { mode, wait_policy }
 }
 
+/// The FROM items of one query level that are common table expression
+/// references, by reference name, and those of each aliased derived table
+/// it reads. An unaliased derived table's are the level's own, since its
+/// FROM items reach the plan without an alias of their own.
+#[derive(Default)]
+struct CteReferences {
+    names: Vec<String>,
+    derived: Vec<(String, CteReferences)>,
+}
+
+impl CteReferences {
+    /// The CTE references of the derived table `name` reads.
+    fn of_derived(&self, name: &str) -> Option<&CteReferences> {
+        self.derived
+            .iter()
+            .find(|(derived, _)| derived == name)
+            .map(|(_, references)| references)
+    }
+}
+
 /// Where in a query level's plan a table scan sits, for the locks it takes.
 #[derive(Clone)]
 enum LockScope {
@@ -530,28 +617,39 @@ enum LockScope {
 /// Record the locks on the table scans they reach: a clause without `OF` on
 /// every scan, and one with `OF` on every scan of the FROM item it names.
 /// The plan nodes of an aliased parenthesized join (`join_aliases`) stay at
-/// the level, since its members are FROM items of the level themselves.
+/// the level, since its members are FROM items of the level themselves. No
+/// lock reaches into a CTE reference `ctes` names.
 fn apply_locks_to_plan(
     plan: LogicalPlan,
     scope: &LockScope,
     join_aliases: &[String],
+    ctes: Option<&CteReferences>,
     locks: &[PlannedLock],
     matched: &mut [bool],
 ) -> Result<LogicalPlan> {
     match plan {
         LogicalPlan::SubqueryAlias(alias) => {
             let name = alias.alias.table();
-            let inner_scope = match scope {
+            if ctes.is_some_and(|ctes| ctes.names.iter().any(|cte| cte == name)) {
+                return Ok(LogicalPlan::SubqueryAlias(alias));
+            }
+            let (inner_scope, inner_ctes) = match scope {
                 LockScope::Level if join_aliases.iter().any(|join| join == name) => {
-                    LockScope::Level
+                    (LockScope::Level, ctes)
                 }
-                LockScope::Level => LockScope::Within(targeting(locks, name, matched)),
-                LockScope::Within(_) => scope.clone(),
+                LockScope::Level => (
+                    LockScope::Within(targeting(locks, name, matched)),
+                    ctes.and_then(|ctes| ctes.of_derived(name)),
+                ),
+                LockScope::Within(_) => {
+                    (scope.clone(), ctes.and_then(|ctes| ctes.of_derived(name)))
+                }
             };
             let input = apply_locks_to_plan(
                 Arc::unwrap_or_clone(alias.input),
                 &inner_scope,
                 join_aliases,
+                inner_ctes,
                 locks,
                 matched,
             )?;
@@ -582,7 +680,7 @@ fn apply_locks_to_plan(
         }
         other => other
             .map_children(|child| {
-                apply_locks_to_plan(child, scope, join_aliases, locks, matched)
+                apply_locks_to_plan(child, scope, join_aliases, ctes, locks, matched)
                     .map(Transformed::yes)
             })
             .map(|transformed| transformed.data),
