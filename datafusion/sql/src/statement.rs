@@ -29,7 +29,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::ast_walk::Walk;
-use crate::dml_carry::{add_locking_junk_columns, carry_dml_input};
+use crate::dml_carry::carry_dml_input;
 use crate::parser::{
     CopyFromStatement, CopyToSource, CopyToStatement, CreateExternalTable, DFParser,
     ExplainStatement, LexOrdering, Statement as DFStatement,
@@ -1330,12 +1330,7 @@ impl SqlToRel<'_> {
         }
         match statement {
             Statement::Query(query) => {
-                let plan = self.query_to_plan_ref(query.as_ref(), planner_context)?;
-                if query.locks.is_empty() {
-                    Ok(plan)
-                } else {
-                    add_locking_junk_columns(plan)
-                }
+                self.query_to_plan_ref(query.as_ref(), planner_context)
             }
             Statement::ExplainTable {
                 describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
@@ -1460,14 +1455,7 @@ impl SqlToRel<'_> {
                     DFStatement::Statement(Box::new(SQLBox::into_owned(statement)));
                 self.explain_to_plan(verbose, analyze, format, statement, planner_context)
             }
-            Statement::Query(query) => {
-                let plan = self.query_to_plan_ref(&query, planner_context)?;
-                if query.locks.is_empty() {
-                    Ok(plan)
-                } else {
-                    add_locking_junk_columns(plan)
-                }
-            }
+            Statement::Query(query) => self.query_to_plan_ref(&query, planner_context),
             Statement::ShowVariable { variable, .. } => {
                 self.show_variable_to_plan(&variable)
             }

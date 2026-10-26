@@ -20,11 +20,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::cte::under_with_list;
+use crate::dml_carry::add_locking_junk_columns;
 use crate::planner::{PlannerContext, SqlToRel};
 
 use crate::stack::StackGuard;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
     Constraints, DFSchema, Result, ScalarValue, not_impl_err, plan_err,
+    sqlstate_datafusion_err,
 };
 use datafusion_expr::expr::Sort;
 
@@ -101,6 +104,7 @@ impl SqlToRel<'_> {
                 )?;
                 let plan = self.limit(plan, limit_info, planner_context)?;
                 let plan = self.apply_query_locks(plan, query, planner_context)?;
+                let plan = self.plan_locking_level(plan, query)?;
                 // Process the `SELECT INTO` after `LIMIT`.
                 self.select_into_ref(plan, &select.projection, select.into.as_ref())
             }
@@ -123,10 +127,69 @@ impl SqlToRel<'_> {
                 )?;
                 let plan = self.order_by(plan, order_by_rex)?;
                 let plan = self.limit(plan, limit_info, planner_context)?;
-                self.apply_query_locks(plan, query, planner_context)
+                let plan = self.apply_query_locks(plan, query, planner_context)?;
+                self.plan_locking_level(plan, query)
             }
         }?;
         Ok(under_with_list(query.with.as_deref(), with_items, plan))
+    }
+
+    /// Check a query level that carries a locking clause, as PostgreSQL's
+    /// `CheckSelectLocking` does, and plan the junk columns its row-lock
+    /// operator rechecks a refreshed row with ([`add_locking_junk_columns`]).
+    fn plan_locking_level(
+        &self,
+        plan: LogicalPlan,
+        query: &Query,
+    ) -> Result<LogicalPlan> {
+        let Some(lock) = query.locks.first() else {
+            return Ok(plan);
+        };
+        let refused = match query.body.as_ref() {
+            SetExpr::SetOperation { .. } => Some("UNION/INTERSECT/EXCEPT"),
+            SetExpr::Select(select) => {
+                let (mut distinct, mut grouped, mut aggregated, mut windowed) =
+                    (false, false, false, false);
+                plan.apply(|node| {
+                    match node {
+                        // A FROM item's own query is a level of its own.
+                        LogicalPlan::SubqueryAlias(_) => {
+                            return Ok(TreeNodeRecursion::Jump);
+                        }
+                        LogicalPlan::Distinct(_) => distinct = true,
+                        LogicalPlan::Aggregate(aggregate) => {
+                            grouped |= !aggregate.group_expr.is_empty();
+                            aggregated = true;
+                        }
+                        LogicalPlan::Window(_) => windowed = true,
+                        _ => {}
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })?;
+                // PostgreSQL's order of precedence.
+                if distinct {
+                    Some("DISTINCT clause")
+                } else if grouped {
+                    Some("GROUP BY clause")
+                } else if select.having.is_some() {
+                    Some("HAVING clause")
+                } else if aggregated {
+                    Some("aggregate functions")
+                } else if windowed {
+                    Some("window functions")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(what) = refused {
+            return Err(sqlstate_datafusion_err(
+                "0A000",
+                format!("FOR {} is not allowed with {what}", lock.lock_type),
+            ));
+        }
+        add_locking_junk_columns(plan)
     }
 
     /// Combines FETCH clause with LIMIT/OFFSET into a single LimitInfo.

@@ -7618,14 +7618,95 @@ fn locking_query_carries_the_joined_columns_linking_an_unlocked_relation() {
          WHERE p.state = 'CA' FOR UPDATE OF o",
     )
     .unwrap();
+    // The level's output keeps its own columns; the select list below the
+    // projection that restores them carries the junk columns.
+    assert!(junk_fields(plan.schema()).is_empty());
+    assert_eq!(plan.schema().fields().len(), 1);
+    assert_eq!(plan.schema().field(0).name(), "order_id");
+    let LogicalPlan::Projection(output) = &plan else {
+        panic!("a projection restores the level's output");
+    };
     assert_eq!(
-        junk_fields(plan.schema()),
+        junk_fields(output.input.schema()),
         vec![
             ("__carried_0_id".into(), "p".into(), Some("id".into())),
             ("__carried_0_present".into(), "p".into(), None),
         ]
     );
-    assert_eq!(plan.schema().field(0).name(), "order_id");
+}
+
+#[test]
+fn locking_derived_table_carries_its_junk_columns_inside_itself() {
+    let plan = logical_plan(
+        "SELECT q.order_id FROM (SELECT o.order_id FROM orders o \
+         JOIN person p ON o.customer_id = p.id ORDER BY o.order_id LIMIT 5 FOR UPDATE OF o) q",
+    )
+    .unwrap();
+    assert!(junk_fields(plan.schema()).is_empty());
+    let mut inner_junk = Vec::new();
+    plan.apply(|node| {
+        if let LogicalPlan::Sort(sort) = node {
+            inner_junk.extend(junk_fields(sort.input.schema()));
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    assert_eq!(
+        inner_junk,
+        vec![
+            ("__carried_0_id".into(), "p".into(), Some("id".into())),
+            ("__carried_0_present".into(), "p".into(), None),
+        ]
+    );
+}
+
+#[test]
+fn locking_query_pulls_its_in_sublink_up_into_a_carried_semi_join() {
+    let plan = logical_plan(
+        "SELECT o.order_id FROM orders o \
+         WHERE o.customer_id IN (SELECT p.id FROM person p WHERE p.state = 'CA') FOR UPDATE OF o",
+    )
+    .unwrap();
+    let text = format!("{}", plan.display_indent());
+    assert_contains!(
+        &text,
+        "LeftSemiCarry Join:  Filter: o.customer_id = __carried_semi_0.__c_in"
+    );
+    assert!(junk_fields(plan.schema()).is_empty());
+}
+
+#[test]
+fn locking_clause_on_a_grouping_level_is_refused() {
+    let error = logical_plan(
+        "SELECT o.customer_id FROM orders o GROUP BY o.customer_id FOR UPDATE",
+    )
+    .unwrap_err();
+    assert_contains!(
+        error.to_string(),
+        "FOR UPDATE is not allowed with GROUP BY clause"
+    );
+    let error = logical_plan("SELECT count(*) FROM orders FOR SHARE").unwrap_err();
+    assert_contains!(
+        error.to_string(),
+        "FOR SHARE is not allowed with aggregate functions"
+    );
+}
+
+#[test]
+fn aggregate_over_a_locking_derived_table_is_planned() {
+    let plan = logical_plan(
+        "SELECT count(*) FROM (SELECT o.order_id FROM orders o FOR UPDATE) q",
+    )
+    .unwrap();
+    let mut locked = false;
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            locked |= scan.row_lock.is_some();
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    assert!(locked);
 }
 
 #[test]

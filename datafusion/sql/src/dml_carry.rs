@@ -32,10 +32,11 @@
 //! partner row a target row matched first is carried with it. Every other
 //! sublink stays a sub-plan the recheck evaluates again.
 //!
-//! A top-level locking query (`SELECT ... FOR UPDATE OF t`) carries the
-//! columns of each relation it does not lock that a predicate linking it to a
-//! locked relation reads, as junk output columns its row-lock operator
-//! consumes and strips.
+//! Each locking query level (`SELECT ... FOR UPDATE OF t`, at the statement's
+//! top or inside it) pulls up the same sublinks and carries the columns of
+//! each relation it does not lock that a predicate linking it to a locked
+//! relation reads, as junk columns its row-lock operator consumes and strips;
+//! the level's own output does not show them.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,7 +47,7 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::{
     Column, DFSchemaRef, JUNK_COLUMN_METADATA_KEY, JUNK_RELATION_METADATA_KEY,
-    JUNK_SOURCE_COLUMN_METADATA_KEY, JoinType, Result, TableReference,
+    JUNK_SOURCE_COLUMN_METADATA_KEY, JoinType, Result, TableReference, internal_err,
 };
 use datafusion_expr::expr::{AllExpr, AnyExpr, Exists, InSubquery, QuantifiedSource};
 use datafusion_expr::utils::{conjunction, split_conjunction, split_conjunction_owned};
@@ -553,11 +554,51 @@ fn relation_own_schema(
     Ok(found)
 }
 
-/// Append to a top-level locking query's output the junk columns of every
-/// relation it does not lock that a predicate linking it to a locked
-/// relation reads, with each such relation's presence column. A query whose
-/// relations are all locked, or that locks none, is returned unchanged.
+/// Plan the carried junk columns of a locking query level (`SELECT ... FOR
+/// UPDATE OF t`), as PostgreSQL's `preprocess_targetlist` adds its rowmark
+/// junk columns, so the level's row-lock operator rechecks a refreshed row
+/// with every relation it does not lock fixed at the row it joined.
+///
+/// The positive `IN` and `EXISTS` sublinks of the level's WHERE clause that
+/// [`carry_dml_input`] pulls up are pulled up the same way, into
+/// [`JoinType::LeftSemiCarry`] joins. Then the level's select list carries,
+/// through its ORDER BY and LIMIT, the columns of each relation it does not
+/// lock that a predicate linking it to a locked relation reads, with each
+/// such relation's presence column, and a projection on top restores the
+/// level's own output, so the query around the level never sees them. A
+/// level whose relations are all locked, or that locks none, is returned
+/// unchanged.
 pub(crate) fn add_locking_junk_columns(plan: LogicalPlan) -> Result<LogicalPlan> {
+    let Some(level) = locking_level_input(&plan) else {
+        return Ok(plan);
+    };
+    let mut items: Vec<(TableReference, bool)> = Vec::new();
+    let mut predicates: Vec<Expr> = Vec::new();
+    collect_level(level, &mut items, &mut predicates)?;
+    if !items.iter().any(|(_, locked)| *locked) {
+        return Ok(plan);
+    }
+    let plan = match level {
+        LogicalPlan::Filter(filter) => {
+            let pulled = pull_up_semi_joins(
+                filter.input.as_ref().clone(),
+                filter.predicate.clone(),
+            )?;
+            if pulled.conditions.is_empty() {
+                plan
+            } else {
+                let input = match pulled.filter {
+                    Some(predicate) => LogicalPlan::Filter(Filter::try_new(
+                        predicate,
+                        Arc::new(pulled.plan),
+                    )?),
+                    None => pulled.plan,
+                };
+                replace_level_input(&plan, input)?
+            }
+        }
+        _ => plan,
+    };
     let Some(level) = locking_level_input(&plan) else {
         return Ok(plan);
     };
@@ -569,9 +610,6 @@ pub(crate) fn add_locking_junk_columns(plan: LogicalPlan) -> Result<LogicalPlan>
         .filter(|(_, locked)| *locked)
         .map(|(relation, _)| relation)
         .collect();
-    if locked.is_empty() {
-        return Ok(plan);
-    }
     let mut reads: Vec<Column> = Vec::new();
     for predicate in &predicates {
         let mut columns = Vec::new();
@@ -624,9 +662,66 @@ pub(crate) fn add_locking_junk_columns(plan: LogicalPlan) -> Result<LogicalPlan>
     if junk.is_empty() {
         return Ok(plan);
     }
-    match extend_level_output(&plan, &junk)? {
-        Some(extended) => Ok(extended),
-        None => Ok(plan),
+    let Some(extended) = extend_level_output(&plan, &junk)? else {
+        return Ok(plan);
+    };
+    // The level's own output, without the junk columns behind it.
+    let output = plan
+        .schema()
+        .iter()
+        .map(|(qualifier, field)| {
+            Expr::Column(Column::new(qualifier.cloned(), field.name()))
+        })
+        .collect::<Vec<_>>();
+    Projection::try_new(output, Arc::new(extended)).map(LogicalPlan::Projection)
+}
+
+/// `plan` with the input of its select-list projection replaced by `input`,
+/// and the ORDER BY, LIMIT and projections above it rebuilt over it.
+fn replace_level_input(plan: &LogicalPlan, input: LogicalPlan) -> Result<LogicalPlan> {
+    match plan {
+        LogicalPlan::Limit(_) | LogicalPlan::Sort(_) => {
+            let inputs = plan.inputs();
+            let [below] = inputs.as_slice() else {
+                return internal_err!("a LIMIT or ORDER BY has one input");
+            };
+            let below = replace_level_input(below, input)?;
+            plan.with_new_exprs(plan.expressions(), vec![below])
+        }
+        LogicalPlan::Projection(projection) => {
+            let below = match projection.input.as_ref() {
+                LogicalPlan::Limit(_)
+                | LogicalPlan::Sort(_)
+                | LogicalPlan::Projection(_) => {
+                    replace_level_input(&projection.input, input)?
+                }
+                _ => input,
+            };
+            Projection::try_new(projection.expr.clone(), Arc::new(below))
+                .map(LogicalPlan::Projection)
+        }
+        _ => internal_err!(
+            "a locking query level has no select list to carry its junk columns"
+        ),
+    }
+}
+
+/// Whether `input`, the input of a FROM item's alias, is a relation under an
+/// alias rather than a query level of its own: a table scan, under only
+/// filters and plain-column projections. The row-lock operator of the level
+/// locks such an item's rows itself; a query level locks its own.
+fn is_aliased_relation(input: &LogicalPlan) -> bool {
+    match input {
+        LogicalPlan::TableScan(_) => true,
+        LogicalPlan::Filter(filter) => is_aliased_relation(&filter.input),
+        LogicalPlan::Projection(projection) => {
+            projection
+                .expr
+                .iter()
+                .all(|expr| matches!(expr, Expr::Column(_)))
+                && is_aliased_relation(&projection.input)
+        }
+        _ => false,
     }
 }
 
@@ -656,9 +751,12 @@ fn collect_level(
 ) -> Result<()> {
     match plan {
         LogicalPlan::SubqueryAlias(alias) => {
-            let locked = alias.input.exists(|node| {
-                Ok(matches!(node, LogicalPlan::TableScan(scan) if scan.row_lock.is_some()))
-            })?;
+            // A query level of its own locks its rows itself: to this level
+            // it is a relation it does not lock.
+            let locked = is_aliased_relation(&alias.input)
+                && alias.input.exists(|node| {
+                    Ok(matches!(node, LogicalPlan::TableScan(scan) if scan.row_lock.is_some()))
+                })?;
             items.push((alias.alias.clone(), locked));
         }
         LogicalPlan::TableScan(scan) => {

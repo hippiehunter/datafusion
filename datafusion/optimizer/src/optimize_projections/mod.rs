@@ -137,6 +137,9 @@ fn optimize_projections(
     // their parents' required indices.
     match plan {
         LogicalPlan::Projection(proj) => {
+            // A junk column feeds the row-lock or write operator above its
+            // query level, which reads it whether or not a parent names it.
+            let indices = indices.append(&junk_positions(&proj.schema));
             return merge_consecutive_projections(proj)?.transform_data(|proj| {
                 rewrite_projection_given_requirements(proj, config, &indices)
             });
@@ -383,7 +386,7 @@ fn optimize_projections(
         LogicalPlan::Join(join) => {
             let left_len = join.left.schema().fields().len();
             let right_len = join.right.schema().fields().len();
-            let right_junk = right_junk_positions(join.right.schema());
+            let right_junk = junk_positions(join.right.schema());
             let (left_req_indices, right_req_indices) = split_join_requirements(
                 left_len,
                 right_len,
@@ -819,9 +822,10 @@ fn split_join_requirements(
     }
 }
 
-/// Positions of the fields of `schema` that are junk columns, which a
-/// [`JoinType::LeftSemiCarry`] join carries from its right child.
-fn right_junk_positions(schema: &DFSchema) -> Vec<usize> {
+/// Positions of the fields of `schema` that are junk columns: those a
+/// [`JoinType::LeftSemiCarry`] join carries from its right child, and those a
+/// projection keeps for the operator above its query level.
+fn junk_positions(schema: &DFSchema) -> Vec<usize> {
     schema
         .fields()
         .iter()
