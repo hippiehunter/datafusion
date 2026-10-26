@@ -32,7 +32,7 @@ use datafusion_common::plan_err;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{Result, sqlstate_datafusion_err};
 use datafusion_expr::{
-    LogicalPlan, SubqueryAlias, TableScanRowLock, TableScanRowLockMode,
+    Expr, LogicalPlan, SubqueryAlias, TableScanRowLock, TableScanRowLockMode,
     TableScanRowLockWaitPolicy,
 };
 use sqlparser::ast::{
@@ -120,7 +120,7 @@ impl SqlToRel<'_> {
             }
             _ => None,
         };
-        let join_aliases = match query.body.as_ref() {
+        let (join_aliases, relation_aliases) = match query.body.as_ref() {
             SetExpr::Select(select) => {
                 let range = self.lock_range(select, planner_context, &[]);
                 let targets = locks
@@ -133,20 +133,31 @@ impl SqlToRel<'_> {
                     &targets,
                     planner_context,
                 )?;
-                range
+                let joins = range
                     .iter()
                     .filter(|entry| matches!(entry.kind, EntryKind::Join))
                     .filter_map(|entry| entry.name.clone())
-                    .collect()
+                    .collect::<Vec<String>>();
+                let relations = range
+                    .iter()
+                    .filter(|entry| matches!(entry.kind, EntryKind::Relation))
+                    .filter_map(|entry| entry.name.clone())
+                    .collect::<Vec<String>>();
+                (joins, relations)
             }
-            _ => Vec::new(),
+            _ => (Vec::new(), Vec::new()),
         };
 
         let mut matched = vec![false; locks.len()];
+        let aliases = LevelAliases {
+            joins: &join_aliases,
+            relations: &relation_aliases,
+        };
         let plan = apply_locks_to_plan(
             plan,
             &LockScope::Level,
-            &join_aliases,
+            false,
+            &aliases,
             ctes.as_ref(),
             &locks,
             &mut matched,
@@ -581,7 +592,13 @@ fn table_scan_row_lock(lock: &LockClause) -> TableScanRowLock {
         Some(NonBlock::SkipLocked) => TableScanRowLockWaitPolicy::SkipLocked,
         Some(NonBlock::Wait(seconds)) => TableScanRowLockWaitPolicy::Wait(seconds),
     };
-    TableScanRowLock { mode, wait_policy }
+    // Whether the scan is read through a table alias is recorded where the
+    // lock reaches it (`apply_locks_to_plan`).
+    TableScanRowLock {
+        mode,
+        wait_policy,
+        unaliased: false,
+    }
 }
 
 /// The FROM items of one query level that are common table expression
@@ -614,15 +631,47 @@ enum LockScope {
     Within(Vec<usize>),
 }
 
+/// The reference names of a query level's FROM items that its plan holds as
+/// a `SubqueryAlias`: its aliased parenthesized joins and its stored
+/// relations.
+struct LevelAliases<'a> {
+    joins: &'a [String],
+    relations: &'a [String],
+}
+
+/// Whether `input`, the input of a `SubqueryAlias`, is the relation of a
+/// table alias: a table scan, or, when the alias names a stored relation of
+/// the level (`names_relation`), the projection a column alias list
+/// (`FROM t AS x(a, b)`) renames the scan's columns with.
+fn is_table_alias_input(input: &LogicalPlan, names_relation: bool) -> bool {
+    match input {
+        LogicalPlan::TableScan(_) => true,
+        LogicalPlan::Projection(projection) => {
+            names_relation
+                && matches!(projection.input.as_ref(), LogicalPlan::TableScan(_))
+                && projection.expr.iter().all(|expr| match expr {
+                    Expr::Column(_) => true,
+                    Expr::Alias(alias) => matches!(alias.expr.as_ref(), Expr::Column(_)),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Record the locks on the table scans they reach: a clause without `OF` on
 /// every scan, and one with `OF` on every scan of the FROM item it names.
-/// The plan nodes of an aliased parenthesized join (`join_aliases`) stay at
+/// The plan nodes of an aliased parenthesized join (`aliases.joins`) stay at
 /// the level, since its members are FROM items of the level themselves. No
-/// lock reaches into a CTE reference `ctes` names.
+/// lock reaches into a CTE reference `ctes` names. `table_alias` tells
+/// whether `plan` is the relation of a table alias, or the column-renaming
+/// projection over it; each lock records whether its scan is read without
+/// one ([`TableScanRowLock::unaliased`]).
 fn apply_locks_to_plan(
     plan: LogicalPlan,
     scope: &LockScope,
-    join_aliases: &[String],
+    table_alias: bool,
+    aliases: &LevelAliases<'_>,
     ctes: Option<&CteReferences>,
     locks: &[PlannedLock],
     matched: &mut [bool],
@@ -633,8 +682,10 @@ fn apply_locks_to_plan(
             if ctes.is_some_and(|ctes| ctes.names.iter().any(|cte| cte == name)) {
                 return Ok(LogicalPlan::SubqueryAlias(alias));
             }
+            let names_relation = matches!(scope, LockScope::Level)
+                && aliases.relations.iter().any(|relation| relation == name);
             let (inner_scope, inner_ctes) = match scope {
-                LockScope::Level if join_aliases.iter().any(|join| join == name) => {
+                LockScope::Level if aliases.joins.iter().any(|join| join == name) => {
                     (LockScope::Level, ctes)
                 }
                 LockScope::Level => (
@@ -645,10 +696,12 @@ fn apply_locks_to_plan(
                     (scope.clone(), ctes.and_then(|ctes| ctes.of_derived(name)))
                 }
             };
+            let inner_table_alias = is_table_alias_input(&alias.input, names_relation);
             let input = apply_locks_to_plan(
                 Arc::unwrap_or_clone(alias.input),
                 &inner_scope,
-                join_aliases,
+                inner_table_alias,
+                aliases,
                 inner_ctes,
                 locks,
                 matched,
@@ -670,7 +723,10 @@ fn apply_locks_to_plan(
                 LockScope::Within(inherited) => applied.extend(inherited),
             }
             for index in applied {
-                let lock = locks[index].row_lock;
+                let lock = TableScanRowLock {
+                    unaliased: !table_alias,
+                    ..locks[index].row_lock
+                };
                 scan.row_lock = Some(match scan.row_lock {
                     None => lock,
                     Some(existing) => combine_row_locks(existing, lock)?,
@@ -678,12 +734,25 @@ fn apply_locks_to_plan(
             }
             Ok(LogicalPlan::TableScan(scan))
         }
-        other => other
-            .map_children(|child| {
-                apply_locks_to_plan(child, scope, join_aliases, ctes, locks, matched)
+        other => {
+            // Only the column-renaming projection of a table alias passes the
+            // alias on to its scan.
+            let table_alias = table_alias && matches!(other, LogicalPlan::Projection(_));
+            other
+                .map_children(|child| {
+                    apply_locks_to_plan(
+                        child,
+                        scope,
+                        table_alias,
+                        aliases,
+                        ctes,
+                        locks,
+                        matched,
+                    )
                     .map(Transformed::yes)
-            })
-            .map(|transformed| transformed.data),
+                })
+                .map(|transformed| transformed.data)
+        }
     }
 }
 
@@ -723,5 +792,8 @@ fn combine_row_locks(
     Ok(TableScanRowLock {
         mode: left.mode.max(right.mode),
         wait_policy,
+        // A lock that reached the scan through its table alias tells that
+        // the alias is the scan's own.
+        unaliased: left.unaliased && right.unaliased,
     })
 }

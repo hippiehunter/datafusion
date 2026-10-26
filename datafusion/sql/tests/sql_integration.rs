@@ -4728,6 +4728,67 @@ fn for_share_without_of_annotates_all_table_scans() -> Result<()> {
     Ok(())
 }
 
+/// Each locked scan of a plan, by table name, with whether its lock reached
+/// it without a table alias ([`TableScanRowLock::unaliased`]): a
+/// `SubqueryAlias` over an unaliased locked scan is a query level of its
+/// own, which locks its rows itself.
+///
+/// [`TableScanRowLock::unaliased`]: datafusion_expr::TableScanRowLock::unaliased
+fn scan_lock_unaliased(sql: &str) -> Vec<(String, bool)> {
+    let plan = logical_plan(sql).unwrap();
+    let mut scans = vec![];
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node
+            && let Some(lock) = scan.row_lock
+        {
+            scans.push((scan.table_name.to_string(), lock.unaliased));
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    scans.sort();
+    scans
+}
+
+#[test]
+fn a_lock_records_whether_its_scan_is_read_through_a_table_alias() {
+    assert_eq!(
+        scan_lock_unaliased("SELECT o.order_id FROM orders o FOR UPDATE"),
+        vec![("orders".to_string(), false)]
+    );
+    assert_eq!(
+        scan_lock_unaliased("SELECT o.x FROM orders AS o(x) FOR UPDATE"),
+        vec![("orders".to_string(), false)]
+    );
+    assert_eq!(
+        scan_lock_unaliased("SELECT order_id FROM orders FOR UPDATE"),
+        vec![("orders".to_string(), true)]
+    );
+    // The derived table's own clause, and a clause of the level around it
+    // that reaches into it, lock a scan its body reads without an alias.
+    assert_eq!(
+        scan_lock_unaliased(
+            "SELECT s.order_id FROM \
+             (SELECT order_id FROM orders WHERE order_id > 1 FOR UPDATE) s"
+        ),
+        vec![("orders".to_string(), true)]
+    );
+    assert_eq!(
+        scan_lock_unaliased(
+            "SELECT s.order_id FROM (SELECT order_id FROM orders) s FOR UPDATE OF s"
+        ),
+        vec![("orders".to_string(), true)]
+    );
+    // A table alias inside a derived table the clause reaches into stays
+    // that table's alias.
+    assert_eq!(
+        scan_lock_unaliased(
+            "SELECT s.order_id FROM (SELECT o.order_id FROM orders o) s FOR UPDATE"
+        ),
+        vec![("orders".to_string(), false)]
+    );
+}
+
 /// The SQLSTATE and message a statement's planning fails with.
 fn planning_sqlstate(sql: &str) -> (String, String) {
     let error = logical_plan(sql).expect_err(sql);

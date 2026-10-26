@@ -706,25 +706,6 @@ fn replace_level_input(plan: &LogicalPlan, input: LogicalPlan) -> Result<Logical
     }
 }
 
-/// Whether `input`, the input of a FROM item's alias, is a relation under an
-/// alias rather than a query level of its own: a table scan, under only
-/// filters and plain-column projections. The row-lock operator of the level
-/// locks such an item's rows itself; a query level locks its own.
-fn is_aliased_relation(input: &LogicalPlan) -> bool {
-    match input {
-        LogicalPlan::TableScan(_) => true,
-        LogicalPlan::Filter(filter) => is_aliased_relation(&filter.input),
-        LogicalPlan::Projection(projection) => {
-            projection
-                .expr
-                .iter()
-                .all(|expr| matches!(expr, Expr::Column(_)))
-                && is_aliased_relation(&projection.input)
-        }
-        _ => false,
-    }
-}
-
 /// The input of a query level's select-list projection: below its LIMIT,
 /// ORDER BY and select-list projections.
 fn locking_level_input(plan: &LogicalPlan) -> Option<&LogicalPlan> {
@@ -753,7 +734,7 @@ fn collect_level(
         LogicalPlan::SubqueryAlias(alias) => {
             // A query level of its own locks its rows itself: to this level
             // it is a relation it does not lock.
-            let locked = is_aliased_relation(&alias.input)
+            let locked = alias.is_table_alias()
                 && alias.input.exists(|node| {
                     Ok(matches!(node, LogicalPlan::TableScan(scan) if scan.row_lock.is_some()))
                 })?;

@@ -133,6 +133,13 @@ pub struct TableScanRowLock {
     pub mode: TableScanRowLockMode,
     /// Conflict handling policy.
     pub wait_policy: TableScanRowLockWaitPolicy,
+    /// The scan is a FROM item its query level reads without a table alias
+    /// of its own, so a `SubqueryAlias` above it is a derived table, view or
+    /// common table expression: a query level that locks its rows itself,
+    /// as PostgreSQL never pulls up a subquery with a locking clause. False
+    /// for a scan read through its table alias (`FROM t AS x`), whose
+    /// `SubqueryAlias` is that alias, part of the scan's own query level.
+    pub unaliased: bool,
 }
 
 impl Display for TableScanRowLock {
@@ -3586,6 +3593,37 @@ impl SubqueryAlias {
             schema,
         })
     }
+
+    /// Whether this alias is a table alias over one relation (`FROM t AS x`)
+    /// rather than a query level of its own (a derived table, view or common
+    /// table expression): its input is a table scan, under only filters and
+    /// projections that pass the scan's columns on by name, and the scan's
+    /// lock, if it has one, reached it through this alias
+    /// ([`TableScanRowLock::unaliased`] is false). A locking clause locks the
+    /// rows of a table alias in the alias's own query level; a query level
+    /// that a lock reaches locks its rows itself, as PostgreSQL never pulls
+    /// up a subquery with a locking clause. A column alias list
+    /// (`FROM t AS x(a, b)`) renames the scan's columns, and its alias is
+    /// planned as a level of its own.
+    pub fn is_table_alias(&self) -> bool {
+        fn relation_under_alias(plan: &LogicalPlan) -> bool {
+            match plan {
+                LogicalPlan::TableScan(scan) => {
+                    scan.row_lock.is_none_or(|lock| !lock.unaliased)
+                }
+                LogicalPlan::Filter(filter) => relation_under_alias(&filter.input),
+                LogicalPlan::Projection(projection) => {
+                    projection
+                        .expr
+                        .iter()
+                        .all(|expr| matches!(expr, Expr::Column(_)))
+                        && relation_under_alias(&projection.input)
+                }
+                _ => false,
+            }
+        }
+        relation_under_alias(&self.input)
+    }
 }
 
 // Manual implementation needed because of `schema` field. Comparison excludes this field.
@@ -4093,6 +4131,7 @@ impl TableScan {
         self.row_lock = Some(TableScanRowLock {
             mode: TableScanRowLockMode::ForUpdate,
             wait_policy: TableScanRowLockWaitPolicy::Block,
+            unaliased: false,
         });
         self.result_relation = true;
         self
