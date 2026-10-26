@@ -58,8 +58,8 @@ use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     Column, Constraints, DFSchema, DFSchemaRef, NullEquality, Result, ScalarValue,
     TableReference, ToDFSchema, UnnestOptions, exec_err,
-    get_target_functional_dependencies, internal_datafusion_err, plan_datafusion_err,
-    plan_err,
+    get_target_functional_dependencies, internal_datafusion_err, is_junk_column_metadata,
+    plan_datafusion_err, plan_err,
 };
 use datafusion_expr_common::type_coercion::binary::type_union_resolution;
 
@@ -148,7 +148,10 @@ pub struct LogicalPlanBuilder {
 /// column types come from the non-recursive term, so a recursive term whose
 /// own type is wider has no type the query could settle on: coercing it would
 /// silently narrow the recursive values.
-pub fn recursive_term_type_settles(static_type: &DataType, recursive_type: &DataType) -> bool {
+pub fn recursive_term_type_settles(
+    static_type: &DataType,
+    recursive_type: &DataType,
+) -> bool {
     static_type == recursive_type
         || comparison_coercion(static_type, recursive_type).as_ref() == Some(static_type)
 }
@@ -446,7 +449,9 @@ impl LogicalPlanBuilder {
                         common
                             .inner()
                             .iter()
-                            .filter(|(key, value)| metadata.inner().get(*key) == Some(*value))
+                            .filter(|(key, value)| {
+                                metadata.inner().get(*key) == Some(*value)
+                            })
                             .map(|(key, value)| (key.clone(), value.clone()))
                             .collect(),
                     ),
@@ -454,7 +459,11 @@ impl LogicalPlanBuilder {
                 });
             }
             if values_on_carrier {
-                fields.push_with_metadata(field_type.to_owned(), field_nullable, identity);
+                fields.push_with_metadata(
+                    field_type.to_owned(),
+                    field_nullable,
+                    identity,
+                );
             } else {
                 fields.push(field_type.to_owned(), field_nullable);
             }
@@ -516,7 +525,9 @@ impl LogicalPlanBuilder {
                         common
                             .inner()
                             .iter()
-                            .filter(|(key, value)| metadata.inner().get(*key) == Some(*value))
+                            .filter(|(key, value)| {
+                                metadata.inner().get(*key) == Some(*value)
+                            })
                             .map(|(key, value)| (key.clone(), value.clone()))
                             .collect(),
                     ),
@@ -1915,6 +1926,19 @@ pub fn build_join_schema(
             .map(|(q, f)| (q.cloned(), Arc::clone(f)))
             .chain(once(mark_field(right)))
             .collect(),
+        JoinType::LeftSemiCarry => {
+            // The left side, then the junk columns of the right row that matched
+            // first. A semi join only emits a left row that matched, so the
+            // carried fields keep their nullability.
+            left_fields
+                .map(|(q, f)| (q.cloned(), Arc::clone(f)))
+                .chain(
+                    right_fields
+                        .filter(|(_, f)| is_junk_column_metadata(f.metadata()))
+                        .map(|(q, f)| (q.cloned(), Arc::clone(f))),
+                )
+                .collect()
+        }
         JoinType::RightSemi | JoinType::RightAnti => {
             // Only use the right side for the schema
             right_fields
@@ -2583,7 +2607,8 @@ mod tests {
     }
 
     fn values_column_type(rows: Vec<Vec<Expr>>) -> Result<DataType> {
-        let LogicalPlan::Values(values) = LogicalPlanBuilder::values(rows)?.build()? else {
+        let LogicalPlan::Values(values) = LogicalPlanBuilder::values(rows)?.build()?
+        else {
             panic!("expected VALUES plan");
         };
         Ok(values.schema.field(0).data_type().clone())

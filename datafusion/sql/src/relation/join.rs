@@ -269,7 +269,8 @@ impl SqlToRel<'_> {
                 | JoinType::Left
                 | JoinType::LeftSemi
                 | JoinType::LeftAnti
-                | JoinType::LeftMark => left_value,
+                | JoinType::LeftMark
+                | JoinType::LeftSemiCarry => left_value,
                 JoinType::Right
                 | JoinType::RightSemi
                 | JoinType::RightAnti

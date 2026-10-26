@@ -106,12 +106,16 @@ impl OptimizerRule for PropagateEmptyRelation {
                             schema: Arc::clone(&join.schema),
                         }),
                     )),
-                    JoinType::LeftSemi if left_empty || right_empty => Ok(
-                        Transformed::yes(LogicalPlan::EmptyRelation(EmptyRelation {
-                            produce_one_row: false,
-                            schema: Arc::clone(&join.schema),
-                        })),
-                    ),
+                    JoinType::LeftSemi | JoinType::LeftSemiCarry
+                        if left_empty || right_empty =>
+                    {
+                        Ok(Transformed::yes(LogicalPlan::EmptyRelation(
+                            EmptyRelation {
+                                produce_one_row: false,
+                                schema: Arc::clone(&join.schema),
+                            },
+                        )))
+                    }
                     JoinType::RightSemi if left_empty || right_empty => Ok(
                         Transformed::yes(LogicalPlan::EmptyRelation(EmptyRelation {
                             produce_one_row: false,
@@ -522,6 +526,10 @@ mod tests {
 
         // test left semi join with empty right
         assert_empty_left_empty_right_lp(false, true, JoinType::LeftSemi, true)?;
+
+        // test carrying left semi join with empty left and with empty right
+        assert_empty_left_empty_right_lp(true, false, JoinType::LeftSemiCarry, true)?;
+        assert_empty_left_empty_right_lp(false, true, JoinType::LeftSemiCarry, true)?;
 
         // test right semi join with empty left
         assert_empty_left_empty_right_lp(true, false, JoinType::RightSemi, true)?;

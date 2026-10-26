@@ -29,7 +29,8 @@ use arrow::datatypes::{TimeUnit::Nanosecond, *};
 use common::{MockContextProvider, SEQUENCE_ROWS_DRAW};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
-    DFSchema, DataFusionError, DataFusionSqlStateError, Result, assert_contains,
+    DFSchema, DataFusionError, DataFusionSqlStateError, Result, TableReference,
+    assert_contains,
 };
 use datafusion_expr::{
     ColumnarValue, CreateIndex, CreateMemoryTable, CreateViewUpdatability, DdlStatement,
@@ -7400,13 +7401,14 @@ fn plan_delete_using() {
     assert_snapshot!(
         plan,
         @r#"
-    Dml: op=[Delete] table=[orders]
-      Filter: o.customer_id = p.id AND p.state = Utf8("CA")
-        Cross Join: 
-          SubqueryAlias: o
-            TableScan: orders, row_lock=[FOR UPDATE]
-          SubqueryAlias: p
-            TableScan: person
+    Dml: op=[Delete] table=[orders] carried=[p(__carried_0_id, __carried_0_state; __carried_0_present)]
+      Projection: o.order_id AS order_id, o.customer_id AS customer_id, o.o_item_id AS o_item_id, o.qty AS qty, o.price AS price, o.delivered AS delivered, p.id AS __carried_0_id, p.state AS __carried_0_state, Boolean(true) AS __carried_0_present
+        Filter: o.customer_id = p.id AND p.state = Utf8("CA")
+          Cross Join: 
+            SubqueryAlias: o
+              TableScan: orders, row_lock=[FOR UPDATE]
+            SubqueryAlias: p
+              TableScan: person
     "#
     );
 }
@@ -7419,15 +7421,16 @@ fn plan_delete_using_multiple_tables() {
     assert_snapshot!(
         plan,
         @"
-    Dml: op=[Delete] table=[orders]
-      Filter: o.customer_id = p.id AND p.id = j1.j1_id
-        Cross Join: 
+    Dml: op=[Delete] table=[orders] carried=[p(__carried_0_id; __carried_0_present), j1(__carried_1_j1_id; __carried_1_present)]
+      Projection: o.order_id AS order_id, o.customer_id AS customer_id, o.o_item_id AS o_item_id, o.qty AS qty, o.price AS price, o.delivered AS delivered, p.id AS __carried_0_id, Boolean(true) AS __carried_0_present, j1.j1_id AS __carried_1_j1_id, Boolean(true) AS __carried_1_present
+        Filter: o.customer_id = p.id AND p.id = j1.j1_id
           Cross Join: 
-            SubqueryAlias: o
-              TableScan: orders, row_lock=[FOR UPDATE]
-            SubqueryAlias: p
-              TableScan: person
-          TableScan: j1
+            Cross Join: 
+              SubqueryAlias: o
+                TableScan: orders, row_lock=[FOR UPDATE]
+              SubqueryAlias: p
+                TableScan: person
+            TableScan: j1
     "
     );
 }
@@ -7440,13 +7443,199 @@ fn plan_delete_using_no_alias() {
     assert_snapshot!(
         plan,
         @"
-    Dml: op=[Delete] table=[orders]
-      Filter: orders.customer_id = person.id
-        Cross Join: 
-          TableScan: orders, row_lock=[FOR UPDATE]
-          TableScan: person
+    Dml: op=[Delete] table=[orders] carried=[person(__carried_0_id; __carried_0_present)]
+      Projection: orders.order_id AS order_id, orders.customer_id AS customer_id, orders.o_item_id AS o_item_id, orders.qty AS qty, orders.price AS price, orders.delivered AS delivered, person.id AS __carried_0_id, Boolean(true) AS __carried_0_present
+        Filter: orders.customer_id = person.id
+          Cross Join: 
+            TableScan: orders, row_lock=[FOR UPDATE]
+            TableScan: person
     "
     );
+}
+
+/// The DML input whose `Dml` node `plan` is, and its carried relations.
+fn dml_input_and_carried(
+    plan: &LogicalPlan,
+) -> (&LogicalPlan, &[datafusion_expr::CarriedJunkColumns]) {
+    let LogicalPlan::Dml(dml) = plan else {
+        panic!("expected a DML plan, got {plan}");
+    };
+    (dml.input.as_ref(), dml.carried.as_slice())
+}
+
+/// The fields of `schema` a junk column holds, as (name, relation, source
+/// column) triples.
+fn junk_fields(schema: &DFSchema) -> Vec<(String, String, Option<String>)> {
+    schema
+        .fields()
+        .iter()
+        .filter(|field| datafusion_common::is_junk_column_metadata(field.metadata()))
+        .map(|field| {
+            (
+                field.name().clone(),
+                field.metadata()[datafusion_common::JUNK_RELATION_METADATA_KEY].clone(),
+                field
+                    .metadata()
+                    .get(datafusion_common::JUNK_SOURCE_COLUMN_METADATA_KEY)
+                    .cloned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn update_from_carries_the_joined_columns_its_where_and_set_read() {
+    let plan = logical_plan(
+        "UPDATE orders SET qty = orders.qty + p.age FROM person p \
+         WHERE orders.customer_id = p.id AND p.state = 'CA'",
+    )
+    .unwrap();
+    let (input, carried) = dml_input_and_carried(&plan);
+    assert_eq!(
+        carried,
+        &[datafusion_expr::CarriedJunkColumns {
+            relation: TableReference::bare("p"),
+            columns: vec![
+                "__carried_0_id".to_string(),
+                "__carried_0_age".to_string(),
+                "__carried_0_state".to_string(),
+            ],
+            presence: "__carried_0_present".to_string(),
+        }]
+    );
+    let names = input
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "order_id",
+            "customer_id",
+            "o_item_id",
+            "qty",
+            "price",
+            "delivered",
+            "__carried_0_id",
+            "__carried_0_age",
+            "__carried_0_state",
+            "__carried_0_present",
+        ]
+    );
+    assert_eq!(
+        junk_fields(input.schema()),
+        vec![
+            ("__carried_0_id".into(), "p".into(), Some("id".into())),
+            ("__carried_0_age".into(), "p".into(), Some("age".into())),
+            ("__carried_0_state".into(), "p".into(), Some("state".into())),
+            ("__carried_0_present".into(), "p".into(), None),
+        ]
+    );
+}
+
+#[test]
+fn update_without_another_relation_carries_nothing() {
+    let plan = logical_plan("UPDATE person SET age = age + 1 WHERE id = 1").unwrap();
+    let (input, carried) = dml_input_and_carried(&plan);
+    assert!(carried.is_empty());
+    assert!(junk_fields(input.schema()).is_empty());
+}
+
+#[test]
+fn delete_in_an_uncorrelated_subquery_is_a_carrying_semi_join() {
+    let plan = logical_plan(
+        "DELETE FROM person WHERE id IN (SELECT customer_id FROM orders WHERE qty > 100)",
+    )
+    .unwrap();
+    let (input, carried) = dml_input_and_carried(&plan);
+    assert_eq!(
+        carried,
+        &[datafusion_expr::CarriedJunkColumns {
+            relation: TableReference::bare("__carried_semi_0"),
+            columns: vec!["__carried_0___c_in".to_string()],
+            presence: "__carried_0_present".to_string(),
+        }]
+    );
+    let text = format!("{}", plan.display_indent());
+    assert_contains!(&text, "LeftSemiCarry Join:  Filter: person.id = __carried_semi_0.__c_in");
+    assert_contains!(&text, "SubqueryAlias: __carried_semi_0");
+    assert_contains!(&text, "orders.customer_id AS __c_in");
+    assert!(!text.contains(" IN ("));
+    assert_eq!(
+        junk_fields(input.schema()),
+        vec![
+            (
+                "__carried_0___c_in".into(),
+                "__carried_semi_0".into(),
+                Some("__c_in".into())
+            ),
+            ("__carried_0_present".into(), "__carried_semi_0".into(), None),
+        ]
+    );
+}
+
+#[test]
+fn update_correlated_exists_is_a_carrying_semi_join_on_its_correlation() {
+    let plan = logical_plan(
+        "UPDATE person SET salary = salary * 1.2 \
+         WHERE EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = person.id AND qty > 100)",
+    )
+    .unwrap();
+    let (_, carried) = dml_input_and_carried(&plan);
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].relation, TableReference::bare("__carried_semi_0"));
+    assert_eq!(carried[0].columns, vec!["__carried_0___c0".to_string()]);
+    let text = format!("{}", plan.display_indent());
+    assert_contains!(
+        &text,
+        "LeftSemiCarry Join:  Filter: __carried_semi_0.__c0 = person.id"
+    );
+    assert_contains!(&text, "orders.customer_id AS __c0");
+    assert_contains!(&text, "Filter: orders.qty > ");
+    assert!(!text.contains("EXISTS"));
+}
+
+#[test]
+fn not_exists_stays_a_sub_plan_and_carries_nothing() {
+    let plan = logical_plan(
+        "DELETE FROM person WHERE NOT EXISTS \
+         (SELECT 1 FROM orders WHERE orders.customer_id = person.id)",
+    )
+    .unwrap();
+    let (_, carried) = dml_input_and_carried(&plan);
+    assert!(carried.is_empty());
+    let text = format!("{}", plan.display_indent());
+    assert_contains!(&text, "NOT EXISTS");
+    assert!(!text.contains("LeftSemiCarry"));
+}
+
+#[test]
+fn locking_query_carries_the_joined_columns_linking_an_unlocked_relation() {
+    let plan = logical_plan(
+        "SELECT o.order_id FROM orders o JOIN person p ON o.customer_id = p.id \
+         WHERE p.state = 'CA' FOR UPDATE OF o",
+    )
+    .unwrap();
+    assert_eq!(
+        junk_fields(plan.schema()),
+        vec![
+            ("__carried_0_id".into(), "p".into(), Some("id".into())),
+            ("__carried_0_present".into(), "p".into(), None),
+        ]
+    );
+    assert_eq!(plan.schema().field(0).name(), "order_id");
+}
+
+#[test]
+fn locking_query_that_locks_every_relation_carries_nothing() {
+    let plan = logical_plan(
+        "SELECT o.order_id FROM orders o JOIN person p ON o.customer_id = p.id FOR UPDATE",
+    )
+    .unwrap();
+    assert!(junk_fields(plan.schema()).is_empty());
+    assert_eq!(plan.schema().fields().len(), 1);
 }
 
 #[test]

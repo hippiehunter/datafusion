@@ -256,6 +256,7 @@ impl TreeNode for LogicalPlan {
                 overriding_system_value,
                 check_option,
                 target_select_rights,
+                carried,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
                     table_name,
@@ -270,6 +271,7 @@ impl TreeNode for LogicalPlan {
                     overriding_system_value,
                     check_option,
                     target_select_rights,
+                    carried,
                 })
             }),
             LogicalPlan::Merge(Merge {

@@ -1262,9 +1262,10 @@ impl LogicalPlan {
                         left.head_output_expr()
                     }
                 }
-                JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                    left.head_output_expr()
-                }
+                JoinType::LeftSemi
+                | JoinType::LeftAnti
+                | JoinType::LeftMark
+                | JoinType::LeftSemiCarry => left.head_output_expr(),
                 JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
                     right.head_output_expr()
                 }
@@ -1593,6 +1594,7 @@ impl LogicalPlan {
                 new_dml.returning_context = dml.returning_context.clone();
                 new_dml.overriding_system_value = dml.overriding_system_value;
                 new_dml.check_option = check_option;
+                new_dml.carried = dml.carried.clone();
                 Ok(LogicalPlan::Dml(new_dml))
             }
             LogicalPlan::Merge(merge) => {
@@ -2407,9 +2409,10 @@ impl LogicalPlan {
                         (left_max, right_max, _) => Some(left_max * right_max),
                     }
                 }
-                JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                    left.max_rows()
-                }
+                JoinType::LeftSemi
+                | JoinType::LeftAnti
+                | JoinType::LeftMark
+                | JoinType::LeftSemiCarry => left.max_rows(),
                 JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
                     right.max_rows()
                 }
@@ -2954,8 +2957,28 @@ impl LogicalPlan {
                         }
                         Ok(())
                     }
-                    LogicalPlan::Dml(DmlStatement { table_name, op, .. }) => {
-                        write!(f, "Dml: op=[{op}] table=[{table_name}]")
+                    LogicalPlan::Dml(DmlStatement {
+                        table_name,
+                        op,
+                        carried,
+                        ..
+                    }) => {
+                        write!(f, "Dml: op=[{op}] table=[{table_name}]")?;
+                        if !carried.is_empty() {
+                            let relations = carried
+                                .iter()
+                                .map(|carried| {
+                                    format!(
+                                        "{}({}; {})",
+                                        carried.relation,
+                                        carried.columns.join(", "),
+                                        carried.presence
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            write!(f, " carried=[{}]", relations.join(", "))?;
+                        }
+                        Ok(())
                     }
                     LogicalPlan::Merge(Merge { target_table, .. }) => {
                         write!(f, "Merge: target=[{target_table}]")
@@ -6773,6 +6796,59 @@ mod tests {
             assert_eq!(join.filter, Some(lit(true)));
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn left_semi_carry_outputs_the_left_side_then_the_right_junk_columns() -> Result<()> {
+        let left = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+        ]);
+        let junk = HashMap::from([(
+            datafusion_common::JUNK_COLUMN_METADATA_KEY.to_string(),
+            "true".to_string(),
+        )]);
+        let right = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("c", DataType::Int32, false).with_metadata(junk.clone()),
+            Field::new("d", DataType::Int32, true),
+        ]);
+        let join = Join::try_new(
+            Arc::new(table_scan(Some("t1"), &left, None)?.build()?),
+            Arc::new(table_scan(Some("t2"), &right, None)?.build()?),
+            vec![(col("t1.a"), col("t2.a"))],
+            None,
+            JoinType::LeftSemiCarry,
+            JoinConstraint::On,
+            NullEquality::NullEqualsNothing,
+        )?;
+        let columns = join
+            .schema
+            .iter()
+            .map(|(qualifier, field)| {
+                (
+                    qualifier.map(|q| q.to_string()),
+                    field.name().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            columns,
+            vec![
+                (Some("t1".to_string()), "a".to_string(), false),
+                (Some("t1".to_string()), "b".to_string(), false),
+                (Some("t2".to_string()), "c".to_string(), false),
+            ]
+        );
+        assert_eq!(join.schema.field(2).metadata(), &junk);
+        assert!(!JoinType::LeftSemiCarry.supports_swap());
+        assert_eq!(JoinType::LeftSemiCarry.to_string(), "LeftSemiCarry");
+        assert_eq!(
+            "leftsemicarry".parse::<JoinType>()?,
+            JoinType::LeftSemiCarry
+        );
         Ok(())
     }
 

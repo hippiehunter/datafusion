@@ -41,8 +41,9 @@ pub use ddl::{
     CreateViewUpdatability, DdlStatement,
 };
 pub use dml::{
-    ConflictAssignment, ConflictTarget, DmlCheckOption, DmlStatement, DoUpdateAction,
-    InsertOp, OnConflict, OnConflictAction, ReturningContext, TargetSelectRights, WriteOp,
+    CarriedJunkColumns, ConflictAssignment, ConflictTarget, DmlCheckOption, DmlStatement,
+    DoUpdateAction, InsertOp, OnConflict, OnConflictAction, ReturningContext,
+    TargetSelectRights, WriteOp, carried_junk_column_name, carried_presence_column_name,
 };
 pub use merge::{
     Merge, MergeAction, MergeAssignment, MergeAssignmentTarget, MergeClause,

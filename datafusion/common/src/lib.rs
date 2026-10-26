@@ -86,7 +86,10 @@ pub use functional_dependencies::{
     get_required_group_by_exprs_indices, get_target_functional_dependencies,
 };
 use hashbrown::DefaultHashBuilder;
-pub use join_type::{JoinConstraint, JoinSide, JoinType};
+pub use join_type::{
+    JUNK_COLUMN_METADATA_KEY, JUNK_RELATION_METADATA_KEY, JUNK_SOURCE_COLUMN_METADATA_KEY,
+    JoinConstraint, JoinSide, JoinType, is_junk_column_metadata,
+};
 pub use nested_struct::cast_column;
 pub use null_equality::NullEquality;
 pub use param_value::ParamValues;

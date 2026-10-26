@@ -464,8 +464,12 @@ impl FunctionalDependencies {
                 left_func_dependencies.extend(right_func_dependencies);
                 left_func_dependencies
             }
-            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                // These joins preserve functional dependencies of the left side:
+            JoinType::LeftSemi
+            | JoinType::LeftAnti
+            | JoinType::LeftMark
+            | JoinType::LeftSemiCarry => {
+                // These joins preserve functional dependencies of the left side, whose
+                // fields lead their output:
                 left_func_dependencies
             }
             JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {

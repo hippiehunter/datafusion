@@ -169,6 +169,10 @@ pub(crate) fn lr_is_preserved(join_type: JoinType) -> (bool, bool) {
         // No columns from the right side of the join can be referenced in output
         // predicates for semi/anti joins, so whether we specify t/f doesn't matter.
         JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => (true, false),
+        // A predicate over the right row a semi join carries must stay above the
+        // join: below it, the predicate would choose which matching row is
+        // carried instead of filtering the row that was.
+        JoinType::LeftSemiCarry => (true, false),
         // No columns from the left side of the join can be referenced in output
         // predicates for semi/anti joins, so whether we specify t/f doesn't matter.
         JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => (false, true),
@@ -190,7 +194,9 @@ pub(crate) fn on_lr_is_preserved(join_type: JoinType) -> (bool, bool) {
         JoinType::Left => (false, true),
         JoinType::Right => (true, false),
         JoinType::Full => (false, false),
-        JoinType::LeftSemi | JoinType::RightSemi => (true, true),
+        JoinType::LeftSemi | JoinType::RightSemi | JoinType::LeftSemiCarry => {
+            (true, true)
+        }
         JoinType::LeftAnti => (false, true),
         JoinType::RightAnti => (true, false),
         JoinType::LeftMark => (false, true),
@@ -687,13 +693,14 @@ fn infer_join_predicates_from_on_filters(
             on_filters,
             inferred_predicates,
         ),
-        JoinType::Left | JoinType::LeftSemi | JoinType::LeftMark => {
-            infer_join_predicates_impl::<true, false>(
-                join_col_keys,
-                on_filters,
-                inferred_predicates,
-            )
-        }
+        JoinType::Left
+        | JoinType::LeftSemi
+        | JoinType::LeftMark
+        | JoinType::LeftSemiCarry => infer_join_predicates_impl::<true, false>(
+            join_col_keys,
+            on_filters,
+            inferred_predicates,
+        ),
         JoinType::Right | JoinType::RightSemi | JoinType::RightMark => {
             infer_join_predicates_impl::<false, true>(
                 join_col_keys,
@@ -939,7 +946,9 @@ impl OptimizerRule for PushDownFilter {
                         .iter()
                         .any(|column| !unnest.input.schema().has_column(column));
 
-                    if contains_list_columns || contains_struct_columns || reads_unnest_output
+                    if contains_list_columns
+                        || contains_struct_columns
+                        || reads_unnest_output
                     {
                         unnest_predicates.push(predicate);
                     } else {

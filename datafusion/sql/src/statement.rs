@@ -29,6 +29,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::ast_walk::Walk;
+use crate::dml_carry::{add_locking_junk_columns, carry_dml_input};
 use crate::parser::{
     CopyFromStatement, CopyToSource, CopyToStatement, CreateExternalTable, DFParser,
     ExplainStatement, LexOrdering, Statement as DFStatement,
@@ -1329,7 +1330,12 @@ impl SqlToRel<'_> {
         }
         match statement {
             Statement::Query(query) => {
-                self.query_to_plan_ref(query.as_ref(), planner_context)
+                let plan = self.query_to_plan_ref(query.as_ref(), planner_context)?;
+                if query.locks.is_empty() {
+                    Ok(plan)
+                } else {
+                    add_locking_junk_columns(plan)
+                }
             }
             Statement::ExplainTable {
                 describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
@@ -1454,7 +1460,14 @@ impl SqlToRel<'_> {
                     DFStatement::Statement(Box::new(SQLBox::into_owned(statement)));
                 self.explain_to_plan(verbose, analyze, format, statement, planner_context)
             }
-            Statement::Query(query) => self.query_to_plan_ref(&query, planner_context),
+            Statement::Query(query) => {
+                let plan = self.query_to_plan_ref(&query, planner_context)?;
+                if query.locks.is_empty() {
+                    Ok(plan)
+                } else {
+                    add_locking_junk_columns(plan)
+                }
+            }
             Statement::ShowVariable { variable, .. } => {
                 self.show_variable_to_plan(&variable)
             }
@@ -3041,6 +3054,10 @@ impl SqlToRel<'_> {
         };
 
         let mut source = source;
+        // The relations the input carries beside the target, once planned
+        // (after the RETURNING list is bound, so its wildcards never see a
+        // junk column).
+        let mut carried = None;
         let mut returning_exprs = None;
         let mut returning_col_names = None;
         let mut returning_output_schema = None;
@@ -3142,6 +3159,10 @@ impl SqlToRel<'_> {
                 )?;
                 let (rewritten, lifted_exprs) =
                     lift_subquery_returning_exprs(rewritten, passthrough_exprs.len())?;
+                let carried_input = carry_dml_input(source, &target_relation, &[])?;
+                source = carried_input.source;
+                projected_exprs.extend(carried_input.junk);
+                carried = Some(carried_input.carried);
                 projected_exprs.extend(passthrough_exprs);
                 source = project(source, projected_exprs)?;
                 source = project_with_lifted_exprs(source, lifted_exprs)?;
@@ -3158,13 +3179,37 @@ impl SqlToRel<'_> {
             }
         }
 
+        let carried = match carried {
+            Some(carried) => carried,
+            None => {
+                let carried_input = carry_dml_input(source, &target_relation, &[])?;
+                source = carried_input.source;
+                if !carried_input.junk.is_empty() {
+                    let mut exprs = table_schema
+                        .fields()
+                        .iter()
+                        .map(|field| {
+                            Expr::Column(Column::new(
+                                Some(target_relation.clone()),
+                                field.name(),
+                            ))
+                            .alias(field.name())
+                        })
+                        .collect::<Vec<_>>();
+                    exprs.extend(carried_input.junk);
+                    source = project(source, exprs)?;
+                }
+                carried_input.carried
+            }
+        };
         let mut dml = DmlStatement::new(
             table_ref,
             table_source,
             WriteOp::Delete,
             Arc::new(source),
             target_select_rights,
-        );
+        )
+        .with_carried(carried);
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }
@@ -4335,6 +4380,9 @@ impl SqlToRel<'_> {
             ));
         }
 
+        // The relations the input carries beside the target (planned once the
+        // RETURNING list is bound, so its wildcards never see a junk column).
+        let mut carried = Vec::new();
         let mut returning_exprs = None;
         let mut returning_col_names = None;
         let mut output_schema = None;
@@ -4401,6 +4449,13 @@ impl SqlToRel<'_> {
                     passthrough_exprs.len(),
                 )?;
 
+            if !preserve_view_old {
+                let carried_input =
+                    carry_dml_input(source, &target_relation, &projected_exprs)?;
+                source = carried_input.source;
+                projected_exprs.extend(carried_input.junk);
+                carried = carried_input.carried;
+            }
             projected_exprs.extend(passthrough_exprs);
             source = project(source, projected_exprs)?;
             source = project_with_lifted_exprs(source, lifted_exprs)?;
@@ -4425,6 +4480,13 @@ impl SqlToRel<'_> {
             output_schema = Some(returning_output_schema);
             returning_exprs = Some(rewritten_returning_exprs);
         } else {
+            if !preserve_view_old {
+                let carried_input =
+                    carry_dml_input(source, &target_relation, &projected_exprs)?;
+                source = carried_input.source;
+                projected_exprs.extend(carried_input.junk);
+                carried = carried_input.carried;
+            }
             source = project(source, projected_exprs)?;
         }
 
@@ -4435,7 +4497,8 @@ impl SqlToRel<'_> {
             Arc::new(source),
             target_select_rights,
         )
-        .with_target_columns(assigned_columns);
+        .with_target_columns(assigned_columns)
+        .with_carried(carried);
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }

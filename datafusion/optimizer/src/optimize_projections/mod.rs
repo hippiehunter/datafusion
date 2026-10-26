@@ -27,6 +27,7 @@ use std::sync::Arc;
 use datafusion_common::{
     Column, DFSchema, HashMap, JoinType, Result, assert_eq_or_internal_err,
     get_required_group_by_exprs_indices, internal_datafusion_err, internal_err,
+    is_junk_column_metadata,
 };
 use datafusion_expr::expr::Alias;
 use datafusion_expr::{
@@ -382,8 +383,14 @@ fn optimize_projections(
         LogicalPlan::Join(join) => {
             let left_len = join.left.schema().fields().len();
             let right_len = join.right.schema().fields().len();
-            let (left_req_indices, right_req_indices) =
-                split_join_requirements(left_len, right_len, indices, &join.join_type);
+            let right_junk = right_junk_positions(join.right.schema());
+            let (left_req_indices, right_req_indices) = split_join_requirements(
+                left_len,
+                right_len,
+                &right_junk,
+                indices,
+                &join.join_type,
+            );
             let left_indices =
                 left_req_indices.with_plan_exprs(&plan, join.left.schema())?;
             let right_indices =
@@ -750,10 +757,26 @@ fn outer_columns_helper_multi<'a, 'b>(
 fn split_join_requirements(
     left_len: usize,
     right_len: usize,
+    right_junk: &[usize],
     indices: RequiredIndices,
     join_type: &JoinType,
 ) -> (RequiredIndices, RequiredIndices) {
     match join_type {
+        JoinType::LeftSemiCarry => {
+            // LEFT SEMI CARRY output is: left columns + the right child's junk
+            // columns, in the order the right child holds them. The carried
+            // output at `left_len + n` is the right child's `right_junk[n]`.
+            let (left, right): (Vec<usize>, Vec<usize>) =
+                indices.indices().iter().copied().partition(|idx| *idx < left_len);
+            let right = right
+                .into_iter()
+                .filter_map(|idx| right_junk.get(idx - left_len).copied())
+                .collect::<Vec<_>>();
+            (
+                RequiredIndices::new_from_indices(left),
+                RequiredIndices::new_from_indices(right),
+            )
+        }
         // In these cases requirements are split between left/right children:
         JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
             // Decrease right side indices by `left_len` so that they point to valid
@@ -794,6 +817,18 @@ fn split_join_requirements(
         // No need to change index, join schema is right child schema.
         JoinType::RightSemi | JoinType::RightAnti => (RequiredIndices::new(), indices),
     }
+}
+
+/// Positions of the fields of `schema` that are junk columns, which a
+/// [`JoinType::LeftSemiCarry`] join carries from its right child.
+fn right_junk_positions(schema: &DFSchema) -> Vec<usize> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| is_junk_column_metadata(field.metadata()))
+        .map(|(position, _)| position)
+        .collect()
 }
 
 /// Adds a projection on top of a logical plan if doing so reduces the number
@@ -1057,7 +1092,7 @@ mod tests {
     #[test]
     fn split_join_requirements_left_mark_ignores_marker_column() {
         let required = RequiredIndices::new_from_indices(vec![0, 2, 3]);
-        let (left, right) = split_join_requirements(3, 2, required, &JoinType::LeftMark);
+        let (left, right) = split_join_requirements(3, 2, &[], required, &JoinType::LeftMark);
 
         assert_eq!(left.into_inner(), vec![0, 2]);
         assert_eq!(right.into_inner(), Vec::<usize>::new());
@@ -1066,7 +1101,7 @@ mod tests {
     #[test]
     fn split_join_requirements_right_mark_ignores_marker_column() {
         let required = RequiredIndices::new_from_indices(vec![0, 1, 2]);
-        let (left, right) = split_join_requirements(4, 2, required, &JoinType::RightMark);
+        let (left, right) = split_join_requirements(4, 2, &[], required, &JoinType::RightMark);
 
         assert_eq!(left.into_inner(), Vec::<usize>::new());
         assert_eq!(right.into_inner(), vec![0, 1]);
@@ -1075,10 +1110,24 @@ mod tests {
     #[test]
     fn split_join_requirements_inner_still_splits_both_children() {
         let required = RequiredIndices::new_from_indices(vec![0, 2, 3, 4]);
-        let (left, right) = split_join_requirements(3, 2, required, &JoinType::Inner);
+        let (left, right) =
+            split_join_requirements(3, 2, &[], required, &JoinType::Inner);
 
         assert_eq!(left.into_inner(), vec![0, 2]);
         assert_eq!(right.into_inner(), vec![0, 1]);
+    }
+
+    #[test]
+    fn split_join_requirements_left_semi_carry_routes_carried_columns_to_their_junk_fields()
+     {
+        // Left has 3 columns; the right child's junk columns sit at 1 and 3, so the
+        // carried outputs 3 and 4 read the right child's 1 and 3.
+        let required = RequiredIndices::new_from_indices(vec![0, 2, 4]);
+        let (left, right) =
+            split_join_requirements(3, 4, &[1, 3], required, &JoinType::LeftSemiCarry);
+
+        assert_eq!(left.into_inner(), vec![0, 2]);
+        assert_eq!(right.into_inner(), vec![3]);
     }
 
     #[test]

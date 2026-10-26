@@ -18,6 +18,7 @@
 //! Defines the [`JoinType`], [`JoinConstraint`] and [`JoinSide`] types.
 
 use std::{
+    collections::HashMap,
     fmt::{self, Display, Formatter},
     str::FromStr,
 };
@@ -72,6 +73,36 @@ pub enum JoinType {
     /// Same logic as the LeftMark Join above, however it returns a record for each record from the
     /// right input.
     RightMark,
+    /// Left Semi Join that carries its first matching right row.
+    ///
+    /// Returns the left rows [`JoinType::LeftSemi`] returns, each once, followed by the
+    /// right input's carried junk columns (fields whose metadata maps
+    /// [`JUNK_COLUMN_METADATA_KEY`] to `"true"`) taken from the first right row that
+    /// matched it. A data-modifying statement plans the semi join of a subquery its
+    /// WHERE clause reads this way, so a refreshed target row can be requalified
+    /// against the partner it joined, as PostgreSQL's semi join projects the inner
+    /// row it matched.
+    LeftSemiCarry,
+}
+
+/// Field metadata key that marks a junk column: a column a plan carries for the
+/// write or lock above it, never part of the statement's result.
+pub const JUNK_COLUMN_METADATA_KEY: &str = "gantry.junk";
+
+/// Field metadata key naming the relation whose joined row a junk column
+/// carries.
+pub const JUNK_RELATION_METADATA_KEY: &str = "gantry.junk.relation";
+
+/// Field metadata key naming the column of the carried relation a junk column
+/// holds. A presence column has none.
+pub const JUNK_SOURCE_COLUMN_METADATA_KEY: &str = "gantry.junk.column";
+
+/// Whether `metadata` marks its field as a junk column (see
+/// [`JUNK_COLUMN_METADATA_KEY`]).
+pub fn is_junk_column_metadata(metadata: &HashMap<String, String>) -> bool {
+    metadata
+        .get(JUNK_COLUMN_METADATA_KEY)
+        .is_some_and(|value| value == "true")
 }
 
 impl JoinType {
@@ -94,10 +125,14 @@ impl JoinType {
             JoinType::RightAnti => JoinType::LeftAnti,
             JoinType::LeftMark => JoinType::RightMark,
             JoinType::RightMark => JoinType::LeftMark,
+            JoinType::LeftSemiCarry => {
+                panic!("LeftSemiCarry has no right-side counterpart to swap to")
+            }
         }
     }
 
-    /// Does the join type support swapping inputs?
+    /// Does the join type support swapping inputs? [`JoinType::LeftSemiCarry`] does
+    /// not: its output carries the right input's junk columns after the left input's.
     pub fn supports_swap(&self) -> bool {
         matches!(
             self,
@@ -128,6 +163,7 @@ impl Display for JoinType {
             JoinType::RightAnti => "RightAnti",
             JoinType::LeftMark => "LeftMark",
             JoinType::RightMark => "RightMark",
+            JoinType::LeftSemiCarry => "LeftSemiCarry",
         };
         write!(f, "{join_type}")
     }
@@ -149,6 +185,7 @@ impl FromStr for JoinType {
             "RIGHTANTI" => Ok(JoinType::RightAnti),
             "LEFTMARK" => Ok(JoinType::LeftMark),
             "RIGHTMARK" => Ok(JoinType::RightMark),
+            "LEFTSEMICARRY" => Ok(JoinType::LeftSemiCarry),
             _ => _not_impl_err!("The join type {s} does not exist or is not implemented"),
         }
     }

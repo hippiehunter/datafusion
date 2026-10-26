@@ -306,7 +306,8 @@ fn check_inner_plan(inner_plan: &LogicalPlan) -> Result<()> {
             JoinType::Left
             | JoinType::LeftSemi
             | JoinType::LeftAnti
-            | JoinType::LeftMark => {
+            | JoinType::LeftMark
+            | JoinType::LeftSemiCarry => {
                 check_inner_plan(left)?;
                 check_no_outer_references(right)
             }

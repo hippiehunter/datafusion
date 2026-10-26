@@ -912,6 +912,12 @@ impl Unparser<'_> {
                 };
 
                 match join.join_type {
+                    JoinType::LeftSemiCarry => {
+                        // SQL has no join that projects the inner row a semi
+                        // join matched; only a data-modifying statement's own
+                        // planning produces one.
+                        return not_impl_err!("Unparsing of LeftSemiCarry join type");
+                    }
                     JoinType::LeftSemi
                     | JoinType::LeftAnti
                     | JoinType::LeftMark
@@ -1480,6 +1486,9 @@ impl Unparser<'_> {
             JoinType::RightSemi => ast::JoinOperator::RightSemi(constraint),
             JoinType::LeftMark | JoinType::RightMark => {
                 return not_impl_err!("Unparsing of Mark join type");
+            }
+            JoinType::LeftSemiCarry => {
+                return not_impl_err!("Unparsing of LeftSemiCarry join type");
             }
         })
     }

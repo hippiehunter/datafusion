@@ -339,7 +339,42 @@ pub struct DmlStatement {
     pub check_option: Option<DmlCheckOption>,
     /// Whether the statement's own expressions read the target's columns.
     pub target_select_rights: TargetSelectRights,
+    /// The relations other than the target whose rows an UPDATE's or DELETE's
+    /// input joins, each with the junk columns that carry the columns of its
+    /// joined row the statement's recheck reads, and its presence column. A
+    /// refreshed target row is requalified against these rows, as
+    /// PostgreSQL's EvalPlanQual re-runs the plan with every other relation
+    /// fixed at the row it joined. Empty for any other statement.
+    pub carried: Vec<CarriedJunkColumns>,
 }
+
+/// One carried relation of a DML input: its junk columns in the input and its
+/// presence column.
+///
+/// Each named column is a field of the DML input's schema whose metadata marks
+/// it as a junk column ([`datafusion_common::JUNK_COLUMN_METADATA_KEY`]). The
+/// presence column is a non-null Boolean that is `true` on a row the relation
+/// joined and `false` on a row an outer join NULL-extended on its side.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+pub struct CarriedJunkColumns {
+    pub relation: TableReference,
+    /// Names of the junk columns in the DML input's schema.
+    pub columns: Vec<String>,
+    /// Name of the presence column in the DML input's schema.
+    pub presence: String,
+}
+
+/// The name of the junk column that carries column `column` of the carried
+/// relation numbered `ordinal`.
+pub fn carried_junk_column_name(ordinal: usize, column: &str) -> String {
+    format!("__carried_{ordinal}_{column}")
+}
+
+/// The name of the presence column of the carried relation numbered `ordinal`.
+pub fn carried_presence_column_name(ordinal: usize) -> String {
+    format!("__carried_{ordinal}_present")
+}
+
 /// The row an INSERT's, UPDATE's or DELETE's `RETURNING` reads, over the
 /// statement's `input`: the input leads with the target's columns in table
 /// order, holding the values written to them (or, for DELETE, read from
@@ -383,6 +418,7 @@ impl Hash for DmlStatement {
         self.overriding_system_value.hash(state);
         self.check_option.hash(state);
         self.target_select_rights.hash(state);
+        self.carried.hash(state);
     }
 }
 
@@ -400,6 +436,7 @@ impl PartialEq for DmlStatement {
             && self.overriding_system_value == other.overriding_system_value
             && self.check_option == other.check_option
             && self.target_select_rights == other.target_select_rights
+            && self.carried == other.carried
     }
 }
 
@@ -418,6 +455,7 @@ impl Debug for DmlStatement {
             .field("returning_context", &self.returning_context)
             .field("check_option", &self.check_option)
             .field("target_select_rights", &self.target_select_rights)
+            .field("carried", &self.carried)
             .finish()
     }
 }
@@ -444,7 +482,15 @@ impl DmlStatement {
             overriding_system_value: false,
             check_option: None,
             target_select_rights,
+            carried: Vec::new(),
         }
+    }
+
+    /// Record the carried relations of an UPDATE's or DELETE's input (see
+    /// [`Self::carried`]).
+    pub fn with_carried(mut self, carried: Vec<CarriedJunkColumns>) -> Self {
+        self.carried = carried;
+        self
     }
 
     /// Set the statement's target columns (see [`Self::target_columns`]).
