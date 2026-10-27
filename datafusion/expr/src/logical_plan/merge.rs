@@ -209,10 +209,13 @@ pub enum MergeInsertKind {
 pub struct MergeInsertExpr {
     /// Full target-row evaluation columns, in table order.
     pub columns: Vec<String>,
-    /// Columns the statement actually provides to storage. Identity columns
-    /// discarded by `OVERRIDING USER VALUE` are absent here.
+    /// Columns the row provides to storage: every column, since the planner
+    /// completes the row as PostgreSQL's rewriter completes an INSERT target
+    /// list, defaults and sequence draws included.
     pub provided_columns: Vec<String>,
-    /// The statement's identity override contract.
+    /// The statement's `OVERRIDING` clause, already applied to the row:
+    /// under `OVERRIDING USER VALUE` an identity column's slot holds its
+    /// default.
     pub overriding: Option<MergeIdentityOverride>,
     pub kind: MergeInsertKind,
     pub insert_predicate: Option<Expr>,

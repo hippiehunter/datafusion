@@ -1374,6 +1374,8 @@ pub struct DmlGeneratedColumns {
     /// absent; a `DEFAULT` written where the statement still provides the
     /// column (`SET col = DEFAULT`, an `ON CONFLICT` assignment, or a VALUES
     /// slot of a column other rows write) draws the sequence through this.
+    /// A MERGE INSERT row, which its arm writes as planned, draws it for an
+    /// omitted column and under `OVERRIDING USER VALUE` as well.
     pub explicit_default_overrides: Vec<(String, BoundSqlExpression)>,
 }
 

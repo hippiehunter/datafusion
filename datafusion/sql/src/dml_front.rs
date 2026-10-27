@@ -123,8 +123,8 @@ fn check_insert_rows(
 }
 
 /// Check MERGE insert clauses against the target's generated and identity
-/// columns and return their typed storage contract. `OVERRIDING USER VALUE`
-/// is represented by the logical MERGE insert's provided-column set; this
+/// columns and return their typed storage contract, from which the planner
+/// fills each arm's defaults and applies `OVERRIDING USER VALUE`. This
 /// validation never edits the parsed statement.
 pub(crate) fn prepare_merge_insert_clauses(
     provider: &dyn ContextProvider,

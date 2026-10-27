@@ -549,6 +549,59 @@ fn merge_insert_rejects_a_column_named_twice() {
     assert_contains!(error.to_string(), "specified more than once");
 }
 
+/// A MERGE INSERT row is complete as PostgreSQL's rewriter completes it: an
+/// omitted or `DEFAULT` sequence-backed column holds its sequence's draw.
+#[test]
+fn merge_insert_fills_a_sequence_column_with_its_draw() {
+    let draw = format!("Int64({SEQUENCE_ROWS_DRAW})");
+    for sql in [
+        "MERGE INTO sequence_rows s USING orders o ON s.id = o.order_id \
+         WHEN NOT MATCHED THEN INSERT (v) VALUES (o.o_item_id)",
+        "MERGE INTO sequence_rows s USING orders o ON s.id = o.order_id \
+         WHEN NOT MATCHED THEN INSERT (id, v) VALUES (DEFAULT, o.o_item_id)",
+        "MERGE INTO sequence_rows s USING orders o ON s.id = o.order_id \
+         WHEN NOT MATCHED THEN INSERT DEFAULT VALUES",
+    ] {
+        let row = merge_insert_row(&logical_plan(sql).unwrap());
+        assert_contains!(format!("{}", row[0]), &draw);
+    }
+}
+
+/// `OVERRIDING USER VALUE` replaces the value written for an identity column
+/// with the column's draw, `OVERRIDING SYSTEM VALUE` keeps it, and neither
+/// clause means a written `GENERATED ALWAYS` identity is refused. A
+/// sequence-backed column that is no identity keeps its written value.
+#[test]
+fn merge_insert_applies_the_overriding_clause_to_identity_columns() {
+    let draw = format!("Int64({SEQUENCE_ROWS_DRAW})");
+    let insert = |table: &str, overriding: &str| {
+        format!(
+            "MERGE INTO {table} t USING orders o ON t.id = o.order_id \
+             WHEN NOT MATCHED THEN INSERT (id, v) {overriding} \
+             VALUES (o.order_id, o.o_item_id)"
+        )
+    };
+
+    let user = merge_insert_row(
+        &logical_plan(&insert("identity_rows", "OVERRIDING USER VALUE")).unwrap(),
+    );
+    assert_contains!(format!("{}", user[0]), &draw);
+    assert!(!format!("{}", user[0]).contains("order_id"));
+
+    let system = merge_insert_row(
+        &logical_plan(&insert("identity_rows", "OVERRIDING SYSTEM VALUE")).unwrap(),
+    );
+    assert_contains!(format!("{}", system[0]), "order_id");
+
+    let refused = logical_plan(&insert("identity_rows", "")).unwrap_err();
+    assert_contains!(refused.to_string(), "cannot insert a non-DEFAULT value");
+
+    let serial = merge_insert_row(
+        &logical_plan(&insert("sequence_rows", "OVERRIDING USER VALUE")).unwrap(),
+    );
+    assert_contains!(format!("{}", serial[0]), "order_id");
+}
+
 fn merge_insert_row(plan: &LogicalPlan) -> Vec<datafusion_expr::Expr> {
     let LogicalPlan::Merge(merge) = plan else {
         panic!("expected MERGE plan");

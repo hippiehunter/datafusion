@@ -976,6 +976,41 @@ fn multiple_assignments_err<T>(column: &str) -> Result<T> {
     plan_err!("multiple assignments to same column \"{column}\"")
 }
 
+/// Where a MERGE `INSERT` arm's columns take their defaults from, and which
+/// written values its `OVERRIDING` clause discards.
+struct MergeInsertDefaults<'a> {
+    table_source: &'a dyn TableSource,
+    generated: Option<&'a DmlGeneratedColumns>,
+    overriding: Option<MergeIdentityOverride>,
+}
+
+impl MergeInsertDefaults<'_> {
+    /// `OVERRIDING USER VALUE` replaces what the statement wrote for an
+    /// identity column with the column's default. A serial or `DEFAULT
+    /// nextval(...)` column is no identity and keeps its written value.
+    fn discards_written_value(&self, column: &str) -> bool {
+        matches!(self.overriding, Some(MergeIdentityOverride::UserValue))
+            && self.generated.is_some_and(|generated| {
+                generated.identity.iter().any(|identity| identity == column)
+            })
+    }
+
+    /// The column's default: its planner default, else the bound draw of
+    /// the sequence behind it, else NULL. A MERGE arm's kernel writes the
+    /// row it is handed, so the draw a plain INSERT leaves to the host
+    /// stands in the row here, where the rewriter puts it.
+    fn column_default(&self, column: &str) -> Expr {
+        self.table_source
+            .get_column_default(column)
+            .cloned()
+            .or_else(|| {
+                self.generated
+                    .and_then(|generated| generated.explicit_default(column))
+            })
+            .unwrap_or(Expr::Literal(ScalarValue::Null, None))
+    }
+}
+
 /// Rebase a catalog-bound row expression onto a statement's semantic values.
 /// Generated expressions are bound once against their owning table; UPDATE,
 /// MERGE, and ON CONFLICT provide the would-be new value for every referenced
@@ -3281,17 +3316,20 @@ impl SqlToRel<'_> {
         }
     }
 
-    /// Restate one MERGE `INSERT` value row in the target row's own column
-    /// order, filling every column the statement does not name from its
-    /// declared default (NULL when it has none) — the resolution an omitted
-    /// INSERT value takes. `named_columns` empty means the row was written
-    /// positionally over the whole target row.
+    /// Restate one MERGE `INSERT` value row as the complete target row in its
+    /// own column order, as PostgreSQL's rewriter completes an INSERT target
+    /// list: a column the statement does not name, or writes as `DEFAULT`
+    /// (`None` in `values`), takes its default, and under `OVERRIDING USER
+    /// VALUE` an identity column takes its default whatever was written. The
+    /// arm's kernel and the READ COMMITTED recheck both write this row as it
+    /// stands. `named_columns` empty means the row was written positionally
+    /// over the whole target row.
     fn merge_insert_row_in_table_order(
         &self,
         target_schema: &Schema,
         named_columns: &[String],
-        values: &[Expr],
-        table_source: &dyn TableSource,
+        values: &[Option<Expr>],
+        defaults: &MergeInsertDefaults<'_>,
         value_schema: &DFSchema,
     ) -> Result<Vec<Expr>> {
         let positions: HashMap<&str, usize> = if named_columns.is_empty() {
@@ -3337,18 +3375,19 @@ impl SqlToRel<'_> {
 
         let mut row = Vec::with_capacity(target_schema.fields().len());
         for field in target_schema.fields() {
+            let written = positions
+                .get(field.name().as_str())
+                .and_then(|index| values[*index].as_ref())
+                .filter(|_| !defaults.discards_written_value(field.name()));
             // Every value reaches its column by assignment, so an untyped
             // literal such as NULL reaches the writer as that column's value
             // rather than as an unresolved null.
-            let expr = match positions.get(field.name().as_str()) {
-                Some(index) => {
-                    self.assign_to_column(values[*index].clone(), field, value_schema)?
+            let expr = match written {
+                Some(value) => {
+                    self.assign_to_column(value.clone(), field, value_schema)?
                 }
                 None => self.assign_to_column(
-                    table_source
-                        .get_column_default(field.name())
-                        .cloned()
-                        .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None)),
+                    defaults.column_default(field.name()),
                     field,
                     &DFSchema::empty(),
                 )?,
@@ -3587,30 +3626,11 @@ impl SqlToRel<'_> {
                         .iter()
                         .map(|ident| self.ident_normalizer.normalize(ident.clone()))
                         .collect::<Vec<_>>();
-                    let positional_count = match &insert.kind {
-                        ast::MergeInsertKind::DefaultValues => 0,
-                        ast::MergeInsertKind::Values(values) => {
-                            values.rows.first().map_or(0, Vec::len)
-                        }
-                        ast::MergeInsertKind::Row => target_schema.fields().len(),
+                    let defaults = MergeInsertDefaults {
+                        table_source: table_source.as_ref(),
+                        generated: generated_columns.as_ref(),
+                        overriding,
                     };
-                    let mut provided_column_names = if named_columns.is_empty() {
-                        target_schema
-                            .fields()
-                            .iter()
-                            .take(positional_count)
-                            .map(|field| field.name().clone())
-                            .collect::<Vec<_>>()
-                    } else {
-                        named_columns.clone()
-                    };
-                    if matches!(overriding, Some(MergeIdentityOverride::UserValue))
-                        && let Some(generated) = &generated_columns
-                    {
-                        provided_column_names.retain(|column| {
-                            !generated.identity.iter().any(|identity| identity == column)
-                        });
-                    }
                     let kind = match insert.kind {
                         // DEFAULT VALUES is the whole row taken from defaults:
                         // an empty explicit row that the expansion below fills.
@@ -3620,7 +3640,7 @@ impl SqlToRel<'_> {
                                     &target_schema,
                                     &named_columns,
                                     &[],
-                                    table_source.as_ref(),
+                                    &defaults,
                                     clause_schema,
                                 )?,
                             ])
@@ -3630,13 +3650,20 @@ impl SqlToRel<'_> {
                             for row in values.rows {
                                 let mut expr_row = Vec::with_capacity(row.len());
                                 for value in row {
-                                    expr_row.push(normalize_expr(value)?);
+                                    expr_row.push(match value {
+                                        SQLExpr::Identifier(ident)
+                                            if is_default_identifier(&ident) =>
+                                        {
+                                            None
+                                        }
+                                        value => Some(normalize_expr(value)?),
+                                    });
                                 }
                                 rows.push(self.merge_insert_row_in_table_order(
                                     &target_schema,
                                     &named_columns,
                                     &expr_row,
-                                    table_source.as_ref(),
+                                    &defaults,
                                     clause_schema,
                                 )?);
                             }
@@ -3645,15 +3672,16 @@ impl SqlToRel<'_> {
                         ast::MergeInsertKind::Row => MergeInsertKind::Row,
                     };
                     // The column list the expansion produced is the target
-                    // row's own, in table order.
-                    let columns = target_schema
+                    // row's own, in table order, and the row the planner
+                    // completed provides every one of them.
+                    let columns: Vec<String> = target_schema
                         .fields()
                         .iter()
                         .map(|field| field.name().clone())
                         .collect();
                     MergeAction::Insert(MergeInsertExpr {
+                        provided_columns: columns.clone(),
                         columns,
-                        provided_columns: provided_column_names,
                         overriding,
                         kind,
                         insert_predicate,

@@ -172,6 +172,27 @@ impl ContextProvider for MockContextProvider {
                 explicit_default_overrides: Vec::new(),
             }));
         }
+        if table_name == Some("identity_rows") {
+            // `id` is `GENERATED ALWAYS AS IDENTITY`: storage-generated as
+            // `sequence_rows.id` is, and refusing a written value unless the
+            // statement says `OVERRIDING ... VALUE`.
+            return Ok(Some(DmlGeneratedColumns {
+                columns: Vec::new(),
+                generated_expressions: Vec::new(),
+                virtual_columns: Vec::new(),
+                positional_columns: vec!["id".to_string(), "v".to_string()],
+                table_name: "identity_rows".to_string(),
+                identity_always: vec!["id".to_string()],
+                identity: vec!["id".to_string()],
+                explicit_default_overrides: vec![(
+                    "id".to_string(),
+                    BoundSqlExpression::new(Expr::Literal(
+                        ScalarValue::Int64(Some(SEQUENCE_ROWS_DRAW)),
+                        None,
+                    )),
+                )],
+            }));
+        }
         if table_name != Some("sequence_rows") {
             return Ok(None);
         }
@@ -280,7 +301,7 @@ impl ContextProvider for MockContextProvider {
                     "json".to_string(),
                 )])),
             ])),
-            "sequence_rows" => Ok(Schema::new(vec![
+            "sequence_rows" | "identity_rows" => Ok(Schema::new(vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("v", DataType::Utf8, true),
             ])),
