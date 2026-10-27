@@ -864,7 +864,10 @@ impl OptimizerRule for PushDownFilter {
                     }
                 }
             }
-            LogicalPlan::Sort(sort) => {
+            // A sort with a fetch keeps only its first rows, as a Limit over
+            // the sort does: filtering its input changes which rows those
+            // are, so the filter stays above it.
+            LogicalPlan::Sort(sort) if sort.fetch.is_none() => {
                 let new_filter =
                     Filter::try_new(filter.predicate, Arc::clone(&sort.input))
                         .map(LogicalPlan::Filter)?;
@@ -1598,6 +1601,40 @@ mod tests {
           Limit: skip=0, fetch=10
             Projection: test.a, test.b
               TableScan: test
+        "
+        )
+    }
+
+    #[test]
+    fn filter_after_sort_with_fetch() -> Result<()> {
+        let table_scan = test_table_scan()?;
+        let plan = LogicalPlanBuilder::from(table_scan)
+            .sort_with_limit(vec![col("a").sort(true, false)], Some(3))?
+            .filter(col("a").gt_eq(lit(2i64)))?
+            .build()?;
+        // the sort keeps its first 3 rows before the filter drops any
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Filter: test.a >= Int64(2)
+          Sort: test.a ASC NULLS LAST, fetch=3
+            TableScan: test
+        "
+        )
+    }
+
+    #[test]
+    fn filter_before_sort_without_fetch() -> Result<()> {
+        let table_scan = test_table_scan()?;
+        let plan = LogicalPlanBuilder::from(table_scan)
+            .sort(vec![col("a").sort(true, false)])?
+            .filter(col("a").gt_eq(lit(2i64)))?
+            .build()?;
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Sort: test.a ASC NULLS LAST
+          TableScan: test, full_filters=[test.a >= Int64(2)]
         "
         )
     }
