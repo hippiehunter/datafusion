@@ -1657,7 +1657,6 @@ impl LogicalPlan {
 
                             MergeAction::Insert(MergeInsertExpr {
                                 columns: insert.columns.clone(),
-                                provided_columns: insert.provided_columns.clone(),
                                 overriding: insert.overriding,
                                 kind,
                                 insert_predicate,

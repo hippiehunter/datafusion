@@ -3680,7 +3680,6 @@ impl SqlToRel<'_> {
                         .map(|field| field.name().clone())
                         .collect();
                     MergeAction::Insert(MergeInsertExpr {
-                        provided_columns: columns.clone(),
                         columns,
                         overriding,
                         kind,
