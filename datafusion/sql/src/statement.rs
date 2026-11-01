@@ -61,7 +61,9 @@ use datafusion_expr::dml::{
     written_row_schema,
 };
 use datafusion_expr::expr::{Exists, InSubquery};
-use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
+use datafusion_expr::expr_rewriter::{
+    normalize_col_with_schemas_and_ambiguity_check, unnormalize_col,
+};
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::{DdlStatement, TableScan, build_join_schema};
 use datafusion_expr::utils::{expand_wildcard, expr_to_columns, exprlist_to_fields};
@@ -1280,6 +1282,9 @@ impl SqlToRel<'_> {
             };
             let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
             let result_type = expr.get_type(schema)?;
+            // The key is evaluated against rows of whichever relation it
+            // routes, so it keeps no table qualifier of its own.
+            let expr = unnormalize_col(expr);
             keys.push(CreateTablePartitionKey {
                 column_name,
                 expr,
@@ -1685,7 +1690,14 @@ impl SqlToRel<'_> {
                         parent_source.schema().as_ref(),
                     )?)
                 } else {
-                    Arc::clone(&schema)
+                    // A key may qualify a column with the table being
+                    // created, `PARTITION BY HASH ((t.c))`, as the catalog's
+                    // own rebinding of the stored key does.
+                    let table = self.object_name_to_table_reference(name.clone())?;
+                    Arc::new(DFSchema::try_from_qualified_schema(
+                        TableReference::bare(table.table()),
+                        schema.as_arrow(),
+                    )?)
                 };
                 let partitioning = self.plan_create_table_partitioning(
                     partition_by,
