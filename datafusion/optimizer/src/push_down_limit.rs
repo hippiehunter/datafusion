@@ -27,7 +27,7 @@ use datafusion_common::Result;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::utils::combine_limit;
 use datafusion_expr::logical_plan::{Join, JoinType, Limit, LogicalPlan};
-use datafusion_expr::{FetchType, SkipType, lit};
+use datafusion_expr::{Expr, FetchType, SkipType, lit};
 
 /// Optimization rule that tries to push down `LIMIT`.
 //. It will push down through projection, limits (taking the smaller limit)
@@ -82,8 +82,8 @@ impl OptimizerRule for PushDownLimit {
 
             let (skip, fetch) = combine_limit(skip, fetch, child_skip, child_fetch);
             let plan = LogicalPlan::Limit(Limit {
-                skip: Some(Box::new(lit(skip as i64))),
-                fetch: fetch.map(|f| Box::new(lit(f as i64))),
+                skip: Some(Box::new(limit_literal(skip))),
+                fetch: fetch.map(|f| Box::new(limit_literal(f))),
                 with_ties: false,
                 input: Arc::clone(&child.input),
             });
@@ -97,22 +97,19 @@ impl OptimizerRule for PushDownLimit {
         let Some(fetch) = fetch else {
             return Ok(Transformed::no(LogicalPlan::Limit(limit)));
         };
+        // The rows an input must produce for this limit to see all it keeps.
+        let rows_needed = fetch.saturating_add(skip);
 
         match Arc::unwrap_or_clone(limit.input) {
             LogicalPlan::TableScan(mut scan) => {
-                let rows_needed = if fetch != 0 { fetch + skip } else { 0 };
-                let new_fetch = scan
-                    .fetch
-                    .map(|x| min(x, rows_needed))
-                    .or(Some(rows_needed));
+                let scan_fetch = if fetch != 0 { rows_needed } else { 0 };
+                let new_fetch =
+                    scan.fetch.map(|x| min(x, scan_fetch)).or(Some(scan_fetch));
                 if new_fetch == scan.fetch {
                     original_limit(skip, fetch, LogicalPlan::TableScan(scan))
                 } else {
                     // push limit into the table scan itself
-                    scan.fetch = scan
-                        .fetch
-                        .map(|x| min(x, rows_needed))
-                        .or(Some(rows_needed));
+                    scan.fetch = new_fetch;
                     transformed_limit(skip, fetch, LogicalPlan::TableScan(scan))
                 }
             }
@@ -121,20 +118,24 @@ impl OptimizerRule for PushDownLimit {
                 union.inputs = union
                     .inputs
                     .into_iter()
-                    .map(|input| make_arc_limit(0, fetch + skip, input))
+                    .map(|input| make_arc_limit(0, rows_needed, input))
                     .collect();
                 transformed_limit(skip, fetch, LogicalPlan::Union(union))
             }
 
-            LogicalPlan::Join(join) => Ok(push_down_join(join, fetch + skip)
-                .update_data(|join| {
+            LogicalPlan::Join(join) => {
+                Ok(push_down_join(join, rows_needed).update_data(|join| {
                     make_limit(skip, fetch, Arc::new(LogicalPlan::Join(join)))
-                })),
+                }))
+            }
 
             LogicalPlan::Sort(mut sort) => {
                 let new_fetch = {
-                    let sort_fetch = skip + fetch;
-                    Some(sort.fetch.map(|f| f.min(sort_fetch)).unwrap_or(sort_fetch))
+                    Some(
+                        sort.fetch
+                            .map(|f| f.min(rows_needed))
+                            .unwrap_or(rows_needed),
+                    )
                 };
                 if new_fetch == sort.fetch {
                     if skip > 0 {
@@ -172,7 +173,7 @@ impl OptimizerRule for PushDownLimit {
                     .map(|child| {
                         LogicalPlan::Limit(Limit {
                             skip: None,
-                            fetch: Some(Box::new(lit((fetch + skip) as i64))),
+                            fetch: Some(Box::new(limit_literal(rows_needed))),
                             with_ties: false,
                             input: Arc::new(child.clone()),
                         })
@@ -213,11 +214,18 @@ impl OptimizerRule for PushDownLimit {
 /// ```
 fn make_limit(skip: usize, fetch: usize, input: Arc<LogicalPlan>) -> LogicalPlan {
     LogicalPlan::Limit(Limit {
-        skip: Some(Box::new(lit(skip as i64))),
-        fetch: Some(Box::new(lit(fetch as i64))),
+        skip: Some(Box::new(limit_literal(skip))),
+        fetch: Some(Box::new(limit_literal(fetch))),
         with_ties: false,
         input,
     })
+}
+
+/// A row count as a limit's `Int64` literal. A count beyond `i64::MAX` (a
+/// skip and fetch that together pass it) is `i64::MAX`, which no input
+/// reaches, rather than a wrapped negative count.
+fn limit_literal(rows: usize) -> Expr {
+    lit(i64::try_from(rows).unwrap_or(i64::MAX))
 }
 
 /// Wrap the input plan with a limit node
@@ -980,6 +988,57 @@ mod test {
             Limit: skip=0, fetch=1010
               TableScan: test, fetch=1010
             TableScan: test2
+        "
+        )
+    }
+
+    #[test]
+    fn limit_beyond_i64_pushed_into_join_saturates() -> Result<()> {
+        let table_scan_1 = test_table_scan()?;
+        let table_scan_2 = test_table_scan_with_name("test2")?;
+
+        let plan = LogicalPlanBuilder::from(table_scan_1)
+            .join(
+                LogicalPlanBuilder::from(table_scan_2).build()?,
+                JoinType::Left,
+                (vec!["a"], vec!["a"]),
+                None,
+            )?
+            .limit(i64::MAX as usize, Some(10))?
+            .build()?;
+
+        // skip + fetch passes i64::MAX: the pushed limit is i64::MAX rows,
+        // not a wrapped negative count.
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Limit: skip=9223372036854775807, fetch=10
+          Left Join: test.a = test2.a
+            Limit: skip=0, fetch=9223372036854775807
+              TableScan: test, fetch=9223372036854775807
+            TableScan: test2
+        "
+        )
+    }
+
+    #[test]
+    fn limit_beyond_i64_pushed_into_union_saturates() -> Result<()> {
+        let table_scan = test_table_scan()?;
+
+        let plan = LogicalPlanBuilder::from(table_scan.clone())
+            .union(LogicalPlanBuilder::from(table_scan).build()?)?
+            .limit(10, Some(i64::MAX as usize))?
+            .build()?;
+
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Limit: skip=10, fetch=9223372036854775807
+          Union
+            Limit: skip=0, fetch=9223372036854775807
+              TableScan: test, fetch=9223372036854775807
+            Limit: skip=0, fetch=9223372036854775807
+              TableScan: test, fetch=9223372036854775807
         "
         )
     }

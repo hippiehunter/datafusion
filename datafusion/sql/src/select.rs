@@ -25,7 +25,6 @@ use crate::outer_aggregates::hoist_outer_level_aggregates;
 use crate::planner::{PlannerContext, SqlToRel};
 use crate::query::to_order_by_exprs_with_select;
 use crate::utils::{
-    CheckColumnsMustReferenceAggregatePurpose, CheckColumnsSatisfyExprsPurpose,
     check_columns_satisfy_exprs, extract_aliases, rebase_expr, resolve_aliases_to_exprs,
     resolve_columns, resolve_positions_to_exprs, rewrite_recursive_unnests_bottom_up,
 };
@@ -1669,13 +1668,7 @@ impl SqlToRel<'_> {
 
         // finally, we have some validation that the re-written projection can be resolved
         // from the aggregate output columns
-        check_columns_satisfy_exprs(
-            &column_exprs_post_aggr,
-            &select_exprs_post_aggr,
-            CheckColumnsSatisfyExprsPurpose::Aggregate(
-                CheckColumnsMustReferenceAggregatePurpose::Projection,
-            ),
-        )?;
+        check_columns_satisfy_exprs(&column_exprs_post_aggr, &select_exprs_post_aggr)?;
 
         // Rewrite the HAVING expression to use the columns produced by the
         // aggregation.
@@ -1686,9 +1679,6 @@ impl SqlToRel<'_> {
             check_columns_satisfy_exprs(
                 &column_exprs_post_aggr,
                 std::slice::from_ref(&having_expr_post_aggr),
-                CheckColumnsSatisfyExprsPurpose::Aggregate(
-                    CheckColumnsMustReferenceAggregatePurpose::Having,
-                ),
             )?;
 
             Some(having_expr_post_aggr)
@@ -1705,9 +1695,6 @@ impl SqlToRel<'_> {
             check_columns_satisfy_exprs(
                 &column_exprs_post_aggr,
                 std::slice::from_ref(&qualify_expr_post_aggr),
-                CheckColumnsSatisfyExprsPurpose::Aggregate(
-                    CheckColumnsMustReferenceAggregatePurpose::Qualify,
-                ),
             )?;
 
             Some(qualify_expr_post_aggr)
@@ -1773,24 +1760,12 @@ impl SqlToRel<'_> {
         if !group_by_exprs.is_empty() {
             let order_by_exprs_only: Vec<Expr> =
                 order_by_post_aggr.iter().map(|s| s.expr.clone()).collect();
-            check_columns_satisfy_exprs(
-                &all_valid_exprs,
-                &order_by_exprs_only,
-                CheckColumnsSatisfyExprsPurpose::Aggregate(
-                    CheckColumnsMustReferenceAggregatePurpose::OrderBy,
-                ),
-            )?;
+            check_columns_satisfy_exprs(&all_valid_exprs, &order_by_exprs_only)?;
         }
 
         // DISTINCT ON groups the aggregated rows, so every column it names is
         // grouped or aggregated, with or without GROUP BY.
-        check_columns_satisfy_exprs(
-            &all_valid_exprs,
-            &distinct_on_post_aggr,
-            CheckColumnsSatisfyExprsPurpose::Aggregate(
-                CheckColumnsMustReferenceAggregatePurpose::DistinctOn,
-            ),
-        )?;
+        check_columns_satisfy_exprs(&all_valid_exprs, &distinct_on_post_aggr)?;
 
         Ok(AggregatePlanResult {
             plan,

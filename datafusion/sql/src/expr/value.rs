@@ -24,6 +24,7 @@ use arrow::datatypes::{
 };
 use bigdecimal::num_bigint::BigInt;
 use bigdecimal::{BigDecimal, Signed, ToPrimitive};
+use datafusion_common::config::Dialect;
 use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
@@ -60,27 +61,39 @@ impl SqlToRel<'_> {
         match value {
             Value::Number(n, _) => self.parse_sql_number(&n, false),
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(lit(s)),
-            // PostgreSQL `B'0101'` is a bit string: its execution carrier is
-            // the digit text, and the `bit` identity rides the literal's field
-            // metadata the way declared column types do.
+            // PostgreSQL `B'0101'` is a bit string.
             Value::SingleQuotedByteStringLiteral(s) => {
                 if let Some(bad) = s.chars().find(|c| !matches!(c, '0' | '1')) {
                     return plan_err!(
                         "invalid input syntax for type bit: \"{s}\": \"{bad}\" is not a valid binary digit"
                     );
                 }
-                Ok(Expr::Literal(
-                    ScalarValue::Utf8(Some(s)),
-                    Some(FieldMetadata::from(HashMap::from([(
-                        "pg_type".to_string(),
-                        "bit".to_string(),
-                    )]))),
-                ))
+                Ok(bit_string_literal(s))
             }
             Value::Null => Ok(Expr::Literal(ScalarValue::Null, None)),
             Value::Boolean(n) => Ok(lit(n)),
             Value::Placeholder(param) => {
                 Self::create_placeholder_expr(param, param_data_types, planner_context)
+            }
+            // PostgreSQL `X'1F'` is the same bit string, written four bits per
+            // hexadecimal digit.
+            Value::HexStringLiteral(s)
+                if self.context_provider.options().sql_parser.dialect
+                    == Dialect::PostgreSQL =>
+            {
+                let mut bits = String::with_capacity(s.len() * 4);
+                for digit in s.chars() {
+                    let Some(value) = digit.to_digit(16) else {
+                        return Err(sqlstate_datafusion_err(
+                            "22P02",
+                            format!("\"{digit}\" is not a valid hexadecimal digit"),
+                        ));
+                    };
+                    for shift in (0..4).rev() {
+                        bits.push(if (value >> shift) & 1 == 1 { '1' } else { '0' });
+                    }
+                }
+                Ok(bit_string_literal(bits))
             }
             Value::HexStringLiteral(s) => {
                 if let Some(v) = try_decode_hex_literal(&s) {
@@ -634,6 +647,19 @@ fn parse_compound_interval(
             not_impl_err!("Unsupported compound interval: {:?} TO {:?}", leading, last)
         }
     }
+}
+
+/// A PostgreSQL bit string literal: its execution carrier is the binary digit
+/// text, and the `bit` identity rides the literal's field metadata the way
+/// declared column types do.
+fn bit_string_literal(digits: String) -> Expr {
+    Expr::Literal(
+        ScalarValue::Utf8(Some(digits)),
+        Some(FieldMetadata::from(HashMap::from([(
+            "pg_type".to_string(),
+            "bit".to_string(),
+        )]))),
+    )
 }
 
 /// Try to decode bytes from hex literal string.

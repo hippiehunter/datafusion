@@ -1608,16 +1608,33 @@ impl SqlToRel<'_> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        // PostgreSQL's `x [NOT] SIMILAR TO p [ESCAPE e]` is
+        // `x [!]~ similar_to_escape(p [, e])`: the pattern becomes a POSIX
+        // regular expression, matched with the regex operator.
         let value = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
         let pattern = self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
-        let escape = similar_escape_expr(escape_char)?;
-        let matched =
-            self.similar_to_call("__dbl_similar_to", vec![value, pattern, escape])?;
-        Ok(if negated {
-            Expr::Not(Box::new(matched))
+        let mut args = vec![pattern];
+        match escape_char {
+            None => {}
+            Some(Value::SingleQuotedString(text)) => args.push(lit(text.clone())),
+            Some(Value::Null) => args.push(Expr::Literal(ScalarValue::Utf8(None), None)),
+            Some(other) => {
+                return plan_err!(
+                    "Invalid escape character in SIMILAR TO expression, got {other}"
+                );
+            }
+        }
+        let regex = self.similar_to_call("similar_to_escape", args)?;
+        let op = if negated {
+            Operator::RegexNotMatch
         } else {
-            matched
-        })
+            Operator::RegexMatch
+        };
+        Ok(Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(value),
+            op,
+            Box::new(regex),
+        )))
     }
 
     fn similar_to_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
@@ -2145,22 +2162,6 @@ fn subscript_field_access(subscript: SubscriptStep) -> GetFieldAccess {
             stride: Box::new(lit(1i64)),
         },
     }
-}
-
-/// The escape argument of a SIMILAR TO / SUBSTRING SIMILAR call as a text
-/// expression: the default `\\` when no ESCAPE clause is present, the empty
-/// string when `ESCAPE ''` disables escaping, and NULL when the clause is NULL.
-fn similar_escape_expr(escape_char: Option<&Value>) -> Result<Expr> {
-    Ok(match escape_char {
-        None => lit("\\"),
-        Some(Value::SingleQuotedString(text)) => lit(text.clone()),
-        Some(Value::Null) => Expr::Literal(ScalarValue::Utf8(None), None),
-        Some(other) => {
-            return plan_err!(
-                "Invalid escape character in SIMILAR TO expression, got {other}"
-            );
-        }
-    })
 }
 
 #[cfg(test)]

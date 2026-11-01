@@ -796,8 +796,15 @@ impl SqlToRel<'_> {
 
             // After resolution, all arguments are positional
             let mut resolved_args = resolved_args;
+            let call_span = crate::utils::convert_parser_span(sql_parser_span);
             for planner in self.context_provider.get_expr_planners() {
-                match planner.plan_function_arguments(&fm, resolved_args, schema)? {
+                match planner.plan_function_arguments(
+                    &fm,
+                    object_name,
+                    call_span,
+                    resolved_args,
+                    schema,
+                )? {
                     PlannerResult::Planned(expr) => return Ok(expr),
                     PlannerResult::Original(args) => resolved_args = args,
                 }

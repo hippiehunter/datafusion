@@ -2536,7 +2536,7 @@ fn select_with_having() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.id" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(Int64(1))" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.id" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -2549,7 +2549,7 @@ fn select_with_having_referencing_column_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.id" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(Int64(1))" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.id" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -2563,7 +2563,7 @@ fn select_with_having_refers_to_invalid_column() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.id, max(person.age)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.first_name" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -2576,7 +2576,7 @@ fn select_with_having_referencing_column_nested_in_select_expression() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.id" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(Int64(1))" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.id" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -2589,7 +2589,7 @@ fn select_with_having_with_aggregate_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "max(person.age)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.first_name" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -2636,7 +2636,7 @@ fn select_aggregate_with_having_referencing_column_not_in_select() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.first_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "count(*)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.first_name" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -2798,7 +2798,7 @@ fn select_aggregate_with_group_by_with_having_referencing_column_not_in_group_by
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in HAVING must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.last_name" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.first_name, max(person.age)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.last_name" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -3323,7 +3323,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_nested_and_not_res
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.age" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -3334,7 +3334,7 @@ fn select_simple_aggregate_with_groupby_non_column_expression_and_its_column_sel
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "person.age" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "person.age + Int32(1), min(person.first_name)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "person.age" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -3706,7 +3706,7 @@ fn select_7480_2() {
 
     assert_snapshot!(
         err.strip_backtrace(),
-        @r#"External error: Column in SELECT must be in GROUP BY or an aggregate function: While expanding wildcard, column "aggregate_test_100.c13" must appear in the GROUP BY clause or must be part of an aggregate function, currently only "aggregate_test_100.c1, min(aggregate_test_100.c12)" appears in the SELECT clause satisfies this requirement"#
+        @r#"External error: column "aggregate_test_100.c13" must appear in the GROUP BY clause or be used in an aggregate function"#
     );
 }
 
@@ -5147,8 +5147,8 @@ mod postgres_planning_semantics {
     use datafusion_expr::dml::ConflictTarget;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{
-        CreateMemoryTable, DdlStatement, Distinct, DistinctOn, Expr, GetFieldAccess,
-        InsertOp, LogicalPlan, ScalarUDF, WriteOp, col, lit,
+        BinaryExpr, CreateMemoryTable, DdlStatement, Distinct, DistinctOn, Expr,
+        GetFieldAccess, InsertOp, LogicalPlan, Operator, ScalarUDF, WriteOp, col, lit,
     };
     use datafusion_functions_aggregate::count::count_udaf;
     use datafusion_sql::parser::DFParser;
@@ -5184,9 +5184,15 @@ mod postgres_planning_semantics {
         fn plan_function_arguments(
             &self,
             function: &Arc<ScalarUDF>,
+            call_name: &sqlparser::ast::ObjectName,
+            call_span: Option<datafusion_common::Span>,
             args: Vec<Expr>,
             _schema: &DFSchema,
         ) -> Result<PlannerResult<Vec<Expr>>> {
+            if call_name.to_string() == "\"sqrt\"" {
+                let column = call_span.map(|span| span.start.column);
+                return datafusion_common::plan_err!("{call_name} at {column:?}");
+            }
             Ok(PlannerResult::Original(if function.name() == "sqrt" {
                 vec![lit(4i64)]
             } else {
@@ -5316,6 +5322,9 @@ mod postgres_planning_semantics {
     fn scalar_call_arguments_run_through_plan_function_arguments() {
         let plan = plan_with_hook_probe("SELECT sqrt(age) FROM person").unwrap();
         assert_eq!(scalar_call_args(&plan, "sqrt"), Some(vec![lit(4i64)]));
+        // The hook sees the name as the call wrote it, and where.
+        let err = plan_with_hook_probe("SELECT \"sqrt\"(age) FROM person").unwrap_err();
+        datafusion_common::assert_contains!(err.to_string(), "\"sqrt\" at Some(8)");
     }
 
     #[test]
@@ -5522,6 +5531,149 @@ mod postgres_planning_semantics {
             partitioning.keys[0].opclass.as_deref(),
             Some("pg_catalog.text_pattern_ops")
         );
+    }
+
+    #[test]
+    fn partition_key_column_must_exist() {
+        for (sql, message) in [
+            (
+                "CREATE TABLE measurements (city TEXT) PARTITION BY RANGE (town)",
+                "column \"town\" named in partition key does not exist",
+            ),
+            (
+                "CREATE TABLE measurements (city TEXT) PARTITION BY LIST (\"City\")",
+                "column \"City\" named in partition key does not exist",
+            ),
+        ] {
+            let err = logical_plan(sql).expect_err("missing key column");
+            assert_eq!(sqlstate(&err), Some("42703"), "{sql}: {err}");
+            datafusion_common::assert_contains!(err.to_string(), message);
+        }
+    }
+
+    fn plan_with_state(sql: &str, state: MockSessionState) -> Result<LogicalPlan> {
+        let context = MockContextProvider { state };
+        let mut statements =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let statement = statements.pop_front().expect("one statement");
+        SqlToRel::new(&context).statement_to_plan(statement)
+    }
+
+    fn projected_exprs(plan: &LogicalPlan) -> Vec<Expr> {
+        match plan {
+            LogicalPlan::Projection(projection) => projection.expr.clone(),
+            other => panic!("expected a projection, got {other}"),
+        }
+    }
+
+    #[test]
+    fn hex_string_is_a_bit_string_under_postgresql() {
+        let mut state = MockSessionState::default();
+        state.config_options.sql_parser.dialect =
+            datafusion_common::config::Dialect::PostgreSQL;
+        let plan = plan_with_state("SELECT X'1F', x'', X'a'", state).unwrap();
+        let bit = |digits: &str| {
+            Expr::Literal(
+                ScalarValue::Utf8(Some(digits.to_string())),
+                Some(datafusion_common::metadata::FieldMetadata::from(
+                    std::collections::HashMap::from([(
+                        "pg_type".to_string(),
+                        "bit".to_string(),
+                    )]),
+                )),
+            )
+        };
+        let literals = projected_exprs(&plan)
+            .into_iter()
+            .map(|expr| match expr {
+                Expr::Alias(alias) => *alias.expr,
+                other => other,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(literals, vec![bit("00011111"), bit(""), bit("1010")]);
+
+        let mut state = MockSessionState::default();
+        state.config_options.sql_parser.dialect =
+            datafusion_common::config::Dialect::PostgreSQL;
+        let err = plan_with_state("SELECT X'fg'", state).unwrap_err();
+        assert_eq!(sqlstate(&err), Some("22P02"), "{err}");
+        datafusion_common::assert_contains!(
+            err.to_string(),
+            "\"g\" is not a valid hexadecimal digit"
+        );
+
+        // Other dialects keep the binary string.
+        let plan = plan_with_state("SELECT X'1F'", MockSessionState::default()).unwrap();
+        assert!(matches!(
+            projected_exprs(&plan).first(),
+            Some(Expr::Literal(ScalarValue::Binary(Some(bytes)), _)) if bytes == &[0x1f]
+        ));
+    }
+
+    #[test]
+    fn similar_to_matches_the_escaped_pattern_as_a_regex() {
+        // Each query plans against a `similar_to_escape` of the arity it calls.
+        let similar_to_shapes = |sql: &str, arity: usize| {
+            let state =
+                MockSessionState::default().with_scalar_function(Arc::new(make_udf(
+                    "similar_to_escape",
+                    vec![DataType::Utf8; arity],
+                    DataType::Utf8,
+                )));
+            projected_exprs(&plan_with_state(sql, state).unwrap())
+                .into_iter()
+                .map(|expr| match expr {
+                    Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                        let Expr::ScalarFunction(call) = *right else {
+                            panic!("expected similar_to_escape, got {right}");
+                        };
+                        assert_eq!(*left, col("person.first_name"));
+                        assert_eq!(call.name(), "similar_to_escape");
+                        (op, call.args)
+                    }
+                    other => panic!("expected a regex match, got {other}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            similar_to_shapes("SELECT first_name SIMILAR TO 'J%' FROM person", 1),
+            vec![(Operator::RegexMatch, vec![lit("J%")])]
+        );
+        assert_eq!(
+            similar_to_shapes(
+                "SELECT first_name NOT SIMILAR TO 'J%' ESCAPE '!', \
+                 first_name SIMILAR TO 'J%' ESCAPE NULL FROM person",
+                2,
+            ),
+            vec![
+                (Operator::RegexNotMatch, vec![lit("J%"), lit("!")]),
+                (
+                    Operator::RegexMatch,
+                    vec![lit("J%"), Expr::Literal(ScalarValue::Utf8(None), None)]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ungrouped_column_is_named_by_its_range_variable() {
+        for (sql, column) in [
+            ("SELECT age FROM person GROUP BY state", "person.age"),
+            ("SELECT p.age FROM person p GROUP BY p.state", "p.age"),
+            (
+                "SELECT state FROM person GROUP BY state HAVING max(age) > 1 ORDER BY id",
+                "person.id",
+            ),
+        ] {
+            let err = logical_plan(sql).expect_err("ungrouped column");
+            assert_eq!(sqlstate(&err), Some("42803"), "{sql}: {err}");
+            datafusion_common::assert_contains!(
+                err.to_string(),
+                format!(
+                    "column \"{column}\" must appear in the GROUP BY clause or be used in an aggregate function"
+                )
+            );
+        }
     }
 
     #[test]

@@ -35,9 +35,7 @@ use datafusion_expr::expr::{
     Alias, GroupingSet, Unnest, WindowFunction, WindowFunctionParams,
 };
 use datafusion_expr::utils::{expr_as_column_expr, find_column_exprs};
-use datafusion_expr::{
-    ColumnUnnestList, Expr, ExprSchemable, LogicalPlan, col, expr_vec_fmt,
-};
+use datafusion_expr::{ColumnUnnestList, Expr, ExprSchemable, LogicalPlan, col};
 
 use indexmap::IndexMap;
 use sqlparser::ast::{Ident, Value};
@@ -138,54 +136,11 @@ pub(crate) fn rebase_expr(
         .data()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CheckColumnsMustReferenceAggregatePurpose {
-    Projection,
-    Having,
-    Qualify,
-    OrderBy,
-    DistinctOn,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CheckColumnsSatisfyExprsPurpose {
-    Aggregate(CheckColumnsMustReferenceAggregatePurpose),
-}
-
-impl CheckColumnsSatisfyExprsPurpose {
-    fn message_prefix(&self) -> &'static str {
-        match self {
-            Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::Projection) => {
-                "Column in SELECT must be in GROUP BY or an aggregate function"
-            }
-            Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::Having) => {
-                "Column in HAVING must be in GROUP BY or an aggregate function"
-            }
-            Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::Qualify) => {
-                "Column in QUALIFY must be in GROUP BY or an aggregate function"
-            }
-            Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::OrderBy) => {
-                "Column in ORDER BY must be in GROUP BY or an aggregate function"
-            }
-            Self::Aggregate(CheckColumnsMustReferenceAggregatePurpose::DistinctOn) => {
-                "Column in DISTINCT ON must be in GROUP BY or an aggregate function"
-            }
-        }
-    }
-
-    fn diagnostic_message(&self, expr: &Expr) -> String {
-        format!(
-            "'{expr}' must appear in GROUP BY clause because it's not an aggregate expression"
-        )
-    }
-}
-
 /// Determines if the set of `Expr`'s are a valid projection on the input
 /// `Expr::Column`'s.
 pub(crate) fn check_columns_satisfy_exprs(
     columns: &[Expr],
     exprs: &[Expr],
-    purpose: CheckColumnsSatisfyExprsPurpose,
 ) -> Result<()> {
     columns.iter().try_for_each(|c| match c {
         Expr::Column(_) => Ok(()),
@@ -196,48 +151,53 @@ pub(crate) fn check_columns_satisfy_exprs(
         match e {
             Expr::GroupingSet(GroupingSet::Rollup(exprs)) => {
                 for e in exprs {
-                    check_column_satisfies_expr(columns, e, purpose)?;
+                    check_column_satisfies_expr(columns, e)?;
                 }
             }
             Expr::GroupingSet(GroupingSet::Cube(exprs)) => {
                 for e in exprs {
-                    check_column_satisfies_expr(columns, e, purpose)?;
+                    check_column_satisfies_expr(columns, e)?;
                 }
             }
             Expr::GroupingSet(GroupingSet::GroupingSets(lists_of_exprs)) => {
                 for exprs in lists_of_exprs {
                     for e in exprs {
-                        check_column_satisfies_expr(columns, e, purpose)?;
+                        check_column_satisfies_expr(columns, e)?;
                     }
                 }
             }
-            _ => check_column_satisfies_expr(columns, e, purpose)?,
+            _ => check_column_satisfies_expr(columns, e)?,
         }
     }
     Ok(())
 }
 
-fn check_column_satisfies_expr(
-    columns: &[Expr],
-    expr: &Expr,
-    purpose: CheckColumnsSatisfyExprsPurpose,
-) -> Result<()> {
+/// A column that is neither grouped nor aggregated is PostgreSQL's
+/// grouping_error, which names the column by its range variable's name and
+/// its own: `column "t.c" must appear in the GROUP BY clause or be used in
+/// an aggregate function`.
+fn check_column_satisfies_expr(columns: &[Expr], expr: &Expr) -> Result<()> {
     if !columns.contains(expr) {
         let diagnostic = Diagnostic::new_error(
-            purpose.diagnostic_message(expr),
+            format!(
+                "'{expr}' must appear in GROUP BY clause because it's not an aggregate expression"
+            ),
             expr.spans().and_then(|spans| spans.first()),
         )
         .with_help(format!("Either add '{expr}' to GROUP BY clause, or use an aggregate function like ANY_VALUE({expr})"), None);
-
-        // A column that is neither grouped nor aggregated is PostgreSQL's
-        // grouping_error.
+        let column = match expr {
+            Expr::Column(Column {
+                relation: Some(relation),
+                name,
+                ..
+            }) => format!("{}.{name}", relation.table()),
+            Expr::Column(Column { name, .. }) => name.clone(),
+            other => other.to_string(),
+        };
         return Err(sqlstate_datafusion_err(
             "42803",
             format!(
-                "{}: While expanding wildcard, column \"{}\" must appear in the GROUP BY clause or must be part of an aggregate function, currently only \"{}\" appears in the SELECT clause satisfies this requirement",
-                purpose.message_prefix(),
-                expr,
-                expr_vec_fmt!(columns)
+                "column \"{column}\" must appear in the GROUP BY clause or be used in an aggregate function"
             ),
         )
         .with_diagnostic(diagnostic));

@@ -25,8 +25,8 @@ use arrow::array::ArrayRef;
 use arrow::datatypes::{
     DataType, Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type,
     DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType,
-    DurationSecondType, Float16Type, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    DurationSecondType, Field, FieldRef, Float16Type, Float32Type, Float64Type, Int8Type,
+    Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, Result, exec_err, internal_err};
@@ -54,6 +54,20 @@ use datafusion_macros::user_doc;
 use half::f16;
 use std::mem::size_of_val;
 use std::ops::Deref;
+use std::sync::Arc;
+
+/// MIN and MAX return one of their input values: the input field's type and
+/// its metadata, which carries an identity such as `money` that the Arrow
+/// type alone does not. The result is NULL over no rows, so it is nullable.
+fn min_max_return_field(name: &str, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+    let [input] = arg_fields else {
+        return internal_err!("{name} takes one argument, got {}", arg_fields.len());
+    };
+    Ok(Arc::new(
+        Field::new(name, input.data_type().clone(), true)
+            .with_metadata(input.metadata().clone()),
+    ))
+}
 
 fn get_min_max_result_type(input_types: &[DataType]) -> Result<Vec<DataType>> {
     // make sure that the input types only has one element.
@@ -217,6 +231,10 @@ impl AggregateUDFImpl for Max {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         Ok(arg_types[0].to_owned())
+    }
+
+    fn return_field(&self, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+        min_max_return_field(self.name(), arg_fields)
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
@@ -504,6 +522,10 @@ impl AggregateUDFImpl for Min {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         Ok(arg_types[0].to_owned())
+    }
+
+    fn return_field(&self, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+        min_max_return_field(self.name(), arg_fields)
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
@@ -1020,7 +1042,26 @@ mod tests {
             IntervalYearMonthType,
         },
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn min_max_return_the_input_field_identity() {
+        let metadata = HashMap::from([("pg_type".to_string(), "money".to_string())]);
+        let input: FieldRef = Arc::new(
+            Field::new("cash", DataType::Int64, false).with_metadata(metadata.clone()),
+        );
+        for (udaf, name) in [
+            (&Max::new() as &dyn AggregateUDFImpl, "max"),
+            (&Min::new() as &dyn AggregateUDFImpl, "min"),
+        ] {
+            let field = udaf.return_field(&[Arc::clone(&input)]).unwrap();
+            assert_eq!(field.name(), name);
+            assert_eq!(field.data_type(), &DataType::Int64);
+            assert!(field.is_nullable());
+            assert_eq!(field.metadata(), &metadata);
+        }
+    }
 
     #[test]
     fn interval_min_max() {

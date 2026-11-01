@@ -41,7 +41,8 @@ use datafusion_expr::{
 };
 
 use sqlparser::ast::{
-    Expr as SQLExpr, Ident, ObjectName, TableAlias, TableFactor, UnaryOperator, Value,
+    Expr as SQLExpr, Ident, ObjectName, SetOperator, TableAlias, TableFactor,
+    UnaryOperator, Value,
 };
 
 /// Row expansion supplied by an embedding. List columns zip by position;
@@ -386,9 +387,12 @@ pub trait ContextProvider {
     /// operation (UNION, INTERSECT, EXCEPT, a recursive CTE's terms) before
     /// the Arrow carrier types establish its schema. An embedding can cast a
     /// column to the type PostgreSQL's common-type rules pick for it, or read
-    /// an untyped literal in it. The default keeps both inputs.
+    /// an untyped literal in it. `op` names the operation, as PostgreSQL's
+    /// "UNION types integer and text cannot be matched" does. The default
+    /// keeps both inputs.
     fn plan_set_operation_inputs(
         &self,
+        _op: SetOperator,
         left: LogicalPlan,
         right: LogicalPlan,
     ) -> Result<(LogicalPlan, LogicalPlan)> {
@@ -541,13 +545,19 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
-    /// Resolve a prefix arithmetic operator (`+`, `-`) over its operand:
-    /// type an untyped operand, take a value of a type derived from the
-    /// operator's operand type (a domain) as that type, and refuse a type
-    /// that declares no such operator. Returns the operand the operator
-    /// applies to, or the original operand for the default planning, which
-    /// accepts numbers, intervals and timestamps for `+` and negates any
-    /// operand for `-`.
+    /// Resolve a prefix operator over its operand: type an untyped operand,
+    /// take a value of a type derived from the operator's operand type (a
+    /// domain) as that type, and refuse a type that declares no such
+    /// operator (PostgreSQL 42883 "operator does not exist: <op> <type>").
+    ///
+    /// For `-`, `~`, `|/`, `||/`, `@` and `@@` a planned result is the
+    /// operand the operator applies to (negated, or passed to `bit_not`,
+    /// `sqrt`, `cbrt`, `abs` or `center`). For `+` a planned result is the
+    /// whole expression. `#`, `@-@`, `?-`, `?|` and `!!` have no default
+    /// planning: a planned result is the whole expression, and an original
+    /// operand leaves the operator unsupported. The default keeps the
+    /// original operand: `+` accepts numbers, intervals and timestamps, and
+    /// the others take their default planning.
     fn plan_prefix_operand(
         &self,
         _op: &UnaryOperator,
@@ -629,12 +639,16 @@ pub trait ExprPlanner: Debug + Send + Sync {
 
     /// Plan the arguments of a call to the scalar function `function`, after
     /// named arguments are resolved to positions and before the call is built.
+    /// `call_name` is the function name as the call wrote it and `call_span`
+    /// where it was written, for errors that name the call as written.
     ///
     /// Returns the original arguments if not possible; a `Planned` expression
     /// replaces the whole call.
     fn plan_function_arguments(
         &self,
         _function: &Arc<ScalarUDF>,
+        _call_name: &ObjectName,
+        _call_span: Option<Span>,
         args: Vec<Expr>,
         _schema: &DFSchema,
     ) -> Result<PlannerResult<Vec<Expr>>> {

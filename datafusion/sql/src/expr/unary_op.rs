@@ -25,8 +25,8 @@ use datafusion_expr::{
 use sqlparser::ast::{Expr as SQLExpr, UnaryOperator, Value, ValueWithSpan};
 
 impl SqlToRel<'_> {
-    /// The operand a prefix arithmetic operator applies to, as the first
-    /// expression planner that resolves the operator types it.
+    /// The operand a prefix operator applies to, as the first expression
+    /// planner that resolves the operator types it.
     fn plan_prefix_operand(
         &self,
         op: &UnaryOperator,
@@ -42,6 +42,32 @@ impl SqlToRel<'_> {
             }
         }
         Ok(PlannerResult::Original(operand))
+    }
+
+    /// A prefix operator that is a call of `function` over its operand, the
+    /// operand resolved by the expression planners first.
+    fn plan_prefix_call(
+        &self,
+        op: &UnaryOperator,
+        expr: &SQLExpr,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+        function: &str,
+        description: &str,
+    ) -> Result<Expr> {
+        let operand = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        let operand = match self.plan_prefix_operand(op, operand, schema)? {
+            PlannerResult::Planned(operand) | PlannerResult::Original(operand) => operand,
+        };
+        match self.context_provider.get_function_meta(function) {
+            Some(func) => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                func,
+                vec![operand],
+            ))),
+            None => not_impl_err!(
+                "{description} requires '{function}' function to be registered"
+            ),
+        }
     }
 
     pub(crate) fn parse_sql_unary_op(
@@ -108,82 +134,60 @@ impl SqlToRel<'_> {
                     }
                 }
             }
-            UnaryOperator::BitwiseNot => {
-                // Bitwise NOT operator (~)
-                // Use a scalar function call to implement bitwise NOT
+            UnaryOperator::BitwiseNot => self.plan_prefix_call(
+                op,
+                expr,
+                schema,
+                planner_context,
+                "bit_not",
+                "Bitwise NOT operator (~)",
+            ),
+            UnaryOperator::PGSquareRoot => self.plan_prefix_call(
+                op,
+                expr,
+                schema,
+                planner_context,
+                "sqrt",
+                "Square root operator (|/)",
+            ),
+            UnaryOperator::PGCubeRoot => self.plan_prefix_call(
+                op,
+                expr,
+                schema,
+                planner_context,
+                "cbrt",
+                "Cube root operator (||/)",
+            ),
+            UnaryOperator::PGAbs => self.plan_prefix_call(
+                op,
+                expr,
+                schema,
+                planner_context,
+                "abs",
+                "Absolute-value operator (@)",
+            ),
+            UnaryOperator::DoubleAt => self.plan_prefix_call(
+                op,
+                expr,
+                schema,
+                planner_context,
+                "center",
+                "Centre operator (@@)",
+            ),
+            // Prefix operators with no default planning: the host plans the
+            // whole operator over the operand, or the operator is refused.
+            UnaryOperator::Hash
+            | UnaryOperator::AtDashAt
+            | UnaryOperator::QuestionDash
+            | UnaryOperator::QuestionPipe
+            | UnaryOperator::PGPrefixFactorial => {
                 let operand =
                     self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
-
-                // Try to get the bit_not function from the context provider
-                if let Some(func) = self.context_provider.get_function_meta("bit_not") {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func,
-                        vec![operand],
-                    )))
-                } else {
-                    // Fall back to not_impl_err if the function is not registered
-                    not_impl_err!(
-                        "Bitwise NOT operator (~) requires 'bit_not' function to be registered"
-                    )
-                }
-            }
-            UnaryOperator::PGSquareRoot => {
-                // PostgreSQL square root prefix operator: |/ value
-                let operand =
-                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
-                if let Some(func) = self.context_provider.get_function_meta("sqrt") {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func,
-                        vec![operand],
-                    )))
-                } else {
-                    not_impl_err!(
-                        "Square root operator (|/) requires 'sqrt' function to be registered"
-                    )
-                }
-            }
-            UnaryOperator::PGCubeRoot => {
-                // PostgreSQL cube root prefix operator: ||/ value
-                let operand =
-                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
-                if let Some(func) = self.context_provider.get_function_meta("cbrt") {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func,
-                        vec![operand],
-                    )))
-                } else {
-                    not_impl_err!(
-                        "Cube root operator (||/) requires 'cbrt' function to be registered"
-                    )
-                }
-            }
-            UnaryOperator::PGAbs => {
-                let operand =
-                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
-                if let Some(func) = self.context_provider.get_function_meta("abs") {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func,
-                        vec![operand],
-                    )))
-                } else {
-                    not_impl_err!(
-                        "Absolute-value operator (@) requires 'abs' function to be registered"
-                    )
-                }
-            }
-            UnaryOperator::DoubleAt => {
-                // PostgreSQL geometric centre prefix operator: @@ geometry
-                let operand =
-                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
-                if let Some(func) = self.context_provider.get_function_meta("center") {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func,
-                        vec![operand],
-                    )))
-                } else {
-                    not_impl_err!(
-                        "Centre operator (@@) requires 'center' function to be registered"
-                    )
+                match self.plan_prefix_operand(op, operand, schema)? {
+                    PlannerResult::Planned(planned) => Ok(planned),
+                    PlannerResult::Original(_) => {
+                        not_impl_err!("Unsupported SQL unary operator {op:?}")
+                    }
                 }
             }
             _ => not_impl_err!("Unsupported SQL unary operator {op:?}"),

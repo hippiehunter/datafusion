@@ -1186,13 +1186,13 @@ stub_typed_udf!(
 );
 stub_scalar_udf!(RegexpReplace, "regexp_replace");
 stub_scalar_udf!(RegexpSubstr, "regexp_substr");
-// `SIMILAR TO` and `SUBSTRING(.. SIMILAR .. ESCAPE ..)` lower to the engine's
-// functions of these names.
+// `SIMILAR TO` matches against the regular expression `similar_to_escape`
+// builds, and `SUBSTRING(.. SIMILAR .. ESCAPE ..)` lowers to an engine function.
 stub_typed_udf!(
-    DblSimilarTo,
-    "__dbl_similar_to",
+    SimilarToEscape,
+    "similar_to_escape",
     Signature::variadic_any(Volatility::Immutable),
-    DataType::Boolean
+    DataType::Utf8
 );
 stub_scalar_udf!(DblSubstringSimilar, "__dbl_substring_similar");
 
@@ -1703,7 +1703,7 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "regexp_like" => Some(regexp_like_udf()),
             "regexp_replace" => Some(regexp_replace_udf()),
             "regexp_substr" => Some(regexp_substr_udf()),
-            "__dbl_similar_to" => Some(dbl_similar_to_udf()),
+            "similar_to_escape" => Some(similar_to_escape_udf()),
             "__dbl_substring_similar" => Some(dbl_substring_similar_udf()),
 
             // JSON functions

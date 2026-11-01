@@ -1274,10 +1274,30 @@ impl SqlToRel<'_> {
         let mut keys = Vec::with_capacity(partition_by.columns.len());
         for key in partition_by.columns {
             let (column_name, sql_expr) = match key.column_or_expr {
-                ast::PartitionKeyExpr::Column(identifier) => (
-                    Some(identifier.value.clone()),
-                    SQLExpr::Identifier(identifier),
-                ),
+                ast::PartitionKeyExpr::Column(identifier) => {
+                    // A key column is a column of the table being created,
+                    // never an outer reference or a whole-row value.
+                    let name = self.ident_normalizer.normalize(identifier.clone());
+                    let exists = schema.has_column_with_unqualified_name(&name)
+                        || self
+                            .context_provider
+                            .resolve_unquoted_column_name(&identifier, schema)
+                            .is_some_and(|provider_name| {
+                                schema.has_column_with_unqualified_name(&provider_name)
+                            });
+                    if !exists {
+                        return Err(sqlstate_datafusion_err(
+                            "42703",
+                            format!(
+                                "column \"{name}\" named in partition key does not exist"
+                            ),
+                        ));
+                    }
+                    (
+                        Some(identifier.value.clone()),
+                        SQLExpr::Identifier(identifier),
+                    )
+                }
                 ast::PartitionKeyExpr::Expr(expr) => (None, expr),
             };
             let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
