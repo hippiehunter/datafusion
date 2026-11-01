@@ -1526,16 +1526,15 @@ impl SqlToRel<'_> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        // The tested value is planned before the list, so an error in it is
+        // reported first, as PostgreSQL's transformAExprIn reports it.
+        let expr = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
         let list_expr = list
             .iter()
             .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Expr::InList(InList::new(
-            Box::new(self.sql_expr_to_logical_expr(expr, schema, planner_context)?),
-            list_expr,
-            negated,
-        )))
+        Ok(Expr::InList(InList::new(Box::new(expr), list_expr, negated)))
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -1625,16 +1624,14 @@ impl SqlToRel<'_> {
             }
         }
         let regex = self.similar_to_call("similar_to_escape", args)?;
+        // Planned as the written operator is, so the extension planners
+        // resolve `~` over the value's type before any coercion.
         let op = if negated {
-            Operator::RegexNotMatch
+            BinaryOperator::PGRegexNotMatch
         } else {
-            Operator::RegexMatch
+            BinaryOperator::PGRegexMatch
         };
-        Ok(Expr::BinaryExpr(BinaryExpr::new(
-            Box::new(value),
-            op,
-            Box::new(regex),
-        )))
+        self.build_logical_expr(op, value, regex, schema)
     }
 
     fn similar_to_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {

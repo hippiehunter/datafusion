@@ -56,16 +56,27 @@ use std::mem::size_of_val;
 use std::ops::Deref;
 use std::sync::Arc;
 
+/// The prefix of the field metadata keys through which a PostgreSQL host
+/// names a domain over the field's type.
+const DOMAIN_METADATA_KEY_PREFIX: &str = "pg_domain_";
+
 /// MIN and MAX return one of their input values: the input field's type and
 /// its metadata, which carries an identity such as `money` that the Arrow
-/// type alone does not. The result is NULL over no rows, so it is nullable.
+/// type alone does not. A domain is not part of that identity: PostgreSQL
+/// resolves `min(d)` over the domain's base type, which is the result type.
+/// The result is NULL over no rows, so it is nullable.
 fn min_max_return_field(name: &str, arg_fields: &[FieldRef]) -> Result<FieldRef> {
     let [input] = arg_fields else {
         return internal_err!("{name} takes one argument, got {}", arg_fields.len());
     };
+    let metadata = input
+        .metadata()
+        .iter()
+        .filter(|(key, _)| !key.starts_with(DOMAIN_METADATA_KEY_PREFIX))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     Ok(Arc::new(
-        Field::new(name, input.data_type().clone(), true)
-            .with_metadata(input.metadata().clone()),
+        Field::new(name, input.data_type().clone(), true).with_metadata(metadata),
     ))
 }
 
@@ -1060,6 +1071,23 @@ mod tests {
             assert_eq!(field.data_type(), &DataType::Int64);
             assert!(field.is_nullable());
             assert_eq!(field.metadata(), &metadata);
+        }
+    }
+
+    #[test]
+    fn min_max_return_the_base_type_of_a_domain() {
+        let base = HashMap::from([("pg_type".to_string(), "money".to_string())]);
+        let mut domain = base.clone();
+        domain.insert("pg_domain_name".to_string(), "cash".to_string());
+        domain.insert("pg_domain_type_oid".to_string(), "16384".to_string());
+        let input: FieldRef =
+            Arc::new(Field::new("cash", DataType::Int64, true).with_metadata(domain));
+        for udaf in [
+            &Max::new() as &dyn AggregateUDFImpl,
+            &Min::new() as &dyn AggregateUDFImpl,
+        ] {
+            let field = udaf.return_field(&[Arc::clone(&input)]).unwrap();
+            assert_eq!(field.metadata(), &base);
         }
     }
 
