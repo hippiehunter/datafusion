@@ -79,7 +79,10 @@ pub enum ReturningContext {
         /// true: `eval_schema` is the before image (OLD qualifier) then the
         /// after image (NEW qualifier), each the target row's full width, then
         /// the action column; an image the action did not produce is all
-        /// nulls. false: one applied image, then the action column.
+        /// nulls. false: one applied image, then the action column. When
+        /// RETURNING reads the source relation, the source row's columns
+        /// follow the action column, all null for a NOT MATCHED BY SOURCE
+        /// row.
         dual_image: bool,
     },
 }
