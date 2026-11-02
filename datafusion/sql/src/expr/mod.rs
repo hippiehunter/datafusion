@@ -710,13 +710,30 @@ impl SqlToRel<'_> {
                 self.xml_function_call(name, vec![value])
             }
 
-            SQLExpr::XmlSerialize { expr, as_type, .. } => {
+            // `XMLSERIALIZE({DOCUMENT | CONTENT} x AS type [[NO] INDENT])`
+            // plans `xmlserialize(x, is_document, indent)` cast to the written
+            // type; the host owns which target types are allowed. ENCODING and
+            // VERSION carry nothing, as in PostgreSQL.
+            SQLExpr::XmlSerialize {
+                document_or_content,
+                expr,
+                as_type,
+                indent,
+                ..
+            } => {
                 let value = self.sql_expr_to_logical_expr(
                     expr.as_ref(),
                     schema,
                     planner_context,
                 )?;
-                let serialized = self.xml_function_call("xmlserialize", vec![value])?;
+                let is_document = matches!(
+                    document_or_content,
+                    sqlparser::ast::XmlDocumentOrContent::Document
+                );
+                let serialized = self.xml_function_call(
+                    "xmlserialize",
+                    vec![value, lit(is_document), lit(*indent == Some(true))],
+                )?;
                 self.finish_cast_expr(serialized, as_type, CastKind::Cast, None, schema)
             }
 
@@ -898,7 +915,7 @@ impl SqlToRel<'_> {
                 *negated,
                 expr.as_ref(),
                 pattern.as_ref(),
-                escape_char.as_ref(),
+                escape_char.as_deref(),
                 schema,
                 planner_context,
             ),
@@ -1603,25 +1620,28 @@ impl SqlToRel<'_> {
         negated: bool,
         expr: &SQLExpr,
         pattern: &SQLExpr,
-        escape_char: Option<&Value>,
+        escape: Option<&SQLExpr>,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         // PostgreSQL's `x [NOT] SIMILAR TO p [ESCAPE e]` is
         // `x [!]~ similar_to_escape(p [, e])`: the pattern becomes a POSIX
-        // regular expression, matched with the regex operator.
+        // regular expression, matched with the regex operator. The escape is
+        // any expression, planned like the pattern.
         let value = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
         let pattern = self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
         let mut args = vec![pattern];
-        match escape_char {
-            None => {}
-            Some(Value::SingleQuotedString(text)) => args.push(lit(text.clone())),
-            Some(Value::Null) => args.push(Expr::Literal(ScalarValue::Utf8(None), None)),
-            Some(other) => {
-                return plan_err!(
-                    "Invalid escape character in SIMILAR TO expression, got {other}"
-                );
-            }
+        if let Some(escape) = escape {
+            let escape =
+                self.sql_expr_to_logical_expr(escape, schema, planner_context)?;
+            // An untyped NULL escape is a text NULL, as PostgreSQL resolves the
+            // unknown literal against similar_to_escape(text, text).
+            args.push(match escape {
+                Expr::Literal(ScalarValue::Null, _) => {
+                    Expr::Literal(ScalarValue::Utf8(None), None)
+                }
+                escape => escape,
+            });
         }
         let regex = self.similar_to_call("similar_to_escape", args)?;
         // Planned as the written operator is, so the extension planners
@@ -2173,7 +2193,10 @@ mod tests {
     use datafusion_common::TableReference;
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::logical_plan::builder::LogicalTableSource;
-    use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
+    use datafusion_expr::{
+        AggregateUDF, ColumnarValue, ScalarUDF, TableSource, Volatility, WindowUDF, col,
+        create_udf,
+    };
 
     use crate::planner::ContextProvider;
 
@@ -2182,6 +2205,7 @@ mod tests {
     struct TestContextProvider {
         options: ConfigOptions,
         tables: HashMap<String, Arc<dyn TableSource>>,
+        functions: HashMap<String, Arc<ScalarUDF>>,
     }
 
     impl TestContextProvider {
@@ -2199,6 +2223,7 @@ mod tests {
             Self {
                 options: Default::default(),
                 tables,
+                functions: HashMap::new(),
             }
         }
     }
@@ -2211,8 +2236,8 @@ mod tests {
             }
         }
 
-        fn get_function_meta(&self, _name: &str) -> Option<Arc<ScalarUDF>> {
-            None
+        fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+            self.functions.get(name).cloned()
         }
 
         fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
@@ -2342,6 +2367,63 @@ mod tests {
         assert!(
             !err_text.contains("Only identifiers and literals are supported in tuples"),
             "keyword OVERLAPS fell back to tuple parser: {err_text}"
+        );
+    }
+
+    #[test]
+    fn xmlserialize_passes_document_and_indent() {
+        let mut context_provider = TestContextProvider::new();
+        context_provider.functions.insert(
+            "xmlserialize".to_string(),
+            Arc::new(create_udf(
+                "xmlserialize",
+                vec![DataType::Utf8, DataType::Boolean, DataType::Boolean],
+                DataType::Utf8,
+                Volatility::Immutable,
+                Arc::new(|args: &[ColumnarValue]| -> Result<ColumnarValue> {
+                    Ok(args[0].clone())
+                }),
+            )),
+        );
+        let schema =
+            DFSchema::try_from(Schema::new(vec![Field::new("x", DataType::Utf8, true)]))
+                .unwrap();
+        let sql_to_rel = SqlToRel::new(&context_provider);
+        let serialize_args = |sql: &str| {
+            let dialect = PostgreSqlDialect {};
+            let sql_expr = Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap();
+            let expr = sql_to_rel
+                .sql_expr_to_logical_expr(
+                    sql_expr,
+                    &schema,
+                    &mut PlannerContext::default(),
+                )
+                .unwrap();
+            let Expr::Cast(Cast { expr, .. }) = expr else {
+                panic!("expected a cast of xmlserialize, got {expr}");
+            };
+            let Expr::ScalarFunction(call) = *expr else {
+                panic!("expected the xmlserialize call, got {expr}");
+            };
+            assert_eq!(call.name(), "xmlserialize");
+            call.args
+        };
+
+        assert_eq!(
+            serialize_args("XMLSERIALIZE(DOCUMENT '<a/>' AS text INDENT)"),
+            vec![lit("<a/>"), lit(true), lit(true)]
+        );
+        assert_eq!(
+            serialize_args("XMLSERIALIZE(CONTENT x AS varchar NO INDENT)"),
+            vec![col("x"), lit(false), lit(false)]
+        );
+        assert_eq!(
+            serialize_args("XMLSERIALIZE(CONTENT x AS text)"),
+            vec![col("x"), lit(false), lit(false)]
         );
     }
 }

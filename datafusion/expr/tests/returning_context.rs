@@ -82,6 +82,7 @@ fn rebuilding_merge_preserves_applied_image_returning_context() {
     let context = ReturningContext::MergeApplied {
         eval_schema: Arc::clone(&table_schema),
         action_column: 0,
+        dual_image: false,
     };
     merge.returning_context = Some(context.clone());
 

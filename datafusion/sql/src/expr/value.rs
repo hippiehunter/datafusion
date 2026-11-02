@@ -109,20 +109,33 @@ impl SqlToRel<'_> {
         }
     }
 
-    /// Parse number in sql string, convert to Expr::Literal
+    /// Parse number in sql string, convert to Expr::Literal. A literal the
+    /// default lowering cannot carry exactly goes to the context provider's
+    /// [`plan_number_literal`](crate::planner::ContextProvider::plan_number_literal).
     pub(super) fn parse_sql_number(
         &self,
         unsigned_number: &str,
         negative: bool,
     ) -> Result<Expr> {
-        Ok(Expr::Literal(
-            sql_number_literal(
-                unsigned_number,
-                negative,
-                self.options.parse_float_as_decimal,
-            )?,
-            None,
-        ))
+        let default = sql_number_literal(
+            unsigned_number,
+            negative,
+            self.options.parse_float_as_decimal,
+        );
+        // With decimal parsing, Float64 arises only from the fallback for a
+        // literal Decimal256 cannot hold, and an error from one it cannot
+        // parse at all (a radix integer wider than i128, an exponent past
+        // Decimal's scale range).
+        let overflowed = self.options.parse_float_as_decimal
+            && matches!(default, Ok(ScalarValue::Float64(_)) | Err(_));
+        if overflowed
+            && let Some(expr) = self
+                .context_provider
+                .plan_number_literal(unsigned_number, negative)?
+        {
+            return Ok(expr);
+        }
+        Ok(Expr::Literal(default?, None))
     }
 
     /// Create a placeholder expression

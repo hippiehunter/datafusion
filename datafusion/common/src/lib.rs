@@ -74,7 +74,8 @@ pub use display::human_readable::{
 };
 pub use error::{
     DataFusionError, DataFusionSqlStateError, Result, SchemaError, SharedResult,
-    field_not_found, sqlstate_datafusion_err, unqualified_field_not_found,
+    field_not_found, sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
+    unqualified_field_not_found,
 };
 pub use file_options::file_type::{
     DEFAULT_ARROW_EXTENSION, DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION,

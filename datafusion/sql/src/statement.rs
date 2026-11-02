@@ -37,8 +37,8 @@ use crate::parser::{
 use crate::planner::{
     AssignmentStep, CreateTableLikeOptions, DmlGeneratedColumns, DmlViewEvent,
     IdentNormalizer, MergeRowAction, MergeRowActions, PlannerContext, PlannerResult,
-    RawAssignmentTarget, SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlError,
-    ViewDmlTarget, object_name_to_qualifier,
+    RawAssignmentTarget, SqlToRel, ValuesAssembly, ValuesDefault, ViewDmlTarget,
+    object_name_to_qualifier,
 };
 use crate::utils::normalize_ident;
 use crate::values::is_default_identifier;
@@ -417,7 +417,22 @@ fn view_expression_scope(
     target_width: usize,
     target: &ViewDmlTarget,
 ) -> Result<LogicalPlan> {
-    let view_qualifier = TableReference::bare(target.view_name.clone());
+    view_expression_scope_under(
+        plan,
+        target_width,
+        target,
+        &TableReference::bare(target.view_name.clone()),
+    )
+}
+
+/// [`view_expression_scope`] with the view's columns named under
+/// `view_qualifier`, the name the statement gives its target.
+fn view_expression_scope_under(
+    plan: &LogicalPlan,
+    target_width: usize,
+    target: &ViewDmlTarget,
+    view_qualifier: &TableReference,
+) -> Result<LogicalPlan> {
     let target_schema = schema_prefix(plan.schema(), target_width)?;
     let mut expressions = Vec::with_capacity(
         target.read_expressions.len()
@@ -483,6 +498,25 @@ fn substitute_bound_view_reads(
     base_schema: &DFSchema,
     target_width: usize,
 ) -> Result<Expr> {
+    substitute_bound_view_reads_under(
+        expression,
+        target,
+        &target.view_name,
+        base_schema,
+        target_width,
+    )
+}
+
+/// [`substitute_bound_view_reads`] for expressions bound against
+/// [`view_expression_scope_under`], whose view columns are named under
+/// `view_qualifier`.
+fn substitute_bound_view_reads_under(
+    expression: Expr,
+    target: &ViewDmlTarget,
+    view_qualifier: &str,
+    base_schema: &DFSchema,
+    target_width: usize,
+) -> Result<Expr> {
     let target_schema = schema_prefix(base_schema, target_width)?;
     let replacements = target
         .read_expressions
@@ -500,7 +534,7 @@ fn substitute_bound_view_reads(
             Expr::Column(column)
                 if column.relation.is_none()
                     || column.relation.as_ref().is_some_and(|relation| {
-                        relation.table().eq_ignore_ascii_case(&target.view_name)
+                        relation.table().eq_ignore_ascii_case(view_qualifier)
                     }) =>
             {
                 replacements
@@ -984,6 +1018,9 @@ struct MergeInsertDefaults<'a> {
     table_source: &'a dyn TableSource,
     generated: Option<&'a DmlGeneratedColumns>,
     overriding: Option<MergeIdentityOverride>,
+    /// For a MERGE into a view, the view's own defaults for the columns the
+    /// arm leaves out, keyed by base column; they replace the base relation's.
+    view_defaults: &'a [(String, BoundSqlExpression)],
 }
 
 impl MergeInsertDefaults<'_> {
@@ -997,14 +1034,17 @@ impl MergeInsertDefaults<'_> {
             })
     }
 
-    /// The column's default: its planner default, else the bound draw of
+    /// The column's default: the view's default when the arm writes through
+    /// a view that has one, else its planner default, else the bound draw of
     /// the sequence behind it, else NULL. A MERGE arm's kernel writes the
     /// row it is handed, so the draw a plain INSERT leaves to the host
     /// stands in the row here, where the rewriter puts it.
     fn column_default(&self, column: &str) -> Expr {
-        self.table_source
-            .get_column_default(column)
-            .cloned()
+        self.view_defaults
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(column))
+            .map(|(_, expression)| expression.expression().clone())
+            .or_else(|| self.table_source.get_column_default(column).cloned())
             .or_else(|| {
                 self.generated
                     .and_then(|generated| generated.explicit_default(column))
@@ -3481,14 +3521,14 @@ impl SqlToRel<'_> {
             return not_impl_err!("MERGE OUTPUT/RETURNING not supported");
         }
 
-        // MERGE's target row set feeds both the join and every clause's
-        // assignments, so only a view whose namespace and row set are
-        // identical to its base relation's may retarget; anything else is
-        // refused rather than rewritten wrong. A passthrough view stack has
-        // no row restriction, so there is no check-option obligation to
-        // record. The arms' row actions decide whether the view's INSTEAD OF
-        // triggers own the statement instead, in which case it is not
-        // retargeted at all.
+        // A MERGE into an automatically updatable view retargets onto the
+        // view's base relation, as PostgreSQL's rewriteTargetView does: the
+        // statement's expressions read the view's row, its arms write the
+        // base columns behind the view's, the view's row restrictions limit
+        // the rows the target offers, and its check option binds the rows
+        // the arms write. The arms' row actions decide whether the view's
+        // INSTEAD OF triggers own the statement instead, in which case it is
+        // not retargeted at all.
         let mut row_actions = MergeRowActions::default();
         for clause in &clauses {
             match &clause.action {
@@ -3509,16 +3549,28 @@ impl SqlToRel<'_> {
             _ => None,
         };
         let mut table = table;
-        if let Some(view_target) = view_target {
-            if !crate::view_dml::merge_target_is_passthrough(&view_target) {
-                return Err(self.context_provider.dml_view_error(
-                    ViewDmlError::MergeNotSupported {
-                        view_name: &view_target.view_name,
-                    },
-                ));
-            }
-            if let TableFactor::Table { name, .. } = &mut table {
+        let mut clauses = clauses;
+        // Per arm, the view's own defaults for the columns an INSERT arm
+        // leaves out, keyed by base column.
+        let mut arm_view_defaults = vec![Vec::new(); clauses.len()];
+        if let Some(view_target) = &view_target {
+            arm_view_defaults =
+                crate::view_dml::rewrite_merge_clauses(view_target, &mut clauses)
+                    .map_err(|failure| {
+                        self.context_provider
+                            .dml_view_error(failure.as_view_error(&view_target.view_name))
+                    })?;
+            if let TableFactor::Table { name, alias, .. } = &mut table {
                 *name = view_target.base_relation.clone();
+                // Without an alias the statement names the target by the
+                // view's name.
+                if alias.is_none() {
+                    *alias = Some(ast::TableAlias {
+                        name: Ident::with_quote('"', view_target.view_name.as_str()),
+                        columns: Vec::new(),
+                        implicit: false,
+                    });
+                }
             }
         }
 
@@ -3607,6 +3659,29 @@ impl SqlToRel<'_> {
             source_plan.schema(),
             &JoinType::Inner,
         )?;
+        // Through a view, the statement's expressions read the view's row
+        // under the target's name: they bind against the view's columns and
+        // then read the base row the view's columns are computed from.
+        let target_width = target_schema.fields().len();
+        let view_scope = view_target
+            .as_ref()
+            .map(|target| {
+                view_expression_scope_under(
+                    &target_plan,
+                    target_width,
+                    target,
+                    &target_relation,
+                )
+            })
+            .transpose()?;
+        let binding_target_schema = view_scope
+            .as_ref()
+            .map_or_else(|| target_plan.schema(), LogicalPlan::schema);
+        let binding_join_schema = build_join_schema(
+            binding_target_schema,
+            source_plan.schema(),
+            &JoinType::Inner,
+        )?;
 
         // A clause sees only the rows that exist for its match kind: a NOT
         // MATCHED [BY TARGET] clause has no target row, and a NOT MATCHED BY
@@ -3618,24 +3693,40 @@ impl SqlToRel<'_> {
                 let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
                 let mut using_columns = HashSet::new();
                 expr_to_columns(&expr, &mut using_columns)?;
-                normalize_col_with_schemas_and_ambiguity_check(
+                let expr = normalize_col_with_schemas_and_ambiguity_check(
                     expr,
                     &[&[schema]],
                     &[using_columns.into()],
-                )
+                )?;
+                match &view_target {
+                    Some(target) => substitute_bound_view_reads_under(
+                        expr,
+                        target,
+                        target_relation.table(),
+                        target_plan.schema(),
+                        target_width,
+                    ),
+                    None => Ok(expr),
+                }
             };
 
-        let on_expr = normalize_expr_in(*on, &join_schema)?;
+        let on_expr = normalize_expr_in(*on, &binding_join_schema)?;
 
         let mut merge_clauses = Vec::with_capacity(clauses.len());
-        for clause in clauses {
-            let clause_schema = match clause.clause_kind {
+        for (clause, view_defaults) in clauses.into_iter().zip(&arm_view_defaults) {
+            // The schema the clause's expressions are written against, and
+            // the one their bound values read.
+            let (clause_schema, value_schema) = match clause.clause_kind {
                 ast::MergeClauseKind::NotMatched
-                | ast::MergeClauseKind::NotMatchedByTarget => {
-                    source_plan.schema().as_ref()
-                }
-                ast::MergeClauseKind::NotMatchedBySource => target_plan.schema().as_ref(),
-                ast::MergeClauseKind::Matched => &join_schema,
+                | ast::MergeClauseKind::NotMatchedByTarget => (
+                    source_plan.schema().as_ref(),
+                    source_plan.schema().as_ref(),
+                ),
+                ast::MergeClauseKind::NotMatchedBySource => (
+                    binding_target_schema.as_ref(),
+                    target_plan.schema().as_ref(),
+                ),
+                ast::MergeClauseKind::Matched => (&binding_join_schema, &join_schema),
             };
             let mut normalize_expr = |sql_expr: SQLExpr| -> Result<Expr> {
                 normalize_expr_in(sql_expr, clause_schema)
@@ -3662,6 +3753,7 @@ impl SqlToRel<'_> {
                         table_source: table_source.as_ref(),
                         generated: generated_columns.as_ref(),
                         overriding,
+                        view_defaults,
                     };
                     let kind = match insert.kind {
                         // DEFAULT VALUES is the whole row taken from defaults:
@@ -3673,7 +3765,7 @@ impl SqlToRel<'_> {
                                     &named_columns,
                                     &[],
                                     &defaults,
-                                    clause_schema,
+                                    value_schema,
                                 )?,
                             ])
                         }
@@ -3696,7 +3788,7 @@ impl SqlToRel<'_> {
                                     &named_columns,
                                     &expr_row,
                                     &defaults,
-                                    clause_schema,
+                                    value_schema,
                                 )?);
                             }
                             MergeInsertKind::Values(rows)
@@ -3738,7 +3830,7 @@ impl SqlToRel<'_> {
                                         target_plan.schema(),
                                     )
                                 })?;
-                            value = self.assign_to_column(value, field, clause_schema)?;
+                            value = self.assign_to_column(value, field, value_schema)?;
                         }
                         assignments.push(MergeAssignment { target, value });
                     }
@@ -3806,14 +3898,45 @@ impl SqlToRel<'_> {
             target_select_rights = target_select_rights.and(arm_rights);
         }
 
-        Ok(LogicalPlan::Merge(Merge::new(
+        // The view's row restrictions limit the rows the target offers: a
+        // base row the view hides matches no source row, so the source row
+        // takes a NOT MATCHED arm, and no NOT MATCHED BY SOURCE arm acts on
+        // it. They are the view's, not the statement's reads, so they add no
+        // target privilege.
+        let mut on_expr = on_expr;
+        let mut check_option = None;
+        if let Some(target) = &view_target {
+            if let Some(restriction) = target
+                .row_restrictions
+                .iter()
+                .map(|restriction| restriction.expression().clone())
+                .reduce(Expr::and)
+            {
+                let restriction =
+                    normalize_bound_view_expression(restriction, target_plan.schema())?;
+                on_expr = on_expr.and(restriction.clone());
+                for clause in &mut merge_clauses {
+                    if clause.clause_kind == MergeClauseKind::NotMatchedBySource {
+                        clause.predicate = Some(match clause.predicate.take() {
+                            Some(predicate) => restriction.clone().and(predicate),
+                            None => restriction.clone(),
+                        });
+                    }
+                }
+            }
+            check_option = crate::view_dml::bind_check_option(target)?;
+        }
+
+        let mut merge = Merge::new(
             table_ref,
             Arc::new(target_plan),
             Arc::new(source_plan),
             on_expr,
             merge_clauses,
             target_select_rights,
-        )))
+        );
+        merge.check_option = check_option;
+        Ok(LogicalPlan::Merge(merge))
     }
 
     /// Plan one assignment through a subscript or field path below a column.
@@ -5335,18 +5458,62 @@ impl SqlToRel<'_> {
                 // target table columns + EXCLUDED columns
                 let combined_schema = qualified_table_schema.join(&excluded_schema)?;
 
-                // Plan the assignments
-                let mut assignments = Vec::with_capacity(do_update.assignments.len());
-                for assignment in &do_update.assignments {
-                    let scalar_assignments = match &assignment.target {
-                        AssignmentTarget::Indirection(target) => {
-                            return not_impl_err!(
-                                "Assignment to a subscripted or field target is not supported: {target}"
-                            );
+                // A dotted target names the column first, as in UPDATE:
+                // `SET c.f = ..` writes field `f` of column `c`. A leading
+                // name that is not a column is a qualifier instead.
+                let split_column_target =
+                    |name: &ObjectName| -> Result<(String, Vec<AccessExpr>)> {
+                        let idents = name
+                            .0
+                            .iter()
+                            .map(|part| {
+                                part.as_ident().cloned().ok_or_else(|| {
+                                    plan_datafusion_err!(
+                                        "ON CONFLICT assignment target is not a column: {name}"
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        let (Some(first), Some(last)) = (idents.first(), idents.last())
+                        else {
+                            return plan_err!("Empty column id");
+                        };
+                        let first_name = self.ident_normalizer.normalize(first.clone());
+                        if idents.len() > 1
+                            && table_schema
+                                .field_with_unqualified_name(&first_name)
+                                .is_ok()
+                        {
+                            let fields = idents[1..]
+                                .iter()
+                                .map(|ident| {
+                                    AccessExpr::Dot(SQLExpr::Identifier(ident.clone()))
+                                })
+                                .collect();
+                            return Ok((first_name, fields));
                         }
-                        AssignmentTarget::ColumnName(_) => {
+                        Ok((self.ident_normalizer.normalize(last.clone()), Vec::new()))
+                    };
+
+                // A column takes either one whole-value assignment or any
+                // number of assignments through a field or subscript path,
+                // which apply in statement order.
+                let mut target_order: Vec<String> = Vec::new();
+                let mut assign_map: HashMap<String, Cow<'_, SQLExpr>> = HashMap::new();
+                let mut path_assign_map: HashMap<
+                    String,
+                    Vec<(Vec<AccessExpr>, Cow<'_, SQLExpr>)>,
+                > = HashMap::new();
+                for assignment in &do_update.assignments {
+                    let targets = match &assignment.target {
+                        AssignmentTarget::Indirection(target) => {
+                            let (column, mut path) = split_column_target(&target.column)?;
+                            path.extend(target.indirection.iter().cloned());
+                            vec![((column, path), Cow::Borrowed(&assignment.value))]
+                        }
+                        AssignmentTarget::ColumnName(name) => {
                             vec![(
-                                assignment.target.clone(),
+                                split_column_target(name)?,
                                 Cow::Borrowed(&assignment.value),
                             )]
                         }
@@ -5377,75 +5544,78 @@ impl SqlToRel<'_> {
                             }
                             targets
                                 .iter()
-                                .cloned()
                                 .zip(values)
                                 .map(|(target, value)| {
-                                    (AssignmentTarget::ColumnName(target), value)
+                                    Ok((split_column_target(target)?, value))
                                 })
-                                .collect()
+                                .collect::<Result<Vec<_>>>()?
                         }
                     };
-
-                    for (target, sql_value) in scalar_assignments {
-                        let AssignmentTarget::ColumnName(target) = target else {
-                            return plan_err!(
-                                "ON CONFLICT assignment did not lower to a single column"
-                            );
-                        };
-                        let target = target
-                            .0
-                            .last()
-                            .and_then(|part| part.as_ident())
-                            .cloned()
-                            .map(|ident| self.ident_normalizer.normalize(ident))
-                            .ok_or_else(|| {
+                    for ((column, path), value) in targets {
+                        table_schema.field_with_unqualified_name(&column).map_err(
+                            |_| {
                                 plan_datafusion_err!(
-                                    "ON CONFLICT assignment target is not a simple column: {target}"
+                                    "ON CONFLICT assignment targets unknown column {column}"
                                 )
-                            })?;
-                        if generated_columns.is_some_and(|generated| {
-                            generated
-                                .columns
-                                .iter()
-                                .any(|column| column.eq_ignore_ascii_case(&target))
-                        }) {
-                            if matches!(
-                                sql_value.as_ref(),
-                                SQLExpr::Identifier(identifier)
-                                    if is_default_identifier(identifier)
-                            ) {
-                                // DEFAULT on a generated column writes its
-                                // expression's value: the assignment below
-                                // computes it when the action reaches it,
-                                // and otherwise the stored value stands.
-                                continue;
+                            },
+                        )?;
+                        if path.is_empty() {
+                            if assign_map.contains_key(&column)
+                                || path_assign_map.contains_key(&column)
+                            {
+                                return multiple_assignments_err(&column);
                             }
+                            target_order.push(column.clone());
+                            assign_map.insert(column, value);
+                        } else {
+                            if assign_map.contains_key(&column) {
+                                return multiple_assignments_err(&column);
+                            }
+                            if !path_assign_map.contains_key(&column) {
+                                target_order.push(column.clone());
+                            }
+                            path_assign_map.entry(column).or_default().push((path, value));
+                        }
+                    }
+                }
+
+                // Plan the assignments
+                let mut assignments = Vec::with_capacity(target_order.len());
+                for target in target_order {
+                    let generated = generated_columns.is_some_and(|generated| {
+                        generated
+                            .columns
+                            .iter()
+                            .any(|column| column.eq_ignore_ascii_case(&target))
+                    });
+                    let field = table_schema.field_with_unqualified_name(&target)?;
+                    if let Some(path_assignments) = path_assign_map.remove(&target) {
+                        if generated {
                             return Err(self
                                 .context_provider
-                                .generated_column_write_error(
-                                    table_name.table(),
-                                    &target,
-                                ));
+                                .generated_column_write_error(table_name.table(), &target));
                         }
-                        let value = if matches!(
-                            sql_value.as_ref(),
-                            SQLExpr::Identifier(identifier)
-                                if is_default_identifier(identifier)
-                        ) {
-                            generated_columns
-                                .and_then(|generated| generated.explicit_default(&target))
-                                .or_else(|| {
-                                    table_source.get_column_default(&target).cloned()
-                                })
-                                .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
-                        } else {
-                            self.sql_to_expr_ref(
+                        // Each path assignment writes into the value the ones
+                        // before it left, starting from the stored row's.
+                        let mut value = Expr::Column(Column::new(
+                            Some(table_ref.clone()),
+                            target.clone(),
+                        ));
+                        for (path, sql_value) in path_assignments {
+                            let assigned = self.sql_to_expr_ref(
                                 sql_value.as_ref(),
                                 &combined_schema,
                                 planner_context,
-                            )?
-                        };
-                        // Normalize column references
+                            )?;
+                            value = self.plan_assignment_target(
+                                value,
+                                Arc::clone(field),
+                                &path,
+                                assigned,
+                                &combined_schema,
+                                planner_context,
+                            )?;
+                        }
                         let mut using_columns = HashSet::new();
                         expr_to_columns(&value, &mut using_columns)?;
                         let value = normalize_col_with_schemas_and_ambiguity_check(
@@ -5453,20 +5623,56 @@ impl SqlToRel<'_> {
                             &[&[&combined_schema]],
                             &[using_columns.into()],
                         )?;
-                        // The value reaches the column by assignment, exactly
-                        // as an UPDATE's does.
-                        let field = table_schema
-                            .field_with_unqualified_name(&target)
-                            .map_err(|_| {
-                                plan_datafusion_err!(
-                                    "ON CONFLICT assignment targets unknown column {target}"
-                                )
-                            })?;
-                        let value =
-                            self.assign_to_column(value, field, &combined_schema)?;
-
+                        let value = self.assign_to_column(value, field, &combined_schema)?;
                         assignments.push(ConflictAssignment { target, value });
+                        continue;
                     }
+                    let Some(sql_value) = assign_map.remove(&target) else {
+                        return internal_err!(
+                            "ON CONFLICT assignment to {target} was not collected"
+                        );
+                    };
+                    let is_default = matches!(
+                        sql_value.as_ref(),
+                        SQLExpr::Identifier(identifier)
+                            if is_default_identifier(identifier)
+                    );
+                    if generated {
+                        if is_default {
+                            // DEFAULT on a generated column writes its
+                            // expression's value: the assignment below
+                            // computes it when the action reaches it, and
+                            // otherwise the stored value stands.
+                            continue;
+                        }
+                        return Err(self
+                            .context_provider
+                            .generated_column_write_error(table_name.table(), &target));
+                    }
+                    let value = if is_default {
+                        generated_columns
+                            .and_then(|generated| generated.explicit_default(&target))
+                            .or_else(|| table_source.get_column_default(&target).cloned())
+                            .unwrap_or_else(|| Expr::Literal(ScalarValue::Null, None))
+                    } else {
+                        self.sql_to_expr_ref(
+                            sql_value.as_ref(),
+                            &combined_schema,
+                            planner_context,
+                        )?
+                    };
+                    // Normalize column references
+                    let mut using_columns = HashSet::new();
+                    expr_to_columns(&value, &mut using_columns)?;
+                    let value = normalize_col_with_schemas_and_ambiguity_check(
+                        value,
+                        &[&[&combined_schema]],
+                        &[using_columns.into()],
+                    )?;
+                    // The value reaches the column by assignment, exactly as an
+                    // UPDATE's does.
+                    let value = self.assign_to_column(value, field, &combined_schema)?;
+                    assignments.push(ConflictAssignment { target, value });
                 }
 
                 if let Some(generated) = generated_columns

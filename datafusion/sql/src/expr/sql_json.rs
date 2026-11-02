@@ -25,14 +25,20 @@
 //! provider registers for each form, and the declared `RETURNING` type becomes
 //! the cast around the call — so the document is built once and typed after.
 
-use datafusion_common::{DFSchema, Result, ScalarValue, not_impl_err, plan_err};
+use datafusion_common::error::{
+    sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
+};
+use datafusion_common::{
+    DFSchema, Result, ScalarValue, internal_err, not_impl_err, plan_err,
+};
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{Expr, lit};
 use sqlparser::ast::{
     CastKind, DataType as SQLDataType, Expr as SQLExpr, ExprWithAlias,
     Function as SQLFunction, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
-    FunctionArguments, JsonNullClause, JsonOnBehavior, JsonPredicateUniqueKeyConstraint,
-    JsonQueryWrapper, JsonQuotesBehavior, JsonQuotesClause, OrderByExpr,
+    FunctionArguments, JsonEncoding, JsonFormatClause, JsonNullClause, JsonOnBehavior,
+    JsonPredicateUniqueKeyConstraint, JsonQueryWrapper, JsonQuotesBehavior,
+    JsonQuotesClause, OrderByExpr,
 };
 
 use crate::planner::{PlannerContext, SqlToRel};
@@ -41,7 +47,8 @@ use crate::planner::{PlannerContext, SqlToRel};
 #[derive(Default)]
 struct SqlJsonClauses {
     returning: Option<SQLDataType>,
-    returning_encoding: bool,
+    /// The `FORMAT JSON [ENCODING ...]` qualifying the `RETURNING` type.
+    returning_format: Option<JsonFormatClause>,
     wrapper: Option<JsonQueryWrapper>,
     quotes: Option<JsonQuotesClause>,
     on_empty: Option<JsonOnBehavior>,
@@ -59,7 +66,7 @@ impl SqlJsonClauses {
             match clause {
                 FunctionArgumentClause::JsonReturningClause(returning) => {
                     collected.returning = Some(returning.data_type.clone());
-                    collected.returning_encoding = returning.format.is_some();
+                    collected.returning_format = returning.format.clone();
                 }
                 FunctionArgumentClause::JsonQueryWrapper(wrapper) => {
                     collected.wrapper = Some(wrapper.clone());
@@ -244,6 +251,7 @@ impl SqlToRel<'_> {
         {
             return Ok(None);
         }
+        self.check_returning_format(&clauses)?;
         let arguments = SqlJsonArguments::collect(&list.args);
 
         let planned = match name.as_str() {
@@ -292,7 +300,76 @@ impl SqlToRel<'_> {
             (None, "json_query") => SQLDataType::JSONB,
             (None, _) => SQLDataType::JSON,
         };
+        // A constructed document reaches bytea as its UTF8 bytes; there is no
+        // json-to-bytea cast. JSON_VALUE and JSON_QUERY coerce their result
+        // through bytea's input function, which the cast is.
+        if !matches!(name, "json_value" | "json_query" | "json_exists")
+            && self.is_bytea_type(&target)?
+        {
+            let text =
+                self.finish_cast_expr(expr, &SQLDataType::Text, CastKind::Cast, None, schema)?;
+            let Some(convert_to) = self.context_provider.get_function_meta("convert_to")
+            else {
+                return internal_err!(
+                    "SQL/JSON RETURNING bytea requires the 'convert_to' function"
+                );
+            };
+            return Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                convert_to,
+                vec![text, lit("UTF8")],
+            )));
+        }
         self.finish_cast_expr(expr, &target, CastKind::Cast, None, schema)
+    }
+
+    /// Whether a written type is `bytea`, as the type planner spells it.
+    fn is_bytea_type(&self, data_type: &SQLDataType) -> Result<bool> {
+        if matches!(data_type, SQLDataType::Bytea) {
+            return Ok(true);
+        }
+        let canonical = match self.context_provider.get_type_planner() {
+            Some(type_planner) => type_planner.canonical_type_spelling(data_type)?,
+            None => None,
+        };
+        Ok(matches!(canonical, Some(SQLDataType::Bytea)))
+    }
+
+    /// PostgreSQL's rules for `RETURNING type FORMAT JSON ENCODING name`: the
+    /// encoding is one it knows, the type is `bytea`, and the encoding UTF8.
+    fn check_returning_format(&self, clauses: &SqlJsonClauses) -> Result<()> {
+        let (Some(returning), Some(format)) =
+            (&clauses.returning, &clauses.returning_format)
+        else {
+            return Ok(());
+        };
+        let Some(encoding) = &format.encoding else {
+            return Ok(());
+        };
+        if let JsonEncoding::Custom(name) = encoding {
+            let name = if name.quote_style.is_some() {
+                name.value.clone()
+            } else {
+                name.value.to_lowercase()
+            };
+            return Err(sqlstate_datafusion_err(
+                "22023",
+                format!("unrecognized JSON encoding: {name}"),
+            ));
+        }
+        if !self.is_bytea_type(returning)? {
+            return Err(sqlstate_datafusion_err(
+                "0A000",
+                "cannot set JSON encoding for non-bytea output types",
+            ));
+        }
+        if !matches!(encoding, JsonEncoding::Utf8) {
+            return Err(sqlstate_datafusion_err_with_hint(
+                "0A000",
+                "unsupported JSON encoding",
+                "Only UTF8 JSON encoding is supported.",
+            ));
+        }
+        Ok(())
     }
 
     /// `PASSING v AS n, ...` becomes the `vars` object the jsonpath evaluator
@@ -445,11 +522,7 @@ impl SqlToRel<'_> {
                 )
             }
             "json_object" => {
-                let mut args = vec![
-                    lit(absent_on_null),
-                    lit(clauses.unique_keys),
-                    lit(clauses.returning_encoding),
-                ];
+                let mut args = vec![lit(absent_on_null), lit(clauses.unique_keys)];
                 for (key, value) in &arguments.pairs {
                     args.push(self.sql_expr_to_logical_expr(
                         key,

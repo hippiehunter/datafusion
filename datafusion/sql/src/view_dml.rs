@@ -36,8 +36,9 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{BoundSqlExpression, DmlCheckOption, LogicalPlan};
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, Expr as SQLExpr, Ident, ObjectName, ObjectNamePart,
-    Query, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visitor,
+    Assignment, AssignmentTarget, Expr as SQLExpr, Ident, MergeAction, MergeClause,
+    MergeInsertKind, ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, TableAlias,
+    TableFactor, TableWithJoins, Visitor,
 };
 use std::ops::ControlFlow;
 
@@ -142,38 +143,10 @@ pub(crate) fn rewrite_insert(
     source: Option<&Query>,
     returning: Option<&[SelectItem]>,
 ) -> Result<RewrittenInsert, RewriteFailure> {
-    let rewritten_columns = if columns.is_empty() {
-        let width = source
-            .and_then(insert_source_width)
-            .unwrap_or(target.columns.len());
-        let mut rewritten = Vec::with_capacity(width);
-        for (view_column, base_column) in target.columns.iter().take(width) {
-            let Some(base_column) = base_column else {
-                return Err(RewriteFailure {
-                    verb: "insert into",
-                    column: view_column.clone(),
-                });
-            };
-            rewritten.push(Ident::with_quote('"', base_column.as_str()));
-        }
-        rewritten
-    } else {
-        let mut rewritten = Vec::with_capacity(columns.len());
-        for column in columns {
-            let base_column =
-                target.base_column(&column.value).flatten().ok_or_else(|| {
-                    RewriteFailure {
-                        verb: "insert into",
-                        column: column.value.clone(),
-                    }
-                })?;
-            let mut renamed = column.clone();
-            renamed.value = base_column.to_string();
-            renamed.quote_style = Some('"');
-            rewritten.push(renamed);
-        }
-        rewritten
-    };
+    let width = source
+        .and_then(insert_source_width)
+        .unwrap_or(target.columns.len());
+    let rewritten_columns = base_insert_columns(target, columns, width, "insert into")?;
 
     // Defaults attached to the view itself override the base relation's, but
     // only for view columns this statement omitted. Keep them semantic and
@@ -218,6 +191,114 @@ fn insert_source_width(source: &Query) -> Option<usize> {
         return None;
     };
     values.rows.first().map(Vec::len)
+}
+
+/// The base columns an INSERT through the view writes, quoted so identifier
+/// normalization keeps the catalog's spelling. A written list maps column by
+/// column; without one the row covers the view's first `width` columns in
+/// order. A computed view column cannot be written.
+fn base_insert_columns(
+    target: &ViewDmlTarget,
+    columns: &[Ident],
+    width: usize,
+    verb: &'static str,
+) -> Result<Vec<Ident>, RewriteFailure> {
+    if columns.is_empty() {
+        let mut rewritten = Vec::with_capacity(width);
+        for (view_column, base_column) in target.columns.iter().take(width) {
+            let Some(base_column) = base_column else {
+                return Err(RewriteFailure {
+                    verb,
+                    column: view_column.clone(),
+                });
+            };
+            rewritten.push(Ident::with_quote('"', base_column.as_str()));
+        }
+        return Ok(rewritten);
+    }
+    let mut rewritten = Vec::with_capacity(columns.len());
+    for column in columns {
+        let base_column = target
+            .base_column(&column.value)
+            .flatten()
+            .ok_or_else(|| RewriteFailure {
+                verb,
+                column: column.value.clone(),
+            })?;
+        let mut renamed = column.clone();
+        renamed.value = base_column.to_string();
+        renamed.quote_style = Some('"');
+        rewritten.push(renamed);
+    }
+    Ok(rewritten)
+}
+
+/// Retarget a MERGE's arms onto the base relation: an UPDATE arm's `SET`
+/// targets and an INSERT arm's column list name base columns, and an INSERT
+/// arm without a column list names the view columns its row covers. Returns,
+/// per arm, the view's own defaults for the view columns an INSERT arm leaves
+/// out, keyed by the base column; they take the place of the base relation's
+/// defaults. As in PostgreSQL, every failure names the verb `merge into`.
+pub(crate) fn rewrite_merge_clauses(
+    target: &ViewDmlTarget,
+    clauses: &mut [MergeClause],
+) -> Result<Vec<Vec<(String, BoundSqlExpression)>>, RewriteFailure> {
+    const VERB: &str = "merge into";
+    let mut view_defaults = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let mut arm_defaults = Vec::new();
+        match &mut clause.action {
+            MergeAction::Update { assignments, .. } => {
+                for assignment in assignments {
+                    rewrite_assignment_target(assignment, target, VERB)?;
+                }
+            }
+            MergeAction::Insert(insert) => {
+                let width = match &insert.kind {
+                    MergeInsertKind::Values(values) => {
+                        values.rows.first().map_or(0, Vec::len)
+                    }
+                    MergeInsertKind::DefaultValues => 0,
+                    MergeInsertKind::Row => target.columns.len(),
+                };
+                let written: Vec<&str> = if insert.columns.is_empty() {
+                    target
+                        .columns
+                        .iter()
+                        .take(width)
+                        .map(|(view_column, _)| view_column.as_str())
+                        .collect()
+                } else {
+                    insert
+                        .columns
+                        .iter()
+                        .map(|column| column.value.as_str())
+                        .collect()
+                };
+                for (view_column, expression) in &target.column_defaults {
+                    if written
+                        .iter()
+                        .any(|column| column.eq_ignore_ascii_case(view_column))
+                    {
+                        continue;
+                    }
+                    let base_column =
+                        target.base_column(view_column).flatten().ok_or_else(|| {
+                            RewriteFailure {
+                                verb: VERB,
+                                column: view_column.clone(),
+                            }
+                        })?;
+                    arm_defaults.push((base_column.to_string(), expression.clone()));
+                }
+                insert.columns =
+                    base_insert_columns(target, &insert.columns, width, VERB)?;
+            }
+            MergeAction::Delete | MergeAction::DoNothing => {}
+        }
+        view_defaults.push(arm_defaults);
+    }
+    Ok(view_defaults)
 }
 
 pub(crate) struct RewrittenUpdate {
@@ -270,7 +351,7 @@ pub(crate) fn rewrite_update(
     let mut rewritten_assignments = Vec::with_capacity(assignments.len());
     for assignment in assignments {
         let mut assignment = assignment.clone();
-        rewrite_assignment_target(&mut assignment, target)?;
+        rewrite_assignment_target(&mut assignment, target, "update")?;
         rewritten_assignments.push(assignment);
     }
 
@@ -328,17 +409,13 @@ pub(crate) fn rewrite_delete(
     }
 }
 
-/// MERGE's target row set feeds both the join and every clause's assignments,
-/// so a view that renames columns or restricts rows would need the whole
-/// statement rewritten in step. Retargeting is allowed only when the view's
-/// namespace and row set are identical to the base relation's.
-pub(crate) fn merge_target_is_passthrough(target: &ViewDmlTarget) -> bool {
-    target.row_restrictions.is_empty() && target.columns_are_passthrough()
-}
-
+/// Map a `SET` target from the view's column onto the base column backing it.
+/// A computed view column cannot be assigned; `verb` names the statement in
+/// that error.
 fn rewrite_assignment_target(
     assignment: &mut Assignment,
     target: &ViewDmlTarget,
+    verb: &'static str,
 ) -> Result<(), RewriteFailure> {
     let names: Vec<&mut ObjectName> = match &mut assignment.target {
         AssignmentTarget::ColumnName(name) => vec![name],
@@ -355,7 +432,7 @@ fn rewrite_assignment_target(
                 .base_column(&written.value)
                 .flatten()
                 .ok_or_else(|| RewriteFailure {
-                    verb: "update",
+                    verb,
                     column: written.value.clone(),
                 })?;
         // The base column name is the catalog's resolved spelling; quoting

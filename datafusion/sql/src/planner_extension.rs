@@ -114,6 +114,19 @@ pub trait ContextProvider {
         Ok(expr)
     }
 
+    /// Lower a numeric literal the default lowering cannot carry exactly: a
+    /// decimal whose digits exceed Decimal256 or whose exponent leaves
+    /// Decimal's scale range, or a radix integer wider than i128.
+    /// `unsigned_number` is the text as written, without its sign. `Ok(None)`
+    /// keeps the default lowering.
+    fn plan_number_literal(
+        &self,
+        _unsigned_number: &str,
+        _negative: bool,
+    ) -> Result<Option<Expr>> {
+        Ok(None)
+    }
+
     /// Attach embedding-owned identity to an explicit whole-row reference.
     /// `relation` is its range-table qualifier and `source` is the bound base
     /// relation before aliasing. Derived queries, CTEs, functions and joined
@@ -449,9 +462,6 @@ pub trait ContextProvider {
             } => DataFusionError::Plan(format!(
                 "cannot {verb} column \"{column}\" of view \"{view_name}\""
             )),
-            ViewDmlError::MergeNotSupported { view_name } => {
-                DataFusionError::Plan(format!("cannot merge into view \"{view_name}\""))
-            }
         }
     }
 
@@ -1336,15 +1346,6 @@ impl ViewDmlTarget {
             .find(|(name, _)| name.eq_ignore_ascii_case(view_column))
             .map(|(_, base)| base.as_deref())
     }
-
-    /// True when every view column passes through to a same-named base
-    /// column.
-    pub fn columns_are_passthrough(&self) -> bool {
-        self.columns.iter().all(|(name, base)| {
-            base.as_deref()
-                .is_some_and(|base| base.eq_ignore_ascii_case(name))
-        })
-    }
 }
 
 /// A DML target relation's generated columns, resolved by
@@ -1441,11 +1442,6 @@ pub enum ViewDmlError<'a> {
         view_name: &'a str,
         /// The column the statement writes.
         column: &'a str,
-    },
-    /// MERGE on a view that renames columns or restricts rows.
-    MergeNotSupported {
-        /// The view's bare name.
-        view_name: &'a str,
     },
 }
 

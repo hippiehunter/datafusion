@@ -5653,6 +5653,17 @@ mod postgres_planning_semantics {
                 ),
             ]
         );
+        // The escape is any expression, here a column of the row.
+        assert_eq!(
+            similar_to_shapes(
+                "SELECT first_name SIMILAR TO 'J%' ESCAPE last_name FROM person",
+                2,
+            ),
+            vec![(
+                Operator::RegexMatch,
+                vec![lit("J%"), col("person.last_name")]
+            )]
+        );
     }
 
     #[test]

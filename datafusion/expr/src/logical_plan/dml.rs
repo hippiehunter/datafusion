@@ -64,18 +64,23 @@ pub struct DmlCheckOption {
 /// Ordinary INSERT/UPDATE/DELETE projections need no context: the operation
 /// identifies their row image. The enum deliberately represents only the two
 /// exceptional layouts so a logical plan cannot carry a context with no
-/// schema, a dual-image MERGE action column, or another meaningless
+/// schema, an action column outside MERGE, or another meaningless
 /// combination.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReturningContext {
     /// PostgreSQL OLD/NEW evaluation. The schema contains the target row
     /// twice, before-image fields followed by after-image fields.
     DualImage { eval_schema: DFSchemaRef },
-    /// MERGE evaluates against whichever image its applied action produced.
+    /// MERGE evaluates against the image its applied action produced.
     /// `action_column` identifies the synthetic `merge_action` text field.
     MergeApplied {
         eval_schema: DFSchemaRef,
         action_column: usize,
+        /// true: `eval_schema` is the before image (OLD qualifier) then the
+        /// after image (NEW qualifier), each the target row's full width, then
+        /// the action column; an image the action did not produce is all
+        /// nulls. false: one applied image, then the action column.
+        dual_image: bool,
     },
 }
 

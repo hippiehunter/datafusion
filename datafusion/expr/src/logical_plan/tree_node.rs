@@ -285,6 +285,7 @@ impl TreeNode for LogicalPlan {
                 returning_context,
                 output_schema,
                 target_select_rights,
+                check_option,
             }) => (target, source)
                 .map_elements(f)?
                 .update_data(|(target, source)| {
@@ -299,6 +300,7 @@ impl TreeNode for LogicalPlan {
                         returning_context,
                         output_schema,
                         target_select_rights,
+                        check_option,
                     })
                 }),
             LogicalPlan::CopyFrom(CopyFrom {

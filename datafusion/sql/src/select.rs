@@ -594,14 +594,6 @@ impl SqlToRel<'_> {
                 // itself. Its expressions and the ORDER BY that picks the kept
                 // row read the rows it filters, so a reference to an output
                 // column reads that column's expression.
-                if select_exprs_post_aggr
-                    .iter()
-                    .any(has_unnest_expr_recursively)
-                {
-                    return not_impl_err!(
-                        "DISTINCT ON with a set-returning function in the select list"
-                    );
-                }
                 let input_schema = Arc::clone(plan.schema());
                 let on_expr = distinct_on_rex
                     .into_iter()
@@ -626,10 +618,24 @@ impl SqlToRel<'_> {
                         .map(|expr| sort.with_expr(expr))
                     })
                     .collect::<Result<Vec<SortExpr>>>()?;
-                let plan = LogicalPlanBuilder::from(plan)
-                    .distinct_on(on_expr, select_exprs_post_aggr, None)?
-                    .build()?;
-                (plan, order_by_rex)
+                if select_exprs_post_aggr
+                    .iter()
+                    .chain(&on_expr)
+                    .chain(order_by_rex.iter().map(|sort| &sort.expr))
+                    .any(has_unnest_expr_recursively)
+                {
+                    self.distinct_on_with_set_returning_functions(
+                        plan,
+                        select_exprs_post_aggr,
+                        on_expr,
+                        order_by_rex,
+                    )?
+                } else {
+                    let plan = LogicalPlanBuilder::from(plan)
+                        .distinct_on(on_expr, select_exprs_post_aggr, None)?
+                        .build()?;
+                    (plan, order_by_rex)
+                }
             }
             distinct => {
                 // Keep the typed select-list expressions until ORDER BY is bound to
@@ -660,6 +666,142 @@ impl SqlToRel<'_> {
 
         let plan = self.order_by(plan, order_by_rex)?;
         Ok(plan)
+    }
+
+    /// Plan DISTINCT ON when the select list, a DISTINCT ON expression or an
+    /// ORDER BY item holds a set-returning function, in PostgreSQL's order of
+    /// evaluation. `on_expr` and `order_by` are expressions over `plan`, the
+    /// rows DISTINCT ON reads.
+    ///
+    /// Set-returning functions expand below DISTINCT ON when no ORDER BY is
+    /// written or when a DISTINCT ON or ORDER BY key reads one. Otherwise every
+    /// set-returning select item is postponed above the sort and DISTINCT ON,
+    /// so a kept row expands after it is chosen:
+    /// `SELECT DISTINCT ON (a) a, generate_series(1, a) FROM t ORDER BY a`
+    /// keeps one row per `a` and returns its whole series.
+    fn distinct_on_with_set_returning_functions(
+        &self,
+        plan: LogicalPlan,
+        select_exprs: Vec<Expr>,
+        on_expr: Vec<Expr>,
+        order_by: Vec<SortExpr>,
+    ) -> Result<(LogicalPlan, Vec<SortExpr>)> {
+        let keys: Vec<&Expr> = on_expr
+            .iter()
+            .chain(order_by.iter().map(|sort| &sort.expr))
+            .collect();
+        let postpone_srfs = !order_by.is_empty()
+            && !keys.iter().any(|key| has_unnest_expr_recursively(key));
+        let postponed: Vec<bool> = select_exprs
+            .iter()
+            .map(|expr| postpone_srfs && has_unnest_expr_recursively(expr))
+            .collect();
+
+        // The rows DISTINCT ON filters: the select items computed below it,
+        // then what its keys and the postponed items read besides them.
+        let below: Vec<Expr> = select_exprs
+            .iter()
+            .zip(&postponed)
+            .filter(|(_, postponed)| !**postponed)
+            .map(|(expr, _)| expr.clone())
+            .collect();
+        let mut carried = vec![];
+        for key in &keys {
+            carry_unnest_inputs(key, &below, true, &mut carried);
+        }
+        for (expr, _) in select_exprs
+            .iter()
+            .zip(&postponed)
+            .filter(|(_, postponed)| **postponed)
+        {
+            carry_unnest_inputs(expr, &below, false, &mut carried);
+        }
+        let expanded = self.try_process_unnest(
+            plan,
+            below
+                .iter()
+                .cloned()
+                .chain(carried.iter().enumerate().map(|(index, expr)| {
+                    expr.clone().alias(format!("__distinct_on_input_{index}"))
+                }))
+                .collect(),
+        )?;
+        let on_expr = on_expr
+            .into_iter()
+            .map(|expr| rebind_to_unnest_output(expr, &below, &carried, &expanded))
+            .collect::<Result<Vec<_>>>()?;
+        let order_by = order_by
+            .iter()
+            .map(|sort| {
+                rebind_to_unnest_output(sort.expr.clone(), &below, &carried, &expanded)
+                    .map(|expr| sort.with_expr(expr))
+            })
+            .collect::<Result<Vec<SortExpr>>>()?;
+
+        if !postpone_srfs {
+            // Every select item is computed below; the caller's ORDER BY
+            // becomes the DISTINCT ON's sort.
+            let select = (0..below.len())
+                .map(|index| unnest_output_column(&expanded, index))
+                .collect();
+            let plan = LogicalPlanBuilder::from(expanded)
+                .distinct_on(on_expr, select, None)?
+                .build()?;
+            return Ok((plan, order_by));
+        }
+
+        // DISTINCT ON keeps one row per key in ORDER BY order and passes
+        // through everything the postponed items read.
+        let pass_through = (0..expanded.schema().fields().len())
+            .map(|index| unnest_output_column(&expanded, index))
+            .collect();
+        let distinct = LogicalPlanBuilder::from(expanded)
+            .distinct_on(on_expr, pass_through, Some(order_by.clone()))?
+            .build()?;
+
+        // The select list over the kept rows, the postponed set-returning
+        // items expanding each one, with the sort keys carried to order the
+        // expanded rows.
+        let mut final_exprs = Vec::with_capacity(select_exprs.len() + order_by.len());
+        let mut below_index = 0;
+        for (expr, postponed) in select_exprs.iter().zip(&postponed) {
+            if *postponed {
+                let rebound =
+                    rebind_to_unnest_output(expr.clone(), &below, &carried, &distinct)?;
+                // Rebinding may respell what the item reads; it keeps its name.
+                let name = expr.qualified_name();
+                final_exprs.push(if rebound.qualified_name() == name {
+                    rebound
+                } else {
+                    rebound.alias_qualified(name.0, name.1)
+                });
+            } else {
+                final_exprs.push(unnest_output_column(&distinct, below_index));
+                below_index += 1;
+            }
+        }
+        let width = select_exprs.len();
+        final_exprs.extend(order_by.iter().enumerate().map(|(index, sort)| {
+            sort.expr
+                .clone()
+                .alias(format!("__distinct_on_order_{index}"))
+        }));
+        let projected = self.try_process_unnest(distinct, final_exprs)?;
+        let sort = order_by
+            .iter()
+            .enumerate()
+            .map(|(index, sort)| {
+                sort.with_expr(unnest_output_column(&projected, width + index))
+            })
+            .collect::<Vec<_>>();
+        let output = (0..width)
+            .map(|index| unnest_output_column(&projected, index))
+            .collect::<Vec<_>>();
+        let plan = LogicalPlanBuilder::from(projected)
+            .sort(sort)?
+            .project(output)?
+            .build()?;
+        Ok((plan, vec![]))
     }
 
     /// Try converting Expr(Unnest(Expr)) to Projection/Unnest/Projection
@@ -2039,35 +2181,97 @@ fn bind_unnest_order_by_to_output(
         .into_iter()
         .map(|sort| {
             let order_expr = sort.expr.clone().unalias();
-            let Some(output_index) =
-                select_exprs
-                    .iter()
-                    .position(|select_expr| match &order_expr {
-                        // ORDER BY aliases and ordinals are resolved against
-                        // the provisional select projection before relational
-                        // UNNEST expansion. Every provisional output column
-                        // can acquire a different qualifier when that expansion
-                        // rebuilds the projection, not only the SRF's own slot.
-                        // Bind the typed output identity to the same final slot.
-                        // The identity is the qualifier and the name together:
-                        // `a.id` and `b.id`, or `t.id` and an SRF aliased `id`,
-                        // are different output columns.
-                        Expr::Column(order_column) => {
-                            let (qualifier, name) = select_expr.qualified_name();
-                            qualifier == order_column.relation
-                                && name == order_column.name
-                        }
-                        _ => {
-                            has_unnest_expr_recursively(select_expr)
-                                && select_expr.clone().unalias() == order_expr
-                        }
-                    })
-            else {
-                return Ok(sort);
-            };
-            let (qualifier, field) = plan.schema().qualified_field(output_index);
-            Ok(sort
-                .with_expr(Expr::Column(Column::new(qualifier.cloned(), field.name()))))
+            // ORDER BY aliases and ordinals are resolved against the
+            // provisional select projection before relational UNNEST
+            // expansion. Every provisional output column can acquire a
+            // different qualifier when that expansion rebuilds the projection,
+            // not only the SRF's own slot. Bind the typed output identity to
+            // the same final slot. The identity is the qualifier and the name
+            // together: `a.id` and `b.id`, or `t.id` and an SRF aliased `id`,
+            // are different output columns.
+            if let Expr::Column(order_column) = &order_expr
+                && let Some(output_index) = select_exprs.iter().position(|select_expr| {
+                    let (qualifier, name) = select_expr.qualified_name();
+                    qualifier == order_column.relation && name == order_column.name
+                })
+            {
+                return Ok(sort.with_expr(unnest_output_column(plan, output_index)));
+            }
+            // Any other item reads the output column of each select
+            // expression it repeats.
+            let rebound =
+                rebind_to_unnest_output(order_expr.clone(), select_exprs, &[], plan)?;
+            Ok(if rebound == order_expr {
+                sort
+            } else {
+                sort.with_expr(rebound)
+            })
         })
         .collect()
+}
+
+/// The `index`-th output column of `plan`, as a column reference.
+fn unnest_output_column(plan: &LogicalPlan, index: usize) -> Expr {
+    Expr::Column(Column::from(plan.schema().qualified_field(index)))
+}
+
+/// Rebind an expression over the rows an UNNEST expansion reads onto the
+/// expansion's output: a subexpression equal to the `i`-th of `select_exprs`
+/// reads output column `i`, one equal to the `k`-th of `carried` reads output
+/// column `select_exprs.len() + k`. The outermost match wins, so
+/// `(a + 1) * 2` reads the output of a select item `a + 1`.
+fn rebind_to_unnest_output(
+    expr: Expr,
+    select_exprs: &[Expr],
+    carried: &[Expr],
+    plan: &LogicalPlan,
+) -> Result<Expr> {
+    let slots = select_exprs
+        .iter()
+        .chain(carried)
+        .map(|slot| slot.clone().unalias())
+        .collect::<Vec<_>>();
+    expr.transform_down(|node| match slots.iter().position(|slot| *slot == node) {
+        Some(index) => Ok(Transformed::new(
+            unnest_output_column(plan, index),
+            true,
+            TreeNodeRecursion::Jump,
+        )),
+        None => Ok(Transformed::no(node)),
+    })
+    .data()
+}
+
+/// Record in `carried` what `expr` reads below an UNNEST expansion beyond the
+/// select items `select_exprs` it computes, each once, in first-seen order. A
+/// subexpression equal to a select item reads that item. A DISTINCT ON or
+/// ORDER BY key (`is_key`) holding a set-returning function of its own is
+/// computed whole, as PostgreSQL computes it as a hidden select item; any
+/// other expression passes the columns it reads through.
+fn carry_unnest_inputs(
+    expr: &Expr,
+    select_exprs: &[Expr],
+    is_key: bool,
+    carried: &mut Vec<Expr>,
+) {
+    let slots = select_exprs
+        .iter()
+        .map(|slot| slot.clone().unalias())
+        .collect::<Vec<_>>();
+    let expr = expr.clone().unalias();
+    if is_key && has_unnest_expr_recursively(&expr) {
+        if !slots.contains(&expr) && !carried.contains(&expr) {
+            carried.push(expr);
+        }
+        return;
+    }
+    let _ = expr.apply(|node| {
+        if slots.contains(node) {
+            return Ok(TreeNodeRecursion::Jump);
+        }
+        if matches!(node, Expr::Column(_)) && !carried.contains(node) {
+            carried.push(node.clone());
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
 }

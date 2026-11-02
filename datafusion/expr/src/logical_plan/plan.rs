@@ -1727,6 +1727,7 @@ impl LogicalPlan {
                     returning_context: merge.returning_context.clone(),
                     output_schema: Arc::clone(&merge.output_schema),
                     target_select_rights: merge.target_select_rights,
+                    check_option: merge.check_option.clone(),
                 }))
             }
             LogicalPlan::Copy(CopyTo {

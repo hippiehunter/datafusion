@@ -63,6 +63,8 @@ pub type SharedResult<T> = result::Result<T, Arc<DataFusionError>>;
 pub struct DataFusionSqlStateError {
     pub sqlstate: String,
     pub message: String,
+    /// The suggestion a client shows beside the message (PostgreSQL's HINT).
+    pub hint: Option<String>,
 }
 
 impl Display for DataFusionSqlStateError {
@@ -82,6 +84,20 @@ pub fn sqlstate_datafusion_err(
     DataFusionError::External(Box::new(DataFusionSqlStateError {
         sqlstate: sqlstate.into(),
         message: message.into(),
+        hint: None,
+    }))
+}
+
+/// [`sqlstate_datafusion_err`] with a HINT for the client.
+pub fn sqlstate_datafusion_err_with_hint(
+    sqlstate: impl Into<String>,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> DataFusionError {
+    DataFusionError::External(Box::new(DataFusionSqlStateError {
+        sqlstate: sqlstate.into(),
+        message: message.into(),
+        hint: Some(hint.into()),
     }))
 }
 
