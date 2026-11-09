@@ -151,6 +151,7 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
                         filter: None,
                         null_treatment: None,
                         distinct: false,
+                        window_reference: None,
                     },
                 }));
 

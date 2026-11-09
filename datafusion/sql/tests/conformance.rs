@@ -1387,6 +1387,10 @@ impl datafusion_expr::AggregateUDFImpl for ListAgg {
     fn supports_within_group_clause(&self) -> bool {
         true
     }
+
+    fn within_group_arguments_are_direct(&self) -> bool {
+        false
+    }
 }
 
 pub fn list_agg_udaf() -> Arc<AggregateUDF> {

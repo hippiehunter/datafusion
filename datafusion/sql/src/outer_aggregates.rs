@@ -81,10 +81,7 @@ fn outer_aggregate_level(
     let mut local = false;
     aggregate.apply(|expr| {
         match expr {
-            Expr::Column(_)
-            | Expr::ScalarSubquery(_)
-            | Expr::Exists(_)
-            | Expr::InSubquery(_) => {
+            expr if matches!(expr, Expr::Column(_)) || expr.subquery().is_some() => {
                 local = true;
                 return Ok(TreeNodeRecursion::Stop);
             }

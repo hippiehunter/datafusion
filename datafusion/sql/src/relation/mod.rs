@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::definition_plan::AliasedRelation;
+use crate::definition_plan::{AliasedRelation, SampledRelation};
 use crate::planner::{
     ContextProvider, PlannedRelation, PlannerContext, RelationPlannerContext,
     RelationPlanning, SqlToRel, TableSampleMethod as LogicalTableSampleMethod,
@@ -56,7 +56,7 @@ use datafusion_expr::{
     LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier,
     RowLimiting, Subquery, SubqueryAlias,
 };
-use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, expr::Unnest};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, TableSource, expr::Unnest};
 use sqlparser::ast::{
     AstBox as SQLBox, Expr as SQLExpr, FunctionArg, FunctionArgExpr, Ident,
     JsonOnBehavior, JsonQueryWrapper, JsonQuotesBehavior, Spanned, SqlJsonTable,
@@ -527,8 +527,10 @@ impl SqlToRel<'_> {
                 };
                 let mut plan = match (
                     cte,
-                    self.context_provider
-                        .get_table_source(resolved_table_ref.clone()),
+                    self.relation_table_source(
+                        resolved_table_ref.clone(),
+                        sample.is_some(),
+                    ),
                 ) {
                     (Some(cte_plan), _) => Ok(cte_plan.clone()),
                     (_, Ok(provider)) => {
@@ -712,7 +714,8 @@ impl SqlToRel<'_> {
     }
 
     /// Lower a parsed TABLESAMPLE clause directly into the provider's typed
-    /// sampling predicate. No SQL rendering or reparsing occurs here.
+    /// sampling predicate, or, planned as written, into a [`SampledRelation`]
+    /// over the scan. No SQL rendering or reparsing occurs here.
     fn apply_table_sample(
         &self,
         plan: LogicalPlan,
@@ -752,10 +755,9 @@ impl SqlToRel<'_> {
         if matches!(quantity.unit, Some(sqlparser::ast::TableSampleUnit::Rows)) {
             return not_impl_err!("TABLESAMPLE row counts are not supported");
         }
-        let empty_schema = DFSchema::empty();
-        let percentage = self.sql_expr_to_logical_expr(
-            &quantity.value,
-            &empty_schema,
+        let percentage = self.table_sample_argument(
+            quantity.value.clone(),
+            &DataType::Float32,
             planner_context,
         )?;
         let repeatable = sample
@@ -767,13 +769,53 @@ impl SqlToRel<'_> {
                         seed.value.clone(),
                     ))
                 });
-                self.sql_expr_to_logical_expr(seed_expr, &empty_schema, planner_context)
+                self.table_sample_argument(seed_expr, &DataType::Float64, planner_context)
             })
             .transpose()?;
+        if self.context_provider.plans_definitions_as_written() {
+            return Ok(
+                SampledRelation::new(plan, method, percentage, repeatable).into_plan()
+            );
+        }
         let predicate = self
             .context_provider
             .plan_table_sample(table_ref, method, percentage, repeatable)?;
         LogicalPlanBuilder::from(plan).filter(predicate)?.build()
+    }
+
+    /// One `TABLESAMPLE` argument, coerced as PostgreSQL's
+    /// `transformRangeTableSample` coerces it: to `real` (`Float32`) for the
+    /// percentage, to `double precision` (`Float64`) for the seed. The
+    /// provider coerces it, an untyped constant included, which takes the
+    /// target type there.
+    fn table_sample_argument(
+        &self,
+        argument: SQLExpr,
+        target: &DataType,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let value = self.sql_expr_to_logical_expr(
+            argument,
+            &DFSchema::empty(),
+            planner_context,
+        )?;
+        self.context_provider
+            .plan_table_sample_argument(value, target)
+    }
+
+    /// The source of the table `name` a FROM item reads. A `sampled` table
+    /// exposes the row identity the provider's sampling predicate reads,
+    /// except in a plan made to be printed, which keeps the clause as written.
+    fn relation_table_source(
+        &self,
+        name: TableReference,
+        sampled: bool,
+    ) -> Result<Arc<dyn TableSource>> {
+        if sampled && !self.context_provider.plans_definitions_as_written() {
+            self.context_provider.get_sampled_table_source(name)
+        } else {
+            self.context_provider.get_table_source(name)
+        }
     }
 
     fn create_extension_relation(
@@ -836,8 +878,10 @@ impl SqlToRel<'_> {
                 };
                 let mut plan = match (
                     cte,
-                    self.context_provider
-                        .get_table_source(resolved_table_ref.clone()),
+                    self.relation_table_source(
+                        resolved_table_ref.clone(),
+                        sample.is_some(),
+                    ),
                 ) {
                     (Some(cte_plan), _) => Ok(cte_plan.clone()),
                     (_, Ok(provider)) => {
@@ -1341,8 +1385,13 @@ impl SqlToRel<'_> {
         planner_context.set_outer_from_schema(Some(old_from_schema));
 
         // We can omit the subquery wrapper if there are no columns
-        // referencing the outer scope.
-        if outer_ref_columns.is_empty() {
+        // referencing the outer scope. A definition planned to be printed
+        // keeps it over every item written LATERAL, which is how its plan
+        // records that the query wrote the keyword.
+        if outer_ref_columns.is_empty()
+            && !(self.context_provider.plans_definitions_as_written()
+                && written_lateral(subquery))
+        {
             return Ok(plan);
         }
 
@@ -1363,6 +1412,16 @@ impl SqlToRel<'_> {
                 spans: Spans::new(),
             })),
         }
+    }
+}
+
+/// Whether the query wrote the keyword LATERAL before `factor`.
+fn written_lateral(factor: &TableFactor) -> bool {
+    match factor {
+        TableFactor::Derived { lateral, .. }
+        | TableFactor::Function { lateral, .. }
+        | TableFactor::RowsFrom { lateral, .. } => *lateral,
+        _ => false,
     }
 }
 

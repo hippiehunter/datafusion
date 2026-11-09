@@ -122,11 +122,13 @@ pub fn physical_exprs_bag_equal(
 ///         expr: Expr::Column(Column::new(Some("t"), "id")),
 ///         asc: true,
 ///         nulls_first: false,
+///         using: None,
 ///     }],
 ///     vec![SortExpr {
 ///         expr: Expr::Column(Column::new(Some("t"), "name")),
 ///         asc: false,
 ///         nulls_first: true,
+///         using: None,
 ///     }],
 /// ];
 /// let result = create_ordering(&schema, &sort_exprs).unwrap();

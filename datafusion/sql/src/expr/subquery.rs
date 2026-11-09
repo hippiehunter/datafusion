@@ -16,19 +16,22 @@
 // under the License.
 
 use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{
     Column, DFSchema, Diagnostic, Result, ScalarValue, Span, Spans, not_impl_err,
     plan_err,
 };
 use datafusion_expr::expr::{
-    AllExpr, AnyExpr, Case, Exists, InSubquery, QuantifiedSource,
+    AllExpr, AnyExpr, Case, Exists, InSubquery, QuantifiedSource, ROW_IN_SUBLINK,
+    SUBLINK_METADATA_KEY,
 };
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, lit};
 use sqlparser::ast::{
     BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
     Query, SelectItem, SetExpr,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
@@ -129,14 +132,17 @@ impl SqlToRel<'_> {
             && row.len() > 1
         {
             // `row IN (subquery)` is `row = ANY (subquery)`.
-            let any = self.row_quantified_subquery(
-                row,
-                &BinaryOperator::Eq,
-                RowQuantifier::Any,
-                &sub_plan,
-                input_schema,
-                planner_context,
-            )?;
+            let any = self.written_sublink(
+                self.row_quantified_subquery(
+                    row,
+                    &BinaryOperator::Eq,
+                    RowQuantifier::Any,
+                    &sub_plan,
+                    input_schema,
+                    planner_context,
+                )?,
+                ROW_IN_SUBLINK,
+            );
             return Ok(if negated {
                 Expr::Not(Box::new(any))
             } else {
@@ -163,6 +169,23 @@ impl SqlToRel<'_> {
             },
             negated,
         )))
+    }
+
+    /// `planned`, the plan of a sublink the query wrote as `kind`, marked
+    /// with that kind when the plan is a definition to be printed back as
+    /// SQL. An executed plan carries no mark.
+    pub(super) fn written_sublink(&self, planned: Expr, kind: &str) -> Expr {
+        if !self.context_provider.plans_definitions_as_written() {
+            return planned;
+        }
+        let name = planned.schema_name().to_string();
+        planned.alias_with_metadata(
+            name,
+            Some(FieldMetadata::from(HashMap::from([(
+                SUBLINK_METADATA_KEY.to_string(),
+                kind.to_string(),
+            )]))),
+        )
     }
 
     pub(super) fn parse_scalar_subquery(

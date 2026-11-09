@@ -722,24 +722,11 @@ fn rewrite_expr(expr: Expr, input: &Projection) -> Result<Transformed<Expr>> {
 fn outer_columns<'a>(expr: &'a Expr, columns: &mut HashSet<&'a Column>) {
     // inspect_expr_pre doesn't handle subquery references, so find them explicitly
     expr.apply(|expr| {
-        match expr {
-            Expr::OuterReferenceColumn(_, col) => {
-                columns.insert(col);
-            }
-            Expr::ScalarSubquery(subquery) => {
-                outer_columns_helper_multi(&subquery.outer_ref_columns, columns);
-            }
-            Expr::Exists(exists) => {
-                outer_columns_helper_multi(&exists.subquery.outer_ref_columns, columns);
-            }
-            Expr::InSubquery(insubquery) => {
-                outer_columns_helper_multi(
-                    &insubquery.subquery.outer_ref_columns,
-                    columns,
-                );
-            }
-            _ => {}
-        };
+        if let Expr::OuterReferenceColumn(_, col) = expr {
+            columns.insert(col);
+        } else if let Some(subquery) = expr.subquery() {
+            outer_columns_helper_multi(&subquery.outer_ref_columns, columns);
+        }
         Ok(TreeNodeRecursion::Continue)
     })
     // unwrap: closure above never returns Err, so can not be Err here
@@ -1046,12 +1033,9 @@ fn plan_contains_other_subqueries(plan: &LogicalPlan, cte_name: &str) -> bool {
 }
 
 fn expr_contains_subquery(expr: &Expr) -> bool {
-    expr.exists(|e| match e {
-        Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery(_) => Ok(true),
-        _ => Ok(false),
-    })
-    // Safe unwrap since we are doing a simple boolean check
-    .unwrap()
+    expr.exists(|e| Ok(e.subquery().is_some()))
+        // Safe unwrap since we are doing a simple boolean check
+        .unwrap()
 }
 
 fn subquery_alias_targets_recursive_cte(plan: &LogicalPlan, cte_name: &str) -> bool {

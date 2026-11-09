@@ -28,8 +28,8 @@ use datafusion_expr::{
     Cast, EmptyRelation, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder,
 };
 use sqlparser::ast::{
-    Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Value,
-    Values as SQLValues,
+    Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    Value, Values as SQLValues,
 };
 
 /// One row of a values list: the relation it is evaluated over when a slot
@@ -87,7 +87,8 @@ impl SqlToRel<'_> {
                     });
                     continue;
                 }
-                let planned = self.sql_to_expr_ref(value, &row_schema, planner_context)?;
+                let planned =
+                    self.sql_to_expr_ref(value, &row_schema, planner_context)?;
                 exprs.push(written_type_kept(value, planned));
             }
             let exprs = match &assembly {
@@ -106,13 +107,8 @@ impl SqlToRel<'_> {
                 Ok::<bool, datafusion_common::DataFusionError>(
                     found
                         || expr.exists(|node| {
-                            Ok(matches!(
-                                node,
-                                Expr::ScalarSubquery(_)
-                                    | Expr::InSubquery(_)
-                                    | Expr::Exists(_)
-                                    | Expr::OuterReferenceColumn(_, _)
-                            ))
+                            Ok(node.subquery().is_some()
+                                || matches!(node, Expr::OuterReferenceColumn(_, _)))
                         })?,
                 )
             })?;
@@ -137,10 +133,10 @@ impl SqlToRel<'_> {
                         let Some(target) = schema.fields().get(index) else {
                             return Ok(expr);
                         };
-                        Ok(self
-                            .context_provider
-                            .plan_assignment_coercion(&expr, target, &empty_schema)?
-                            .unwrap_or(expr))
+                        if target.data_type() == &DataType::Null {
+                            return Ok(expr);
+                        }
+                        self.assign_to_column(expr, target, &empty_schema)
                     })
                     .collect::<Result<Vec<_>>>()
             })
@@ -224,15 +220,24 @@ impl SqlToRel<'_> {
                 crate::planner::SetReturningColumns::Rows(rows) => {
                     let mut plan = LogicalPlanBuilder::empty(true)
                         .project(vec![rows.alias("__values_srf_row")])?
-                        .unnest_columns_with_options(vec![Column::from_name("__values_srf_row")],
-                            UnnestOptions::new().with_preserve_nulls(false))?;
-                    let DataType::Struct(fields) = plan.schema().field(0).data_type() else {
+                        .unnest_columns_with_options(
+                            vec![Column::from_name("__values_srf_row")],
+                            UnnestOptions::new().with_preserve_nulls(false),
+                        )?;
+                    let DataType::Struct(fields) = plan.schema().field(0).data_type()
+                    else {
                         return plan_err!("{name} must return a list of records");
                     };
-                    let output = fields.iter().map(|field| {
-                        Expr::Column(Column::from_name(format!("__values_srf_row.{}", field.name())))
+                    let output = fields
+                        .iter()
+                        .map(|field| {
+                            Expr::Column(Column::from_name(format!(
+                                "__values_srf_row.{}",
+                                field.name()
+                            )))
                             .alias(field.name())
-                    }).collect::<Vec<_>>();
+                        })
+                        .collect::<Vec<_>>();
                     plan = plan.unnest_column("__values_srf_row")?;
                     return Ok(Some(plan.project(output)?.build()?));
                 }
@@ -373,10 +378,9 @@ impl SqlToRel<'_> {
                     let expr =
                         match target_fields.as_ref().and_then(|fields| fields.get(index))
                         {
-                            Some(target) => self
-                                .context_provider
-                                .plan_assignment_coercion(&expr, target, input.schema())?
-                                .unwrap_or(expr),
+                            Some(target) => {
+                                self.assign_to_column(expr, target, input.schema())?
+                            }
                             None => expr,
                         };
                     let expr = if expr.get_type(input.schema())? == *data_type {

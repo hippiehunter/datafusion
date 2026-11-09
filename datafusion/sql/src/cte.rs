@@ -412,7 +412,7 @@ impl SqlToRel<'_> {
         // this uses the named_relation we inserted above to resolve the
         // relation. This ensures that the recursive term uses the named relation logical plan
         // and thus the 'continuance' physical plan as its input and source
-        let recursive_plan = self.set_expr_to_plan_ref(right_expr, planner_context)?;
+        let recursive_plan = self.set_operation_input(right_expr, planner_context)?;
 
         // Check if the recursive term references the CTE itself,
         // if not, it is a non-recursive CTE

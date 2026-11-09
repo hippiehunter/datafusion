@@ -28,11 +28,10 @@ use crate::{
 };
 use datafusion_expr_common::signature::{Signature, TypeSignature};
 
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field};
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion,
 };
-use datafusion_common::utils::get_at_indices;
 use datafusion_common::{
     Column, DFSchema, DFSchemaRef, HashMap, Result, TableReference, internal_err,
     plan_err,
@@ -350,7 +349,9 @@ fn get_excluded_columns(
 /// `tableoid` and its other system columns this way.
 pub const SYSTEM_COLUMN_METADATA_KEY: &str = "datafusion.system_column";
 
-fn is_system_column(field: &Field) -> bool {
+/// Whether `field` is a system column ([`SYSTEM_COLUMN_METADATA_KEY`]): a
+/// column a statement may read but no statement writes.
+pub fn is_system_column(field: &Field) -> bool {
     field
         .metadata()
         .get(SYSTEM_COLUMN_METADATA_KEY)
@@ -396,39 +397,32 @@ pub fn expand_wildcard(
     Ok(get_exprs_except_skipped(schema, &columns_to_skip))
 }
 
-/// Resolves an `Expr::Wildcard` to a collection of qualified `Expr::Column`'s.
+/// Resolves `qualifier.*` to the columns of the relation `qualifier` names.
+/// Each column keeps the qualifier its field has in `schema`: `t.*` over a
+/// relation `s.t` yields columns of `s.t`, the relation the scan provides.
 pub fn expand_qualified_wildcard(
     qualifier: &TableReference,
     schema: &DFSchema,
     wildcard_options: Option<&WildcardOptions>,
 ) -> Result<Vec<Expr>> {
     let qualified_indices = schema.fields_indices_with_qualified(qualifier);
-    let projected_func_dependencies = schema
-        .functional_dependencies()
-        .project_functional_dependencies(&qualified_indices, qualified_indices.len());
-    let fields_with_qualified = get_at_indices(schema.fields(), &qualified_indices)?;
-    if fields_with_qualified.is_empty() {
+    if qualified_indices.is_empty() {
         return plan_err!("Invalid qualifier {qualifier}");
     }
-
-    let qualified_schema = Arc::new(Schema::new_with_metadata(
-        fields_with_qualified,
-        schema.metadata().clone(),
-    ));
-    let qualified_dfschema =
-        DFSchema::try_from_qualified_schema(qualifier.clone(), &qualified_schema)?
-            .with_functional_dependencies(projected_func_dependencies)?;
-    let excluded_columns = wildcard_options
+    let columns_to_skip: HashSet<Column> = wildcard_options
         .map(|options| get_excluded_columns(&options.except, schema, Some(qualifier)))
         .transpose()?
-        .unwrap_or_default();
-    // Add each excluded `Column` to columns_to_skip
-    let mut columns_to_skip = HashSet::new();
-    columns_to_skip.extend(excluded_columns);
-    Ok(get_exprs_except_skipped(
-        &qualified_dfschema,
-        &columns_to_skip,
-    ))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    Ok(qualified_indices
+        .into_iter()
+        .map(|index| schema.qualified_field(index))
+        .filter(|(_, field)| !is_system_column(field.as_ref()))
+        .map(Column::from)
+        .filter(|column| !columns_to_skip.contains(column))
+        .map(Expr::Column)
+        .collect())
 }
 
 /// (expr, "is the SortExpr for window (either comes from PARTITION BY or ORDER BY columns)")
@@ -490,12 +484,14 @@ pub fn compare_sort_expr(
         expr: expr_a,
         asc: asc_a,
         nulls_first: nulls_first_a,
+        ..
     } = sort_expr_a;
 
     let Sort {
         expr: expr_b,
         asc: asc_b,
         nulls_first: nulls_first_b,
+        ..
     } = sort_expr_b;
 
     let ref_indexes_a = find_column_indexes_referenced_by_expr(expr_a, schema);
@@ -1359,11 +1355,13 @@ mod tests {
                         expr: col("age"),
                         asc: asc_,
                         nulls_first: nulls_first_,
+                        using: None,
                     },
                     Sort {
                         expr: col("name"),
                         asc: asc_,
                         nulls_first: nulls_first_,
+                        using: None,
                     },
                 ];
 
@@ -1373,6 +1371,7 @@ mod tests {
                             expr: col("age"),
                             asc: asc_,
                             nulls_first: nulls_first_,
+                            using: None,
                         },
                         true,
                     ),
@@ -1381,6 +1380,7 @@ mod tests {
                             expr: col("name"),
                             asc: asc_,
                             nulls_first: nulls_first_,
+                            using: None,
                         },
                         true,
                     ),
@@ -1389,6 +1389,7 @@ mod tests {
                             expr: col("created_at"),
                             asc: true,
                             nulls_first: false,
+                            using: None,
                         },
                         true,
                     ),

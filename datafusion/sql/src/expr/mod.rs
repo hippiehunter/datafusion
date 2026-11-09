@@ -39,7 +39,8 @@ use datafusion_expr::{BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, li
 
 use crate::planner::{
     PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawDistinctFromExpr,
-    RawFieldAccessExpr, RawSubscriptExpr, SqlToRel, SubscriptStep, claimed_cast,
+    RawFieldAccessExpr, RawSubscriptExpr, SqlSyntaxCall, SqlToRel, SubscriptStep,
+    TrimSide, claimed_cast,
 };
 
 mod binary_op;
@@ -241,11 +242,18 @@ impl SqlToRel<'_> {
             ))),
         ));
 
-        Ok(Expr::BinaryExpr(BinaryExpr::new(
+        let mut group = Expr::BinaryExpr(BinaryExpr::new(
             Box::new(half_open_overlap),
             Operator::Or,
             Box::new(both_points_same),
-        )))
+        ));
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_overlaps(group)? {
+                PlannerResult::Planned(planned) => return Ok(planned),
+                PlannerResult::Original(original) => group = original,
+            }
+        }
+        Ok(group)
     }
 
     fn extract_pg_overlaps_period(expr: &SQLExpr) -> Result<(&SQLExpr, &SQLExpr)> {
@@ -336,9 +344,9 @@ impl SqlToRel<'_> {
     /// then goes through the registered expression planners' `plan_between`.
     fn sql_between_to_expr(
         &self,
-        subject: Expr,
-        low: Expr,
-        high: Expr,
+        subject: &Expr,
+        low: &Expr,
+        high: &Expr,
         negated: bool,
         symmetric: sqlparser::ast::BetweenSymmetric,
         schema: &DFSchema,
@@ -366,19 +374,19 @@ impl SqlToRel<'_> {
             (sqlparser::ast::BetweenSymmetric::Symmetric, false) => self
                 .build_logical_expr(
                     BinaryOperator::Or,
-                    within(&low, &high)?,
-                    within(&high, &low)?,
+                    within(low, high)?,
+                    within(high, low)?,
                     schema,
                 )?,
             (sqlparser::ast::BetweenSymmetric::Symmetric, true) => self
                 .build_logical_expr(
                     BinaryOperator::And,
-                    outside(&low, &high)?,
-                    outside(&high, &low)?,
+                    outside(low, high)?,
+                    outside(high, low)?,
                     schema,
                 )?,
-            (_, false) => within(&low, &high)?,
-            (_, true) => outside(&low, &high)?,
+            (_, false) => within(low, high)?,
+            (_, true) => outside(low, high)?,
         };
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_between(group)? {
@@ -502,7 +510,9 @@ impl SqlToRel<'_> {
 
                 for planner in self.context_provider.get_expr_planners() {
                     match planner.plan_extract(extract_args)? {
-                        PlannerResult::Planned(expr) => return Ok(expr),
+                        PlannerResult::Planned(expr) => {
+                            return self.sql_syntax_call(SqlSyntaxCall::Extract, expr);
+                        }
                         PlannerResult::Original(args) => {
                             extract_args = args;
                         }
@@ -856,7 +866,9 @@ impl SqlToRel<'_> {
                     schema,
                     planner_context,
                 )?;
-                self.sql_between_to_expr(subject, low, high, *negated, *symmetric, schema)
+                self.sql_between_to_expr(
+                    &subject, &low, &high, *negated, *symmetric, schema,
+                )
             }
 
             SQLExpr::InList {
@@ -984,12 +996,13 @@ impl SqlToRel<'_> {
                 expr,
                 substring_from,
                 substring_for,
-                special: _,
+                special,
                 shorthand: false,
             } => self.sql_substring_to_expr(
                 expr,
                 substring_from.as_ref(),
                 substring_for.as_ref(),
+                *special,
                 schema,
                 planner_context,
             ),
@@ -1143,10 +1156,13 @@ impl SqlToRel<'_> {
                         schema,
                         planner_context,
                     )?;
-                    return Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        timezone,
-                        vec![zone, timestamp],
-                    )));
+                    return self.sql_syntax_call(
+                        SqlSyntaxCall::AtTimeZone,
+                        Expr::ScalarFunction(ScalarFunction::new_udf(
+                            timezone,
+                            vec![zone, timestamp],
+                        )),
+                    );
                 }
                 Ok(Expr::Cast(Cast::new(
                     Box::new(timestamp),
@@ -1176,10 +1192,13 @@ impl SqlToRel<'_> {
                 else {
                     return not_impl_err!("AT LOCAL requires a timezone() function");
                 };
-                Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                    timezone,
-                    vec![timestamp],
-                )))
+                self.sql_syntax_call(
+                    SqlSyntaxCall::AtLocal,
+                    Expr::ScalarFunction(ScalarFunction::new_udf(
+                        timezone,
+                        vec![timestamp],
+                    )),
+                )
             }
             SQLExpr::AnyOp {
                 left,
@@ -1211,6 +1230,14 @@ impl SqlToRel<'_> {
                             schema,
                             planner_context,
                         )?;
+
+                        if self.context_provider.plans_definitions_as_written() {
+                            return Ok(Expr::AnyExpr(AnyExpr::new(
+                                Box::new(left_expr),
+                                op,
+                                QuantifiedSource::Array(Box::new(right_expr)),
+                            )));
+                        }
 
                         // Try ExprPlanners first (e.g., for column-typed arrays)
                         let mut any_expr = RawBinaryExpr {
@@ -1339,15 +1366,19 @@ impl SqlToRel<'_> {
                     planner_context,
                 )?;
                 match self.context_provider.get_function_meta("pg_collation_for") {
-                    Some(func) => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-                        func,
-                        vec![operand],
-                    ))),
+                    Some(func) => self.sql_syntax_call(
+                        SqlSyntaxCall::CollationFor,
+                        Expr::ScalarFunction(ScalarFunction::new_udf(
+                            func,
+                            vec![operand],
+                        )),
+                    ),
                     None => not_impl_err!("COLLATION FOR is not supported"),
                 }
             }
             // `x IS [NOT] [form] NORMALIZED` is the predicate form of
-            // `is_normalized(x, form)`; NFC is the default form.
+            // `is_normalized(x [, form])`; a form the SQL does not name is
+            // the function's default, NFC.
             SQLExpr::IsNormalized {
                 expr,
                 form,
@@ -1358,10 +1389,10 @@ impl SqlToRel<'_> {
                     schema,
                     planner_context,
                 )?;
-                let form = form
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "NFC".to_string());
+                let args = match form {
+                    Some(form) => vec![arg, lit(form.to_string())],
+                    None => vec![arg],
+                };
                 let fun = self
                     .context_provider
                     .get_function_meta("is_normalized")
@@ -1370,10 +1401,10 @@ impl SqlToRel<'_> {
                             "Unable to find expected 'is_normalized' function"
                         )
                     })?;
-                let call = Expr::ScalarFunction(ScalarFunction::new_udf(
-                    fun,
-                    vec![arg, lit(form)],
-                ));
+                let call = self.sql_syntax_call(
+                    SqlSyntaxCall::IsNormalized,
+                    Expr::ScalarFunction(ScalarFunction::new_udf(fun, args)),
+                )?;
                 Ok(if *negated {
                     Expr::Not(Box::new(call))
                 } else {
@@ -1508,7 +1539,9 @@ impl SqlToRel<'_> {
         let mut position_args = vec![fullstr, substr];
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_position(position_args)? {
-                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Planned(expr) => {
+                    return self.sql_syntax_call(SqlSyntaxCall::Position, expr);
+                }
                 PlannerResult::Original(args) => {
                     position_args = args;
                 }
@@ -1516,6 +1549,23 @@ impl SqlToRel<'_> {
         }
 
         not_impl_err!("Position not supported by ExprPlanner: {position_args:?}")
+    }
+
+    /// `planned`, marked by the first expression planner that marks the SQL
+    /// syntax `syntax` it was written in.
+    pub(super) fn sql_syntax_call(
+        &self,
+        syntax: SqlSyntaxCall,
+        planned: Expr,
+    ) -> Result<Expr> {
+        let mut planned = planned;
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_sql_syntax_call(syntax, planned)? {
+                PlannerResult::Planned(marked) => return Ok(marked),
+                PlannerResult::Original(original) => planned = original,
+            }
+        }
+        Ok(planned)
     }
 
     // Handles a call to struct(...) where the arguments are not named. For example
@@ -1551,7 +1601,11 @@ impl SqlToRel<'_> {
             .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Expr::InList(InList::new(Box::new(expr), list_expr, negated)))
+        Ok(Expr::InList(InList::new(
+            Box::new(expr),
+            list_expr,
+            negated,
+        )))
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -1698,11 +1752,11 @@ impl SqlToRel<'_> {
             (None, None) => Ok(vec![arg]),
         }?;
 
-        let fun_name = match trim_where {
-            Some(TrimWhereField::Leading) => "ltrim",
-            Some(TrimWhereField::Trailing) => "rtrim",
-            Some(TrimWhereField::Both) => "btrim",
-            None => "trim",
+        let (fun_name, side) = match trim_where {
+            Some(TrimWhereField::Leading) => ("ltrim", TrimSide::Leading),
+            Some(TrimWhereField::Trailing) => ("rtrim", TrimSide::Trailing),
+            // PostgreSQL has no `trim` function: TRIM without a side is BOTH.
+            Some(TrimWhereField::Both) | None => ("btrim", TrimSide::Both),
         };
         let fun = self
             .context_provider
@@ -1711,7 +1765,10 @@ impl SqlToRel<'_> {
                 internal_datafusion_err!("Unable to find expected '{fun_name}' function")
             })?;
 
-        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(fun, args)))
+        self.sql_syntax_call(
+            SqlSyntaxCall::Trim(side),
+            Expr::ScalarFunction(ScalarFunction::new_udf(fun, args)),
+        )
     }
 
     fn sql_overlay_to_expr(
@@ -1741,7 +1798,9 @@ impl SqlToRel<'_> {
         };
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_overlay(overlay_args)? {
-                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Planned(expr) => {
+                    return self.sql_syntax_call(SqlSyntaxCall::Overlay, expr);
+                }
                 PlannerResult::Original(args) => overlay_args = args,
             }
         }

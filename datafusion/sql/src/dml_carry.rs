@@ -56,11 +56,11 @@ use datafusion_common::{
     Column, DFSchemaRef, JUNK_COLUMN_METADATA_KEY, JUNK_RELATION_METADATA_KEY,
     JUNK_SOURCE_COLUMN_METADATA_KEY, JoinType, Result, TableReference, internal_err,
 };
-use datafusion_expr::expr::{AllExpr, AnyExpr, Exists, InSubquery, QuantifiedSource};
+use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::{conjunction, split_conjunction, split_conjunction_owned};
 use datafusion_expr::{
     BinaryExpr, CarriedJunkColumns, Expr, Filter, Join, LogicalPlan, LogicalPlanBuilder,
-    Operator, Projection, Subquery, SubqueryAlias, carried_junk_column_name,
+    Operator, Projection, SubqueryAlias, carried_junk_column_name,
     carried_presence_column_name, lit,
 };
 
@@ -499,24 +499,7 @@ fn expr_has_outer_reference(expr: &Expr) -> Result<bool> {
 }
 
 fn expr_has_subquery(expr: &Expr) -> Result<bool> {
-    expr.exists(|expr| Ok(expr_subquery(expr).is_some()))
-}
-
-fn expr_subquery(expr: &Expr) -> Option<&Subquery> {
-    match expr {
-        Expr::Exists(Exists { subquery, .. })
-        | Expr::InSubquery(InSubquery { subquery, .. })
-        | Expr::ScalarSubquery(subquery)
-        | Expr::AnyExpr(AnyExpr {
-            source: QuantifiedSource::Subquery(subquery),
-            ..
-        })
-        | Expr::AllExpr(AllExpr {
-            source: QuantifiedSource::Subquery(subquery),
-            ..
-        }) => Some(subquery),
-        _ => None,
-    }
+    expr.exists(|expr| Ok(expr.subquery().is_some()))
 }
 
 /// Whether any expression of `plan` or of a subquery inside it holds an
@@ -547,7 +530,7 @@ fn collect_read_columns(expr: &Expr, reads: &mut Vec<Column>) -> Result<()> {
                 }
             }
             other => {
-                if let Some(subquery) = expr_subquery(other) {
+                if let Some(subquery) = other.subquery() {
                     subquery.subquery.apply_with_subqueries(|node| {
                         node.apply_expressions(|expr| {
                             expr.apply(|expr| {

@@ -254,6 +254,7 @@ impl TreeNode for Expr {
                             filter,
                             null_treatment,
                             distinct,
+                            window_reference,
                         },
                 } = *window_fun;
 
@@ -271,6 +272,7 @@ impl TreeNode for Expr {
                                     filter: new_filter,
                                     null_treatment,
                                     distinct,
+                                    window_reference,
                                 },
                             }))
                         },

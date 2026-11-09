@@ -17,29 +17,31 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use crate::definition_plan::{EmptyGrouping, WindowClause, WindowDefinition};
 use crate::expr::grouping_set::is_empty_grouping_element;
 use crate::outer_aggregates::hoist_outer_level_aggregates;
-use crate::planner::{PlannerContext, SqlToRel};
-use crate::query::to_order_by_exprs_with_select;
+use crate::planner::{PlannerContext, SqlToRel, WindowClauseEntry};
+use crate::query::{to_order_by_exprs_with_select, without_repeated_sort_keys};
 use crate::utils::{
     check_columns_satisfy_exprs, extract_aliases, rebase_expr, resolve_aliases_to_exprs,
     resolve_columns, resolve_positions_to_exprs, rewrite_recursive_unnests_bottom_up,
 };
 
-use datafusion_common::error::{DataFusionErrorBuilder, sqlstate_datafusion_err};
+use datafusion_common::error::{
+    DataFusionErrorBuilder, sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
+};
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion,
 };
 use datafusion_common::{Column, RecursionUnnestOption, UnnestOptions};
 use datafusion_common::{
-    DFSchema, Result, ScalarValue, internal_err, not_impl_err, plan_datafusion_err,
-    plan_err,
+    DFSchema, DataFusionError, DataFusionSqlStateError, Result, ScalarValue,
+    internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::expr::{
-    self, Alias, WildcardOptions, WildcardRename, WildcardReplace,
+    self, Alias, WildcardOptions, WildcardRename, WildcardReplace, WindowReference,
 };
 use datafusion_expr::expr_rewriter::{
     normalize_col, normalize_col_with_schemas_and_ambiguity_check, normalize_sorts,
@@ -51,7 +53,7 @@ use datafusion_expr::utils::{
 };
 use datafusion_expr::{
     Aggregate, Expr, Filter, GroupingSet, LogicalPlan, LogicalPlanBuilder,
-    LogicalPlanBuilderOptions, SortExpr,
+    LogicalPlanBuilderOptions, SortExpr, UserDefinedLogicalNodeCore,
 };
 
 use indexmap::IndexMap;
@@ -59,9 +61,9 @@ use sqlparser::ast::{
     AstBox as SQLBox, AttachedToken, Distinct, Expr as SQLExpr, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, GroupBySetQuantifier, Ident, Join,
     JoinConstraint, JoinOperator, NamedWindowExpr, ObjectName, OrderBy, OrderByExpr,
-    OrderByOptions, Query as SQLQuery, SelectFlavor, SelectItemQualifiedWildcardKind, SetExpr,
-    TableAlias, TableFactor, Value, ValueWithSpan, WildcardAdditionalOptions, WindowType,
-    visit_expressions_mut,
+    OrderByOptions, Query as SQLQuery, SelectFlavor, SelectItemQualifiedWildcardKind,
+    SetExpr, TableAlias, TableFactor, Value, ValueWithSpan, WildcardAdditionalOptions,
+    WindowSpec, WindowType,
 };
 use sqlparser::ast::{NamedWindowDefinition, Select, SelectItem, TableWithJoins};
 
@@ -80,6 +82,9 @@ struct AggregatePlanResult {
     order_by_exprs: Vec<SortExpr>,
     /// DISTINCT ON expressions rewritten to reference aggregate output columns
     distinct_on_exprs: Vec<Expr>,
+    /// The WINDOW clause's keys rewritten to reference aggregate output
+    /// columns
+    window_clause_exprs: Vec<Expr>,
 }
 
 /// `GROUP BY DISTINCT ...`: the same grouping set reached through more than one
@@ -111,6 +116,65 @@ fn deduplicate_grouping_sets(group_expr: Vec<Expr>) -> Result<Vec<Expr>> {
         }
     }
     Ok(vec![Expr::GroupingSet(GroupingSet::GroupingSets(distinct))])
+}
+
+/// The direct arguments of `aggregate` if it is an ordered-set aggregate
+/// called with WITHIN GROUP. Planning puts the WITHIN GROUP sort keys first in
+/// its arguments and the direct arguments after them.
+fn ordered_set_direct_arguments(aggregate: &Expr) -> &[Expr] {
+    match aggregate {
+        Expr::AggregateFunction(function)
+            if function.func.supports_within_group_clause()
+                && function.func.within_group_arguments_are_direct()
+                && !function.params.order_by.is_empty() =>
+        {
+            function
+                .params
+                .args
+                .get(function.params.order_by.len()..)
+                .unwrap_or_default()
+        }
+        _ => &[],
+    }
+}
+
+/// A grouping error raised for an ordered-set aggregate's direct argument
+/// carries PostgreSQL's DETAIL naming the rule it broke.
+fn with_direct_argument_detail(error: DataFusionError) -> DataFusionError {
+    match error {
+        DataFusionError::Diagnostic(diagnostic, inner) => DataFusionError::Diagnostic(
+            diagnostic,
+            Box::new(with_direct_argument_detail(*inner)),
+        ),
+        DataFusionError::External(external) => {
+            match external.downcast::<DataFusionSqlStateError>() {
+                Ok(mut state) => {
+                    state.detail = Some(
+                        "Direct arguments of an ordered-set aggregate must use only grouped columns."
+                            .to_owned(),
+                    );
+                    DataFusionError::External(state)
+                }
+                Err(other) => DataFusionError::External(other),
+            }
+        }
+        other => other,
+    }
+}
+
+/// The GROUP BY items with each plain item equal to an earlier plain item
+/// dropped. Grouping by an expression twice groups exactly as grouping by it
+/// once, also inside every grouping set the items cross with; PostgreSQL's
+/// analysis keeps one group clause for it (`addTargetToGroupList`). Grouping
+/// set items are kept, since repeating one repeats its grouping sets.
+fn without_repeated_group_items(group_expr: Vec<Expr>) -> Vec<Expr> {
+    let mut kept: Vec<Expr> = Vec::with_capacity(group_expr.len());
+    for expr in group_expr {
+        if matches!(expr, Expr::GroupingSet(_)) || !kept.contains(&expr) {
+            kept.push(expr);
+        }
+    }
+    kept
 }
 
 impl SqlToRel<'_> {
@@ -157,12 +221,29 @@ impl SqlToRel<'_> {
         self.select_to_plan_ref_prepared(select, query_order_by, planner_context)
     }
 
+    /// Plan one query level with its WINDOW clause in scope: a window call
+    /// of the level names the windows it defines, and a query nested in the
+    /// level names only its own.
     fn select_to_plan_ref_prepared(
         &self,
         select: &Select,
         query_order_by: Option<&OrderBy>,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        let windows = self.window_clause(&select.named_window)?;
+        let enclosing = planner_context.set_window_clause(windows.into());
+        let plan = self.select_level_to_plan(select, query_order_by, planner_context);
+        planner_context.set_window_clause(enclosing);
+        plan
+    }
+
+    fn select_level_to_plan(
+        &self,
+        select: &Select,
+        query_order_by: Option<&OrderBy>,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        let resolve_unknowns = planner_context.take_resolve_unknowns();
         // Check for unsupported syntax first
         if select.top.is_some() {
             return not_impl_err!("TOP");
@@ -176,17 +257,12 @@ impl SqlToRel<'_> {
         let base_plan =
             self.plan_selection_ref(select.selection.as_deref(), plan, planner_context)?;
 
-        // Handle named windows before processing the projection expression
-        check_conflicting_windows(&select.named_window)?;
-        let mut projection = Cow::Borrowed(select.projection.as_slice());
-        if !select.named_window.is_empty() {
-            self.match_window_definitions(projection.to_mut(), &select.named_window)?;
-        }
+        let projection = select.projection.as_slice();
 
         // Process the SELECT expressions
         let select_exprs = self.prepare_select_exprs_ref(
             &base_plan,
-            projection.as_ref(),
+            projection,
             empty_from,
             planner_context,
         )?;
@@ -204,7 +280,7 @@ impl SqlToRel<'_> {
         // Having and group by clause may reference aliases defined in select projection
         let projected_plan = self.project(base_plan.clone(), select_exprs)?;
         let select_exprs = projected_plan.expressions();
-        let output_names = self.select_output_names(projection.as_ref(), &select_exprs);
+        let output_names = self.select_output_names(projection, &select_exprs);
 
         let order_by = self.output_column_positions(
             to_order_by_exprs_with_select(query_order_by, Some(&select_exprs))?,
@@ -212,6 +288,7 @@ impl SqlToRel<'_> {
             &output_names,
             &select_exprs,
         )?;
+        let order_by_positions = output_positions(&order_by);
 
         // Place the fields of the base plan at the front so that when there are references
         // with the same name, the fields of the base plan will be searched first.
@@ -232,40 +309,43 @@ impl SqlToRel<'_> {
 
         // DISTINCT ON expressions resolve the way ORDER BY items do: an output
         // column name, then an output position, then an input expression.
-        let distinct_on_rex: Vec<Expr> = match &select.distinct {
-            Some(Distinct::On(on)) => {
-                let as_order_by = on
-                    .iter()
-                    .map(|expr| OrderByExpr {
-                        expr: expr.clone(),
-                        options: OrderByOptions {
-                            asc: None,
-                            nulls_first: None,
-                        },
-                        with_fill: None,
-                        using: None,
-                    })
-                    .collect::<Vec<_>>();
-                let as_order_by = self.output_column_positions(
-                    Cow::Owned(as_order_by),
-                    "DISTINCT ON",
-                    &output_names,
-                    &select_exprs,
-                )?;
-                let sorts = self.order_by_to_sort_expr(
-                    as_order_by,
-                    projected_plan.schema().as_ref(),
-                    planner_context,
-                    true,
-                    Some(base_plan.schema().as_ref()),
-                )?;
-                normalize_sorts(sorts, &projected_plan)?
-                    .into_iter()
-                    .map(|sort| sort.expr)
-                    .collect()
-            }
-            _ => vec![],
-        };
+        let (distinct_on_rex, distinct_on_positions): (Vec<Expr>, Vec<Option<usize>>) =
+            match &select.distinct {
+                Some(Distinct::On(on)) => {
+                    let as_order_by = on
+                        .iter()
+                        .map(|expr| OrderByExpr {
+                            expr: expr.clone(),
+                            options: OrderByOptions {
+                                asc: None,
+                                nulls_first: None,
+                            },
+                            with_fill: None,
+                            using: None,
+                        })
+                        .collect::<Vec<_>>();
+                    let as_order_by = self.output_column_positions(
+                        Cow::Owned(as_order_by),
+                        "DISTINCT ON",
+                        &output_names,
+                        &select_exprs,
+                    )?;
+                    let positions = output_positions(&as_order_by);
+                    let sorts = self.order_by_to_sort_expr(
+                        as_order_by,
+                        projected_plan.schema().as_ref(),
+                        planner_context,
+                        true,
+                        Some(base_plan.schema().as_ref()),
+                    )?;
+                    let exprs = normalize_sorts(sorts, &projected_plan)?
+                        .into_iter()
+                        .map(|sort| sort.expr)
+                        .collect();
+                    (exprs, positions)
+                }
+                _ => (vec![], vec![]),
+            };
 
         // This alias map is resolved and looked up in both having exprs and group by exprs
         let alias_map = extract_aliases(&select_exprs);
@@ -313,6 +393,11 @@ impl SqlToRel<'_> {
             } => (Some(expressions.as_slice()), Some(*quantifier)),
             _ => (None, None),
         };
+        // `GROUP BY ()` alone makes the whole input one group, which exists
+        // even when the input is empty.
+        let groups_whole_input = group_by_sql_exprs.is_some_and(|exprs| {
+            !exprs.is_empty() && exprs.iter().all(is_empty_grouping_element)
+        });
         let group_by_exprs = if let Some(exprs) = group_by_sql_exprs {
             let planned = exprs
                 .iter()
@@ -351,6 +436,7 @@ impl SqlToRel<'_> {
                     Ok(group_by_expr)
                 })
                 .collect::<Result<Vec<Expr>>>()?;
+            let planned = without_repeated_group_items(planned);
             if matches!(set_quantifier, Some(GroupBySetQuantifier::Distinct)) {
                 deduplicate_grouping_sets(planned)?
             } else {
@@ -400,6 +486,22 @@ impl SqlToRel<'_> {
             })
             .transpose()?;
 
+        // The WINDOW clause's windows read the rows the level's window calls
+        // read, so their keys are bound, grouped and checked as the calls'
+        // are, whether or not a call runs over them.
+        let window_clause = if planner_context.window_clause().is_empty() {
+            None
+        } else {
+            let entries = planner_context.window_clause().to_vec();
+            let windows =
+                self.window_definitions(&entries, &base_plan, planner_context)?;
+            Some(WindowClause::new(base_plan.clone(), windows))
+        };
+        let window_clause_exprs = window_clause
+            .as_ref()
+            .map(UserDefinedLogicalNodeCore::expressions)
+            .unwrap_or_default();
+
         // The outer expressions we will search through for aggregates.
         // First, find aggregates in SELECT, HAVING, and QUALIFY
         let select_having_qualify_aggrs = find_aggregate_exprs(
@@ -413,11 +515,18 @@ impl SqlToRel<'_> {
         let order_by_aggrs = find_aggregate_exprs(order_by_rex.iter().map(|s| &s.expr));
         // An aggregate written only in DISTINCT ON still makes the query grouped
         let distinct_on_aggrs = find_aggregate_exprs(distinct_on_rex.iter());
+        // So does one written only in the WINDOW clause.
+        let window_clause_aggrs = find_aggregate_exprs(window_clause_exprs.iter());
 
-        // Combine: all aggregates from SELECT/HAVING/QUALIFY, plus ORDER BY and
-        // DISTINCT ON aggregates that aren't already in SELECT/HAVING/QUALIFY
+        // Combine: all aggregates from SELECT/HAVING/QUALIFY, plus ORDER BY,
+        // DISTINCT ON and WINDOW clause aggregates that aren't already in
+        // SELECT/HAVING/QUALIFY
         let mut aggr_exprs = select_having_qualify_aggrs;
-        for order_by_aggr in order_by_aggrs.into_iter().chain(distinct_on_aggrs) {
+        for order_by_aggr in order_by_aggrs
+            .into_iter()
+            .chain(distinct_on_aggrs)
+            .chain(window_clause_aggrs)
+        {
             if !aggr_exprs.iter().any(|e| e == &order_by_aggr) {
                 aggr_exprs.push(order_by_aggr);
             }
@@ -441,6 +550,7 @@ impl SqlToRel<'_> {
             qualify_expr: qualify_expr_post_aggr,
             order_by_exprs: mut order_by_rex,
             distinct_on_exprs: mut distinct_on_rex,
+            window_clause_exprs: window_clause_post_aggr,
         } = if !group_by_exprs.is_empty() || !aggr_exprs.is_empty() {
             self.aggregate(
                 &base_plan,
@@ -449,14 +559,15 @@ impl SqlToRel<'_> {
                 qualify_expr_opt.as_ref(),
                 &order_by_rex,
                 &distinct_on_rex,
+                &window_clause_exprs,
                 &group_by_exprs,
                 &aggr_exprs,
             )?
-        } else if having_expr_opt.is_some() {
-            // A HAVING clause with neither GROUP BY nor an aggregate still
-            // makes the whole input one group, which the clause keeps or
-            // drops. That group exists even over an empty input, so the
-            // aggregate carries one call to anchor it; the projection over
+        } else if having_expr_opt.is_some() || groups_whole_input {
+            // A HAVING clause or `GROUP BY ()` with no grouping column and no
+            // aggregate still makes the whole input one group, which HAVING
+            // keeps or drops. That group exists even over an empty input, so
+            // the aggregate carries one call to anchor it; the projection over
             // the aggregate does not select it.
             let count_udf = self
                 .context_provider
@@ -481,6 +592,7 @@ impl SqlToRel<'_> {
                 qualify_expr_opt.as_ref(),
                 &order_by_rex,
                 &distinct_on_rex,
+                &window_clause_exprs,
                 &group_by_exprs,
                 &[group_anchor],
             )?
@@ -492,6 +604,7 @@ impl SqlToRel<'_> {
                 qualify_expr: qualify_expr_opt,
                 order_by_exprs: order_by_rex,
                 distinct_on_exprs: distinct_on_rex,
+                window_clause_exprs,
             }
         };
 
@@ -501,6 +614,26 @@ impl SqlToRel<'_> {
                 .build()?
         } else {
             plan
+        };
+
+        // A plan made to be printed keeps the WINDOW clause over the rows its
+        // windows read.
+        let plan = if groups_whole_input
+            && self.context_provider.plans_definitions_as_written()
+        {
+            EmptyGrouping::new(plan).into_plan()
+        } else {
+            plan
+        };
+        let plan = match window_clause {
+            Some(window_clause)
+                if self.context_provider.plans_definitions_as_written() =>
+            {
+                window_clause
+                    .with_exprs_and_inputs(window_clause_post_aggr, vec![plan])?
+                    .into_plan()
+            }
+            _ => plan,
         };
 
         // The outer expressions we will search through for window functions.
@@ -587,37 +720,64 @@ impl SqlToRel<'_> {
             plan
         };
 
+        let select_exprs_post_aggr =
+            self.target_list(select_exprs_post_aggr, plan.schema(), resolve_unknowns)?;
+
         let (plan, order_by_rex) = match &select.distinct {
             Some(Distinct::On(_)) => {
                 // DISTINCT ON keeps one row per group of its expressions after
                 // grouping, HAVING and windows, and projects the select list
                 // itself. Its expressions and the ORDER BY that picks the kept
-                // row read the rows it filters, so a reference to an output
-                // column reads that column's expression.
-                let input_schema = Arc::clone(plan.schema());
-                let on_expr = distinct_on_rex
-                    .into_iter()
-                    .map(|expr| {
-                        resolve_projection_references(
-                            expr,
-                            projected_plan.schema(),
-                            &select_exprs_post_aggr,
-                            &input_schema,
-                        )
+                // row read the rows it filters, so an item naming an output
+                // column, by position or by name, reads that column's
+                // expression; every other item is already over those rows.
+                // An item written as a select expression was bound to that
+                // output column by its name; below the projection it reads
+                // the select expression the name stands for.
+                let output_reference = |expr: Expr| -> Result<Expr> {
+                    expr.transform(|expr| match &expr {
+                        Expr::Column(column) if column.relation.is_none() => {
+                            match select_exprs_post_aggr.iter().find(|item| {
+                                item.name_for_alias()
+                                    .is_ok_and(|name| name == column.name)
+                            }) {
+                                Some(item) => Ok(Transformed::yes(
+                                    without_naming_aliases(item.clone()),
+                                )),
+                                None => Ok(Transformed::no(expr)),
+                            }
+                        }
+                        _ => Ok(Transformed::no(expr)),
                     })
+                    .data()
+                };
+                let output_expr = |position: Option<usize>, expr: Expr| match position {
+                    None => output_reference(expr),
+                    Some(index) => select_exprs_post_aggr
+                        .get(index)
+                        .map(|select_expr| without_naming_aliases(select_expr.clone()))
+                        .ok_or_else(|| {
+                            internal_datafusion_err!(
+                                "output position {index} has no select expression"
+                            )
+                        }),
+                };
+                let on_expr = distinct_on_positions
+                    .into_iter()
+                    .zip(distinct_on_rex)
+                    .map(|(position, expr)| output_expr(position, expr))
                     .collect::<Result<Vec<_>>>()?;
-                let order_by_rex = order_by_rex
-                    .iter()
-                    .map(|sort| {
-                        resolve_projection_references(
-                            sort.expr.clone(),
-                            projected_plan.schema(),
-                            &select_exprs_post_aggr,
-                            &input_schema,
-                        )
-                        .map(|expr| sort.with_expr(expr))
+                let order_by_rex = order_by_positions
+                    .into_iter()
+                    .zip(&order_by_rex)
+                    .map(|(position, sort)| {
+                        output_expr(position, sort.expr.clone())
+                            .map(|expr| sort.with_expr(expr))
                     })
                     .collect::<Result<Vec<SortExpr>>>()?;
+                // Two keys written differently can read the same expression
+                // once output references are resolved.
+                let order_by_rex = without_repeated_sort_keys(order_by_rex);
                 if select_exprs_post_aggr
                     .iter()
                     .chain(&on_expr)
@@ -626,9 +786,9 @@ impl SqlToRel<'_> {
                 {
                     self.distinct_on_with_set_returning_functions(
                         plan,
-                        select_exprs_post_aggr,
+                        &select_exprs_post_aggr,
                         on_expr,
-                        order_by_rex,
+                        &order_by_rex,
                     )?
                 } else {
                     let plan = LogicalPlanBuilder::from(plan)
@@ -682,9 +842,9 @@ impl SqlToRel<'_> {
     fn distinct_on_with_set_returning_functions(
         &self,
         plan: LogicalPlan,
-        select_exprs: Vec<Expr>,
+        select_exprs: &[Expr],
         on_expr: Vec<Expr>,
-        order_by: Vec<SortExpr>,
+        order_by: &[SortExpr],
     ) -> Result<(LogicalPlan, Vec<SortExpr>)> {
         let keys: Vec<&Expr> = on_expr
             .iter()
@@ -1463,8 +1623,29 @@ impl SqlToRel<'_> {
             &[&[plan.schema()]],
             &plan.using_columns()?,
         )?;
+        self.expand_row_wildcard(&expr, row_expr, plan.schema())
+    }
+
+    /// The fields `(row_expr).*` expands to over `schema`: the fields of the
+    /// composite value `row_expr`, as an expression planner expands them.
+    pub fn row_wildcard_exprs(
+        &self,
+        row_expr: &SQLExpr,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Vec<Expr>> {
+        let expr = self.sql_to_expr_ref(row_expr, schema, planner_context)?;
+        self.expand_row_wildcard(&expr, row_expr, schema)
+    }
+
+    fn expand_row_wildcard(
+        &self,
+        expr: &Expr,
+        row_expr: &SQLExpr,
+        schema: &DFSchema,
+    ) -> Result<Vec<Expr>> {
         for planner in self.context_provider.get_expr_planners() {
-            if let Some(fields) = planner.plan_row_wildcard(&expr, plan.schema())? {
+            if let Some(fields) = planner.plan_row_wildcard(expr, schema)? {
                 return Ok(fields);
             }
         }
@@ -1719,6 +1900,8 @@ impl SqlToRel<'_> {
     ///   the aggregate
     /// * `order_by_post_aggr`     - The ORDER BY expressions rewritten to reference columns from
     ///   the aggregate
+    /// * `window_clause_exprs`    - The WINDOW clause's keys rewritten to reference columns from
+    ///   the aggregate
     #[expect(clippy::too_many_arguments)]
     fn aggregate(
         &self,
@@ -1728,6 +1911,7 @@ impl SqlToRel<'_> {
         qualify_expr_opt: Option<&Expr>,
         order_by_exprs: &[SortExpr],
         distinct_on_exprs: &[Expr],
+        window_clause_exprs: &[Expr],
         group_by_exprs: &[Expr],
         aggr_exprs: &[Expr],
     ) -> Result<AggregatePlanResult> {
@@ -1742,6 +1926,7 @@ impl SqlToRel<'_> {
             .chain(qualify_expr_opt)
             .chain(order_by_exprs.iter().map(|sort| &sort.expr))
             .chain(distinct_on_exprs.iter())
+            .chain(window_clause_exprs.iter())
         {
             expr_to_columns(expr, &mut referenced)?;
         }
@@ -1787,6 +1972,7 @@ impl SqlToRel<'_> {
                 _ => aggr_projection_exprs.push(expr.clone()),
             }
         }
+        let grouped_count = aggr_projection_exprs.len();
         aggr_projection_exprs.extend_from_slice(aggr_exprs);
 
         // now attempt to resolve columns and replace with fully-qualified columns
@@ -1801,6 +1987,23 @@ impl SqlToRel<'_> {
             .iter()
             .map(|expr| expr_as_column_expr(expr, input))
             .collect::<Result<Vec<Expr>>>()?;
+
+        // The direct arguments of an ordered-set aggregate are evaluated once
+        // per group rather than per row, so they read grouped columns only.
+        for aggregate in aggr_exprs {
+            for direct in ordered_set_direct_arguments(aggregate) {
+                let direct = rebase_expr(
+                    &resolve_columns(direct, input)?,
+                    &aggr_projection_exprs[..grouped_count],
+                    input,
+                )?;
+                check_columns_satisfy_exprs(
+                    &column_exprs_post_aggr[..grouped_count],
+                    std::slice::from_ref(&direct),
+                )
+                .map_err(with_direct_argument_detail)?;
+            }
+        }
 
         // next we re-write the projection
         let select_exprs_post_aggr = select_exprs
@@ -1843,6 +2046,14 @@ impl SqlToRel<'_> {
         } else {
             None
         };
+
+        // The WINDOW clause's keys read the grouped rows, as the window calls
+        // that run over them do, whether or not any call does.
+        let window_clause_post_aggr = window_clause_exprs
+            .iter()
+            .map(|expr| rebase_expr(expr, &aggr_projection_exprs, input))
+            .collect::<Result<Vec<Expr>>>()?;
+        check_columns_satisfy_exprs(&column_exprs_post_aggr, &window_clause_post_aggr)?;
 
         // An ORDER BY or DISTINCT ON expression that matches an aliased SELECT
         // expression (ignoring the alias) reads the SELECT's output column, so
@@ -1916,6 +2127,7 @@ impl SqlToRel<'_> {
             qualify_expr: qualify_expr_post_aggr,
             order_by_exprs: order_by_post_aggr,
             distinct_on_exprs: distinct_on_post_aggr,
+            window_clause_exprs: window_clause_post_aggr,
         })
     }
 
@@ -2046,74 +2258,244 @@ impl SqlToRel<'_> {
         Ok(Some(first))
     }
 
-    // If the projection is done over a named window, that window
-    // name must be defined. Otherwise, it gives an error.
-    fn match_window_definitions(
+    /// The select list of one query level as the host plans it, each item
+    /// under the output name it was planned with: ORDER BY and DISTINCT ON
+    /// already read the output columns by those names.
+    fn target_list(
         &self,
-        projection: &mut [SelectItem],
-        named_windows: &[NamedWindowDefinition],
-    ) -> Result<()> {
-        let named_windows: Vec<(&NamedWindowDefinition, String)> = named_windows
+        select_exprs: Vec<Expr>,
+        schema: &DFSchema,
+        resolve_unknowns: bool,
+    ) -> Result<Vec<Expr>> {
+        let names = select_exprs
             .iter()
-            .map(|w| (w, self.ident_normalizer.normalize(w.0.clone())))
-            .collect();
-        for proj in projection.iter_mut() {
-            if let SelectItem::ExprWithAlias { expr, alias: _ }
-            | SelectItem::UnnamedExpr(expr) = proj
-            {
-                let mut err = None;
-                let _ = visit_expressions_mut(expr, |expr| {
-                    if let SQLExpr::Function(f) = expr
-                        && let Some(WindowType::NamedWindow(ident)) = &f.over
-                    {
-                        let normalized_ident =
-                            self.ident_normalizer.normalize(ident.clone());
-                        for (
-                            NamedWindowDefinition(_, window_expr),
-                            normalized_window_ident,
-                        ) in named_windows.iter()
-                        {
-                            if normalized_ident.eq(normalized_window_ident) {
-                                f.over = Some(match window_expr {
-                                    NamedWindowExpr::NamedWindow(ident) => {
-                                        WindowType::NamedWindow(ident.clone())
-                                    }
-                                    NamedWindowExpr::WindowSpec(spec) => {
-                                        WindowType::WindowSpec(spec.clone())
-                                    }
-                                })
-                            }
-                        }
-                        // All named windows must be defined with a WindowSpec.
-                        if let Some(WindowType::NamedWindow(ident)) = &f.over {
-                            err = Some(plan_err!("The window {ident} is not defined!"));
-                            return ControlFlow::Break(());
-                        }
-                    }
-                    ControlFlow::Continue(())
-                });
-                if let Some(err) = err {
-                    return err;
+            .map(Expr::qualified_name)
+            .collect::<Vec<_>>();
+        let planned = self.context_provider.plan_target_list(
+            select_exprs,
+            schema,
+            resolve_unknowns,
+        )?;
+        if planned.len() != names.len() {
+            return internal_err!(
+                "the host planned {} select items for {}",
+                planned.len(),
+                names.len()
+            );
+        }
+        Ok(planned
+            .into_iter()
+            .zip(names)
+            .map(|(expr, (qualifier, name))| {
+                if expr.qualified_name() == (qualifier.clone(), name.clone()) {
+                    expr
+                } else {
+                    expr.alias_qualified(qualifier, name)
                 }
-            }
-        }
-        Ok(())
+            })
+            .collect())
     }
-}
 
-// If there are any multiple-defined windows, we raise an error.
-fn check_conflicting_windows(window_defs: &[NamedWindowDefinition]) -> Result<()> {
-    for (i, window_def_i) in window_defs.iter().enumerate() {
-        for window_def_j in window_defs.iter().skip(i + 1) {
-            if window_def_i.0 == window_def_j.0 {
-                return plan_err!(
-                    "The window {} is defined multiple times!",
-                    window_def_i.0
-                );
+    /// The windows a WINDOW clause defines, in order, each as written and
+    /// with what it copies from an earlier window it names filled in.
+    fn window_clause(
+        &self,
+        definitions: &[NamedWindowDefinition],
+    ) -> Result<Vec<WindowClauseEntry>> {
+        let mut windows: Vec<WindowClauseEntry> = Vec::with_capacity(definitions.len());
+        for NamedWindowDefinition(name, window) in definitions {
+            let name = self.ident_normalizer.normalize(name.clone());
+            if windows.iter().any(|defined| defined.name == name) {
+                return Err(sqlstate_datafusion_err(
+                    "42P20",
+                    format!("window \"{name}\" is already defined"),
+                ));
             }
+            let (written, window) = match window {
+                NamedWindowExpr::NamedWindow(reference) => {
+                    (None, self.named_window(reference, &windows)?.window.clone())
+                }
+                NamedWindowExpr::WindowSpec(spec) => {
+                    (Some(spec.clone()), self.refine_window(spec, &windows)?)
+                }
+            };
+            windows.push(WindowClauseEntry {
+                name,
+                written,
+                window,
+            });
+        }
+        Ok(windows)
+    }
+
+    /// The window `over` denotes among `windows`, and the entry of the
+    /// WINDOW clause it names, as PostgreSQL's `transformWindowFuncCall`
+    /// resolves it. `OVER w` names the window `w`. An OVER clause that
+    /// writes exactly what an entry writes, its window name included, names
+    /// that entry. Any other `OVER (w ...)` refines `w`, and an unnamed
+    /// specification that matches no entry names none.
+    pub(crate) fn resolve_window<'w>(
+        &self,
+        over: &'w WindowType,
+        windows: &[WindowClauseEntry],
+    ) -> Result<(Cow<'w, WindowSpec>, Option<WindowReference>)> {
+        let spec = match over {
+            WindowType::NamedWindow(reference) => {
+                let entry = self.named_window(reference, windows)?;
+                return Ok((
+                    Cow::Owned(entry.window.clone()),
+                    Some(WindowReference::Named(entry.name.clone())),
+                ));
+            }
+            WindowType::WindowSpec(spec) => spec,
+        };
+        if let Some(entry) = windows
+            .iter()
+            .find(|entry| entry.written.as_ref() == Some(spec))
+        {
+            return Ok((
+                Cow::Owned(entry.window.clone()),
+                Some(WindowReference::Named(entry.name.clone())),
+            ));
+        }
+        match &spec.window_name {
+            None => Ok((Cow::Borrowed(spec), None)),
+            Some(name) => Ok((
+                Cow::Owned(self.refine_window(spec, windows)?),
+                Some(WindowReference::Refines(
+                    self.ident_normalizer.normalize(name.clone()),
+                )),
+            )),
         }
     }
-    Ok(())
+
+    /// The entry of `windows` that `reference` names.
+    fn named_window<'w>(
+        &self,
+        reference: &Ident,
+        windows: &'w [WindowClauseEntry],
+    ) -> Result<&'w WindowClauseEntry> {
+        let name = self.ident_normalizer.normalize(reference.clone());
+        windows
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                sqlstate_datafusion_err(
+                    "42704",
+                    format!("window \"{name}\" does not exist"),
+                )
+            })
+    }
+
+    /// The WINDOW clause entries `windows` as the plan keeps them: each
+    /// window's keys bound over the rows of `plan`, which the query level's
+    /// window calls read before grouping, with what the entry wrote told
+    /// from what it copied.
+    fn window_definitions(
+        &self,
+        windows: &[WindowClauseEntry],
+        plan: &LogicalPlan,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Vec<WindowDefinition>> {
+        windows
+            .iter()
+            .map(|entry| {
+                let (partition_by, mut order_by, frame) =
+                    self.plan_window_spec(&entry.window, plan.schema(), planner_context)?;
+                // A RANGE frame over no ORDER BY sorts by a key the planner
+                // adds, which the window does not write.
+                order_by.truncate(entry.window.order_by.len());
+                let (base, order_copied) = match &entry.written {
+                    Some(written) => (
+                        written
+                            .window_name
+                            .as_ref()
+                            .map(|base| self.ident_normalizer.normalize(base.clone())),
+                        written.window_name.is_some()
+                            && written.order_by.is_empty()
+                            && !entry.window.order_by.is_empty(),
+                    ),
+                    None => (None, false),
+                };
+                Ok(WindowDefinition {
+                    name: entry.name.clone(),
+                    base,
+                    partition_by: partition_by
+                        .into_iter()
+                        .map(|expr| normalize_col(expr, plan))
+                        .collect::<Result<_>>()?,
+                    order_by: order_by
+                        .into_iter()
+                        .map(|sort| {
+                            let expr = normalize_col(sort.expr.clone(), plan)?;
+                            Ok(sort.with_expr(expr))
+                        })
+                        .collect::<Result<_>>()?,
+                    order_copied,
+                    frame: entry.window.window_frame.is_some().then_some(frame),
+                    frame_between: entry
+                        .window
+                        .window_frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.end_bound.is_some()),
+                })
+            })
+            .collect()
+    }
+
+    /// `spec` with the window it names, if it names one, copied in. The
+    /// named window's PARTITION BY is inherited and may not be overridden;
+    /// its ORDER BY is inherited when `spec` writes none, and may not be
+    /// overridden either when it has one. A window with a frame clause
+    /// cannot be copied, since the frame is the last part a window adds.
+    fn refine_window(
+        &self,
+        spec: &WindowSpec,
+        windows: &[WindowClauseEntry],
+    ) -> Result<WindowSpec> {
+        let Some(reference) = &spec.window_name else {
+            return Ok(spec.clone());
+        };
+        let base = &self.named_window(reference, windows)?.window;
+        let name = self.ident_normalizer.normalize(reference.clone());
+        if !spec.partition_by.is_empty() {
+            return Err(sqlstate_datafusion_err(
+                "42P20",
+                format!("cannot override PARTITION BY clause of window \"{name}\""),
+            ));
+        }
+        if !spec.order_by.is_empty() && !base.order_by.is_empty() {
+            return Err(sqlstate_datafusion_err(
+                "42P20",
+                format!("cannot override ORDER BY clause of window \"{name}\""),
+            ));
+        }
+        if base.window_frame.is_some() {
+            let message =
+                format!("cannot copy window \"{name}\" because it has a frame clause");
+            // `OVER (w)` that adds nothing to `w` means `OVER w`.
+            let adds_nothing = spec.order_by.is_empty() && spec.window_frame.is_none();
+            return Err(if adds_nothing {
+                sqlstate_datafusion_err_with_hint(
+                    "42P20",
+                    message,
+                    "Omit the parentheses in this OVER clause.",
+                )
+            } else {
+                sqlstate_datafusion_err("42P20", message)
+            });
+        }
+        Ok(WindowSpec {
+            window_name: None,
+            partition_by: base.partition_by.clone(),
+            order_by: if spec.order_by.is_empty() {
+                base.order_by.clone()
+            } else {
+                spec.order_by.clone()
+            },
+            window_frame: spec.window_frame.clone(),
+        })
+    }
 }
 
 /// The relation of a select item that is `relation.*` inside parentheses.
@@ -2139,32 +2521,32 @@ fn has_unnest_expr_recursively(expr: &Expr) -> bool {
     has_unnest
 }
 
-/// Rewrite a reference to an output column of the select list into that
-/// column's expression over `input`, the rows DISTINCT ON reads. A column
-/// `input` provides itself stays as it is.
-fn resolve_projection_references(
-    expr: Expr,
-    projected: &DFSchema,
-    select_exprs: &[Expr],
-    input: &DFSchema,
-) -> Result<Expr> {
-    expr.transform(|expr| match expr {
-        Expr::Column(column) if input.maybe_index_of_column(&column).is_none() => {
-            match projected.maybe_index_of_column(&column) {
-                None => Ok(Transformed::no(Expr::Column(column))),
-                Some(index) => match select_exprs.get(index) {
-                    Some(select_expr) => {
-                        Ok(Transformed::yes(select_expr.clone().unalias()))
-                    }
-                    None => internal_err!(
-                        "output column {column} has no select expression at position {index}"
-                    ),
-                },
-            }
+/// `expr` without the aliases that only name it. An alias that carries field
+/// metadata is part of the expression it wraps: a host records on it how the
+/// expression was written, which a reference to the select item keeps.
+fn without_naming_aliases(expr: Expr) -> Expr {
+    match expr {
+        Expr::Alias(alias) if alias.metadata.is_none() => {
+            without_naming_aliases(*alias.expr)
         }
-        other => Ok(Transformed::no(other)),
-    })
-    .data()
+        other => other,
+    }
+}
+
+/// The output column each ORDER BY or DISTINCT ON item names by position,
+/// as [`SqlToRel::output_column_positions`] leaves a bare output name and as
+/// a written number is: 0-based, `None` for an item that is an expression.
+fn output_positions(items: &[OrderByExpr]) -> Vec<Option<usize>> {
+    items
+        .iter()
+        .map(|item| match &item.expr {
+            SQLExpr::Value(ValueWithSpan {
+                value: Value::Number(number, _),
+                ..
+            }) => number.parse::<usize>().ok().and_then(|n| n.checked_sub(1)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Bind an ORDER BY expression copied from a select-list SRF to the ordinary

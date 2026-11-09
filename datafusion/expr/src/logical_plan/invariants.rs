@@ -78,14 +78,9 @@ fn assert_valid_extension_nodes(plan: &LogicalPlan, check: InvariantLevel) -> Re
         plan.apply_expressions(|expr| {
             // recursively look for subqueries
             expr.apply(|expr| {
-                match expr {
-                    Expr::Exists(Exists { subquery, .. })
-                    | Expr::InSubquery(InSubquery { subquery, .. })
-                    | Expr::ScalarSubquery(subquery) => {
-                        assert_valid_extension_nodes(&subquery.subquery, check)?;
-                    }
-                    _ => {}
-                };
+                if let Some(subquery) = expr.subquery() {
+                    assert_valid_extension_nodes(&subquery.subquery, check)?;
+                }
                 Ok(TreeNodeRecursion::Continue)
             })
         })

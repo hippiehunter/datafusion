@@ -2090,13 +2090,7 @@ impl LogicalPlan {
                 // Extract order_by expressions (wrapped in Sort)
                 let order_by: Vec<_> = order_by
                     .iter()
-                    .map(|sort_expr| {
-                        expr_iter.next().map(|e| SortExpr {
-                            expr: e,
-                            asc: sort_expr.asc,
-                            nulls_first: sort_expr.nulls_first,
-                        })
-                    })
+                    .map(|sort_expr| expr_iter.next().map(|e| sort_expr.with_expr(e)))
                     .collect::<Option<_>>()
                     .ok_or_else(|| {
                         DataFusionError::Internal(
@@ -4706,7 +4700,8 @@ pub struct DistinctOn {
 }
 
 impl DistinctOn {
-    /// Create a new `DistinctOn` struct.
+    /// Create a new `DistinctOn` struct. An `ON` expression equal to an
+    /// earlier one is dropped, as PostgreSQL keeps each distinct key once.
     pub fn try_new(
         on_expr: Vec<Expr>,
         select_expr: Vec<Expr>,
@@ -4717,7 +4712,13 @@ impl DistinctOn {
             return plan_err!("No `ON` expressions provided");
         }
 
-        let on_expr = normalize_cols(on_expr, input.as_ref())?;
+        let normalized = normalize_cols(on_expr, input.as_ref())?;
+        let mut on_expr: Vec<Expr> = Vec::with_capacity(normalized.len());
+        for expr in normalized {
+            if !on_expr.contains(&expr) {
+                on_expr.push(expr);
+            }
+        }
         let qualified_fields = exprlist_to_fields(select_expr.as_slice(), &input)?
             .into_iter()
             .collect();
@@ -4748,6 +4749,11 @@ impl DistinctOn {
     /// before every other item, in any order, and once any other item is
     /// present every `ON` expression is among those leading items. Otherwise
     /// the error is 42P10.
+    ///
+    /// The `ON` expressions are then kept in PostgreSQL's `distinctClause`
+    /// order: those the ORDER BY names, in ORDER BY order, then the rest in
+    /// written order. A key set is grouped the same in any order, so only the
+    /// order the definition reads back in changes.
     pub fn with_sort_expr(mut self, sort_expr: Vec<SortExpr>) -> Result<Self> {
         let sort_expr = normalize_sorts(sort_expr, self.input.as_ref())?;
 
@@ -4758,7 +4764,9 @@ impl DistinctOn {
                 if other_item_seen {
                     return Err(distinct_on_order_by_mismatch());
                 }
-                leading.push(&sort.expr);
+                if !leading.contains(&&sort.expr) {
+                    leading.push(&sort.expr);
+                }
             } else {
                 other_item_seen = true;
             }
@@ -4767,6 +4775,13 @@ impl DistinctOn {
             return Err(distinct_on_order_by_mismatch());
         }
 
+        let mut on_expr: Vec<Expr> = leading.into_iter().cloned().collect();
+        for expr in &self.on_expr {
+            if !on_expr.contains(expr) {
+                on_expr.push(expr.clone());
+            }
+        }
+        self.on_expr = on_expr;
         self.sort_expr = Some(sort_expr);
         Ok(self)
     }
@@ -5719,6 +5734,7 @@ fn get_unnested_list_datatype_recursive(
 mod tests {
     use super::*;
     use crate::builder::LogicalTableSource;
+    use crate::expr::{AllExpr, AnyExpr, QuantifiedSource};
     use crate::logical_plan::table_scan;
     use crate::select_expr::SelectExpr;
     use crate::test::function_stub::{count, count_udaf};
@@ -6692,6 +6708,68 @@ mod tests {
         let mut rewriter = ProjectJumpRewriter::new();
         plan.rewrite_with_subqueries(&mut rewriter).unwrap();
         assert!(!rewriter.filter_found);
+    }
+
+    /// `x op ANY (SELECT ...)` and `x op ALL (SELECT ...)` carry a subquery
+    /// like IN does: every walk with subqueries visits and rewrites it.
+    #[test]
+    fn quantified_subqueries_are_walked_and_rewritten_with_the_plan() {
+        let inner_schema = Schema::new(vec![Field::new("sub_id", DataType::Int32, false)]);
+        let outer_schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+        for all in [false, true] {
+            let source = QuantifiedSource::Subquery(Subquery {
+                subquery: Arc::new(
+                    table_scan(Some("inner_rows"), &inner_schema, None)
+                        .unwrap()
+                        .build()
+                        .unwrap(),
+                ),
+                outer_ref_columns: vec![],
+                spans: Spans::new(),
+            });
+            let quantified = if all {
+                Expr::AllExpr(AllExpr::new(Box::new(col("id")), Operator::Eq, source))
+            } else {
+                Expr::AnyExpr(AnyExpr::new(Box::new(col("id")), Operator::Eq, source))
+            };
+            let plan = table_scan(Some("outer_rows"), &outer_schema, None)
+                .unwrap()
+                .filter(quantified)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let mut scanned = vec![];
+            plan.apply_with_subqueries(|node| {
+                if let LogicalPlan::TableScan(scan) = node {
+                    scanned.push(scan.table_name.to_string());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            assert_eq!(scanned, ["inner_rows", "outer_rows"]);
+
+            let rewritten = plan
+                .transform_up_with_subqueries(|node| match node {
+                    LogicalPlan::TableScan(mut scan)
+                        if scan.table_name.table() == "inner_rows" =>
+                    {
+                        scan.fetch = Some(1);
+                        Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+                    }
+                    other => Ok(Transformed::no(other)),
+                })
+                .unwrap();
+            assert!(rewritten.transformed);
+            let LogicalPlan::Filter(filter) = rewritten.data else {
+                panic!("the filter keeps its place");
+            };
+            let subquery = filter.predicate.subquery().expect("quantified subquery");
+            let LogicalPlan::TableScan(scan) = subquery.subquery.as_ref() else {
+                panic!("the subquery keeps its scan");
+            };
+            assert_eq!(scan.fetch, Some(1));
+        }
     }
 
     #[test]

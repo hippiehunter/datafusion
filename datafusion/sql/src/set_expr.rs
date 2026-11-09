@@ -24,11 +24,15 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
 use datafusion_expr::logical_plan::builder::requalify_sides_if_needed;
+use datafusion_expr::logical_plan::{SetOperation, SetOperationKind};
 use datafusion_expr::{
     Expr, LogicalPlan, LogicalPlanBuilder, WindowFrame, WindowFunctionDefinition,
     WindowUDF,
 };
-use sqlparser::ast::{SetExpr, SetOperator, SetQuantifier, Spanned};
+use sqlparser::ast::{
+    AttachedToken, GroupByExpr, Select, SelectFlavor, SelectItem, SetExpr, SetOperator,
+    SetQuantifier, Spanned, TableFactor, TableWithJoins, WildcardAdditionalOptions,
+};
 
 impl SqlToRel<'_> {
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
@@ -51,9 +55,8 @@ impl SqlToRel<'_> {
             } => {
                 let left_span = crate::utils::convert_parser_span(left.span());
                 let right_span = crate::utils::convert_parser_span(right.span());
-                let left_plan = self.set_expr_to_plan_ref(left.as_ref(), planner_context);
-                let right_plan =
-                    self.set_expr_to_plan_ref(right.as_ref(), planner_context);
+                let left_plan = self.set_operation_input(left, planner_context);
+                let right_plan = self.set_operation_input(right, planner_context);
                 let (left_plan, right_plan) = match (left_plan, right_plan) {
                     (Ok(left_plan), Ok(right_plan)) => (left_plan, right_plan),
                     (Err(left_err), Err(right_err)) => {
@@ -101,8 +104,65 @@ impl SqlToRel<'_> {
                     planner_context,
                 )
             }
+            // PostgreSQL's grammar reads `TABLE relation_expr` as
+            // `SELECT * FROM relation_expr`, keeping the name's quoting and
+            // its ONLY marker.
+            SetExpr::Table(table) => {
+                let Some(relation) = &table.relation else {
+                    return plan_err!("TABLE command names no relation");
+                };
+                let select = Select {
+                    hints: vec![],
+                    select_token: AttachedToken::empty(),
+                    distinct: None,
+                    top: None,
+                    top_before_distinct: false,
+                    projection: vec![SelectItem::Wildcard(
+                        WildcardAdditionalOptions::default(),
+                    )],
+                    into: None,
+                    from: vec![TableWithJoins {
+                        relation: TableFactor::Table {
+                            name: relation.name.clone(),
+                            alias: None,
+                            args: None,
+                            with_hints: vec![],
+                            version: None,
+                            with_ordinality: false,
+                            only: relation.only,
+                            partitions: vec![],
+                            json_path: None,
+                            sample: None,
+                            index_hints: vec![],
+                        },
+                        joins: vec![],
+                    }],
+                    selection: None,
+                    group_by: GroupByExpr::Expressions(vec![], vec![]),
+                    having: None,
+                    qualify: None,
+                    named_window: vec![],
+                    connect_by: None,
+                    flavor: SelectFlavor::Standard,
+                };
+                self.select_to_plan_ref(&select, None, planner_context)
+            }
             _ => not_impl_err!("Query {set_expr} not implemented yet"),
         }
+    }
+
+    /// One input of a set operation, or the recursive term of a recursive
+    /// query. Its select list keeps its untyped values untyped: the
+    /// operation gives each column one type across its inputs.
+    pub(super) fn set_operation_input(
+        &self,
+        input: &SetExpr,
+        planner_context: &mut PlannerContext,
+    ) -> Result<LogicalPlan> {
+        planner_context.set_resolve_unknowns(false);
+        let plan = self.set_expr_to_plan_ref(input, planner_context);
+        planner_context.set_resolve_unknowns(true);
+        plan
     }
 
     pub(super) fn is_union_all(set_quantifier: SetQuantifier) -> Result<bool> {
@@ -155,6 +215,25 @@ impl SqlToRel<'_> {
         let (left_plan, right_plan) = self
             .context_provider
             .plan_set_operation_inputs(op, left_plan, right_plan)?;
+        // A definition planned to be printed keeps INTERSECT and EXCEPT as
+        // written; execution planning turns them into the joins below.
+        if self.context_provider.plans_definitions_as_written() {
+            let kind = match op {
+                SetOperator::Intersect => Some(SetOperationKind::Intersect),
+                SetOperator::Except => Some(SetOperationKind::Except),
+                _ => None,
+            };
+            let all = match set_quantifier {
+                SetQuantifier::All => Some(true),
+                SetQuantifier::Distinct | SetQuantifier::None => Some(false),
+                _ => None,
+            };
+            if let (Some(kind), Some(all)) = (kind, all) {
+                return Ok(
+                    SetOperation::new(kind, all, left_plan, right_plan).into_plan()
+                );
+            }
+        }
         match (op, set_quantifier) {
             (SetOperator::Union, SetQuantifier::All) => {
                 LogicalPlanBuilder::from(left_plan)
@@ -290,6 +369,7 @@ fn number_duplicates(
             filter: None,
             null_treatment: None,
             distinct: false,
+            window_reference: None,
         },
     }))
     .alias(DUPLICATE_ORDINAL_COLUMN);

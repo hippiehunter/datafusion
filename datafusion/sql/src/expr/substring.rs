@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, SqlSyntaxCall, SqlToRel};
 use arrow::datatypes::DataType;
 use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::{DFSchema, Result, ScalarValue};
@@ -72,11 +72,14 @@ impl SqlToRel<'_> {
         self.sql_function_to_expr(&function, schema, planner_context)
     }
 
+    /// `SUBSTRING(string FROM start [FOR count])`, or with `comma_separated`
+    /// the call `substring(string, start [, count])`.
     pub(super) fn sql_substring_to_expr(
         &self,
         expr: &SQLBox<SQLExpr>,
         substring_from: Option<&SQLBox<SQLExpr>>,
         substring_for: Option<&SQLBox<SQLExpr>>,
+        comma_separated: bool,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
@@ -158,7 +161,10 @@ impl SqlToRel<'_> {
         // Try to plan the substring expression using one of the registered planners
         for planner in self.context_provider.get_expr_planners() {
             match planner.plan_substring(substring_args)? {
-                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Planned(expr) if comma_separated => return Ok(expr),
+                PlannerResult::Planned(expr) => {
+                    return self.sql_syntax_call(SqlSyntaxCall::Substring, expr);
+                }
                 PlannerResult::Original(args) => {
                     substring_args = args;
                 }

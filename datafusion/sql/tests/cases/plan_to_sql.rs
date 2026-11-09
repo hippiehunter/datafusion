@@ -1886,7 +1886,7 @@ fn test_order_by_to_sql_1() {
     );
     assert_snapshot!(
         statement,
-        @r#"SELECT person.id, person.first_name, sum(person.id) AS "sum" FROM person GROUP BY person.id, person.first_name ORDER BY "sum" ASC NULLS LAST, person.first_name DESC NULLS FIRST, person.id ASC NULLS LAST, person.first_name ASC NULLS LAST LIMIT 10"#
+        @r#"SELECT person.id, person.first_name, sum(person.id) AS "sum" FROM person GROUP BY person.id, person.first_name ORDER BY "sum" ASC NULLS LAST, person.first_name DESC NULLS FIRST, person.id ASC NULLS LAST LIMIT 10"#
     );
 }
 
@@ -1899,7 +1899,7 @@ fn test_order_by_to_sql_2() {
     );
     assert_snapshot!(
         statement,
-        @r#"SELECT person.id, person.first_name, sum(person.id) AS total_sum FROM person GROUP BY person.id, person.first_name ORDER BY total_sum ASC NULLS LAST, person.first_name DESC NULLS FIRST, person.id ASC NULLS LAST, person.first_name ASC NULLS LAST LIMIT 10"#
+        @r#"SELECT person.id, person.first_name, sum(person.id) AS total_sum FROM person GROUP BY person.id, person.first_name ORDER BY total_sum ASC NULLS LAST, person.first_name DESC NULLS FIRST, person.id ASC NULLS LAST LIMIT 10"#
     );
 }
 
@@ -2565,6 +2565,7 @@ fn test_unparse_window() -> Result<()> {
             null_treatment: None,
             distinct: false,
             filter: None,
+            window_reference: None,
         },
     }));
     let table = table_scan(Some("test"), &schema, Some(vec![0, 1]))?.build()?;

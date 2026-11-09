@@ -28,8 +28,8 @@ use datafusion_common::{
     Constraints, DFSchema, DataFusionError, Result, Span, TableReference,
     config::ConfigOptions, file_options::file_type::FileType, not_impl_err,
 };
-use datafusion_expr::expr::NullTreatment;
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
+use datafusion_expr::expr::{NullTreatment, WindowReference};
 use datafusion_expr::expr_rewriter::NamePreserver;
 use datafusion_expr::expr_schema::is_type_only_cast_target;
 use datafusion_expr::logical_plan::{GraphPattern, GraphTable, LogicalPlan, RowLimiting};
@@ -56,7 +56,7 @@ pub enum SetReturningColumns {
 }
 
 /// Physical sampling strategy requested by a SQL `TABLESAMPLE` clause.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
 pub enum TableSampleMethod {
     Bernoulli,
     System,
@@ -76,6 +76,19 @@ pub struct CreateTableLikeOptions {
     pub generated: bool,
     pub comments: bool,
     pub storage: bool,
+    pub compression: bool,
+}
+
+/// What makes an operator an ordering operator for a sort key: the btree
+/// strategy it has in an operator family over the key's type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderingOperator {
+    /// The operator is its family's less-than (btree strategy 1) rather than
+    /// its greater-than (strategy 5), so the sort it names is ascending.
+    pub ascending: bool,
+    /// The operator is the `<` or `>` of the type's default btree operator
+    /// class, which a sort names by ASC or DESC alone.
+    pub default_for_type: bool,
 }
 
 /// Provider-resolved input for one `CREATE TABLE ... LIKE` clause.
@@ -184,6 +197,15 @@ pub trait ContextProvider {
     /// Returns a table by reference, if it exists
     fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
 
+    /// The source of a table read under `TABLESAMPLE`: its schema carries
+    /// the row identity the predicate of [`Self::plan_table_sample`] reads.
+    fn get_sampled_table_source(
+        &self,
+        name: TableReference,
+    ) -> Result<Arc<dyn TableSource>> {
+        self.get_table_source(name)
+    }
+
     /// Resolve the semantic row shape and selected properties copied by one
     /// `CREATE TABLE ... LIKE` clause.
     ///
@@ -205,9 +227,12 @@ pub trait ContextProvider {
         DataFusionError::Plan(format!("column \"{name}\" specified more than once"))
     }
 
-    /// Build the engine-owned predicate for a physical table sample. The SQL
+    /// Build the engine-owned predicate for a physical table sample, over the
+    /// scan of the source [`Self::get_sampled_table_source`] returned. The SQL
     /// planner owns clause parsing and expression typing; the table provider
-    /// owns stable row identity and the sampling algorithm.
+    /// owns stable row identity and the sampling algorithm. A plan made to
+    /// be printed ([`Self::plans_definitions_as_written`]) keeps the clause
+    /// as a [`crate::definition_plan::SampledRelation`] instead.
     fn plan_table_sample(
         &self,
         _name: &TableReference,
@@ -216,6 +241,16 @@ pub trait ContextProvider {
         _repeatable: Option<Expr>,
     ) -> Result<Expr> {
         not_impl_err!("TABLESAMPLE is not supported by this table provider")
+    }
+
+    /// A `TABLESAMPLE` argument coerced to `target` (`Float32` for the
+    /// percentage, `Float64` for the seed), as PostgreSQL's parse analysis
+    /// coerces it by assignment. An untyped constant takes the target type,
+    /// read through that type's input while the clause is planned. A
+    /// provider refuses an argument whose type has no such coercion; the
+    /// default casts.
+    fn plan_table_sample_argument(&self, value: Expr, target: &DataType) -> Result<Expr> {
+        value.cast_to(target, &DFSchema::empty())
     }
 
     /// Error identity for attaching `TABLESAMPLE` to a CTE or another
@@ -394,6 +429,47 @@ pub trait ContextProvider {
     /// The default preserves ordinary DataFusion VALUES inference.
     fn plan_values_coercion(&self, rows: Vec<Vec<Expr>>) -> Result<Vec<Vec<Expr>>> {
         Ok(rows)
+    }
+
+    /// The select list of one query level, over `schema`, before its
+    /// projection is built. `resolve_unknowns` says whether the level gives
+    /// its untyped values a type of their own, as PostgreSQL's
+    /// `resolveTargetListUnknowns` does: every level does except an input
+    /// of a set operation and the source of INSERT ... SELECT, whose untyped
+    /// values take the type their consumer gives them. Each returned item
+    /// keeps the output name of the item it replaces. The default keeps the
+    /// list.
+    fn plan_target_list(
+        &self,
+        select_exprs: Vec<Expr>,
+        _schema: &DFSchema,
+        _resolve_unknowns: bool,
+    ) -> Result<Vec<Expr>> {
+        Ok(select_exprs)
+    }
+
+    /// The btree strategy that makes `operator` an ordering operator for
+    /// `operand`, a sort key planned against `schema`, as PostgreSQL reads
+    /// `ORDER BY operand USING operator`. `None` when the operator is no
+    /// less-than or greater-than member of a btree operator family over the
+    /// key's type. The default knows only the type's own `<` and `>`.
+    fn ordering_operator(
+        &self,
+        operator: &str,
+        _operand: &Expr,
+        _schema: &DFSchema,
+    ) -> Result<Option<OrderingOperator>> {
+        Ok(match operator {
+            "<" => Some(OrderingOperator {
+                ascending: true,
+                default_for_type: true,
+            }),
+            ">" => Some(OrderingOperator {
+                ascending: false,
+                default_for_type: true,
+            }),
+            _ => None,
+        })
     }
 
     /// Resolve provider-owned semantic types across the two inputs of a set
@@ -712,6 +788,22 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(args))
     }
 
+    /// Marks `planned`, the expression a call written in SQL syntax was
+    /// planned as. PostgreSQL plans `POSITION(a IN b)`, `EXTRACT(f FROM x)`,
+    /// `x AT TIME ZONE z` and the other forms of [`SqlSyntaxCall`] as calls
+    /// of ordinary functions, and prints each back in the syntax it was
+    /// written in, where the same function called by name prints as a call.
+    ///
+    /// Returns the expression unchanged if not marked
+    fn plan_sql_syntax_call(
+        &self,
+        syntax: SqlSyntaxCall,
+        planned: Expr,
+    ) -> Result<PlannerResult<Expr>> {
+        let _ = syntax;
+        Ok(PlannerResult::Original(planned))
+    }
+
     /// Plans a `make_map` expression, such as `make_map(key1, value1, key2, value2, ...)`
     ///
     /// Returns original expression arguments if not possible
@@ -785,6 +877,12 @@ pub trait ExprPlanner: Debug + Send + Sync {
     ///
     /// Returns the original group if not possible
     fn plan_between(&self, group: Expr) -> Result<PlannerResult<Expr>> {
+        Ok(PlannerResult::Original(group))
+    }
+
+    /// Plans the comparison group implementing a period OVERLAPS operator.
+    /// Catalog printers can retain its SQL provenance before it is expanded.
+    fn plan_overlaps(&self, group: Expr) -> Result<PlannerResult<Expr>> {
         Ok(PlannerResult::Original(group))
     }
 
@@ -972,6 +1070,40 @@ impl ExprPlanner for AggregateFunctionPlanner {
 
         Ok(PlannerResult::Original(raw_expr))
     }
+}
+
+/// A call written in SQL syntax rather than as a function call, which
+/// PostgreSQL keeps as a call with `COERCE_SQL_SYNTAX` and prints back in
+/// that syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SqlSyntaxCall {
+    /// `POSITION(substring IN string)`
+    Position,
+    /// `SUBSTRING(string FROM start [FOR count])`
+    Substring,
+    /// `TRIM([BOTH | LEADING | TRAILING] [characters] FROM string)`
+    Trim(TrimSide),
+    /// `OVERLAY(string PLACING replacement FROM start [FOR count])`
+    Overlay,
+    /// `EXTRACT(field FROM source)`
+    Extract,
+    /// `value AT TIME ZONE zone`
+    AtTimeZone,
+    /// `value AT LOCAL`
+    AtLocal,
+    /// `value IS [form] NORMALIZED`
+    IsNormalized,
+    /// `COLLATION FOR (value)`
+    CollationFor,
+}
+
+/// The side a `TRIM` removes characters from. A `TRIM` that names none
+/// trims both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrimSide {
+    Both,
+    Leading,
+    Trailing,
 }
 
 /// An operator with two arguments to plan
@@ -1224,6 +1356,9 @@ pub struct RawWindowExpr {
     pub filter: Option<Box<Expr>>,
     pub null_treatment: Option<NullTreatment>,
     pub distinct: bool,
+    /// The WINDOW clause entry the OVER clause named, whose definition
+    /// `partition_by`, `order_by` and `window_frame` already hold.
+    pub window_reference: Option<WindowReference>,
 }
 
 /// Result of planning a raw expr with [`ExprPlanner`]

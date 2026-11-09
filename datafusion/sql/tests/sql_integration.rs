@@ -413,6 +413,53 @@ fn insert_target_alias_names_the_target_row_in_returning() {
 }
 
 #[test]
+fn insert_returning_preserves_parser_folded_and_quoted_column_identity() {
+    for sql in [
+        r#"INSERT INTO folded_rows VALUES (7, NULL) RETURNING n, "n""#,
+        r#"INSERT INTO folded_rows(n, "n") VALUES (7, 'quoted') RETURNING n, "n""#,
+        r#"INSERT INTO folded_rows("n") VALUES ('quoted') RETURNING n, "n""#,
+        r#"INSERT INTO folded_rows SELECT 7, CAST('typed' AS VARCHAR) RETURNING n, "n""#,
+        r#"INSERT INTO folded_rows VALUES (7, NULL) RETURNING folded_rows.n, folded_rows."n""#,
+    ] {
+        let plan = logical_plan_with_dialect_and_options(
+            sql,
+            &OracleDialect {},
+            ident_normalization_parser_options_no_ident_normalization(),
+        )
+        .unwrap();
+        let LogicalPlan::Dml(dml) = &plan else {
+            panic!("expected DML plan");
+        };
+        assert_eq!(
+            dml.returning_columns.as_deref(),
+            Some(["N".to_string(), "n".to_string()].as_slice()),
+            "{sql}"
+        );
+        let evaluation_schema = dml.returning_eval_schema().unwrap();
+        for schema in [plan.schema().as_ref(), evaluation_schema.as_ref()] {
+            assert_eq!(schema.field(0).name(), "N", "{sql}");
+            assert_eq!(schema.field(0).data_type(), &DataType::Int32, "{sql}");
+            assert_eq!(schema.field(1).name(), "n", "{sql}");
+            assert_eq!(schema.field(1).data_type(), &DataType::Utf8, "{sql}");
+        }
+    }
+}
+
+#[test]
+fn delete_returning_preserves_parser_folded_and_quoted_column_identity() {
+    let plan = logical_plan_with_dialect_and_options(
+        r#"DELETE FROM folded_rows RETURNING n, "n""#,
+        &OracleDialect {},
+        ident_normalization_parser_options_no_ident_normalization(),
+    )
+    .unwrap();
+    assert_eq!(plan.schema().field(0).name(), "N");
+    assert_eq!(plan.schema().field(0).data_type(), &DataType::Int32);
+    assert_eq!(plan.schema().field(1).name(), "n");
+    assert_eq!(plan.schema().field(1).data_type(), &DataType::Utf8);
+}
+
+#[test]
 fn insert_target_alias_hides_the_relation_name_in_returning() {
     let error = logical_plan(
         "INSERT INTO person AS p (id, first_name, last_name) VALUES (1, 'A', 'B') \
@@ -1101,20 +1148,6 @@ fn plan_insert() {
     Dml: op=[Insert Into] table=[person]
       Projection: column1 AS id, column2 AS first_name, column3 AS last_name, CAST(NULL AS Int32) AS age, CAST(NULL AS Utf8) AS state, CAST(NULL AS Float64) AS salary, CAST(NULL AS Timestamp(ns)) AS birth_date, CAST(NULL AS Int32) AS 😀
         Values: (CAST(Int32(1) AS UInt32), Utf8("Alan"), Utf8("Turing"))
-    "#
-    );
-}
-
-#[test]
-fn plan_insert_default_values() {
-    let sql = "insert into person (id, first_name, last_name) values (DEFAULT, 'Alan', DEFAULT)";
-    let plan = logical_plan(sql).unwrap();
-    assert_snapshot!(
-        plan,
-        @r#"
-    Dml: op=[Insert Into] table=[person]
-      Projection: column1 AS id, column2 AS first_name, column3 AS last_name, CAST(NULL AS Int32) AS age, CAST(NULL AS Utf8) AS state, CAST(NULL AS Float64) AS salary, CAST(NULL AS Timestamp(ns)) AS birth_date, CAST(NULL AS Int32) AS 😀
-        Values: (UInt32(NULL), Utf8("Alan"), Utf8(NULL))
     "#
     );
 }
@@ -1963,20 +1996,19 @@ fn plan_create_table_with_storage_parameter_expression_error() {
 )]
 #[case::non_existing_column(
     "INSERT INTO test_decimal (nonexistent, price) VALUES (1, 2), (4, 5)",
-    "Schema error: No field named nonexistent. \
-    Valid fields are id, price."
+    "External error: column \"nonexistent\" of relation \"test_decimal\" does not exist"
 )]
 #[case::target_column_count_mismatch(
     "INSERT INTO person (id, first_name, last_name) VALUES ($1, $2)",
-    "Error during planning: Inconsistent data length across values list: got 2 values in row 0 but expected 3"
+    "External error: INSERT has more target columns than expressions"
 )]
 #[case::source_column_count_mismatch(
     "INSERT INTO test_decimal VALUES (1, 2, 3)",
-    "Error during planning: Inconsistent data length across values list: got 3 values in row 0 but expected 2"
+    "External error: INSERT has more expressions than target columns"
 )]
 #[case::extra_placeholder(
     "INSERT INTO person (id, first_name, last_name) VALUES ($1, $2, $3, $4)",
-    "Error during planning: Placeholder $4 refers to a non existent column"
+    "External error: INSERT has more expressions than target columns"
 )]
 // PostgreSQL spells a placeholder `$` plus decimal digits; a `$` followed by
 // a name is a syntax error at the `$` itself.
@@ -3181,8 +3213,9 @@ fn select_grouped_by_a_cast_of_a_column_references_the_grouped_value() {
             panic!("{sql}: {error}");
         }
     }
-    let plan = logical_plan("SELECT CAST(age AS VARCHAR) AS a, count(*) FROM person GROUP BY 1")
-        .unwrap();
+    let plan =
+        logical_plan("SELECT CAST(age AS VARCHAR) AS a, count(*) FROM person GROUP BY 1")
+            .unwrap();
     assert_snapshot!(
         plan,
         @"
@@ -5378,7 +5411,8 @@ mod postgres_planning_semantics {
                 .iter()
                 .filter(|subscript| matches!(subscript, SubscriptStep::Slice { .. }))
                 .count();
-            let list = DataType::List(Arc::new(Field::new_list_field(DataType::Int64, true)));
+            let list =
+                DataType::List(Arc::new(Field::new_list_field(DataType::Int64, true)));
             let udf = Arc::new(make_udf(
                 "subscripts",
                 vec![list.clone(), DataType::Int64, DataType::Int64],
@@ -5831,8 +5865,8 @@ mod postgres_planning_semantics {
     /// the column it is compared with.
     #[test]
     fn a_fixed_parameter_list_reaches_the_explained_statement() -> Result<()> {
-        let mut planner_context = PlannerContext::new()
-            .with_fixed_parameter_list(vec![Arc::new(Field::new(
+        let mut planner_context =
+            PlannerContext::new().with_fixed_parameter_list(vec![Arc::new(Field::new(
                 "$1",
                 DataType::Int16,
                 true,
@@ -6719,10 +6753,7 @@ fn test_any_subquery() {
     let sql = "SELECT id FROM person WHERE id > ANY(SELECT id FROM person WHERE id < 5)";
     let plan = logical_plan(sql).unwrap();
     let plan_str = format!("{plan}");
-    assert!(
-        plan_str.contains("ANY"),
-        "Expected ANY in plan: {plan_str}"
-    );
+    assert!(plan_str.contains("ANY"), "Expected ANY in plan: {plan_str}");
 }
 
 #[test]
@@ -6731,10 +6762,7 @@ fn test_all_subquery() {
     let sql = "SELECT id FROM person WHERE id > ALL(SELECT id FROM person WHERE id < 5)";
     let plan = logical_plan(sql).unwrap();
     let plan_str = format!("{plan}");
-    assert!(
-        plan_str.contains("ALL"),
-        "Expected ALL in plan: {plan_str}"
-    );
+    assert!(plan_str.contains("ALL"), "Expected ALL in plan: {plan_str}");
 }
 
 #[test]
@@ -7873,7 +7901,10 @@ fn delete_in_an_uncorrelated_subquery_is_a_carrying_semi_join() {
         }]
     );
     let text = format!("{}", plan.display_indent());
-    assert_contains!(&text, "LeftSemiCarry Join:  Filter: person.id = __carried_semi_0.__c_in");
+    assert_contains!(
+        &text,
+        "LeftSemiCarry Join:  Filter: person.id = __carried_semi_0.__c_in"
+    );
     assert_contains!(&text, "SubqueryAlias: __carried_semi_0");
     assert_contains!(&text, "orders.customer_id AS __c_in");
     assert!(!text.contains(" IN ("));
@@ -7885,7 +7916,11 @@ fn delete_in_an_uncorrelated_subquery_is_a_carrying_semi_join() {
                 "__carried_semi_0".into(),
                 Some("__c_in".into())
             ),
-            ("__carried_0_present".into(), "__carried_semi_0".into(), None),
+            (
+                "__carried_0_present".into(),
+                "__carried_semi_0".into(),
+                None
+            ),
         ]
     );
 }
@@ -7899,7 +7934,10 @@ fn update_correlated_exists_is_a_carrying_semi_join_on_its_correlation() {
     .unwrap();
     let (_, carried) = dml_input_and_carried(&plan);
     assert_eq!(carried.len(), 1);
-    assert_eq!(carried[0].relation, TableReference::bare("__carried_semi_0"));
+    assert_eq!(
+        carried[0].relation,
+        TableReference::bare("__carried_semi_0")
+    );
     assert_eq!(carried[0].columns, vec!["__carried_0___c0".to_string()]);
     let text = format!("{}", plan.display_indent());
     assert_contains!(
@@ -7957,7 +7995,11 @@ fn uncorrelated_sublinks_are_computed_below_their_clause_and_carried() {
                 "__carried_initplan".into(),
                 Some("__initplan_1".into())
             ),
-            ("__carried_0_present".into(), "__carried_initplan".into(), None),
+            (
+                "__carried_0_present".into(),
+                "__carried_initplan".into(),
+                None
+            ),
         ]
     );
     let text = format!("{}", plan.display_indent());
@@ -8113,5 +8155,1266 @@ fn plan_delete_using_unnest_alias_in_correlated_subquery() {
             // This workspace currently builds SQL without nested expressions enabled.
             assert_contains!(err.to_string(), "nested_expressions");
         }
+    }
+}
+
+/// PostgreSQL's parse analysis of a query's clauses: what each clause list
+/// holds once analysed, which is also what a definition reads back as.
+mod postgres_clause_analysis {
+    use std::any::Any;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow::datatypes::DataType;
+    use datafusion_common::metadata::FieldMetadata;
+    use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion_common::{
+        Column, DFSchema, DataFusionError, DataFusionSqlStateError, Result,
+        TableReference, not_impl_err,
+    };
+    use datafusion_expr::expr::{AggregateFunction, WindowFunction};
+    use datafusion_expr::function::AccumulatorArgs;
+    use datafusion_expr::test::function_stub::sum_udaf;
+    use datafusion_expr::{
+        Accumulator, AggregateUDF, AggregateUDFImpl, Cast, Distinct, DistinctOn, Expr,
+        LogicalPlan, Signature, SortExpr, Volatility, WindowFunctionDefinition, lit,
+    };
+    use datafusion_functions_aggregate::count::count_udaf;
+    use datafusion_functions_aggregate::percentile_cont::percentile_cont_udaf;
+    use datafusion_sql::parser::DFParser;
+    use datafusion_sql::planner::{ExprPlanner, PlannerResult, RawCastExpr, SqlToRel};
+    use sqlparser::dialect::PostgreSqlDialect;
+
+    use super::{logical_plan, make_udf};
+    use crate::common::{MockContextProvider, MockSessionState};
+
+    const WRITTEN_CAST_KEY: &str = "test.written_cast";
+
+    /// An aggregate registered under a SQL/JSON aggregate's name, which
+    /// planning resolves and never runs.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct JsonAggregateStub {
+        name: &'static str,
+        signature: Signature,
+    }
+
+    impl AggregateUDFImpl for JsonAggregateStub {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+            Ok(DataType::Utf8)
+        }
+
+        fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+            not_impl_err!("{} is planned, never run", self.name)
+        }
+    }
+
+    fn sql_json_state() -> MockSessionState {
+        let aggregate = |name| {
+            Arc::new(AggregateUDF::new_from_impl(JsonAggregateStub {
+                name,
+                signature: Signature::variadic_any(Volatility::Immutable),
+            }))
+        };
+        MockSessionState::default()
+            .with_scalar_function(Arc::new(make_udf(
+                "json_member_key",
+                vec![DataType::Utf8],
+                DataType::Utf8,
+            )))
+            .with_scalar_function(Arc::new(make_udf(
+                "json_member_value",
+                vec![DataType::Int32],
+                DataType::Utf8,
+            )))
+            .with_aggregate_function(aggregate("json_objectagg"))
+            .with_aggregate_function(aggregate("json_arrayagg"))
+    }
+
+    /// Marks a written cast the way a host records how an expression was
+    /// written: an alias carrying field metadata, named as the cast column.
+    #[derive(Debug)]
+    struct WrittenCastPlanner;
+
+    impl ExprPlanner for WrittenCastPlanner {
+        fn plan_cast(
+            &self,
+            expr: RawCastExpr,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<RawCastExpr>> {
+            let name = match &expr.expr {
+                Expr::Column(column) => column.name.clone(),
+                other => other.schema_name().to_string(),
+            };
+            let cast = Expr::Cast(Cast::new_from_field(
+                Box::new(expr.expr),
+                Arc::clone(&expr.field),
+            ));
+            Ok(PlannerResult::Planned(cast.alias_with_metadata(
+                name,
+                Some(FieldMetadata::from(HashMap::from([(
+                    WRITTEN_CAST_KEY.to_string(),
+                    "true".to_string(),
+                )]))),
+            )))
+        }
+    }
+
+    fn plan_with_state(sql: &str, state: MockSessionState) -> Result<LogicalPlan> {
+        let context = MockContextProvider { state };
+        let planner = SqlToRel::new(&context);
+        let mut statements =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let statement = statements.pop_front().expect("one statement");
+        planner.statement_to_plan(statement)
+    }
+
+    fn sqlstate(err: &DataFusionError) -> Option<&str> {
+        match err.find_root() {
+            DataFusionError::External(external) => external
+                .downcast_ref::<DataFusionSqlStateError>()
+                .map(|error| error.sqlstate.as_str()),
+            _ => None,
+        }
+    }
+
+    fn distinct_on(plan: &LogicalPlan) -> DistinctOn {
+        let mut found = None;
+        plan.apply(|node| {
+            if let LogicalPlan::Distinct(Distinct::On(distinct_on)) = node {
+                found = Some(distinct_on.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        found.expect("a DISTINCT ON node")
+    }
+
+    /// The keys of the topmost sort of `plan`, as (expression, ascending,
+    /// nulls first).
+    fn sort_keys(plan: &LogicalPlan) -> Vec<(Expr, bool, bool)> {
+        let mut found = None;
+        plan.apply(|node| {
+            if let LogicalPlan::Sort(sort) = node {
+                found = Some(sort.expr.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        keys_of(&found.expect("a sort node"))
+    }
+
+    fn keys_of(sorts: &[SortExpr]) -> Vec<(Expr, bool, bool)> {
+        sorts
+            .iter()
+            .map(|sort| (sort.expr.clone(), sort.asc, sort.nulls_first))
+            .collect()
+    }
+
+    /// The window calls of `plan`'s window nodes, in plan order.
+    fn window_calls(plan: &LogicalPlan) -> Vec<WindowFunction> {
+        let mut calls = vec![];
+        plan.apply(|node| {
+            if let LogicalPlan::Window(window) = node {
+                for expr in &window.window_expr {
+                    if let Expr::WindowFunction(call) = expr.clone().unalias() {
+                        calls.push(*call);
+                    }
+                }
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        calls
+    }
+
+    fn person(column: &str) -> Expr {
+        Expr::Column(Column::new(Some(TableReference::bare("person")), column))
+    }
+
+    #[test]
+    fn distinct_on_clause_follows_the_order_by_keys() -> Result<()> {
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (state, id) id, state, age FROM person \
+             ORDER BY id, state, age",
+        )?;
+        assert_eq!(
+            distinct_on(&plan).on_expr,
+            vec![person("id"), person("state")]
+        );
+
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (state, id) id, state FROM person ORDER BY id",
+        )?;
+        assert_eq!(
+            distinct_on(&plan).on_expr,
+            vec![person("id"), person("state")]
+        );
+
+        let plan = logical_plan("SELECT DISTINCT ON (id, id) id FROM person")?;
+        assert_eq!(distinct_on(&plan).on_expr, vec![person("id")]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_repeated_order_by_key_is_planned_once() -> Result<()> {
+        let plan =
+            logical_plan("SELECT id, state FROM person ORDER BY id, id DESC, state")?;
+        let keys = sort_keys(&plan);
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0].1 && keys[1].1);
+        assert_ne!(keys[0].0, keys[1].0);
+
+        let plan = logical_plan(
+            "SELECT id FROM person UNION SELECT id FROM person ORDER BY id, id DESC",
+        )?;
+        let keys = sort_keys(&plan);
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].1);
+
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (id) id, state FROM person \
+             ORDER BY id, id DESC NULLS FIRST, state",
+        )?;
+        let sort_expr = distinct_on(&plan).sort_expr.expect("DISTINCT ON sorts");
+        assert_eq!(
+            keys_of(&sort_expr),
+            vec![(person("id"), true, false), (person("state"), true, false)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_repeated_group_by_item_is_planned_once() -> Result<()> {
+        let plan =
+            logical_plan("SELECT state, count(*) FROM person GROUP BY state, state")?;
+        let mut grouped = None;
+        plan.apply(|node| {
+            if let LogicalPlan::Aggregate(aggregate) = node {
+                grouped = Some(aggregate.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        let aggregate = grouped.expect("an aggregate node");
+        assert_eq!(aggregate.group_expr, vec![person("state")]);
+        // The aggregate's columns are its grouping columns, then its
+        // aggregates.
+        assert_eq!(aggregate.schema.fields().len(), 2);
+        assert_eq!(aggregate.schema.field(0).name(), "state");
+        Ok(())
+    }
+
+    #[test]
+    fn a_distinct_on_position_keeps_the_select_items_metadata_alias() -> Result<()> {
+        let state =
+            MockSessionState::default().with_expr_planner(Arc::new(WrittenCastPlanner));
+        let plan = plan_with_state(
+            "SELECT DISTINCT ON (1) CAST(state AS VARCHAR), id FROM person ORDER BY 1, 2",
+            state,
+        )?;
+        let distinct_on = distinct_on(&plan);
+        let written_cast = |expr: &Expr| {
+            matches!(
+                expr,
+                Expr::Alias(alias)
+                    if alias.metadata.as_ref().is_some_and(|metadata| {
+                        metadata.inner().contains_key(WRITTEN_CAST_KEY)
+                    }) && matches!(alias.expr.as_ref(), Expr::Cast(_))
+            )
+        };
+        assert!(written_cast(&distinct_on.on_expr[0]), "{distinct_on:?}");
+        let sort_expr = distinct_on.sort_expr.expect("DISTINCT ON sorts");
+        assert!(written_cast(&sort_expr[0].expr), "{sort_expr:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_on_names_bind_function_and_cast_outputs() -> Result<()> {
+        // `sqrt(age)` is the output column `sqrt`; `CAST(state AS ...)` the
+        // output column `state`, which a bare name reaches ahead of the
+        // input column of that name.
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (sqrt) sqrt(age), id FROM person ORDER BY sqrt, id",
+        )?;
+        let node = distinct_on(&plan);
+        assert!(
+            matches!(node.on_expr[0].clone().unalias(), Expr::ScalarFunction(_)),
+            "{node:?}"
+        );
+
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (state) CAST(state AS VARCHAR(1)), first_name \
+             FROM person ORDER BY state, first_name",
+        )?;
+        let node = distinct_on(&plan);
+        assert!(
+            matches!(node.on_expr[0].clone().unalias(), Expr::Cast(_)),
+            "{node:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_ambiguous_output_name_is_reported_for_its_clause() {
+        let err = logical_plan(
+            "SELECT DISTINCT ON (state) state AS x, first_name AS x FROM person \
+             ORDER BY state, x",
+        )
+        .unwrap_err();
+        assert_eq!(sqlstate(&err), Some("42702"), "{err}");
+        assert!(
+            err.to_string().contains("ORDER BY \"x\" is ambiguous"),
+            "{err}"
+        );
+
+        let err = logical_plan(
+            "SELECT DISTINCT ON (x) state AS x, first_name AS x FROM person",
+        )
+        .unwrap_err();
+        assert_eq!(sqlstate(&err), Some("42702"), "{err}");
+        assert!(
+            err.to_string().contains("DISTINCT ON \"x\" is ambiguous"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn window_reference_inherits_partition_and_order() -> Result<()> {
+        let plan = logical_plan(
+            "SELECT sum(age) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+             FROM person WINDOW w AS (PARTITION BY state ORDER BY id)",
+        )?;
+        let calls = window_calls(&plan);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].params.partition_by, vec![person("state")]);
+        assert_eq!(
+            keys_of(&calls[0].params.order_by),
+            vec![(person("id"), true, false)]
+        );
+
+        let plan = logical_plan(
+            "SELECT sum(age) OVER w2 FROM person \
+             WINDOW w AS (PARTITION BY state), w2 AS (w ORDER BY id)",
+        )?;
+        let calls = window_calls(&plan);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].params.partition_by, vec![person("state")]);
+        assert_eq!(
+            keys_of(&calls[0].params.order_by),
+            vec![(person("id"), true, false)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn window_references_follow_postgresql_rules() {
+        for (sql, code) in [
+            (
+                "SELECT sum(age) OVER (w PARTITION BY id) FROM person \
+                 WINDOW w AS (PARTITION BY state)",
+                "42P20",
+            ),
+            (
+                "SELECT sum(age) OVER w2 FROM person \
+                 WINDOW w AS (ORDER BY id), w2 AS (w ORDER BY age)",
+                "42P20",
+            ),
+            (
+                "SELECT sum(age) OVER (w) FROM person \
+                 WINDOW w AS (ORDER BY id ROWS UNBOUNDED PRECEDING)",
+                "42P20",
+            ),
+            (
+                "SELECT sum(age) OVER w FROM person \
+                 WINDOW w AS (ORDER BY id), w AS (ORDER BY age)",
+                "42P20",
+            ),
+            (
+                "SELECT sum(age) OVER x FROM person WINDOW w AS (ORDER BY id)",
+                "42704",
+            ),
+            ("SELECT sum(age) OVER (x ORDER BY id) FROM person", "42704"),
+            ("SELECT sum(age) OVER x FROM person", "42704"),
+        ] {
+            let err = logical_plan(sql).unwrap_err();
+            assert_eq!(sqlstate(&err), Some(code), "{sql}: {err}");
+        }
+        // A window with a frame is still named whole.
+        logical_plan(
+            "SELECT sum(age) OVER w FROM person \
+             WINDOW w AS (ORDER BY id ROWS UNBOUNDED PRECEDING)",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn qualified_wildcard_keeps_field_qualifiers() -> Result<()> {
+        let plan = logical_plan("SELECT j1.* FROM public.j1, j2")?;
+        let LogicalPlan::Projection(projection) = &plan else {
+            panic!("a projection: {plan}");
+        };
+        let relation = TableReference::partial("public", "j1");
+        assert_eq!(
+            projection.expr,
+            vec![
+                Expr::Column(Column::new(Some(relation.clone()), "j1_id")),
+                Expr::Column(Column::new(Some(relation), "j1_string")),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn order_by_using_greater_than_is_desc_nulls_first() -> Result<()> {
+        let plan = logical_plan("SELECT age FROM person ORDER BY age USING >")?;
+        assert_eq!(sort_keys(&plan), vec![(person("age"), false, true)]);
+        let plan = logical_plan("SELECT age FROM person ORDER BY age USING <")?;
+        assert_eq!(sort_keys(&plan), vec![(person("age"), true, false)]);
+        Ok(())
+    }
+
+    #[test]
+    fn sql_json_aggregates_carry_their_null_policy_and_filter() -> Result<()> {
+        let plan = plan_with_state(
+            "SELECT JSON_OBJECTAGG(first_name : age), \
+             JSON_OBJECTAGG(first_name : age ABSENT ON NULL) FILTER (WHERE age > 1), \
+             JSON_ARRAYAGG(age) FROM person",
+            sql_json_state(),
+        )?;
+        let mut calls: Vec<AggregateFunction> = vec![];
+        plan.apply(|node| {
+            if let LogicalPlan::Aggregate(aggregate) = node {
+                for expr in &aggregate.aggr_expr {
+                    if let Expr::AggregateFunction(call) = expr.clone().unalias() {
+                        calls.push(call);
+                    }
+                }
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        let shapes: Vec<(&str, Vec<Expr>, bool)> = calls
+            .iter()
+            .map(|call| {
+                // The clause arguments follow the rendered members.
+                let members = if call.func.name() == "json_objectagg" {
+                    2
+                } else {
+                    1
+                };
+                (
+                    call.func.name(),
+                    call.params.args[members..].to_vec(),
+                    call.params.filter.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                // NULL ON NULL is JSON_OBJECTAGG's default.
+                ("json_objectagg", vec![lit(false), lit(false)], false),
+                ("json_objectagg", vec![lit(false), lit(true)], true),
+                // ABSENT ON NULL is JSON_ARRAYAGG's default.
+                ("json_arrayagg", vec![lit(true)], false),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_sql_json_aggregate_with_over_is_a_window_call() -> Result<()> {
+        let plan = plan_with_state(
+            "SELECT JSON_ARRAYAGG(age) OVER (PARTITION BY state) FROM person",
+            sql_json_state(),
+        )?;
+        let calls = window_calls(&plan);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0].fun,
+            WindowFunctionDefinition::AggregateUDF(aggregate)
+                if aggregate.name() == "json_arrayagg"
+        ));
+        assert_eq!(calls[0].params.partition_by, vec![person("state")]);
+
+        let err = plan_with_state(
+            "SELECT JSON_ARRAYAGG(age ORDER BY id) OVER () FROM person",
+            sql_json_state(),
+        )
+        .unwrap_err();
+        assert_eq!(sqlstate(&err), Some("0A000"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn ordered_set_direct_arguments_use_only_grouped_columns() {
+        let state = || {
+            MockSessionState::default()
+                .with_aggregate_function(percentile_cont_udaf())
+                .with_aggregate_function(count_udaf())
+                .with_aggregate_function(sum_udaf())
+        };
+        for sql in [
+            "SELECT percentile_cont(salary) WITHIN GROUP (ORDER BY age) \
+             FROM person GROUP BY state",
+            "SELECT percentile_cont(salary) WITHIN GROUP (ORDER BY age) FROM person",
+        ] {
+            let err = plan_with_state(sql, state()).unwrap_err();
+            assert_eq!(sqlstate(&err), Some("42803"), "{sql}: {err}");
+            assert!(
+                err.to_string().contains(
+                    "column \"person.salary\" must appear in the GROUP BY clause"
+                ),
+                "{sql}: {err}"
+            );
+        }
+        for sql in [
+            "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY age) \
+             FROM person GROUP BY state",
+            "SELECT percentile_cont(salary) WITHIN GROUP (ORDER BY age) \
+             FROM person GROUP BY salary",
+        ] {
+            plan_with_state(sql, state()).unwrap();
+        }
+    }
+}
+
+/// What the planner records about how a query was written, and the host
+/// hooks it asks while planning: definitions planned to be printed back keep
+/// INTERSECT/EXCEPT, sublink kinds and LATERAL; every plan keeps window
+/// references, USING operators, the written GROUP BY () and LIKE options.
+mod planner_recorded_facts {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_common::metadata::FieldMetadata;
+    use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion_common::{
+        DFSchema, DataFusionError, DataFusionSqlStateError, Result, ScalarValue,
+        TableReference,
+    };
+    use datafusion_expr::expr::{
+        ARRAY_SUBLINK, ROW_IN_SUBLINK, SUBLINK_METADATA_KEY, WindowFunction,
+        WindowReference,
+    };
+    use datafusion_expr::logical_plan::{SetOperation, SetOperationKind};
+    use datafusion_expr::{
+        AggregateUDF, DdlStatement, Distinct, Expr, LogicalPlan, ScalarUDF, SortExpr,
+        TableSource, WindowUDF,
+    };
+    use datafusion_functions_aggregate::array_agg::array_agg_udaf;
+    use datafusion_functions_aggregate::count::count_udaf;
+    use datafusion_functions_aggregate::percentile_cont::percentile_cont_udaf;
+    use datafusion_sql::definition_plan::{WindowClause, as_definition_node};
+    use datafusion_sql::parser::DFParser;
+    use datafusion_sql::planner::{
+        ContextProvider, CreateTableLikeOptions, CreateTableLikeSource, ExprPlanner,
+        OrderingOperator, SqlToRel, TypePlanner,
+    };
+    use sqlparser::dialect::PostgreSqlDialect;
+
+    use super::{logical_plan, make_udf};
+    use crate::common::{MockContextProvider, MockSessionState};
+
+    /// Field metadata the host below puts on an untyped literal it resolves.
+    const RESOLVED_KEY: &str = "test.resolved_unknown";
+
+    /// A host over the mock provider that answers the hooks these tests ask
+    /// about: `~<~` and `~>~` order text as its pattern operator family's
+    /// less-than and greater-than, a select list that resolves its untyped
+    /// values marks each untyped string literal, and a LIKE source reports
+    /// the compression option it was asked for.
+    struct Host {
+        inner: MockContextProvider,
+    }
+
+    fn resolve_unknown(expr: Expr) -> Expr {
+        match expr {
+            Expr::Alias(mut alias) => {
+                alias.expr = Box::new(resolve_unknown(*alias.expr));
+                Expr::Alias(alias)
+            }
+            Expr::Literal(value @ ScalarValue::Utf8(Some(_)), None) => Expr::Literal(
+                value,
+                Some(FieldMetadata::from(HashMap::from([(
+                    RESOLVED_KEY.to_string(),
+                    "text".to_string(),
+                )]))),
+            ),
+            other => other,
+        }
+    }
+
+    impl ContextProvider for Host {
+        fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {
+            self.inner.get_table_source(name)
+        }
+
+        fn get_create_table_like_source(
+            &self,
+            name: TableReference,
+            options: CreateTableLikeOptions,
+        ) -> Result<CreateTableLikeSource> {
+            let mut source = self.inner.get_create_table_like_source(name, options)?;
+            let fields = source
+                .schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    let mut metadata = field.metadata().clone();
+                    metadata.insert(
+                        "like.compression".to_string(),
+                        options.compression.to_string(),
+                    );
+                    Arc::new(field.as_ref().clone().with_metadata(metadata))
+                })
+                .collect::<Vec<_>>();
+            source.schema = Arc::new(Schema::new(fields));
+            Ok(source)
+        }
+
+        fn ordering_operator(
+            &self,
+            operator: &str,
+            _operand: &Expr,
+            _schema: &DFSchema,
+        ) -> Result<Option<OrderingOperator>> {
+            Ok(match operator {
+                "<" | "~<~" => Some(OrderingOperator {
+                    ascending: true,
+                    default_for_type: operator == "<",
+                }),
+                ">" | "~>~" => Some(OrderingOperator {
+                    ascending: false,
+                    default_for_type: operator == ">",
+                }),
+                _ => None,
+            })
+        }
+
+        fn plan_target_list(
+            &self,
+            select_exprs: Vec<Expr>,
+            _schema: &DFSchema,
+            resolve_unknowns: bool,
+        ) -> Result<Vec<Expr>> {
+            if !resolve_unknowns {
+                return Ok(select_exprs);
+            }
+            Ok(select_exprs.into_iter().map(resolve_unknown).collect())
+        }
+
+        fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+            self.inner.get_function_meta(name)
+        }
+
+        fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+            self.inner.get_aggregate_meta(name)
+        }
+
+        fn get_window_meta(&self, name: &str) -> Option<Arc<WindowUDF>> {
+            self.inner.get_window_meta(name)
+        }
+
+        fn get_variable_type(&self, _variable_names: &[String]) -> Option<DataType> {
+            None
+        }
+
+        fn options(&self) -> &ConfigOptions {
+            self.inner.options()
+        }
+
+        fn udf_names(&self) -> Vec<String> {
+            self.inner.udf_names()
+        }
+
+        fn udaf_names(&self) -> Vec<String> {
+            self.inner.udaf_names()
+        }
+
+        fn udwf_names(&self) -> Vec<String> {
+            self.inner.udwf_names()
+        }
+
+        fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
+            self.inner.get_expr_planners()
+        }
+
+        fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
+            self.inner.get_type_planner()
+        }
+    }
+
+    fn parse_and_plan(context: &dyn ContextProvider, sql: &str) -> Result<LogicalPlan> {
+        let planner = SqlToRel::new(context);
+        let mut statements =
+            DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?;
+        let statement = statements.pop_front().expect("one statement");
+        planner.statement_to_plan(statement)
+    }
+
+    fn plan_in(sql: &str, state: MockSessionState) -> Result<LogicalPlan> {
+        parse_and_plan(&MockContextProvider { state }, sql)
+    }
+
+    fn plan_with_host(sql: &str) -> Result<LogicalPlan> {
+        let host = Host {
+            inner: MockContextProvider {
+                state: MockSessionState::default(),
+            },
+        };
+        parse_and_plan(&host, sql)
+    }
+
+    /// Plans a row constructor as a call of a mock `row` function, the way a
+    /// host's struct planner builds one, for the `(id, age)` of `person`.
+    #[derive(Debug)]
+    struct RowLiteralPlanner;
+
+    impl ExprPlanner for RowLiteralPlanner {
+        fn plan_struct_literal(
+            &self,
+            args: Vec<Expr>,
+            _is_named_struct: bool,
+        ) -> Result<datafusion_sql::planner::PlannerResult<Vec<Expr>>> {
+            let row = make_udf(
+                "row",
+                vec![DataType::UInt32, DataType::Int32],
+                DataType::Struct(
+                    vec![
+                        Field::new("c0", DataType::UInt32, true),
+                        Field::new("c1", DataType::Int32, true),
+                    ]
+                    .into(),
+                ),
+            );
+            Ok(datafusion_sql::planner::PlannerResult::Planned(
+                Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+                    Arc::new(row),
+                    args,
+                )),
+            ))
+        }
+    }
+
+    fn definition_state() -> MockSessionState {
+        let mut state = MockSessionState::default()
+            .with_aggregate_function(array_agg_udaf())
+            .with_aggregate_function(count_udaf())
+            .with_expr_planner(Arc::new(RowLiteralPlanner));
+        state.plans_definitions_as_written = true;
+        state
+    }
+
+    fn sql_state_error(err: &DataFusionError) -> Option<&DataFusionSqlStateError> {
+        match err.find_root() {
+            DataFusionError::External(external) => {
+                external.downcast_ref::<DataFusionSqlStateError>()
+            }
+            _ => None,
+        }
+    }
+
+    /// Every expression of `plan` and of the plans nested in it, in plan
+    /// order, each with every expression nested in it.
+    fn all_exprs(plan: &LogicalPlan) -> Vec<Expr> {
+        let mut found = vec![];
+        plan.apply_with_subqueries(|node| {
+            node.apply_expressions(|expr| {
+                expr.apply(|nested| {
+                    found.push(nested.clone());
+                    Ok(TreeNodeRecursion::Continue)
+                })
+            })?;
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        found
+    }
+
+    fn sublink_kinds(plan: &LogicalPlan) -> Vec<String> {
+        all_exprs(plan)
+            .into_iter()
+            .filter_map(|expr| match expr {
+                Expr::Alias(alias) => alias
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.inner().get(SUBLINK_METADATA_KEY))
+                    .cloned(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_subquery_node(plan: &LogicalPlan) -> bool {
+        plan.exists(|node| Ok(matches!(node, LogicalPlan::Subquery(_))))
+            .expect("walking the plan cannot fail")
+    }
+
+    fn top_sort(plan: &LogicalPlan) -> Vec<SortExpr> {
+        let mut found = None;
+        plan.apply(|node| {
+            if let LogicalPlan::Sort(sort) = node {
+                found = Some(sort.expr.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        found.expect("a sort node")
+    }
+
+    fn window_calls(plan: &LogicalPlan) -> Vec<WindowFunction> {
+        let mut calls = vec![];
+        plan.apply(|node| {
+            if let LogicalPlan::Window(window) = node {
+                for expr in &window.window_expr {
+                    if let Expr::WindowFunction(call) = expr.clone().unalias() {
+                        calls.push(*call);
+                    }
+                }
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("walking the plan cannot fail");
+        calls
+    }
+
+    #[test]
+    fn intersect_and_except_plan_as_set_operation_nodes() -> Result<()> {
+        for (sql, op, all) in [
+            (
+                "SELECT id FROM person INTERSECT SELECT id FROM person",
+                SetOperationKind::Intersect,
+                false,
+            ),
+            (
+                "SELECT id FROM person INTERSECT ALL SELECT id FROM person",
+                SetOperationKind::Intersect,
+                true,
+            ),
+            (
+                "SELECT id FROM person EXCEPT SELECT id FROM person",
+                SetOperationKind::Except,
+                false,
+            ),
+            (
+                "SELECT id FROM person EXCEPT ALL SELECT id FROM person",
+                SetOperationKind::Except,
+                true,
+            ),
+        ] {
+            let plan = plan_in(sql, definition_state())?;
+            let node = as_definition_node::<SetOperation>(&plan)
+                .unwrap_or_else(|| panic!("{sql}: a set operation node, not {plan}"));
+            assert_eq!((node.op, node.all), (op, all), "{sql}");
+            assert_eq!(node.left().schema().fields().len(), 1, "{sql}");
+            assert_eq!(node.right().schema().fields().len(), 1, "{sql}");
+        }
+        // Planned to run, the operation is the join that computes it.
+        let plan = logical_plan("SELECT id FROM person INTERSECT SELECT id FROM person")?;
+        assert!(
+            as_definition_node::<SetOperation>(&plan).is_none(),
+            "{plan}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn window_reference_is_recorded_for_named_and_refined_windows() -> Result<()> {
+        let plan = logical_plan(
+            "SELECT sum(age) OVER w, \
+             sum(age) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), \
+             sum(age) OVER (PARTITION BY state) \
+             FROM person WINDOW w AS (PARTITION BY state ORDER BY id)",
+        )?;
+        let mut references = window_calls(&plan)
+            .into_iter()
+            .map(|call| call.params.window_reference)
+            .collect::<Vec<_>>();
+        references.sort_by(|left, right| {
+            left.partial_cmp(right).expect("references are ordered")
+        });
+        assert_eq!(
+            references,
+            vec![
+                None,
+                Some(WindowReference::Named("w".to_string())),
+                Some(WindowReference::Refines("w".to_string())),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_plan_made_to_be_printed_keeps_every_window_the_clause_defines() -> Result<()> {
+        let sql = "SELECT count(age) OVER (w ORDER BY id) FROM person \
+                   WINDOW w AS (PARTITION BY state), \
+                   w2 AS (w ORDER BY age ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), \
+                   unused AS (ORDER BY age)";
+        let window_clauses = |plan: &LogicalPlan| {
+            let mut clauses = vec![];
+            plan.apply(|node| {
+                if let Some(clause) = as_definition_node::<WindowClause>(node) {
+                    clauses.push(clause.clone());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .expect("walking the plan cannot fail");
+            clauses
+        };
+        let plan = plan_in(sql, definition_state())?;
+        let [clause] =
+            window_clauses(&plan)
+                .try_into()
+                .unwrap_or_else(|clauses: Vec<_>| {
+                    panic!("one WINDOW clause, not {}: {plan}", clauses.len())
+                });
+        let windows = clause
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.name.as_str(),
+                    window.base.as_deref(),
+                    window.partition_by.len(),
+                    window.order_by.len(),
+                    window.order_copied,
+                    window.frame.is_some(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            windows,
+            vec![
+                ("w", None, 1, 0, false, false),
+                ("w2", Some("w"), 1, 1, false, true),
+                ("unused", None, 0, 1, false, false),
+            ]
+        );
+        // Planned to run, the calls hold the windows they run over.
+        assert!(window_clauses(&logical_plan(sql)?).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_unused_window_reads_the_grouped_rows() {
+        let error = logical_plan(
+            "SELECT state FROM person GROUP BY state WINDOW w AS (ORDER BY age)",
+        )
+        .expect_err("an ungrouped column in an unused window");
+        assert!(error.to_string().contains("age"), "{error}");
+        logical_plan(
+            "SELECT state FROM person GROUP BY state WINDOW w AS (ORDER BY max(age))",
+        )
+        .expect("an aggregate in an unused window");
+    }
+
+    #[test]
+    fn order_by_using_takes_the_operator_btree_strategy() -> Result<()> {
+        let plan = plan_with_host(
+            "SELECT first_name FROM person ORDER BY first_name USING ~>~",
+        )?;
+        let keys = top_sort(&plan);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            (keys[0].asc, keys[0].nulls_first, keys[0].using.as_deref()),
+            (false, true, Some("~>~"))
+        );
+
+        let plan = plan_with_host(
+            "SELECT first_name FROM person ORDER BY first_name USING ~<~",
+        )?;
+        let keys = top_sort(&plan);
+        assert_eq!(
+            (keys[0].asc, keys[0].nulls_first, keys[0].using.as_deref()),
+            (true, false, Some("~<~"))
+        );
+
+        // The type's own `<` and `>` are ASC and DESC.
+        let plan = plan_with_host("SELECT age FROM person ORDER BY age USING >")?;
+        let keys = top_sort(&plan);
+        assert_eq!(
+            (keys[0].asc, keys[0].nulls_first, keys[0].using.as_deref()),
+            (false, true, None)
+        );
+
+        let err =
+            plan_with_host("SELECT first_name FROM person ORDER BY first_name USING ~~")
+                .unwrap_err();
+        let state = sql_state_error(&err).expect("a SQLSTATE error");
+        assert_eq!(state.sqlstate, "42809");
+        assert_eq!(
+            state.message,
+            "operator ~~ is not a valid ordering operator"
+        );
+        assert_eq!(
+            state.hint.as_deref(),
+            Some(
+                "Ordering operators must be \"<\" or \">\" members of btree operator families."
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn row_in_and_array_sublinks_record_their_kind() -> Result<()> {
+        let row_in =
+            "SELECT id FROM person WHERE (id, age) IN (SELECT id, age FROM person)";
+        let array = "SELECT ARRAY(SELECT age FROM person)";
+        assert_eq!(
+            sublink_kinds(&plan_in(row_in, definition_state())?),
+            vec![ROW_IN_SUBLINK.to_string()]
+        );
+        assert_eq!(
+            sublink_kinds(&plan_in(array, definition_state())?),
+            vec![ARRAY_SUBLINK.to_string()]
+        );
+        // A plan to run carries no mark.
+        let state = MockSessionState::default().with_aggregate_function(array_agg_udaf());
+        assert!(sublink_kinds(&plan_in(array, state)?).is_empty());
+        let state =
+            MockSessionState::default().with_expr_planner(Arc::new(RowLiteralPlanner));
+        assert!(sublink_kinds(&plan_in(row_in, state)?).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn lateral_derived_and_function_items_are_marked() -> Result<()> {
+        let derived = "SELECT l.one FROM person p, LATERAL (SELECT 1 AS one) l";
+        assert!(has_subquery_node(&plan_in(derived, definition_state())?));
+        assert!(!has_subquery_node(&logical_plan(derived)?));
+
+        let row_stream = || {
+            Arc::new(make_udf(
+                "row_stream",
+                vec![DataType::Int64],
+                DataType::new_list(
+                    DataType::Struct(
+                        vec![Field::new("id", DataType::Int32, false)].into(),
+                    ),
+                    false,
+                ),
+            ))
+        };
+        let function = "SELECT r.id FROM person, LATERAL row_stream(1) AS r";
+        let mut state = definition_state();
+        state.row_stream_function = Some(row_stream());
+        assert!(has_subquery_node(&plan_in(function, state)?));
+        let mut state = MockSessionState::default();
+        state.row_stream_function = Some(row_stream());
+        assert!(!has_subquery_node(&plan_in(function, state)?));
+        Ok(())
+    }
+
+    /// `GROUP BY ()` makes the whole input one group, which exists even when
+    /// the input is empty, so the query plans as an aggregate with no
+    /// grouping column.
+    #[test]
+    fn group_by_empty_set_groups_the_whole_input() -> Result<()> {
+        let plan = logical_plan("SELECT 1 FROM person GROUP BY ()")?;
+        let grouped = plan
+            .exists(|node| {
+                Ok(matches!(
+                    node,
+                    LogicalPlan::Aggregate(aggregate) if aggregate.group_expr.is_empty()
+                ))
+            })
+            .expect("walking the plan cannot fail");
+        assert!(grouped, "{plan}");
+        Ok(())
+    }
+
+    #[test]
+    fn ordered_set_direct_argument_error_carries_detail() {
+        let state = MockSessionState::default()
+            .with_aggregate_function(percentile_cont_udaf())
+            .with_aggregate_function(count_udaf());
+        let err = plan_in(
+            "SELECT percentile_cont(salary) WITHIN GROUP (ORDER BY age) \
+             FROM person GROUP BY state",
+            state,
+        )
+        .unwrap_err();
+        let state = sql_state_error(&err).expect("a SQLSTATE error");
+        assert_eq!(state.sqlstate, "42803");
+        assert_eq!(
+            state.detail.as_deref(),
+            Some(
+                "Direct arguments of an ordered-set aggregate must use only grouped columns."
+            )
+        );
+    }
+
+    /// PostgreSQL has no `trim` function: TRIM without a side is BOTH.
+    #[test]
+    fn trim_without_a_side_plans_btrim() -> Result<()> {
+        let state = MockSessionState::default().with_scalar_function(Arc::new(make_udf(
+            "btrim",
+            vec![DataType::Utf8],
+            DataType::Utf8,
+        )));
+        let plan = plan_in("SELECT TRIM(first_name) FROM person", state)?;
+        let LogicalPlan::Projection(projection) = &plan else {
+            panic!("a projection: {plan}");
+        };
+        let Expr::ScalarFunction(call) = projection.expr[0].clone().unalias() else {
+            panic!("a function call: {}", projection.expr[0]);
+        };
+        assert_eq!(call.name(), "btrim");
+        Ok(())
+    }
+
+    #[test]
+    fn including_compression_is_its_own_like_option() -> Result<()> {
+        for (sql, compression, storage) in [
+            (
+                "CREATE TABLE copied (LIKE like_left INCLUDING COMPRESSION)",
+                "true",
+                "false",
+            ),
+            (
+                "CREATE TABLE copied (LIKE like_left INCLUDING STORAGE)",
+                "false",
+                "true",
+            ),
+            (
+                "CREATE TABLE copied (LIKE like_left INCLUDING ALL EXCLUDING COMPRESSION)",
+                "false",
+                "true",
+            ),
+        ] {
+            let LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) =
+                plan_with_host(sql)?
+            else {
+                panic!("{sql}: a CreateMemoryTable plan");
+            };
+            let schema = table.input.schema();
+            let metadata = schema.field(0).metadata();
+            assert_eq!(
+                (
+                    metadata.get("like.compression").map(String::as_str),
+                    metadata.get("like.storage").map(String::as_str),
+                ),
+                (Some(compression), Some(storage)),
+                "{sql}"
+            );
+        }
+        Ok(())
+    }
+
+    /// An output name DISTINCT ON reads is the output column, even when an
+    /// input column of the derived table it reads has the same name.
+    #[test]
+    fn distinct_on_output_alias_over_unaliased_derived_table_binds_the_output()
+    -> Result<()> {
+        let plan = logical_plan(
+            "SELECT DISTINCT ON (a) a + 1 AS a FROM (SELECT 1 AS a) ORDER BY a",
+        )?;
+        let mut on_expr = None;
+        plan.apply(|node| {
+            if let LogicalPlan::Distinct(Distinct::On(distinct_on)) = node {
+                on_expr = Some(distinct_on.on_expr.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        let on_expr = on_expr.expect("a DISTINCT ON node");
+        assert!(
+            matches!(on_expr.as_slice(), [Expr::BinaryExpr(_)]),
+            "DISTINCT ON reads {on_expr:?}"
+        );
+        Ok(())
+    }
+
+    /// A select list resolves its untyped values except as an input of a
+    /// set operation or the source of INSERT ... SELECT; a derived table and
+    /// a WITH item inside either resolve their own.
+    #[test]
+    fn target_list_unknowns_resolve_only_where_postgresql_resolves_them() -> Result<()> {
+        let resolved = |plan: &LogicalPlan| {
+            all_exprs(plan)
+                .into_iter()
+                .filter(|expr| {
+                    matches!(
+                        expr,
+                        Expr::Literal(_, Some(metadata))
+                            if metadata.inner().contains_key(RESOLVED_KEY)
+                    )
+                })
+                .count()
+        };
+        assert_eq!(resolved(&plan_with_host("SELECT 'x' AS c")?), 1);
+        assert_eq!(
+            resolved(&plan_with_host("SELECT * FROM (SELECT 'x' AS c) s")?),
+            1
+        );
+        assert_eq!(resolved(&plan_with_host("SELECT 'a' UNION SELECT 'b'")?), 0);
+        assert_eq!(
+            resolved(&plan_with_host(
+                "SELECT * FROM (SELECT 'a' AS c UNION SELECT 'b') s"
+            )?),
+            0
+        );
+        assert_eq!(
+            resolved(&plan_with_host(
+                "SELECT c FROM (SELECT 'x' AS c) s UNION SELECT 'b'"
+            )?),
+            1
+        );
+        assert_eq!(
+            resolved(&plan_with_host(
+                "INSERT INTO person (id, first_name, last_name) SELECT 1, 'x', 'y'"
+            )?),
+            0
+        );
+        assert_eq!(
+            resolved(&plan_with_host(
+                "INSERT INTO person (id, first_name, last_name) \
+                 WITH w AS (SELECT 'x' AS x) SELECT 1, x, 'y' FROM w"
+            )?),
+            1
+        );
+        Ok(())
+    }
+}
+
+/// A DISTINCT ON sort key written as a select-list expression reads that
+/// expression below the select list, whatever name the select list gives
+/// it: the aggregate's own name, an alias, or another aggregate's name.
+#[test]
+fn distinct_on_sort_keys_read_select_expressions_under_any_output_name() {
+    for (sql, key) in [
+        (
+            "SELECT DISTINCT ON (state) state, count(*) AS n FROM person \
+             GROUP BY state ORDER BY state, count(*) DESC",
+            "count(*) DESC NULLS FIRST",
+        ),
+        (
+            "SELECT DISTINCT ON (state) state, sum(age) FROM person \
+             GROUP BY state ORDER BY state, sum(age) DESC",
+            "sum(person.age) DESC NULLS FIRST",
+        ),
+    ] {
+        let plan = logical_plan(sql).unwrap().display_indent().to_string();
+        assert!(
+            plan.contains(&format!("sort_expr=[[person.state ASC NULLS LAST, {key}]]")),
+            "{sql}: {plan}"
+        );
     }
 }

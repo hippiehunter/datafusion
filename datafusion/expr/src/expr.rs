@@ -32,10 +32,10 @@ use crate::{ExprSchemable, Operator, Signature, WindowFrame, WindowUDF};
 
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::cse::{HashNode, NormalizeEq, Normalizeable};
+use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
-use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::{
     Column, DFSchema, HashMap, Result, ScalarValue, Spans, TableReference,
 };
@@ -851,6 +851,10 @@ pub struct Sort {
     pub asc: bool,
     /// Whether to put Nulls before all other data values
     pub nulls_first: bool,
+    /// The ordering operator a `USING` clause named, when it is not the
+    /// default btree `<` or `>` of the key's type. `asc` and `nulls_first`
+    /// hold the direction its btree strategy gives and the NULLS placement.
+    pub using: Option<String>,
 }
 
 impl Sort {
@@ -860,15 +864,19 @@ impl Sort {
             expr,
             asc,
             nulls_first,
+            using: None,
         }
     }
 
-    /// Create a new Sort expression with the opposite sort direction
+    /// Create a new Sort expression with the opposite sort direction. The
+    /// operator a `USING` clause named no longer describes the reversed
+    /// order, so the result names none.
     pub fn reverse(&self) -> Self {
         Self {
             expr: self.expr.clone(),
             asc: !self.asc,
             nulls_first: !self.nulls_first,
+            using: None,
         }
     }
 
@@ -878,6 +886,7 @@ impl Sort {
             expr,
             asc: self.asc,
             nulls_first: self.nulls_first,
+            using: self.using.clone(),
         }
     }
 }
@@ -885,7 +894,9 @@ impl Sort {
 impl Display for Sort {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.expr)?;
-        if self.asc {
+        if let Some(operator) = &self.using {
+            write!(f, " USING {operator}")?;
+        } else if self.asc {
             write!(f, " ASC")?;
         } else {
             write!(f, " DESC")?;
@@ -911,9 +922,20 @@ impl<'a> TreeNodeContainer<'a, Expr> for Sort {
         self,
         f: F,
     ) -> Result<Transformed<Self>> {
-        self.expr
-            .map_elements(f)?
-            .map_data(|expr| Ok(Self { expr, ..self }))
+        let Self {
+            expr,
+            asc,
+            nulls_first,
+            using,
+        } = self;
+        expr.map_elements(f)?.map_data(|expr| {
+            Ok(Self {
+                expr,
+                asc,
+                nulls_first,
+                using,
+            })
+        })
     }
 }
 
@@ -1061,7 +1083,10 @@ pub struct WindowFunction {
     pub params: WindowFunctionParams,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+/// The parts of one window call. Equality, ordering and hashing read the
+/// window the call computes over, not how the call named it: two calls that
+/// differ only in `window_reference` compute the same values.
+#[derive(Clone, Debug)]
 pub struct WindowFunctionParams {
     /// List of expressions to feed to the functions as arguments
     pub args: Vec<Expr>,
@@ -1077,6 +1102,76 @@ pub struct WindowFunctionParams {
     pub null_treatment: Option<NullTreatment>,
     /// Distinct flag
     pub distinct: bool,
+    /// The WINDOW clause entry the call's OVER clause named, whose
+    /// definition `partition_by`, `order_by` and `window_frame` already hold.
+    pub window_reference: Option<WindowReference>,
+}
+
+/// Field metadata key of the alias that a planner planning a definition to
+/// print it back as SQL puts over a sublink whose plan does not show how the
+/// query wrote it. The value is [`ARRAY_SUBLINK`] or [`ROW_IN_SUBLINK`].
+pub const SUBLINK_METADATA_KEY: &str = "datafusion.sublink";
+
+/// `ARRAY(subquery)`, planned as a scalar subquery that aggregates the
+/// subquery's rows into one array.
+pub const ARRAY_SUBLINK: &str = "array";
+
+/// `(a, b, ...) IN (subquery)`, planned as `(a, b, ...) = ANY (subquery)`.
+pub const ROW_IN_SUBLINK: &str = "row_in";
+
+/// How an OVER clause named a window of its query level's WINDOW clause.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub enum WindowReference {
+    /// `OVER w`: the call runs over the window `w` defines.
+    Named(String),
+    /// `OVER (w ...)`: the call copies the window `w` and adds the ORDER BY
+    /// or frame clause written after the name.
+    Refines(String),
+}
+
+/// The parts of [`WindowFunctionParams`] that decide what a call computes.
+type ComputedWindow<'a> = (
+    &'a [Expr],
+    &'a [Expr],
+    &'a [Sort],
+    &'a WindowFrame,
+    Option<&'a Expr>,
+    Option<&'a NullTreatment>,
+    bool,
+);
+
+impl WindowFunctionParams {
+    fn computed_window(&self) -> ComputedWindow<'_> {
+        (
+            &self.args,
+            &self.partition_by,
+            &self.order_by,
+            &self.window_frame,
+            self.filter.as_deref(),
+            self.null_treatment.as_ref(),
+            self.distinct,
+        )
+    }
+}
+
+impl PartialEq for WindowFunctionParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.computed_window() == other.computed_window()
+    }
+}
+
+impl Eq for WindowFunctionParams {}
+
+impl PartialOrd for WindowFunctionParams {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.computed_window().partial_cmp(&other.computed_window())
+    }
+}
+
+impl Hash for WindowFunctionParams {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.computed_window().hash(state);
+    }
 }
 
 impl WindowFunction {
@@ -1093,6 +1188,7 @@ impl WindowFunction {
                 filter: None,
                 null_treatment: None,
                 distinct: false,
+                window_reference: None,
             },
         }
     }
@@ -1691,10 +1787,7 @@ impl Expr {
         self.transform_down_up(
             |expr| {
                 // f_down: skip subqueries.  Check in f_down to avoid recursing into them
-                let recursion = if matches!(
-                    expr,
-                    Expr::Exists { .. } | Expr::ScalarSubquery(_) | Expr::InSubquery(_)
-                ) {
+                let recursion = if expr.subquery().is_some() {
                     // Subqueries could contain aliases so don't recurse into those
                     TreeNodeRecursion::Jump
                 } else {
@@ -1920,6 +2013,26 @@ impl Expr {
     pub fn contains_outer(&self) -> bool {
         self.exists(|expr| Ok(matches!(expr, Expr::OuterReferenceColumn { .. })))
             .expect("exists closure is infallible")
+    }
+
+    /// The subquery this expression node evaluates: a scalar, `EXISTS`, `IN`,
+    /// or quantified (`op ANY`/`op ALL`) subquery. Every pass that walks the
+    /// plans inside a plan's expressions reaches them through this.
+    pub fn subquery(&self) -> Option<&Subquery> {
+        match self {
+            Expr::Exists(Exists { subquery, .. })
+            | Expr::InSubquery(InSubquery { subquery, .. })
+            | Expr::ScalarSubquery(subquery)
+            | Expr::AnyExpr(AnyExpr {
+                source: QuantifiedSource::Subquery(subquery),
+                ..
+            })
+            | Expr::AllExpr(AllExpr {
+                source: QuantifiedSource::Subquery(subquery),
+                ..
+            }) => Some(subquery),
+            _ => None,
+        }
     }
 
     /// Returns true if the expression node is volatile, i.e. whether it can return
@@ -2307,6 +2420,7 @@ impl NormalizeEq for Expr {
                             filter: self_filter,
                             null_treatment: self_null_treatment,
                             distinct: self_distinct,
+                            window_reference: _,
                         },
                 } = left.as_ref();
                 let WindowFunction {
@@ -2320,6 +2434,7 @@ impl NormalizeEq for Expr {
                             filter: other_filter,
                             null_treatment: other_null_treatment,
                             distinct: other_distinct,
+                            window_reference: _,
                         },
                 } = other.as_ref();
 
@@ -2578,6 +2693,7 @@ impl HashNode for Expr {
                             filter,
                             null_treatment,
                             distinct,
+                            window_reference: _,
                         },
                 } = window_fun.as_ref();
                 fun.hash(state);
@@ -2947,6 +3063,7 @@ impl Display for SchemaDisplay<'_> {
                             filter,
                             null_treatment,
                             distinct,
+                            window_reference: _,
                         } = params;
 
                         // Write function name and open parenthesis
@@ -3252,7 +3369,17 @@ pub fn schema_name_from_sorts(sorts: &[Sort]) -> Result<String, fmt::Error> {
         } else {
             "NULLS LAST"
         };
-        write!(&mut s, "{} {} {}", e.expr, ordering, nulls_ordering)?;
+        // A projection can materialize a sort operand under its alias.
+        // The aggregate's field identity must keep that alias when the
+        // operand is rewritten or replaced by the projected column.
+        match &e.expr {
+            Expr::Alias(alias) => {
+                write!(&mut s, "{} {} {}", alias.name, ordering, nulls_ordering)?;
+            }
+            expression => {
+                write!(&mut s, "{expression} {ordering} {nulls_ordering}")?;
+            }
+        }
     }
 
     Ok(s)
@@ -3371,6 +3498,7 @@ impl Display for Expr {
                             filter,
                             null_treatment,
                             distinct,
+                            window_reference: _,
                         } = params;
 
                         fmt_function(f, &fun.to_string(), *distinct, args, true)?;
@@ -3534,6 +3662,25 @@ mod test {
     };
     use arrow::datatypes::{Field, Schema};
     use std::any::Any;
+
+    #[test]
+    fn sort_schema_names_follow_materialized_aliases() {
+        let named = Expr::Cast(Cast::new(Box::new(col("value")), DataType::Int64))
+            .alias("sort_operand")
+            .sort(true, false);
+        let materialized = col("sort_operand").sort(true, false);
+        assert_eq!(
+            schema_name_from_sorts(&[named]).unwrap(),
+            schema_name_from_sorts(&[materialized]).unwrap(),
+        );
+        let unaliased = Expr::Cast(Cast::new(Box::new(col("value")), DataType::Int64))
+            .sort(true, false);
+        assert!(
+            schema_name_from_sorts(&[unaliased])
+                .unwrap()
+                .contains("CAST")
+        );
+    }
 
     #[test]
     fn infer_placeholder_in_clause() {

@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::definition_plan::{WithQuery, as_definition_node};
+use crate::definition_plan::{SetReturningCall, WithQuery, as_definition_node};
 use crate::planner::{
     ContextProvider, PlannerContext, PlannerResult, RawAggregateExpr, RawCallForm,
     RawWindowExpr, RoutineCallKind, SqlToRel,
@@ -41,7 +41,7 @@ use datafusion_expr::{
 use sqlparser::ast::{
     AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
     FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
-    FunctionArguments, ObjectName, OrderByExpr, Spanned, Value, WindowType,
+    FunctionArguments, ObjectName, OrderByExpr, Spanned, Value, WindowSpec, WindowType,
 };
 
 /// Suggest a valid function based on an invalid input function name
@@ -498,11 +498,12 @@ impl SqlToRel<'_> {
         if name.eq_ignore_ascii_case("array")
             && let FunctionArguments::Subquery(query) = &function.args
         {
-            return self.plan_array_subquery_constructor(
+            let array = self.plan_array_subquery_constructor(
                 query.as_ref(),
                 schema,
                 planner_context,
-            );
+            )?;
+            return Ok(self.written_sublink(array, expr::ARRAY_SUBLINK));
         }
 
         // PostgreSQL typecast-as-function syntax: bpchar(expr) → CAST(expr AS CHARACTER)
@@ -540,6 +541,10 @@ impl SqlToRel<'_> {
             within_group,
             function_without_parentheses,
         } = function_args;
+
+        let window = over
+            .map(|over| self.resolve_window(over, planner_context.window_clause()))
+            .transpose()?;
 
         if !order_by.is_empty() && !within_group.is_empty() {
             return plan_err!(
@@ -638,12 +643,14 @@ impl SqlToRel<'_> {
             let args = if function == GraphFunction::ElementNumber {
                 args.iter()
                     .map(|arg| match arg {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Identifier(ident))) => {
-                            Ok(Expr::Column(Column::from_name(
-                                self.ident_normalizer.normalize(ident.clone()),
-                            )))
-                        }
-                        other => plan_err!("ELEMENT_NUMBER takes an element variable, not {other}"),
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                            SQLExpr::Identifier(ident),
+                        )) => Ok(Expr::Column(Column::from_name(
+                            self.ident_normalizer.normalize(ident.clone()),
+                        ))),
+                        other => plan_err!(
+                            "ELEMENT_NUMBER takes an element variable, not {other}"
+                        ),
                     })
                     .collect::<Result<Vec<_>>>()?
             } else {
@@ -659,22 +666,50 @@ impl SqlToRel<'_> {
         // of its rows becomes a row of the query, so the call plans as the
         // unnest of the lists it expands to. In the SELECT list that unnest
         // happens after grouping, windows and HAVING, where the planner turns
-        // `Expr::Unnest` into the plan's `Unnest`.
+        // `Expr::Unnest` into the plan's `Unnest`. A plan made to be printed
+        // keeps the call as written, typed as the row that unnest produces.
         if over.is_none() && self.context_provider.is_set_returning_function(&name) {
             let (srf_args, arg_names) =
                 self.function_args_to_expr_with_names(args, schema, planner_context)?;
+            // A call kept as written keeps its arguments in written order
+            // and by the names they were written with, as a non-set-returning
+            // named call does: the defaults resolution fills in for the
+            // parameters it skipped are not part of what it wrote.
+            let written_positions =
+                if self.context_provider.plans_definitions_as_written()
+                    && arg_names.iter().any(Option::is_some)
+                {
+                    Some(self.written_set_returning_arguments(&name, &arg_names)?)
+                } else {
+                    None
+                };
             let srf_args = self.resolve_named_arguments(&name, srf_args, arg_names)?;
-            return match self
+            let written_args = self
+                .context_provider
+                .plans_definitions_as_written()
+                .then(|| srf_args.clone());
+            let expanded = match self
                 .context_provider
                 .plan_set_returning_function(&name, &srf_args, schema, None)?
             {
                 Some(crate::planner::SetReturningColumns::Lists(columns)) => {
-                    self.set_returning_expr(&name, columns)
+                    self.set_returning_expr(&name, columns)?
                 }
                 Some(crate::planner::SetReturningColumns::Rows(rows)) => {
-                    Ok(Expr::Unnest(Unnest::new(rows)))
+                    Expr::Unnest(Unnest::new(rows))
                 }
-                None => self.set_returning_source_expr(&name, srf_args),
+                None => self.set_returning_source_expr(&name, srf_args)?,
+            };
+            return match written_args {
+                Some(args) => {
+                    let (_, row) = expanded.to_field(schema)?;
+                    let call = SetReturningCall::new(name.clone(), row).call(args);
+                    match written_positions {
+                        Some(written) => self.plan_written_named_call(call, &written),
+                        None => Ok(call),
+                    }
+                }
+                None => Ok(expanded),
             };
         }
 
@@ -812,14 +847,8 @@ impl SqlToRel<'_> {
             let inner = ScalarFunction::new_udf(fm, resolved_args);
 
             if let Some(written) = written_arguments {
-                let mut call = Expr::ScalarFunction(inner);
-                for planner in self.context_provider.get_expr_planners() {
-                    match planner.plan_named_call(call, &written)? {
-                        PlannerResult::Planned(planned) => return Ok(planned),
-                        PlannerResult::Original(original) => call = original,
-                    }
-                }
-                return Ok(call);
+                return self
+                    .plan_written_named_call(Expr::ScalarFunction(inner), &written);
             }
             if name.eq_ignore_ascii_case(inner.name()) {
                 return Ok(Expr::ScalarFunction(inner));
@@ -860,63 +889,9 @@ impl SqlToRel<'_> {
             ));
         }
         // Then, window function
-        if let Some(WindowType::WindowSpec(window)) = over {
-            let partition_by = window
-                .partition_by
-                .iter()
-                // Ignore window spec PARTITION BY for scalar values
-                // as they do not change and thus do not generate new partitions
-                .filter(|e| !matches!(e, sqlparser::ast::Expr::Value { .. },))
-                .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
-                .collect::<Result<Vec<_>>>()?;
-            let mut order_by = self.order_by_to_sort_expr(
-                &window.order_by,
-                schema,
-                planner_context,
-                // Numeric literals in window function ORDER BY are treated as constants
-                false,
-                None,
-            )?;
-
-            let func_deps = schema.functional_dependencies();
-            // Find whether ties are possible in the given ordering
-            let is_ordering_strict = order_by.iter().find_map(|orderby_expr| {
-                if let Expr::Column(col) = &orderby_expr.expr {
-                    let idx = schema.index_of_column(col).ok()?;
-                    return if func_deps.iter().any(|dep| {
-                        dep.source_indices == vec![idx] && dep.mode == Dependency::Single
-                    }) {
-                        Some(true)
-                    } else {
-                        Some(false)
-                    };
-                }
-                Some(false)
-            });
-
-            let window_frame = window
-                .window_frame
-                .as_ref()
-                .map(|window_frame| {
-                    let window_frame = super::window_frame::convert_window_frame(
-                        window_frame.clone(),
-                        &mut |interval| {
-                            self.frame_offset_interval(interval, planner_context)
-                        },
-                    )?;
-                    window_frame
-                        .regularize_order_bys(&mut order_by)
-                        .map(|_| window_frame)
-                })
-                .transpose()?;
-
-            let window_frame = if let Some(window_frame) = window_frame {
-                window_frame
-            } else if let Some(is_ordering_strict) = is_ordering_strict {
-                WindowFrame::new(Some(is_ordering_strict))
-            } else {
-                WindowFrame::new((!order_by.is_empty()).then_some(false))
-            };
+        if let Some((window, window_reference)) = window {
+            let (partition_by, order_by, window_frame) =
+                self.plan_window_spec(&window, schema, planner_context)?;
 
             if let Ok(fun) = self.find_window_func(&name) {
                 let (args, arg_names) =
@@ -953,69 +928,41 @@ impl SqlToRel<'_> {
                     .transpose()?
                     .map(Box::new);
 
-                let mut window_expr = RawWindowExpr {
-                    name: name.clone(),
-                    name_span: crate::utils::convert_parser_span(sql_parser_span),
-                    func_def: fun,
-                    args: resolved_args,
-                    partition_by,
-                    order_by,
-                    window_frame,
-                    filter,
-                    null_treatment,
-                    distinct: function_args.distinct,
-                };
-
-                for planner in self.context_provider.get_expr_planners().iter() {
-                    match planner.plan_window(window_expr, schema)? {
-                        PlannerResult::Planned(expr) => return Ok(expr),
-                        PlannerResult::Original(expr) => window_expr = expr,
-                    }
-                }
-
-                let RawWindowExpr {
-                    name: _,
-                    name_span: _,
-                    func_def,
-                    args,
-                    partition_by,
-                    order_by,
-                    window_frame,
-                    filter,
-                    null_treatment,
-                    distinct,
-                } = window_expr;
-
-                let inner = WindowFunction {
-                    fun: func_def,
-                    params: expr::WindowFunctionParams {
-                        args,
+                let planned = self.plan_window_call(
+                    RawWindowExpr {
+                        name: name.clone(),
+                        name_span: crate::utils::convert_parser_span(sql_parser_span),
+                        func_def: fun,
+                        args: resolved_args,
                         partition_by,
                         order_by,
                         window_frame,
                         filter,
                         null_treatment,
-                        distinct,
+                        distinct: function_args.distinct,
+                        window_reference,
                     },
-                };
-
-                if name.eq_ignore_ascii_case(inner.fun.name()) {
-                    return Ok(Expr::WindowFunction(Box::new(inner)));
-                } else {
-                    // If the function is called by an alias, a verbose string representation is created
-                    // (e.g., "my_alias(arg1, arg2)") and the expression is wrapped in an `Alias`
-                    // to ensure the output column name matches the user's query.
-                    let arg_names = inner
-                        .params
-                        .args
-                        .iter()
-                        .map(|arg| arg.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let verbose_alias = format!("{name}({arg_names})");
-
-                    return Ok(Expr::WindowFunction(Box::new(inner)).alias(verbose_alias));
+                    schema,
+                )?;
+                if self.context_provider.plans_definitions_as_written()
+                    && let Some(frame) = &window.window_frame
+                {
+                    let name = planned.schema_name().to_string();
+                    let metadata = datafusion_common::metadata::FieldMetadata::from(
+                        std::collections::HashMap::from([(
+                            crate::definition_plan::WINDOW_FRAME_SYNTAX_METADATA_KEY
+                                .to_string(),
+                            if frame.end_bound.is_some() {
+                                "between"
+                            } else {
+                                "short"
+                            }
+                            .to_string(),
+                        )]),
+                    );
+                    return Ok(planned.alias_with_metadata(name, Some(metadata)));
                 }
+                return Ok(planned);
             }
         } else {
             // User defined aggregate functions (UDAF) have precedence in case it has the same name as a scalar built-in function
@@ -1576,6 +1523,132 @@ impl SqlToRel<'_> {
         Ok((within_group, args, arg_names))
     }
 
+    /// The PARTITION BY keys, ORDER BY keys and frame of the window a call
+    /// is planned over.
+    pub(crate) fn plan_window_spec(
+        &self,
+        window: &WindowSpec,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<(Vec<Expr>, Vec<SortExpr>, WindowFrame)> {
+        let partition_by = window
+            .partition_by
+            .iter()
+            // Ignore window spec PARTITION BY for scalar values
+            // as they do not change and thus do not generate new partitions
+            .filter(|e| !matches!(e, sqlparser::ast::Expr::Value { .. },))
+            .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
+            .collect::<Result<Vec<_>>>()?;
+        let mut order_by = self.order_by_to_sort_expr(
+            &window.order_by,
+            schema,
+            planner_context,
+            // Numeric literals in window function ORDER BY are treated as constants
+            false,
+            None,
+        )?;
+
+        let func_deps = schema.functional_dependencies();
+        // Find whether ties are possible in the given ordering
+        let is_ordering_strict = order_by.iter().find_map(|orderby_expr| {
+            if let Expr::Column(col) = &orderby_expr.expr {
+                let idx = schema.index_of_column(col).ok()?;
+                return if func_deps.iter().any(|dep| {
+                    dep.source_indices == vec![idx] && dep.mode == Dependency::Single
+                }) {
+                    Some(true)
+                } else {
+                    Some(false)
+                };
+            }
+            Some(false)
+        });
+
+        let window_frame = window
+            .window_frame
+            .as_ref()
+            .map(|window_frame| {
+                let window_frame = super::window_frame::convert_window_frame(
+                    window_frame.clone(),
+                    &mut |interval| self.frame_offset_interval(interval, planner_context),
+                )?;
+                window_frame
+                    .regularize_order_bys(&mut order_by)
+                    .map(|_| window_frame)
+            })
+            .transpose()?;
+
+        let window_frame = if let Some(window_frame) = window_frame {
+            window_frame
+        } else if let Some(is_ordering_strict) = is_ordering_strict {
+            WindowFrame::new(Some(is_ordering_strict))
+        } else {
+            WindowFrame::new((!order_by.is_empty()).then_some(false))
+        };
+        Ok((partition_by, order_by, window_frame))
+    }
+
+    /// A window call, as the first expression planner that plans it does, or
+    /// as a [`WindowFunction`] of its parts.
+    pub(super) fn plan_window_call(
+        &self,
+        mut window_expr: RawWindowExpr,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        for planner in self.context_provider.get_expr_planners().iter() {
+            match planner.plan_window(window_expr, schema)? {
+                PlannerResult::Planned(expr) => return Ok(expr),
+                PlannerResult::Original(expr) => window_expr = expr,
+            }
+        }
+
+        let RawWindowExpr {
+            name,
+            name_span: _,
+            func_def,
+            args,
+            partition_by,
+            order_by,
+            window_frame,
+            filter,
+            null_treatment,
+            distinct,
+            window_reference,
+        } = window_expr;
+
+        let inner = WindowFunction {
+            fun: func_def,
+            params: expr::WindowFunctionParams {
+                args,
+                partition_by,
+                order_by,
+                window_frame,
+                filter,
+                null_treatment,
+                distinct,
+                window_reference,
+            },
+        };
+
+        if name.eq_ignore_ascii_case(inner.fun.name()) {
+            Ok(Expr::WindowFunction(Box::new(inner)))
+        } else {
+            // If the function is called by an alias, a verbose string representation is created
+            // (e.g., "my_alias(arg1, arg2)") and the expression is wrapped in an `Alias`
+            // to ensure the output column name matches the user's query.
+            let arg_names = inner
+                .params
+                .args
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let verbose_alias = format!("{name}({arg_names})");
+
+            Ok(Expr::WindowFunction(Box::new(inner)).alias(verbose_alias))
+        }
+    }
+
     /// Plan an ARRAY subquery constructor (SQL:2016 S095)
     ///
     /// Transforms `ARRAY(SELECT col FROM t ORDER BY x)` into:
@@ -1689,6 +1762,50 @@ impl SqlToRel<'_> {
 
     /// Positional arguments for a call that named some of them, resolved
     /// against the function's declared parameter names.
+    /// `call`, a call written with named arguments, as the first expression
+    /// planner that records how it was written plans it. `written` holds the
+    /// parameter position and written name of each argument in written order.
+    fn plan_written_named_call(
+        &self,
+        mut call: Expr,
+        written: &[(usize, Option<String>)],
+    ) -> Result<Expr> {
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_named_call(call, written)? {
+                PlannerResult::Planned(planned) => return Ok(planned),
+                PlannerResult::Original(original) => call = original,
+            }
+        }
+        Ok(call)
+    }
+
+    /// The parameter position and written name of each argument of a call
+    /// of the set-returning function `name` written with `arg_names`, in
+    /// written order.
+    fn written_set_returning_arguments(
+        &self,
+        name: &str,
+        arg_names: &[Option<String>],
+    ) -> Result<Vec<(usize, Option<String>)>> {
+        let function =
+            self.context_provider
+                .get_function_meta(name)
+                .ok_or_else(|| {
+                    plan_datafusion_err!(
+                        "Function '{name}' does not support named arguments"
+                    )
+                })?;
+        let Some(parameter_names) = function.signature().parameter_names.as_deref()
+        else {
+            return plan_err!("Function '{name}' does not support named arguments");
+        };
+        written_argument_positions(parameter_names, arg_names).ok_or_else(|| {
+            plan_datafusion_err!(
+                "a named argument of {name} names no parameter of the function"
+            )
+        })
+    }
+
     fn resolve_named_arguments(
         &self,
         name: &str,
@@ -2080,7 +2197,9 @@ mod scalar_subquery_aggregate_tests {
         assert_eq!(error.diagnostic().unwrap().span.unwrap().start.column, 8);
     }
 
-    fn recording_context(refusal: Option<&'static str>) -> (ArrayContext, Arc<CallFormRecorder>) {
+    fn recording_context(
+        refusal: Option<&'static str>,
+    ) -> (ArrayContext, Arc<CallFormRecorder>) {
         let recorder = Arc::new(CallFormRecorder {
             refusal,
             ..Default::default()
@@ -2101,9 +2220,9 @@ mod scalar_subquery_aggregate_tests {
         )
         .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("WITHIN GROUP is only supported for ordered-set aggregate functions"),
+            error.to_string().contains(
+                "WITHIN GROUP is only supported for ordered-set aggregate functions"
+            ),
             "{error}"
         );
         let calls = recorder.calls.lock().unwrap();
@@ -2157,7 +2276,10 @@ mod scalar_subquery_aggregate_tests {
             panic!("the refusal keeps its SQLSTATE: {error}")
         };
         let state = source.downcast_ref::<DataFusionSqlStateError>().unwrap();
-        assert_eq!((state.sqlstate.as_str(), state.message.as_str()), ("42809", "refused"));
+        assert_eq!(
+            (state.sqlstate.as_str(), state.message.as_str()),
+            ("42809", "refused")
+        );
     }
 
     #[test]

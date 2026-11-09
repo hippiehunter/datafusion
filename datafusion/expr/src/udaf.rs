@@ -334,6 +334,11 @@ impl AggregateUDF {
         self.inner.supports_within_group_clause()
     }
 
+    /// See [`AggregateUDFImpl::within_group_arguments_are_direct`] for more details.
+    pub fn within_group_arguments_are_direct(&self) -> bool {
+        self.inner.within_group_arguments_are_direct()
+    }
+
     /// Returns the documentation for this Aggregate UDF.
     ///
     /// Documentation can be accessed programmatically as well as
@@ -804,6 +809,17 @@ pub trait AggregateUDFImpl: Debug + DynEq + DynHash + Send + Sync {
         false
     }
 
+    /// For an aggregate that supports `WITHIN GROUP`, whether the arguments
+    /// the call writes are direct arguments, evaluated once per group from
+    /// grouped columns only. That is PostgreSQL's ordered-set and
+    /// hypothetical-set aggregates (`percentile_cont(0.5) WITHIN GROUP (ORDER
+    /// BY x)`), whose aggregated input is the `WITHIN GROUP` sort key. SQL's
+    /// `LISTAGG(value, separator) WITHIN GROUP (ORDER BY key)` instead
+    /// aggregates its written `value` per row, and returns false.
+    fn within_group_arguments_are_direct(&self) -> bool {
+        true
+    }
+
     /// Returns the documentation for this Aggregate UDF.
     ///
     /// Documentation can be accessed programmatically as well as
@@ -943,6 +959,7 @@ pub fn udaf_default_window_function_schema_name<F: AggregateUDFImpl + ?Sized>(
         filter,
         null_treatment,
         distinct,
+        window_reference: _,
     } = params;
 
     let mut schema_name = String::new();
@@ -1044,6 +1061,7 @@ pub fn udaf_default_window_function_display_name<F: AggregateUDFImpl + ?Sized>(
         filter,
         null_treatment,
         distinct,
+        window_reference: _,
     } = params;
 
     let mut display_name = String::new();
@@ -1266,6 +1284,10 @@ impl AggregateUDFImpl for AliasedAggregateUDFImpl {
 
     fn supports_within_group_clause(&self) -> bool {
         self.inner.supports_within_group_clause()
+    }
+
+    fn within_group_arguments_are_direct(&self) -> bool {
+        self.inner.within_group_arguments_are_direct()
     }
 
     fn set_monotonicity(&self, data_type: &DataType) -> SetMonotonicity {

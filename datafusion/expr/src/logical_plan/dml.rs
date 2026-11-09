@@ -41,8 +41,8 @@ pub enum ConflictTarget {
     Index(String),
 }
 
-use crate::expr::{AllExpr, AnyExpr, Exists, InSubquery, QuantifiedSource};
 use crate::logical_plan::Subquery;
+use crate::utils::is_system_column;
 use crate::{BoundSqlExpression, Expr, LogicalPlan, TableSource};
 
 /// A row-visibility predicate imposed by an automatically updatable view.
@@ -247,18 +247,10 @@ fn expr_reads_target(
             Expr::Column(column) | Expr::OuterReferenceColumn(_, column) => {
                 is_target_column(column)
             }
-            Expr::Exists(Exists { subquery, .. })
-            | Expr::InSubquery(InSubquery { subquery, .. })
-            | Expr::ScalarSubquery(subquery)
-            | Expr::AnyExpr(AnyExpr {
-                source: QuantifiedSource::Subquery(subquery),
-                ..
-            })
-            | Expr::AllExpr(AllExpr {
-                source: QuantifiedSource::Subquery(subquery),
-                ..
-            }) => subquery_reads_target(subquery, is_target_column)?,
-            _ => false,
+            other => match other.subquery() {
+                Some(subquery) => subquery_reads_target(subquery, is_target_column)?,
+                None => false,
+            },
         };
         Ok(if reads {
             TreeNodeRecursion::Stop
@@ -389,9 +381,12 @@ pub fn carried_presence_column_name(ordinal: usize) -> String {
 /// them), followed by any columns RETURNING reads from joined relations.
 /// RETURNING reads the row as stored, so a target column has the column's own
 /// field (its type and SQL identity), not the field of the expression
-/// assigned to it; a joined column keeps its own.
+/// assigned to it; a joined column keeps its own. A system column of the
+/// target that the input does not carry (an INSERT writes none) follows the
+/// input's columns: RETURNING reads it from the relation the row is stored
+/// in, not from the input.
 pub fn written_row_schema(input: &DFSchema, target: &Schema) -> Result<DFSchema> {
-    let fields = input
+    let mut fields = input
         .iter()
         .enumerate()
         .map(|(index, (qualifier, field))| {
@@ -399,6 +394,9 @@ pub fn written_row_schema(input: &DFSchema, target: &Schema) -> Result<DFSchema>
                 return Ok((qualifier.cloned(), Arc::clone(field)));
             };
             if column.name() != field.name() {
+                if is_system_column(column) {
+                    return Ok((qualifier.cloned(), Arc::clone(field)));
+                }
                 return internal_err!(
                     "DML input column {index} is {}, not the target column {}",
                     field.name(),
@@ -408,6 +406,16 @@ pub fn written_row_schema(input: &DFSchema, target: &Schema) -> Result<DFSchema>
             Ok((qualifier.cloned(), Arc::clone(column)))
         })
         .collect::<Result<Vec<_>>>()?;
+    for column in target.fields() {
+        if is_system_column(column)
+            && !input
+                .fields()
+                .iter()
+                .any(|field| field.name() == column.name())
+        {
+            fields.push((None, Arc::clone(column)));
+        }
+    }
     DFSchema::new_with_metadata(fields, input.metadata().clone())
 }
 
@@ -588,7 +596,10 @@ impl DmlStatement {
     /// row as `excluded`. Both carry the target's columns; `excluded` also
     /// carries each sub-select the planner computed on the INSERT source
     /// (the input columns named with [`CONFLICT_SOURCE_COLUMN_PREFIX`]),
-    /// which follow the target's columns in the input row.
+    /// which follow the target's columns in the input row. Both rows carry
+    /// the target's stored columns; the conflicting row's system columns,
+    /// which no image holds, follow everything else, and the proposed row
+    /// has none.
     pub fn conflict_update_scope(&self) -> Result<Option<DFSchemaRef>> {
         let Some(update) = self.conflict_update() else {
             return Ok(None);
@@ -598,9 +609,27 @@ impl DmlStatement {
             None => TableReference::bare(self.table_name.table()),
         };
         let target = self.target.schema();
-        let target_row = DFSchema::try_from_qualified_schema(target_row, &target)?;
-        let excluded = Schema::new(
+        let stored = Schema::new(
             target
+                .fields()
+                .iter()
+                .filter(|field| !is_system_column(field))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let system = Schema::new(
+            target
+                .fields()
+                .iter()
+                .filter(|field| is_system_column(field))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let target_system =
+            DFSchema::try_from_qualified_schema(target_row.clone(), &system)?;
+        let target_row = DFSchema::try_from_qualified_schema(target_row, &stored)?;
+        let excluded = Schema::new(
+            stored
                 .fields()
                 .iter()
                 .chain(self.input.schema().fields().iter().filter(|field| {
@@ -613,7 +642,7 @@ impl DmlStatement {
             TableReference::bare(EXCLUDED),
             &excluded,
         )?;
-        Ok(Some(Arc::new(target_row.join(&excluded)?)))
+        Ok(Some(Arc::new(target_row.join(&excluded)?.join(&target_system)?)))
     }
 
     /// Return a descriptive name of this [`DmlStatement`]

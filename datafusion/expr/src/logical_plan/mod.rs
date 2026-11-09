@@ -25,6 +25,8 @@ mod merge;
 pub use invariants::{InvariantLevel, assert_expected_schema, check_subquery_expr};
 mod plan;
 pub(crate) use plan::unnested_list_metadata;
+mod set_operation;
+pub use set_operation::{SetOperation, SetOperationKind};
 pub mod tree_node;
 
 pub use builder::{
@@ -37,8 +39,8 @@ pub use ddl::{
     CreateExternalTable, CreateIndex, CreateMemoryTable, CreateMemoryTableSpec,
     CreateTablePartitionBound, CreateTablePartitionBoundValue, CreateTablePartitionKey,
     CreateTablePartitionOf, CreateTablePartitioning, CreateTablePartitioningStrategy,
-    CreateView, CreateViewCheckOption, CreateViewColumn, CreateViewNotUpdatable, CreateViewSpec,
-    CreateViewUpdatability, DdlStatement,
+    CreateView, CreateViewCheckOption, CreateViewColumn, CreateViewNotUpdatable,
+    CreateViewSpec, CreateViewUpdatability, DdlStatement,
 };
 pub use dml::{
     CarriedJunkColumns, ConflictAssignment, ConflictTarget, DmlCheckOption, DmlStatement,
@@ -58,11 +60,10 @@ pub use plan::{
     JsonTable, JsonTableColumnDef, JsonTableErrorHandling, LabelExpression, Limit,
     LogicalPlan, MatchRecognize, MeasureExpr, NodePattern, Partitioning, PathFinding,
     PathMode, Pattern, PatternSymbol, PlanType, Projection, RecursiveQuery, Repartition,
-    RepetitionQuantifier,
-    RowLimiting, RowsPerMatchOption, SkipType, Sort, StringifiedPlan, Subquery,
-    SubqueryAlias, SubsetDef, SymbolDef, TableScan, TableScanRowLock,
-    TableScanRowLockMode, TableScanRowLockWaitPolicy, ToStringifiedPlan, Union, Unnest,
-    Values, Window, projection_schema,
+    RepetitionQuantifier, RowLimiting, RowsPerMatchOption, SkipType, Sort,
+    StringifiedPlan, Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan,
+    TableScanRowLock, TableScanRowLockMode, TableScanRowLockWaitPolicy,
+    ToStringifiedPlan, Union, Unnest, Values, Window, projection_schema,
 };
 
 pub use display::display_schema;

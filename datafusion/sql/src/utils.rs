@@ -47,7 +47,7 @@ pub fn reject_check_constraint_expression(expr: &Expr) -> Result<()> {
     let mut refusal = None;
     expr.apply(|node| {
         let found = match node {
-            Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_) => {
+            node if node.subquery().is_some() => {
                 Some(("0A000", "cannot use subquery in check constraint"))
             }
             Expr::AggregateFunction(_) => Some((

@@ -32,16 +32,17 @@ use datafusion_common::{
     DFSchema, Result, ScalarValue, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::expr::ScalarFunction;
-use datafusion_expr::{Expr, lit};
+use datafusion_expr::{Expr, WindowFunctionDefinition, lit};
 use sqlparser::ast::{
     CastKind, DataType as SQLDataType, Expr as SQLExpr, ExprWithAlias,
     Function as SQLFunction, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
     FunctionArguments, JsonEncoding, JsonFormatClause, JsonNullClause, JsonOnBehavior,
     JsonPredicateUniqueKeyConstraint, JsonQueryWrapper, JsonQuotesBehavior,
-    JsonQuotesClause, OrderByExpr,
+    JsonQuotesClause, OrderByExpr, Spanned,
 };
 
-use crate::planner::{PlannerContext, SqlToRel};
+use crate::planner::{PlannerContext, RawWindowExpr, SqlToRel};
+use crate::utils::convert_parser_span;
 
 /// The clauses a SQL/JSON call carries.
 #[derive(Default)]
@@ -265,6 +266,7 @@ impl SqlToRel<'_> {
                 )?,
             "json_arrayagg" | "json_objectagg" => self.plan_sql_json_aggregate(
                 &name,
+                function,
                 &arguments,
                 &clauses,
                 schema,
@@ -306,8 +308,13 @@ impl SqlToRel<'_> {
         if !matches!(name, "json_value" | "json_query" | "json_exists")
             && self.is_bytea_type(&target)?
         {
-            let text =
-                self.finish_cast_expr(expr, &SQLDataType::Text, CastKind::Cast, None, schema)?;
+            let text = self.finish_cast_expr(
+                expr,
+                &SQLDataType::Text,
+                CastKind::Cast,
+                None,
+                schema,
+            )?;
             let Some(convert_to) = self.context_provider.get_function_meta("convert_to")
             else {
                 return internal_err!(
@@ -588,9 +595,17 @@ impl SqlToRel<'_> {
         )
     }
 
+    /// `JSON_ARRAYAGG(value ...)` and `JSON_OBJECTAGG(key : value ...)` as a
+    /// call of the aggregate the context provider registers under the same
+    /// name, its clauses as arguments: `JSON_ARRAYAGG` takes the rendered
+    /// value and its null policy, `JSON_OBJECTAGG` the rendered key, the
+    /// rendered value, its key uniqueness and its null policy. The ORDER BY
+    /// and FILTER clauses are the call's own, and an OVER clause makes it a
+    /// window call.
     fn plan_sql_json_aggregate(
         &self,
         name: &str,
+        function: &SQLFunction,
         arguments: &SqlJsonArguments,
         clauses: &SqlJsonClauses,
         schema: &DFSchema,
@@ -601,9 +616,9 @@ impl SqlToRel<'_> {
                 "SQL/JSON requires the '{name}' aggregate to be registered"
             );
         };
-        // `JSON_ARRAYAGG` and `JSON_OBJECTAGG` both omit nulls unless told
-        // otherwise, which is the opposite of their `json_agg` counterparts.
-        let absent_on_null = clauses.absent_on_null.unwrap_or(true);
+        // `JSON_ARRAYAGG` omits nulls unless told otherwise, the opposite of
+        // `json_agg`; `JSON_OBJECTAGG` keeps them, as `json_object_agg` does.
+        let absent_on_null = clauses.absent_on_null.unwrap_or(name == "json_arrayagg");
         // The member text an argument contributes depends on its declared
         // type, which only a scalar function sees. Rendering each argument
         // before it reaches the aggregate keeps the accumulator a plain
@@ -627,8 +642,45 @@ impl SqlToRel<'_> {
                 self.sql_json_function_call("json_member_key", vec![key])?,
                 self.sql_json_function_call("json_member_value", vec![value])?,
                 lit(clauses.unique_keys),
+                lit(absent_on_null),
             ]
         };
+        let filter = function
+            .filter
+            .as_ref()
+            .map(|filter| {
+                self.sql_expr_to_logical_expr(filter.as_ref(), schema, planner_context)
+            })
+            .transpose()?
+            .map(Box::new);
+        if let Some(over) = &function.over {
+            let (window, window_reference) =
+                self.resolve_window(over, planner_context.window_clause())?;
+            if !clauses.order_by.is_empty() {
+                return Err(sqlstate_datafusion_err(
+                    "0A000",
+                    "aggregate ORDER BY is not implemented for window functions",
+                ));
+            }
+            let (partition_by, order_by, window_frame) =
+                self.plan_window_spec(&window, schema, planner_context)?;
+            return self.plan_window_call(
+                RawWindowExpr {
+                    name: name.to_string(),
+                    name_span: convert_parser_span(function.name.span()),
+                    func_def: WindowFunctionDefinition::AggregateUDF(aggregate),
+                    args,
+                    partition_by,
+                    order_by,
+                    window_frame,
+                    filter,
+                    null_treatment: None,
+                    distinct: false,
+                    window_reference,
+                },
+                schema,
+            );
+        }
         let order_by = if clauses.order_by.is_empty() {
             Vec::new()
         } else {
@@ -642,7 +694,7 @@ impl SqlToRel<'_> {
         };
         Ok(Expr::AggregateFunction(
             datafusion_expr::expr::AggregateFunction::new_udf(
-                aggregate, args, false, None, order_by, None,
+                aggregate, args, false, filter, order_by, None,
             ),
         ))
     }

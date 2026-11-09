@@ -22,6 +22,7 @@ use sqlparser::ast::{
     CreateTableLikeDefaults, CreateTableLikeOption, TableLikeOptionKind,
 };
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -60,13 +61,17 @@ use datafusion_expr::dml::{
     DoUpdateAction, EXCLUDED, InsertOp, OnConflict, OnConflictAction, TargetSelectRights,
     written_row_schema,
 };
-use datafusion_expr::expr::{Exists, InSubquery};
+use datafusion_expr::expr::{
+    AllExpr, AnyExpr, Cast, Exists, InSubquery, QuantifiedSource,
+};
 use datafusion_expr::expr_rewriter::{
     normalize_col_with_schemas_and_ambiguity_check, unnormalize_col,
 };
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::{DdlStatement, TableScan, build_join_schema};
-use datafusion_expr::utils::{expand_wildcard, expr_to_columns, exprlist_to_fields};
+use datafusion_expr::utils::{
+    expand_wildcard, expr_to_columns, exprlist_to_fields, is_system_column,
+};
 use datafusion_expr::{
     Analyze, BoundSqlExpression, CreateExternalTable as PlanCreateExternalTable,
     CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateMemoryTableSpec,
@@ -276,9 +281,8 @@ fn lower_create_table_like_options(
                  included: bool| {
         match kind {
             TableLikeOptionKind::Comments => options.comments = included,
-            TableLikeOptionKind::Compression | TableLikeOptionKind::Storage => {
-                options.storage = included;
-            }
+            TableLikeOptionKind::Compression => options.compression = included,
+            TableLikeOptionKind::Storage => options.storage = included,
             TableLikeOptionKind::Constraints => options.constraints = included,
             TableLikeOptionKind::Defaults => options.defaults = included,
             TableLikeOptionKind::Generated => options.generated = included,
@@ -293,6 +297,7 @@ fn lower_create_table_like_options(
                 options.identity = included;
                 options.indexes = included;
                 options.storage = included;
+                options.compression = included;
             }
         }
     };
@@ -630,22 +635,27 @@ fn object_name_to_string(object_name: &ObjectName) -> String {
         .join(".")
 }
 
-fn select_items_to_column_names(items: &[SelectItem]) -> Vec<String> {
+fn select_items_to_column_names(
+    items: &[SelectItem],
+    ident_normalizer: &IdentNormalizer,
+) -> Vec<String> {
     let names: Vec<String> = items
         .iter()
         .map(|item| match item {
             SelectItem::UnnamedExpr(expr) => match expr {
-                SQLExpr::Identifier(ident) => ident_to_string(ident),
+                SQLExpr::Identifier(ident) => ident_normalizer.normalize(ident.clone()),
                 SQLExpr::CompoundIdentifier(idents) => idents
                     .last()
-                    .map(ident_to_string)
+                    .map(|ident| ident_normalizer.normalize(ident.clone()))
                     .unwrap_or_else(|| "*".to_string()),
                 _ => "*".to_string(),
             },
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
                 "*".to_string()
             }
-            SelectItem::ExprWithAlias { alias, .. } => ident_to_string(alias),
+            SelectItem::ExprWithAlias { alias, .. } => {
+                ident_normalizer.normalize(alias.clone())
+            }
         })
         .collect();
     // `*` stands for the whole row, over which every other item is then
@@ -835,12 +845,7 @@ fn rewrite_update_returning_exprs(
 }
 
 fn expr_contains_subquery(expr: &Expr) -> Result<bool> {
-    expr.exists(|node| {
-        Ok(matches!(
-            node,
-            Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_)
-        ))
-    })
+    expr.exists(|node| Ok(node.subquery().is_some()))
 }
 
 /// A RETURNING expression that contains a subquery is evaluated in the
@@ -1092,15 +1097,28 @@ fn expression_without_alias(expression: &Expr) -> Expr {
 /// Construct `TableConstraint`(s) for the given columns by iterating over
 /// `columns` and extracting individual inline constraint definitions.
 fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConstraint> {
+    inline_constraints(columns.iter().map(column_def_options))
+}
+
+/// A declared column's name and its options.
+fn column_def_options(column: &ColumnDef) -> (&Ident, &[ast::ColumnOptionDef]) {
+    (&column.name, column.options.as_slice())
+}
+
+/// The table constraints the column options of `columns`, each a column's
+/// name and its options, declare.
+fn inline_constraints<'a>(
+    columns: impl IntoIterator<Item = (&'a Ident, &'a [ast::ColumnOptionDef])>,
+) -> Vec<TableConstraint> {
     let mut constraints = vec![];
-    for column in columns {
-        for ast::ColumnOptionDef { name, option } in &column.options {
+    for (column_name, options) in columns {
+        for ast::ColumnOptionDef { name, option } in options {
             match option {
                 ast::ColumnOption::Unique(unique_constraint) => {
                     // Create a new UniqueConstraint with the column from this definition
                     let column_expr = IndexColumn {
                         column: OrderByExpr {
-                            expr: SQLExpr::Identifier(column.name.clone()),
+                            expr: SQLExpr::Identifier(column_name.clone()),
                             options: OrderByOptions {
                                 asc: None,
                                 nulls_first: None,
@@ -1128,7 +1146,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                 ast::ColumnOption::PrimaryKey(pk_constraint) => {
                     let column_expr = IndexColumn {
                         column: OrderByExpr {
-                            expr: SQLExpr::Identifier(column.name.clone()),
+                            expr: SQLExpr::Identifier(column_name.clone()),
                             options: OrderByOptions {
                                 asc: None,
                                 nulls_first: None,
@@ -1154,7 +1172,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         name: name.clone(),
                         index_name: fk_constraint.index_name.clone(),
                         columns: vec![ForeignKeyColumnOrPeriod::Column(
-                            column.name.clone(),
+                            column_name.clone(),
                         )],
                         foreign_table: fk_constraint.foreign_table.clone(),
                         referred_columns: fk_constraint.referred_columns.clone(),
@@ -1171,6 +1189,7 @@ fn calc_inline_constraints_from_columns(columns: &[ColumnDef]) -> Vec<TableConst
                         expr: check_constraint.expr.clone(),
                         enforced: check_constraint.enforced,
                         no_inherit: check_constraint.no_inherit,
+                        not_valid: check_constraint.not_valid,
                     }));
                 }
                 // Other options are not constraint related.
@@ -1590,6 +1609,7 @@ impl SqlToRel<'_> {
                 with_data,
                 partition_by,
                 partition_of,
+                partition_columns,
                 partition_bound,
                 ..
             }) => {
@@ -1666,10 +1686,24 @@ impl SqlToRel<'_> {
                 // PostgreSQL creates a table's constraints in the order the
                 // statement declares them, and a column's own constraints
                 // come with the column, ahead of the table constraints.
-                let mut all_constraints = calc_inline_constraints_from_columns(&columns);
+                // A partition's element list names columns of its parent,
+                // whose options it declares as a column's own.
+                let declared_options = columns
+                    .iter()
+                    .map(column_def_options)
+                    .chain(
+                        partition_columns
+                            .iter()
+                            .map(|column| (&column.name, column.options.as_slice())),
+                    )
+                    .collect::<Vec<_>>();
+                let mut all_constraints =
+                    inline_constraints(declared_options.iter().copied());
                 all_constraints.extend(constraints);
-                let mut column_defaults =
-                    self.build_column_defaults(&columns, planner_context)?;
+                let mut column_defaults = self.build_column_defaults(
+                    declared_options.iter().copied(),
+                    planner_context,
+                )?;
                 let explicit_schema = self.build_schema(&columns)?;
                 let explicit_schema_metadata = explicit_schema.metadata().clone();
                 let mut fields =
@@ -1776,6 +1810,27 @@ impl SqlToRel<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 if has_columns {
                     planner_context.set_table_schema(Some(Arc::clone(&schema)));
+                }
+                // An inheriting table's columns merge with its parents' after
+                // this plan, so a key over an inherited column names no column
+                // of it. The embedding engine carries such a key through its
+                // constraint hints and resolves it against the merged columns,
+                // as it carries EXCLUDE.
+                if !inherits.is_empty() || partition_of.is_some() {
+                    let declared = schema.field_names();
+                    all_constraints.retain(|constraint| {
+                        let columns = match constraint {
+                            TableConstraint::PrimaryKey(key) => &key.columns,
+                            TableConstraint::Unique(key) => &key.columns,
+                            _ => return true,
+                        };
+                        columns.iter().all(|column| match &column.column.expr {
+                            SQLExpr::Identifier(ident) => declared.contains(
+                                &self.ident_normalizer.normalize(ident.clone()),
+                            ),
+                            _ => true,
+                        })
+                    });
                 }
 
                 match query {
@@ -2601,7 +2656,10 @@ impl SqlToRel<'_> {
         let mut planner_context = PlannerContext::without_parameters();
 
         let column_defaults = self
-            .build_column_defaults(&columns, &mut planner_context)?
+            .build_column_defaults(
+                columns.iter().map(column_def_options),
+                &mut planner_context,
+            )?
             .into_iter()
             .collect();
 
@@ -3171,7 +3229,8 @@ impl SqlToRel<'_> {
                 });
             if plain_columns {
                 target_select_rights = TargetSelectRights::Required;
-                let cols = select_items_to_column_names(returning_items);
+                let cols =
+                    select_items_to_column_names(returning_items, &self.ident_normalizer);
                 returning_output_schema = returning_columns_to_output_schema(
                     &table_schema,
                     &cols,
@@ -3345,13 +3404,16 @@ impl SqlToRel<'_> {
             if !matches!(
                 written,
                 Expr::Literal(
-                    ScalarValue::Utf8(Some(_)) | ScalarValue::Utf8View(Some(_)) | ScalarValue::LargeUtf8(Some(_)),
+                    ScalarValue::Utf8(Some(_))
+                        | ScalarValue::Utf8View(Some(_))
+                        | ScalarValue::LargeUtf8(Some(_)),
                     None
                 )
             ) {
                 continue;
             }
-            let output_name = name.unwrap_or_else(|| exprs[*slot].schema_name().to_string());
+            let output_name =
+                name.unwrap_or_else(|| exprs[*slot].schema_name().to_string());
             let value = self.assign_to_column(
                 written.clone(),
                 table_schema.field(index),
@@ -3373,7 +3435,7 @@ impl SqlToRel<'_> {
     /// assignment coercion, else a cast to the column's type. Every value a
     /// statement writes into a column takes this one path, a default the
     /// statement leaves to the column included.
-    fn assign_to_column(
+    pub(super) fn assign_to_column(
         &self,
         value: Expr,
         column: &FieldRef,
@@ -3384,6 +3446,11 @@ impl SqlToRel<'_> {
             .plan_assignment_coercion(&value, column, schema)?
         {
             Some(coerced) => Ok(coerced),
+            // NULL takes the column's complete identity. A carrier-only cast
+            // would lose nominal types before VALUES common-type inference.
+            None if matches!(value, Expr::Literal(ScalarValue::Null, _)) => Ok(
+                Expr::Cast(Cast::new_from_field(Box::new(value), Arc::clone(column))),
+            ),
             None => value.cast_to(column.data_type(), schema),
         }
     }
@@ -3718,10 +3785,9 @@ impl SqlToRel<'_> {
             // the one their bound values read.
             let (clause_schema, value_schema) = match clause.clause_kind {
                 ast::MergeClauseKind::NotMatched
-                | ast::MergeClauseKind::NotMatchedByTarget => (
-                    source_plan.schema().as_ref(),
-                    source_plan.schema().as_ref(),
-                ),
+                | ast::MergeClauseKind::NotMatchedByTarget => {
+                    (source_plan.schema().as_ref(), source_plan.schema().as_ref())
+                }
                 ast::MergeClauseKind::NotMatchedBySource => (
                     binding_target_schema.as_ref(),
                     target_plan.schema().as_ref(),
@@ -4843,9 +4909,13 @@ impl SqlToRel<'_> {
         let table_name = self.object_name_to_table_reference(table_name.clone())?;
         let table_source = self.context_provider.get_table_source(table_name.clone())?;
         let table_schema = DFSchema::try_from(table_source.schema())?;
+        // A system column the statement reads is a column of the target's
+        // planning schema, but no INSERT writes one: it is neither a position
+        // nor a name the INSERT can target.
         let positional_columns: Vec<String> = table_schema
             .fields()
             .iter()
+            .filter(|field| !is_system_column(field))
             .map(|field| field.name().clone())
             .collect();
         // A positional VALUES list shorter than the table writes its leading
@@ -4903,37 +4973,45 @@ impl SqlToRel<'_> {
         // not provided, and should be filled with a default value later.
         // A column written through several paths is one target column.
         let provided_columns = written_columns.as_deref().unwrap_or(columns);
-        let mut target_col_names: Vec<String> =
-            if overriding_user_value && written_columns.is_none() && columns.is_empty() {
+        // The columns the write provides, `provided`, or every column when
+        // `whole_row`.
+        let target_column_names = |provided: &[Ident], whole_row: bool| {
+            let mut names: Vec<String> = if overriding_user_value && whole_row {
                 positional_columns.clone()
             } else {
-                Vec::with_capacity(provided_columns.len())
+                Vec::with_capacity(provided.len())
             };
-        for column in provided_columns {
-            let name = self.ident_normalizer.normalize(column.clone());
-            if !target_col_names.contains(&name) {
-                target_col_names.push(name);
+            for column in provided {
+                let name = self.ident_normalizer.normalize(column.clone());
+                if !names.contains(&name) {
+                    names.push(name);
+                }
             }
-        }
-        // A view-level default is materialized by the projection below and is
-        // therefore a supplied base-row value. If it remained absent from the
-        // write contract, the mutation adapter would replace it with the base
-        // table's own default.
-        for (column, _) in view_column_defaults {
-            if !target_col_names
-                .iter()
-                .any(|written| written.eq_ignore_ascii_case(column))
-            {
-                target_col_names.push(column.clone());
-            }
-        }
-        if overriding_user_value {
-            target_col_names.retain(|column| {
-                !overriding_user_identity_columns
+            // A view-level default is materialized by the projection below
+            // and is therefore a supplied base-row value. If it remained
+            // absent from the write contract, the mutation adapter would
+            // replace it with the base table's own default.
+            for (column, _) in view_column_defaults {
+                if !names
                     .iter()
-                    .any(|identity| identity == column)
-            });
-        }
+                    .any(|written| written.eq_ignore_ascii_case(column))
+                {
+                    names.push(column.clone());
+                }
+            }
+            if overriding_user_value {
+                names.retain(|column| {
+                    !overriding_user_identity_columns
+                        .iter()
+                        .any(|identity| identity == column)
+                });
+            }
+            names
+        };
+        let target_col_names = target_column_names(
+            provided_columns,
+            written_columns.is_none() && columns.is_empty(),
+        );
         // Without a recorded column list the write provides every column of
         // the relation.
         let records_target_columns =
@@ -4943,76 +5021,104 @@ impl SqlToRel<'_> {
         // the subscript/field path below the column it writes (`a[2]`,
         // `fn.first`); a whole-column target has an empty path.
         let empty_path: &[AccessExpr] = &[];
-        let (fields, value_sources): (Fields, ColumnValueSources<'_>) = if columns
-            .is_empty()
-        {
-            // Empty means we're inserting into all columns of the table
-            (
-                table_schema.fields().clone(),
-                (0..table_schema.fields().len())
-                    .map(|i| vec![(i, empty_path)])
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            let mut value_sources: Vec<Vec<(usize, &[AccessExpr])>> =
-                vec![Vec::new(); table_schema.fields().len()];
-            let fields = columns
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(i, c)| {
-                    let c = self.ident_normalizer.normalize(c);
-                    let column_index = table_schema
-                        .index_of_column_by_name(None, &c)
-                        .ok_or_else(|| unqualified_field_not_found(&c, &table_schema))?;
-                    let path = column_targets
-                        .and_then(|targets| targets.get(i))
-                        .map(|target| target.indirection.as_slice())
-                        .unwrap_or(empty_path);
-                    let sources = &mut value_sources[column_index];
-                    // A column may be written through several paths, but
-                    // only once as a whole.
-                    if path.is_empty() && !sources.is_empty()
-                        || sources.iter().any(|(_, p)| p.is_empty())
-                    {
-                        return schema_err!(SchemaError::DuplicateUnqualifiedField {
-                            name: c,
-                        });
-                    }
-                    sources.push((i, path));
-                    let field = table_schema.field(column_index);
-                    // A value written through an element subscript has the
-                    // element's type, and one written through a slice the
-                    // column's own. A value written into a field of a
-                    // composite has the field's type, which the dialect's
-                    // type registry holds rather than this schema, so the
-                    // slot is left untyped for the value to type.
-                    Ok(match path {
-                        [] | [AccessExpr::Subscript(Subscript::Slice { .. })] => {
-                            Arc::clone(field)
+        let (fields, value_sources): (Fields, ColumnValueSources<'_>) =
+            if columns.is_empty() {
+                // Empty means we're inserting into all columns of the table, each
+                // but a system column taking the next source column.
+                let mut slot = 0;
+                let value_sources = table_schema
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        if is_system_column(field) {
+                            return Vec::new();
                         }
-                        [AccessExpr::Subscript(Subscript::Index { .. })] => {
-                            match field.data_type() {
-                                DataType::List(item)
-                                | DataType::LargeList(item)
-                                | DataType::FixedSizeList(item, _) => Arc::new(
-                                    Field::new(
-                                        field.name(),
-                                        item.data_type().clone(),
-                                        true,
-                                    )
-                                    .with_metadata(field.metadata().clone()),
-                                ),
-                                _ => Arc::clone(field),
-                            }
-                        }
-                        _ => Arc::new(Field::new(field.name(), DataType::Null, true)),
+                        slot += 1;
+                        vec![(slot - 1, empty_path)]
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            (Fields::from(fields), value_sources)
-        };
+                    .collect::<Vec<_>>();
+                (
+                    table_schema
+                        .fields()
+                        .iter()
+                        .filter(|field| !is_system_column(field))
+                        .cloned()
+                        .collect(),
+                    value_sources,
+                )
+            } else {
+                let mut value_sources: Vec<Vec<(usize, &[AccessExpr])>> =
+                    vec![Vec::new(); table_schema.fields().len()];
+                let fields = columns
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let c = self.ident_normalizer.normalize(c);
+                        let column_index = table_schema
+                            .index_of_column_by_name(None, &c)
+                            .filter(|&index| !is_system_column(table_schema.field(index)))
+                            .ok_or_else(|| unknown_insert_column(&c, &table_name))?;
+                        let path = column_targets
+                            .and_then(|targets| targets.get(i))
+                            .map(|target| target.indirection.as_slice())
+                            .unwrap_or(empty_path);
+                        let sources = &mut value_sources[column_index];
+                        // A column may be written through several paths, but
+                        // only once as a whole.
+                        if path.is_empty() && !sources.is_empty()
+                            || sources.iter().any(|(_, p)| p.is_empty())
+                        {
+                            return schema_err!(SchemaError::DuplicateUnqualifiedField {
+                                name: c,
+                            });
+                        }
+                        sources.push((i, path));
+                        let field = table_schema.field(column_index);
+                        // A value written through an element subscript has the
+                        // element's type, and one written through a slice the
+                        // column's own. A value written into a field of a
+                        // composite has the field's type, which the dialect's
+                        // type registry holds rather than this schema, so the
+                        // slot is left untyped for the value to type.
+                        Ok(match path {
+                            [] | [AccessExpr::Subscript(Subscript::Slice { .. })] => {
+                                Arc::clone(field)
+                            }
+                            [AccessExpr::Subscript(Subscript::Index { .. })] => {
+                                match field.data_type() {
+                                    DataType::List(item)
+                                    | DataType::LargeList(item)
+                                    | DataType::FixedSizeList(item, _) => Arc::new(
+                                        Field::new(
+                                            field.name(),
+                                            item.data_type().clone(),
+                                            true,
+                                        )
+                                        .with_metadata(field.metadata().clone()),
+                                    ),
+                                    _ => Arc::clone(field),
+                                }
+                            }
+                            _ => Arc::new(Field::new(field.name(), DataType::Null, true)),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                (Fields::from(fields), value_sources)
+            };
 
+        // A VALUES list pairs with the target columns before it is planned.
+        if let SetExpr::Values(values) = source.body.as_ref()
+            && let Some(first) = values.rows.first()
+        {
+            if values.rows.iter().any(|row| row.len() != first.len()) {
+                return Err(sqlstate_datafusion_err(
+                    "42601",
+                    "VALUES lists must all be the same length",
+                ));
+            }
+            check_insert_width(first.len(), fields.len())?;
+        }
         // Adapt source literals to their target columns — canonicalizing a
         // flexible timestamp text literal, or wrapping a value in a dialect
         // conversion — before anything below reads them.
@@ -5106,9 +5212,21 @@ impl SqlToRel<'_> {
                 })
                 .collect::<Vec<_>>(),
         );
-        planner_context.set_table_schema(Some(DFSchemaRef::new(
-            DFSchema::from_unqualified_fields(source_fields, Default::default())?,
-        )));
+        // Only a top-level VALUES list is a row of the INSERT target.
+        // A SELECT binds its own FROM/subqueries independently; the target
+        // supplies assignment types to its still-unknown outputs afterwards.
+        planner_context.set_table_schema(
+            if matches!(source.body.as_ref(), SetExpr::Values(_)) {
+                Some(DFSchemaRef::new(DFSchema::from_unqualified_fields(
+                    source_fields,
+                    Default::default(),
+                )?))
+            } else {
+                None
+            },
+        );
+        planner_context.set_values_defaults(None);
+        planner_context.set_values_assembly(None);
         if matches!(source.body.as_ref(), SetExpr::Values(_)) {
             let mut defaults = vec![ValuesDefault::Column(None); fields.len()];
             for (column_index, sources) in value_sources.iter().enumerate() {
@@ -5163,6 +5281,9 @@ impl SqlToRel<'_> {
                     .collect(),
             }));
         }
+        // The source's untyped values take the types of the columns they are
+        // assigned to.
+        planner_context.set_resolve_unknowns(false);
         let source = self.query_to_plan_ref(source, &mut planner_context)?;
         let (fields, value_sources) = if assemble_values {
             (
@@ -5174,14 +5295,54 @@ impl SqlToRel<'_> {
         } else {
             (fields, value_sources)
         };
-        if fields.len() != source.schema().fields().len() {
-            plan_err!("Column count doesn't match insert query!")?;
-        }
-        let source = self.assign_selected_literals(source, &value_sources, &table_schema)?;
+        // A query narrower than the table, written with no column list,
+        // writes the table's leading columns and leaves the rest to their
+        // defaults, as a VALUES list does: PostgreSQL pairs the query's
+        // columns with the table's in order.
+        let source_width = source.schema().fields().len();
+        let implied_by_source =
+            columns.is_empty() && column_targets.is_none() && source_width < fields.len();
+        let (fields, value_sources, target_col_names, records_target_columns) =
+            if implied_by_source {
+                let implied = positional_columns[..source_width]
+                    .iter()
+                    .map(|name| Ident::with_quote('"', name.clone()))
+                    .collect::<Vec<_>>();
+                (
+                    fields
+                        .iter()
+                        .take(source_width)
+                        .cloned()
+                        .collect::<Fields>(),
+                    value_sources
+                        .into_iter()
+                        .map(|sources| {
+                            sources
+                                .into_iter()
+                                .filter(|(slot, _)| *slot < source_width)
+                                .collect()
+                        })
+                        .collect(),
+                    target_column_names(&implied, false),
+                    true,
+                )
+            } else {
+                (
+                    fields,
+                    value_sources,
+                    target_col_names,
+                    records_target_columns,
+                )
+            };
+        check_insert_width(source_width, fields.len())?;
+        let source =
+            self.assign_selected_literals(source, &value_sources, &table_schema)?;
 
+        // No INSERT writes a system column, so its row carries none.
         let exprs = value_sources
             .into_iter()
             .enumerate()
+            .filter(|(i, _)| !is_system_column(table_schema.field(*i)))
             .map(|(i, sources)| {
                 let target_field = table_schema.field(i);
                 let expr = match sources.as_slice() {
@@ -5331,7 +5492,9 @@ impl SqlToRel<'_> {
                             &mut outer_planner_context.clone(),
                         )?);
                 }
-                let names = returning.map(select_items_to_column_names);
+                let names = returning.map(|items| {
+                    select_items_to_column_names(items, &self.ident_normalizer)
+                });
                 let schema = names
                     .as_ref()
                     .map(|cols| {
@@ -5449,9 +5612,18 @@ impl SqlToRel<'_> {
                     &table_schema.as_arrow().clone(),
                 )?;
 
+                // The proposed row is no stored row: it has no system
+                // columns.
                 let excluded_schema = DFSchema::try_from_qualified_schema(
                     TableReference::bare(EXCLUDED),
-                    &table_schema.as_arrow().clone(),
+                    &Schema::new(
+                        table_schema
+                            .fields()
+                            .iter()
+                            .filter(|field| !is_system_column(field))
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ),
                 )?;
 
                 // Build a combined schema for expression planning:
@@ -5552,13 +5724,19 @@ impl SqlToRel<'_> {
                         }
                     };
                     for ((column, path), value) in targets {
-                        table_schema.field_with_unqualified_name(&column).map_err(
+                        let field = table_schema.field_with_unqualified_name(&column).map_err(
                             |_| {
                                 plan_datafusion_err!(
                                     "ON CONFLICT assignment targets unknown column {column}"
                                 )
                             },
                         )?;
+                        if is_system_column(field) {
+                            return Err(sqlstate_datafusion_err(
+                                "0A000",
+                                format!("cannot assign to system column \"{column}\""),
+                            ));
+                        }
                         if path.is_empty() {
                             if assign_map.contains_key(&column)
                                 || path_assign_map.contains_key(&column)
@@ -5574,7 +5752,10 @@ impl SqlToRel<'_> {
                             if !path_assign_map.contains_key(&column) {
                                 target_order.push(column.clone());
                             }
-                            path_assign_map.entry(column).or_default().push((path, value));
+                            path_assign_map
+                                .entry(column)
+                                .or_default()
+                                .push((path, value));
                         }
                     }
                 }
@@ -5593,7 +5774,10 @@ impl SqlToRel<'_> {
                         if generated {
                             return Err(self
                                 .context_provider
-                                .generated_column_write_error(table_name.table(), &target));
+                                .generated_column_write_error(
+                                    table_name.table(),
+                                    &target,
+                                ));
                         }
                         // Each path assignment writes into the value the ones
                         // before it left, starting from the stored row's.
@@ -5623,7 +5807,8 @@ impl SqlToRel<'_> {
                             &[&[&combined_schema]],
                             &[using_columns.into()],
                         )?;
-                        let value = self.assign_to_column(value, field, &combined_schema)?;
+                        let value =
+                            self.assign_to_column(value, field, &combined_schema)?;
                         assignments.push(ConflictAssignment { target, value });
                         continue;
                     }
@@ -5932,7 +6117,12 @@ impl SqlToRel<'_> {
 
         // For INSERT DEFAULT VALUES, we create a synthetic VALUES clause with DEFAULT for each column
         let fields = if columns.is_empty() {
-            table_schema.fields().clone()
+            table_schema
+                .fields()
+                .iter()
+                .filter(|field| !is_system_column(field))
+                .cloned()
+                .collect()
         } else {
             let fields: Vec<FieldRef> = columns
                 .iter()
@@ -5940,7 +6130,8 @@ impl SqlToRel<'_> {
                     let c = self.ident_normalizer.normalize(c.clone());
                     let column_index = table_schema
                         .index_of_column_by_name(None, &c)
-                        .ok_or_else(|| unqualified_field_not_found(&c, &table_schema))?;
+                        .filter(|&index| !is_system_column(table_schema.field(index)))
+                        .ok_or_else(|| unknown_insert_column(&c, &table_name))?;
                     Ok(Arc::clone(table_schema.field(column_index)))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -6159,6 +6350,34 @@ ON p.function_name = r.routine_name
     }
 }
 
+/// PostgreSQL's refusal of an INSERT target column `column` that `table`
+/// does not have; a system column is none an INSERT can name.
+fn unknown_insert_column(column: &str, table: &TableReference) -> DataFusionError {
+    sqlstate_datafusion_err(
+        "42703",
+        format!(
+            "column \"{column}\" of relation \"{}\" does not exist",
+            table.table()
+        ),
+    )
+}
+
+/// PostgreSQL's refusal of an INSERT whose source row, `source_width` wide,
+/// does not pair with its `target_width` target columns.
+fn check_insert_width(source_width: usize, target_width: usize) -> Result<()> {
+    match source_width.cmp(&target_width) {
+        Ordering::Greater => Err(sqlstate_datafusion_err(
+            "42601",
+            "INSERT has more expressions than target columns",
+        )),
+        Ordering::Less => Err(sqlstate_datafusion_err(
+            "42601",
+            "INSERT has more target columns than expressions",
+        )),
+        Ordering::Equal => Ok(()),
+    }
+}
+
 /// `(a, b) = (SELECT x, y ...)` assigns one scalar sub-select per target
 /// column: the `idx`-th value is the original query narrowed to its `idx`-th
 /// projection item, so `a = (SELECT x ...)` and `b = (SELECT y ...)`.
@@ -6175,10 +6394,7 @@ fn hoist_conflict_subqueries(
     hoisted: &mut Vec<Expr>,
 ) -> Result<Expr> {
     expr.transform_down(|node| {
-        if !matches!(
-            node,
-            Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery(_)
-        ) {
+        if node.subquery().is_none() {
             return Ok(Transformed::no(node));
         }
         let name = format!("{CONFLICT_SOURCE_COLUMN_PREFIX}{}", hoisted.len());
@@ -6221,6 +6437,28 @@ fn excluded_refs_to_source(
                     negated: in_subquery.negated,
                 }))
             }
+            Expr::AnyExpr(AnyExpr {
+                expr,
+                op,
+                source: QuantifiedSource::Subquery(subquery),
+            }) => Transformed::yes(Expr::AnyExpr(AnyExpr {
+                expr,
+                op,
+                source: QuantifiedSource::Subquery(subquery_refs_to_source(
+                    subquery, target, excluded,
+                )?),
+            })),
+            Expr::AllExpr(AllExpr {
+                expr,
+                op,
+                source: QuantifiedSource::Subquery(subquery),
+            }) => Transformed::yes(Expr::AllExpr(AllExpr {
+                expr,
+                op,
+                source: QuantifiedSource::Subquery(subquery_refs_to_source(
+                    subquery, target, excluded,
+                )?),
+            })),
             other => Transformed::no(other),
         })
     })

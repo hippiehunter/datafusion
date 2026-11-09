@@ -292,6 +292,10 @@ impl ContextProvider for MockContextProvider {
                 Field::new("tag", DataType::Utf8, true),
                 Field::new("age", DataType::Int32, true),
             ])),
+            "FOLDED_ROWS" => Ok(Schema::new(vec![
+                Field::new("N", DataType::Int32, true),
+                Field::new("n", DataType::Utf8, true),
+            ])),
             // A column whose SQL type rides field metadata over its Arrow
             // carrier, as a host's extension types do.
             "typed_columns" => Ok(Schema::new(vec![

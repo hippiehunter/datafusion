@@ -35,12 +35,18 @@ pub fn rewrite_sort_cols_by_aggs(
     sorts
         .into_iter()
         .map(|e| {
-            let sort = e.into();
-            Ok(Sort::new(
-                rewrite_sort_col_by_aggs(sort.expr, plan)?,
-                sort.asc,
-                sort.nulls_first,
-            ))
+            let Sort {
+                expr,
+                asc,
+                nulls_first,
+                using,
+            } = e.into();
+            Ok(Sort {
+                expr: rewrite_sort_col_by_aggs(expr, plan)?,
+                asc,
+                nulls_first,
+                using,
+            })
         })
         .collect()
 }

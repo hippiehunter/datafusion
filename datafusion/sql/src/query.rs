@@ -79,6 +79,9 @@ impl SqlToRel<'_> {
         query: &Query,
         outer_planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        // Whether this query's body resolves its select list's untyped
+        // values; the queries of its WITH clause each resolve their own.
+        let resolve_unknowns = outer_planner_context.take_resolve_unknowns();
         // Each query has its own planner context, including CTEs that are visible within that query.
         // It also inherits the CTEs from the outer query by cloning the outer planner context.
         let mut query_plan_context = outer_planner_context.clone();
@@ -94,6 +97,7 @@ impl SqlToRel<'_> {
             Some(with) => self.plan_with_clause_ref(with, planner_context)?,
             None => Vec::new(),
         };
+        planner_context.set_resolve_unknowns(resolve_unknowns);
 
         let plan = match query.body.as_ref() {
             SetExpr::Select(select) => {
@@ -198,6 +202,12 @@ impl SqlToRel<'_> {
                 "0A000",
                 format!("FOR {} is not allowed with {what}", lock.lock_type),
             ));
+        }
+        // The junk columns are what the row-lock operator rechecks a
+        // refreshed row with; a plan made to be printed keeps the level the
+        // query wrote, as PostgreSQL's stored query has no rowmark columns.
+        if self.context_provider.plans_definitions_as_written() {
+            return Ok(plan);
         }
         add_locking_junk_columns(plan)
     }
@@ -366,6 +376,15 @@ impl SqlToRel<'_> {
             }
             None => None,
         };
+        // PostgreSQL's transformLimitClause: a WITH TIES count written as
+        // NULL cannot say how many rows tie.
+        if with_ties && matches!(&fetch, Some(Expr::Literal(value, _)) if value.is_null())
+        {
+            return Err(sqlstate_datafusion_err(
+                "2201W",
+                "row count cannot be null in FETCH FIRST ... WITH TIES clause",
+            ));
+        }
 
         // For FETCH PERCENT: Currently we accept the syntax but treat it as a simple limit
         // The percentage value will be used directly as the limit count (not semantically correct,
@@ -399,6 +418,7 @@ impl SqlToRel<'_> {
         if order_by.is_empty() {
             return Ok(plan);
         }
+        let order_by = without_repeated_sort_keys(order_by);
 
         if let LogicalPlan::Distinct(Distinct::On(ref distinct_on)) = plan {
             // In case of `DISTINCT ON` we must capture the sort expressions since during the plan
@@ -443,6 +463,20 @@ impl SqlToRel<'_> {
             _ => Ok(plan),
         }
     }
+}
+
+/// The sort keys of an ORDER BY with each key whose expression an earlier key
+/// already sorts by dropped, whatever its direction or NULLS placement. Rows
+/// that tie on the earlier key tie on the repeat too, so it never orders
+/// anything; PostgreSQL's analysis drops it (`addTargetToSortList`).
+pub(crate) fn without_repeated_sort_keys(order_by: Vec<Sort>) -> Vec<Sort> {
+    let mut kept: Vec<Sort> = Vec::with_capacity(order_by.len());
+    for sort in order_by {
+        if !kept.iter().any(|earlier| earlier.expr == sort.expr) {
+            kept.push(sort);
+        }
+    }
+    kept
 }
 
 /// Returns the order by expressions from the query.

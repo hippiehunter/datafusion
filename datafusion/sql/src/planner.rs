@@ -45,7 +45,9 @@ use datafusion_expr::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use datafusion_expr::utils::find_column_exprs;
 use sqlparser::ast::{AccessExpr, ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
 use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption, ColumnOptionDef};
-use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
+use sqlparser::ast::{
+    DataType as SQLDataType, Ident, ObjectName, TableAlias, WindowSpec,
+};
 use sqlparser::ast::{Expr as SQLExpr, Query, SelectItem, SetExpr};
 
 /// SQL parser options
@@ -336,6 +338,30 @@ pub struct PlannerContext {
     /// clause, where the graph functions (`MATCHNUM`, `ELEMENT_NUMBER`) are
     /// in scope.
     in_graph_table: bool,
+    /// The windows the WINDOW clause of the query level being planned
+    /// defines, in order. Empty at a level without a WINDOW clause,
+    /// including every query nested in one that has one.
+    window_clause: Arc<[WindowClauseEntry]>,
+    /// Whether the query about to be planned at this level resolves the
+    /// untyped values of its select list, as PostgreSQL's
+    /// `resolveTargetListUnknowns` does. Every query does except an input of
+    /// a set operation and the source of INSERT ... SELECT, whose untyped
+    /// values take the type their consumer gives them.
+    resolve_unknowns: bool,
+}
+
+/// One window a query level's WINDOW clause defines.
+#[derive(Debug, Clone)]
+pub(crate) struct WindowClauseEntry {
+    /// The window's name, normalized.
+    pub(crate) name: String,
+    /// The specification as the clause wrote it: `w2 AS (w ORDER BY x)`
+    /// writes the window name `w` and the ORDER BY. `None` for `w2 AS w`,
+    /// which names another window instead of writing a specification.
+    pub(crate) written: Option<WindowSpec>,
+    /// The window itself, with what it copies from the window it names
+    /// filled in.
+    pub(crate) window: WindowSpec,
 }
 
 impl Default for PlannerContext {
@@ -360,7 +386,37 @@ impl PlannerContext {
             next_anonymous_placeholder: Cell::new(1),
             outer_level_aggregates: Vec::new(),
             in_graph_table: false,
+            window_clause: Arc::from([]),
+            resolve_unknowns: true,
         }
+    }
+
+    /// Whether the query about to be planned resolves the untyped values of
+    /// its select list. Taking the answer leaves every query planned inside
+    /// that one resolving its own.
+    pub(crate) fn take_resolve_unknowns(&mut self) -> bool {
+        std::mem::replace(&mut self.resolve_unknowns, true)
+    }
+
+    /// Say whether the next query planned at this level resolves the untyped
+    /// values of its select list.
+    pub(crate) fn set_resolve_unknowns(&mut self, resolve_unknowns: bool) {
+        self.resolve_unknowns = resolve_unknowns;
+    }
+
+    /// The windows the WINDOW clause of the query level being planned
+    /// defines.
+    pub(crate) fn window_clause(&self) -> &[WindowClauseEntry] {
+        &self.window_clause
+    }
+
+    /// Enter a query level whose WINDOW clause defines `windows`, returning
+    /// the enclosing level's.
+    pub(crate) fn set_window_clause(
+        &mut self,
+        windows: Arc<[WindowClauseEntry]>,
+    ) -> Arc<[WindowClauseEntry]> {
+        std::mem::replace(&mut self.window_clause, windows)
     }
 
     /// Whether the graph functions of a GRAPH_TABLE are in scope.
@@ -665,10 +721,12 @@ impl<'a> SqlToRel<'a> {
         Ok(Schema::new(fields))
     }
 
-    /// Returns a vector of (column_name, default_expr) pairs
-    pub(super) fn build_column_defaults(
+    /// The DEFAULT each of `columns`, a column's name and its options,
+    /// declares, bound with no columns in scope, as (column_name,
+    /// default_expr) pairs.
+    pub(super) fn build_column_defaults<'c>(
         &self,
-        columns: &Vec<SQLColumnDef>,
+        columns: impl IntoIterator<Item = (&'c Ident, &'c [ColumnOptionDef])>,
         planner_context: &mut PlannerContext,
     ) -> Result<Vec<(String, Expr)>> {
         let mut column_defaults = vec![];
@@ -686,20 +744,16 @@ impl<'a> SqlToRel<'a> {
             _ => e,
         };
 
-        for column in columns {
-            if let Some(default_sql_expr) =
-                column.options.iter().find_map(|o| match &o.option {
-                    ColumnOption::Default(expr) => Some(expr),
-                    _ => None,
-                })
-            {
+        for (name, options) in columns {
+            if let Some(default_sql_expr) = options.iter().find_map(|o| match &o.option {
+                ColumnOption::Default(expr) => Some(expr),
+                _ => None,
+            }) {
                 let default_expr = self
                     .sql_to_expr(default_sql_expr.clone(), &empty_schema, planner_context)
                     .map_err(error_desc)?;
-                column_defaults.push((
-                    self.ident_normalizer.normalize(column.name.clone()),
-                    default_expr,
-                ));
+                column_defaults
+                    .push((self.ident_normalizer.normalize(name.clone()), default_expr));
             }
         }
         Ok(column_defaults)

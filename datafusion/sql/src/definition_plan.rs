@@ -27,22 +27,84 @@
 //! ([`ContextProvider::plans_definitions_as_written`]) gets these nodes
 //! instead: [`WithQuery`] over the query that owns a `WITH` list, a
 //! [`CteReference`] leaf wherever the query reads one of its items, and an
-//! [`AliasedRelation`] over a `FROM` item with a column alias list, and a
+//! [`AliasedRelation`] over a `FROM` item with a column alias list, a
 //! [`FunctionRelation`] over table functions before their expansion as lists
-//! and unnesting loses their SQL identities. The plan is for reading; nothing
+//! and unnesting loses their SQL identities, and a [`SampledRelation`] over
+//! a table read under `TABLESAMPLE`, where execution planning keeps only the
+//! provider's sampling predicate, and a [`WindowClause`] under the windows of
+//! a query level that writes a WINDOW clause, where execution planning keeps
+//! only the windows its calls run over. A set-returning function called in an
+//! expression is a [`SetReturningCall`], where execution planning expands it
+//! into the lists an `Unnest` walks. The plan is for reading; nothing
 //! executes it.
 //!
 //! [`ContextProvider::plans_definitions_as_written`]: crate::planner::ContextProvider::plans_definitions_as_written
 
+use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::{Field, FieldRef, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use datafusion_common::{DFSchema, DFSchemaRef, Result, TableReference, internal_err};
+use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{
-    Expr, Extension, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
+    ColumnarValue, Expr, Extension, LogicalPlan, ReturnFieldArgs, ScalarFunctionArgs,
+    ScalarUDF, ScalarUDFImpl, Signature, SortExpr, UserDefinedLogicalNode,
+    UserDefinedLogicalNodeCore, Volatility, WindowFrame,
 };
+
+use crate::planner::TableSampleMethod;
+
+/// Metadata on a definition-only window expression: `between` or `short`.
+pub const WINDOW_FRAME_SYNTAX_METADATA_KEY: &str = "datafusion.window_frame_syntax";
+
+/// The explicit empty GROUP BY clause, which has the same grouping effect
+/// as an ungrouped aggregate but must remain visible in a stored definition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+pub struct EmptyGrouping {
+    input: LogicalPlan,
+}
+impl EmptyGrouping {
+    pub fn new(input: LogicalPlan) -> Self {
+        Self { input }
+    }
+    pub fn input(&self) -> &LogicalPlan {
+        &self.input
+    }
+    pub fn into_plan(self) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(self),
+        })
+    }
+}
+impl UserDefinedLogicalNodeCore for EmptyGrouping {
+    fn name(&self) -> &str {
+        "EmptyGrouping"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "EmptyGrouping")
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        if !exprs.is_empty() || inputs.len() != 1 {
+            return internal_err!("EmptyGrouping requires no expressions and one input");
+        }
+        Ok(Self::new(inputs.remove(0)))
+    }
+}
 
 /// A `SEARCH` clause of a recursive `WITH` item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
@@ -435,8 +497,17 @@ impl FunctionRelation {
 impl PartialOrd for FunctionRelation {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let names = self.calls.iter().map(|call| &call.name).collect::<Vec<_>>();
-        let other_names = other.calls.iter().map(|call| &call.name).collect::<Vec<_>>();
-        (self.with_ordinality, names, self.call_arguments(), &self.input)
+        let other_names = other
+            .calls
+            .iter()
+            .map(|call| &call.name)
+            .collect::<Vec<_>>();
+        (
+            self.with_ordinality,
+            names,
+            self.call_arguments(),
+            &self.input,
+        )
             .partial_cmp(&(
                 other.with_ordinality,
                 other_names,
@@ -465,7 +536,11 @@ impl UserDefinedLogicalNodeCore for FunctionRelation {
     }
 
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let names = self.calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>();
+        let names = self
+            .calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect::<Vec<_>>();
         write!(f, "FunctionRelation: {}", names.join(", "))
     }
 
@@ -486,10 +561,316 @@ impl UserDefinedLogicalNodeCore for FunctionRelation {
             );
         }
         let mut calls = self.calls.clone();
-        for (argument, expr) in calls.iter_mut().flat_map(|call| &mut call.args).zip(exprs) {
+        for (argument, expr) in
+            calls.iter_mut().flat_map(|call| &mut call.args).zip(exprs)
+        {
             *argument = expr;
         }
         Ok(Self::new(input, calls, self.with_ordinality))
+    }
+}
+
+/// A table read under `TABLESAMPLE method (percentage) [REPEATABLE (seed)]`:
+/// the scan of the table, the method, and the argument and seed as the query
+/// wrote them. Its rows are the scan's, so its schema is the scan's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SampledRelation {
+    pub method: TableSampleMethod,
+    pub percentage: Expr,
+    pub repeatable: Option<Expr>,
+    input: LogicalPlan,
+}
+
+impl SampledRelation {
+    pub fn new(
+        input: LogicalPlan,
+        method: TableSampleMethod,
+        percentage: Expr,
+        repeatable: Option<Expr>,
+    ) -> Self {
+        Self {
+            method,
+            percentage,
+            repeatable,
+            input,
+        }
+    }
+
+    pub fn into_plan(self) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(self),
+        })
+    }
+
+    /// The scan of the sampled table.
+    pub fn input(&self) -> &LogicalPlan {
+        &self.input
+    }
+}
+
+impl PartialOrd for SampledRelation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (self.method, &self.percentage, &self.repeatable, &self.input)
+            .partial_cmp(&(
+                other.method,
+                &other.percentage,
+                &other.repeatable,
+                &other.input,
+            ))
+            .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+impl UserDefinedLogicalNodeCore for SampledRelation {
+    fn name(&self) -> &str {
+        "SampledRelation"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        let mut exprs = vec![self.percentage.clone()];
+        exprs.extend(self.repeatable.clone());
+        exprs
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SampledRelation: {:?}", self.method)
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        let (Some(input), true) = (inputs.pop(), inputs.is_empty()) else {
+            return internal_err!("SampledRelation has one input");
+        };
+        let expected = 1 + usize::from(self.repeatable.is_some());
+        if exprs.len() != expected {
+            return internal_err!(
+                "SampledRelation has {} expressions, not {}",
+                expected,
+                exprs.len()
+            );
+        }
+        let mut exprs = exprs.into_iter();
+        let (Some(percentage), repeatable) = (exprs.next(), exprs.next()) else {
+            return internal_err!("SampledRelation lost its percentage");
+        };
+        Ok(Self::new(input, self.method, percentage, repeatable))
+    }
+}
+
+/// One window of a query level's WINDOW clause, as the clause defines it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct WindowDefinition {
+    /// The window's name.
+    pub name: String,
+    /// The earlier window `name AS (base ...)` copies.
+    pub base: Option<String>,
+    /// The PARTITION BY keys: the base window's when the definition copies
+    /// one, which may not write its own.
+    pub partition_by: Vec<Expr>,
+    /// The ORDER BY keys, the base window's when `order_copied`.
+    pub order_by: Vec<SortExpr>,
+    /// Whether the ORDER BY is the one the base window wrote, which a
+    /// definition that writes none copies.
+    pub order_copied: bool,
+    /// The frame clause the definition wrote, `None` where it wrote none.
+    pub frame: Option<WindowFrame>,
+    /// Whether the written frame used BETWEEN rather than the short form.
+    pub frame_between: bool,
+}
+
+/// A query level's WINDOW clause over the rows its windows read: the rows
+/// after grouping and HAVING. Execution planning keeps only the windows a
+/// call runs over, folded into each call; this keeps every window the
+/// clause defines, used or not, and what each wrote. Its rows are its
+/// input's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WindowClause {
+    pub windows: Vec<WindowDefinition>,
+    input: LogicalPlan,
+}
+
+impl WindowClause {
+    pub fn new(input: LogicalPlan, windows: Vec<WindowDefinition>) -> Self {
+        Self { windows, input }
+    }
+
+    pub fn into_plan(self) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(self),
+        })
+    }
+
+    /// The rows the windows read.
+    pub fn input(&self) -> &LogicalPlan {
+        &self.input
+    }
+
+    /// The window the clause names `name`.
+    pub fn window(&self, name: &str) -> Option<&WindowDefinition> {
+        self.windows.iter().find(|window| window.name == name)
+    }
+}
+
+impl PartialOrd for WindowClause {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (&self.windows, &self.input)
+            .partial_cmp(&(&other.windows, &other.input))
+            .filter(|cmp| *cmp != Ordering::Equal || self == other)
+    }
+}
+
+impl UserDefinedLogicalNodeCore for WindowClause {
+    fn name(&self) -> &str {
+        "WindowClause"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+
+    /// Each window's PARTITION BY keys, then its ORDER BY keys.
+    fn expressions(&self) -> Vec<Expr> {
+        self.windows
+            .iter()
+            .flat_map(|window| {
+                window
+                    .partition_by
+                    .iter()
+                    .cloned()
+                    .chain(window.order_by.iter().map(|sort| sort.expr.clone()))
+            })
+            .collect()
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let names = self
+            .windows
+            .iter()
+            .map(|window| window.name.as_str())
+            .collect::<Vec<_>>();
+        write!(f, "WindowClause: {}", names.join(", "))
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        let (Some(input), true) = (inputs.pop(), inputs.is_empty()) else {
+            return internal_err!("WindowClause has one input");
+        };
+        let expected = self
+            .windows
+            .iter()
+            .map(|window| window.partition_by.len() + window.order_by.len())
+            .sum::<usize>();
+        if exprs.len() != expected {
+            return internal_err!(
+                "WindowClause has {} expressions, not {}",
+                expected,
+                exprs.len()
+            );
+        }
+        let mut exprs = exprs.into_iter();
+        let windows = self
+            .windows
+            .iter()
+            .map(|window| WindowDefinition {
+                partition_by: exprs.by_ref().take(window.partition_by.len()).collect(),
+                order_by: window
+                    .order_by
+                    .iter()
+                    .zip(exprs.by_ref())
+                    .map(|(sort, expr)| sort.with_expr(expr))
+                    .collect(),
+                ..window.clone()
+            })
+            .collect();
+        Ok(Self::new(input, windows))
+    }
+}
+
+/// A call of the set-returning function `name` in an expression, as the
+/// query wrote it: the function's name and its arguments before the
+/// provider expands the call into lists, typed as one row of the function's
+/// result. Its arguments take no coercion here; they are the call's as
+/// written. It is never evaluated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SetReturningCall {
+    name: String,
+    row: FieldRef,
+    signature: Signature,
+}
+
+impl SetReturningCall {
+    /// The call of `name` whose rows are each a value of `row`.
+    pub fn new(name: String, row: FieldRef) -> Self {
+        Self {
+            name,
+            row,
+            signature: Signature::user_defined(Volatility::Volatile),
+        }
+    }
+
+    /// The call over `args`.
+    pub fn call(self, args: Vec<Expr>) -> Expr {
+        Expr::ScalarFunction(ScalarFunction::new_udf(
+            Arc::new(ScalarUDF::new_from_impl(self)),
+            args,
+        ))
+    }
+
+    /// The written call `function` is, when it is one.
+    pub fn of(function: &ScalarFunction) -> Option<&Self> {
+        function.func.inner().as_any().downcast_ref::<Self>()
+    }
+}
+
+impl ScalarUDFImpl for SetReturningCall {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        Ok(arg_types.to_vec())
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(self.row.data_type().clone())
+    }
+
+    fn return_field_from_args(&self, _args: ReturnFieldArgs) -> Result<FieldRef> {
+        Ok(Arc::new(self.row.as_ref().clone().with_name(&self.name)))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        internal_err!(
+            "the set-returning call {} of a plan planned as written is not evaluated",
+            self.name
+        )
     }
 }
 

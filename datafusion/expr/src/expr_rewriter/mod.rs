@@ -127,9 +127,18 @@ pub fn normalize_sorts(
     sorts
         .into_iter()
         .map(|e| {
-            let sort = e.into();
-            normalize_col(sort.expr, plan)
-                .map(|expr| Sort::new(expr, sort.asc, sort.nulls_first))
+            let Sort {
+                expr,
+                asc,
+                nulls_first,
+                using,
+            } = e.into();
+            normalize_col(expr, plan).map(|expr| Sort {
+                expr,
+                asc,
+                nulls_first,
+                using,
+            })
         })
         .collect()
 }

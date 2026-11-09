@@ -849,6 +849,7 @@ impl Unparser<'_> {
             expr,
             asc,
             nulls_first,
+            using,
         } = sort;
         let sql_parser_expr = self.expr_to_sql(expr)?;
 
@@ -861,11 +862,21 @@ impl Unparser<'_> {
         Ok(ast::OrderByExpr {
             expr: sql_parser_expr,
             options: OrderByOptions {
-                asc: Some(*asc),
+                asc: using.is_none().then_some(*asc),
                 nulls_first,
             },
             with_fill: None,
-            using: None,
+            // An operator name holds no `.`: one the query qualified prints
+            // as `OPERATOR(schema.op)`.
+            using: using.as_deref().map(|operator| {
+                if operator.contains('.') {
+                    BinaryOperator::PGCustomBinaryOperator(
+                        operator.split('.').map(str::to_string).collect(),
+                    )
+                } else {
+                    BinaryOperator::Custom(operator.to_string())
+                }
+            }),
         })
     }
 
@@ -2312,6 +2323,7 @@ mod tests {
                         null_treatment: None,
                         distinct: false,
                         filter: Some(Box::new(col("a").gt(lit(100)))),
+                        window_reference: None,
                     },
                 }),
                 r#"count(*) FILTER (WHERE (a > 100)) OVER (ORDER BY a DESC NULLS FIRST RANGE BETWEEN 6 PRECEDING AND 2 FOLLOWING)"#,

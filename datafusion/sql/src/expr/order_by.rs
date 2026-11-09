@@ -16,6 +16,7 @@
 // under the License.
 
 use crate::planner::{PlannerContext, SqlToRel};
+use datafusion_common::error::sqlstate_datafusion_err_with_hint;
 use datafusion_common::{
     Column, DFSchema, Result, not_impl_err, plan_datafusion_err, plan_err,
 };
@@ -57,15 +58,6 @@ impl SqlToRel<'_> {
 
         let mut sort_expr_vec = Vec::with_capacity(order_by_exprs.len());
 
-        let make_sort_expr = |expr: Expr,
-                              asc: Option<bool>,
-                              nulls_first: Option<bool>| {
-            let asc = asc.unwrap_or(true);
-            let nulls_first = nulls_first
-                .unwrap_or_else(|| self.options.default_null_ordering.nulls_first(asc));
-            Sort::new(expr, asc, nulls_first)
-        };
-
         for order_by_expr in order_by_exprs {
             let OrderByExpr {
                 expr,
@@ -77,26 +69,19 @@ impl SqlToRel<'_> {
             if let Some(with_fill) = with_fill {
                 return not_impl_err!("ORDER BY WITH FILL is not supported: {with_fill}");
             }
-            // `USING <operator>` names the ordering operator instead of
-            // spelling ASC/DESC: a less-than operator sorts ascending, a
-            // greater-than operator descending.
-            let asc = match using {
-                None => *asc,
-                Some(_) if asc.is_some() => {
-                    return plan_err!(
-                        "ORDER BY ... USING may not be combined with ASC or DESC"
-                    );
-                }
-                Some(BinaryOperator::Lt) => Some(true),
-                Some(BinaryOperator::Gt) => Some(false),
-                Some(other) => {
-                    return plan_err!(
-                        "operator {other} is not a valid ordering operator; \
-                         ordering operators must be \"<\" or \">\" members of an operator family"
-                    );
-                }
-            };
+            if using.is_some() && asc.is_some() {
+                return plan_err!(
+                    "ORDER BY ... USING may not be combined with ASC or DESC"
+                );
+            }
 
+            let key_schema = match expr {
+                SQLExpr::Value(ValueWithSpan {
+                    value: Value::Number(_, _),
+                    ..
+                }) if literal_to_column => input_schema,
+                _ => order_by_schema,
+            };
             let expr = match expr {
                 SQLExpr::Value(ValueWithSpan {
                     value: Value::Number(v, _),
@@ -126,9 +111,49 @@ impl SqlToRel<'_> {
                     self.sql_expr_to_logical_expr(e, order_by_schema, planner_context)?
                 }
             };
-            sort_expr_vec.push(make_sort_expr(expr, asc, *nulls_first));
+            // `USING <operator>` names the ordering operator instead of
+            // spelling ASC/DESC: its btree strategy in a family over the
+            // key's type gives the direction, and with it the NULLS default.
+            let (asc, using) = match using {
+                None => (asc.unwrap_or(true), None),
+                Some(operator) => {
+                    let name = ordering_operator_name(operator);
+                    let Some(ordering) = self
+                        .context_provider
+                        .ordering_operator(&name, &expr, key_schema)?
+                    else {
+                        return Err(sqlstate_datafusion_err_with_hint(
+                            "42809",
+                            format!("operator {name} is not a valid ordering operator"),
+                            "Ordering operators must be \"<\" or \">\" members of btree operator families.",
+                        ));
+                    };
+                    (
+                        ordering.ascending,
+                        (!ordering.default_for_type).then_some(name),
+                    )
+                }
+            };
+            let nulls_first = nulls_first
+                .unwrap_or_else(|| self.options.default_null_ordering.nulls_first(asc));
+            sort_expr_vec.push(Sort {
+                expr,
+                asc,
+                nulls_first,
+                using,
+            });
         }
 
         Ok(sort_expr_vec)
+    }
+}
+
+/// The name of the operator a `USING` clause wrote: `OPERATOR(schema.op)`
+/// names it qualified, every other spelling is the operator itself.
+fn ordering_operator_name(operator: &BinaryOperator) -> String {
+    match operator {
+        BinaryOperator::PGCustomBinaryOperator(parts) => parts.join("."),
+        BinaryOperator::Custom(name) => name.clone(),
+        other => other.to_string(),
     }
 }

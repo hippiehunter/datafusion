@@ -51,7 +51,7 @@ use datafusion_common::tree_node::TreeNodeRefContainer;
 use std::sync::Arc;
 
 use crate::ExprSchemable;
-use crate::expr::{Exists, InSubquery};
+use crate::expr::{AllExpr, AnyExpr, Exists, InSubquery, QuantifiedSource};
 use crate::expr_rewriter::NamePreserver;
 use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeContainer, TreeNodeIterator, TreeNodeRecursion,
@@ -1143,16 +1143,12 @@ impl LogicalPlan {
         mut f: F,
     ) -> Result<TreeNodeRecursion> {
         self.apply_expressions(|expr| {
-            expr.apply(|expr| match expr {
-                Expr::Exists(Exists { subquery, .. })
-                | Expr::InSubquery(InSubquery { subquery, .. })
-                | Expr::ScalarSubquery(subquery) => {
-                    // use a synthetic plan so the collector sees a
-                    // LogicalPlan::Subquery (even though it is
-                    // actually a Subquery alias)
-                    f(&LogicalPlan::Subquery(subquery.clone()))
-                }
-                _ => Ok(TreeNodeRecursion::Continue),
+            expr.apply(|expr| match expr.subquery() {
+                // use a synthetic plan so the collector sees a
+                // LogicalPlan::Subquery (even though it is
+                // actually a Subquery alias)
+                Some(subquery) => f(&LogicalPlan::Subquery(subquery.clone())),
+                None => Ok(TreeNodeRecursion::Continue),
             })
         })
     }
@@ -1194,6 +1190,30 @@ impl LogicalPlan {
                         }
                         _ => internal_err!("Transformation should return Subquery"),
                     }),
+                Expr::AnyExpr(AnyExpr {
+                    expr,
+                    op,
+                    source: QuantifiedSource::Subquery(subquery),
+                }) => f(LogicalPlan::Subquery(subquery))?.map_data(|s| match s {
+                    LogicalPlan::Subquery(subquery) => Ok(Expr::AnyExpr(AnyExpr {
+                        expr,
+                        op,
+                        source: QuantifiedSource::Subquery(subquery),
+                    })),
+                    _ => internal_err!("Transformation should return Subquery"),
+                }),
+                Expr::AllExpr(AllExpr {
+                    expr,
+                    op,
+                    source: QuantifiedSource::Subquery(subquery),
+                }) => f(LogicalPlan::Subquery(subquery))?.map_data(|s| match s {
+                    LogicalPlan::Subquery(subquery) => Ok(Expr::AllExpr(AllExpr {
+                        expr,
+                        op,
+                        source: QuantifiedSource::Subquery(subquery),
+                    })),
+                    _ => internal_err!("Transformation should return Subquery"),
+                }),
                 _ => Ok(Transformed::no(expr)),
             })
         })

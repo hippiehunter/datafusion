@@ -604,6 +604,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                             filter,
                             null_treatment,
                             distinct,
+                            window_reference,
                         },
                 } = *window_fun;
                 let window_frame =
@@ -636,6 +637,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                         filter,
                         null_treatment,
                         distinct,
+                        window_reference,
                     },
                 });
                 Ok(Transformed::yes(new_expr))

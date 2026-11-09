@@ -56,10 +56,13 @@ impl OptimizerRule for PushDownLimit {
             return Ok(Transformed::no(plan));
         };
 
-        // Skip optimization for WITH TIES to preserve correctness
-        // WITH TIES requires special handling with ORDER BY that would be
-        // broken by limit pushdown
+        // A WITH TIES limit keeps the peers of its last row in the ordering
+        // beneath it, so it returns more rows than its fetch: no fetch bound
+        // can be pushed below it, and it does not merge with a limit above.
         if limit.with_ties {
+            return Ok(Transformed::no(LogicalPlan::Limit(limit)));
+        }
+        if matches!(limit.input.as_ref(), LogicalPlan::Limit(child) if child.with_ties) {
             return Ok(Transformed::no(LogicalPlan::Limit(limit)));
         }
 
@@ -1177,6 +1180,46 @@ mod test {
             @r"
         Limit: skip=1000, fetch=0
           TableScan: test, fetch=0
+        "
+        )
+    }
+
+    #[test]
+    fn with_ties_limit_is_not_pushed_into_sort() -> Result<()> {
+        let scan = test_table_scan()?;
+
+        let plan = LogicalPlanBuilder::from(scan)
+            .sort_by(vec![col("a")])?
+            .limit_by_expr_with_ties(Some(lit(1i64)), Some(lit(2i64)), true)?
+            .build()?;
+
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Limit: skip=1, fetch=2, with_ties=true
+          Sort: test.a ASC NULLS LAST
+            TableScan: test
+        "
+        )
+    }
+
+    #[test]
+    fn a_limit_above_a_with_ties_limit_keeps_both() -> Result<()> {
+        let scan = test_table_scan()?;
+
+        let plan = LogicalPlanBuilder::from(scan)
+            .sort_by(vec![col("a")])?
+            .limit_by_expr_with_ties(None, Some(lit(2i64)), true)?
+            .limit(0, Some(10))?
+            .build()?;
+
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Limit: skip=0, fetch=10
+          Limit: skip=0, fetch=2, with_ties=true
+            Sort: test.a ASC NULLS LAST
+              TableScan: test
         "
         )
     }
