@@ -53,6 +53,7 @@ use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::{
     EdgeDirection, EdgePattern, GraphColumn, GraphPattern, GraphPatternElement,
     GraphPatternExpr, GraphTable, JsonTable, JsonTableColumnDef, JsonTableErrorHandling,
+    JsonTableQuotes,
     LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier,
     RowLimiting, Subquery, SubqueryAlias,
 };
@@ -420,7 +421,7 @@ impl SqlToRel<'_> {
                 }
             }
         }
-        Ok(plan)
+        self.with_row_presence(plan, planner_context)
     }
 
     /// `plan` under the alias its FROM item wrote. Planned as written, a
@@ -481,7 +482,7 @@ impl SqlToRel<'_> {
                 }
             }
         }
-        Ok(plan)
+        self.with_row_presence(plan, planner_context)
     }
 
     fn create_default_relation_ref(
@@ -1545,12 +1546,13 @@ impl SqlToRel<'_> {
                 Ok(JsonTableColumnDef::Path {
                     name,
                     data_type,
+                    declared_type: named.r#type.to_string(),
                     metadata: FieldMetadata::from(field.as_ref()),
                     path,
                     exists: named.exists,
                     format_json: false,
                     wrapper: None,
-                    omit_quotes: false,
+                    quotes: None,
                     on_empty,
                     on_error,
                 })
@@ -1729,20 +1731,22 @@ impl SqlToRel<'_> {
                     | JsonQueryWrapper::WithUnconditional
                     | JsonQueryWrapper::WithUnconditionalArray => "unconditional",
                 });
-                let omit_quotes = quotes
-                    .as_ref()
-                    .is_some_and(|quotes| quotes.behavior == JsonQuotesBehavior::Omit);
+                let quotes = quotes.as_ref().map(|quotes| match quotes.behavior {
+                    JsonQuotesBehavior::Keep => JsonTableQuotes::Keep,
+                    JsonQuotesBehavior::Omit => JsonTableQuotes::Omit,
+                });
                 let path = Self::sql_json_table_column_path(&name, path)?;
                 let field = self.convert_data_type_to_field(&data_type)?;
                 Ok(JsonTableColumnDef::Path {
                     name: name.value,
                     data_type: field.data_type().clone(),
+                    declared_type: data_type.to_string(),
                     metadata: FieldMetadata::from(field.as_ref()),
                     path,
                     exists: false,
                     format_json,
                     wrapper: wrapper.map(str::to_string),
-                    omit_quotes,
+                    quotes,
                     on_empty: on_empty
                         .map(Self::convert_sql_json_behavior)
                         .transpose()?,
@@ -1777,12 +1781,13 @@ impl SqlToRel<'_> {
                 Ok(JsonTableColumnDef::Path {
                     name: name.value,
                     data_type: field.data_type().clone(),
+                    declared_type: data_type.to_string(),
                     metadata: FieldMetadata::from(field.as_ref()),
                     path,
                     exists: true,
                     format_json: false,
                     wrapper: None,
-                    omit_quotes: false,
+                    quotes: None,
                     on_empty: None,
                     on_error: on_error
                         .map(Self::convert_sql_json_behavior)

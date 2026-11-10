@@ -222,7 +222,7 @@ impl SqlToRel<'_> {
         self.try_plan_array_literal(values, schema)
     }
 
-    fn try_plan_array_literal(
+    pub(super) fn try_plan_array_literal(
         &self,
         values: Vec<Expr>,
         schema: &DFSchema,

@@ -57,6 +57,7 @@ pub mod planner;
 mod planner_extension;
 mod query;
 mod relation;
+mod row_presence;
 pub mod resolve;
 mod select;
 mod set_expr;

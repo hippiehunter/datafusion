@@ -868,6 +868,19 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plans a `CASE` expression once its operand, conditions and results are
+    /// planned, so a planner can give the result branches one common type
+    /// before the expression is built.
+    ///
+    /// Returns the original parts if not possible
+    fn plan_case(
+        &self,
+        expr: RawCaseExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawCaseExpr>> {
+        Ok(PlannerResult::Original(expr))
+    }
+
     /// Plans the group of comparisons a `BETWEEN` is transformed into, once
     /// its comparisons are planned: `x BETWEEN a AND b` is `x >= a AND x <= b`,
     /// `NOT BETWEEN` is `x < a OR x > b`, and `SYMMETRIC` combines both orders
@@ -1129,6 +1142,20 @@ pub struct RawDistinctFromExpr {
     pub right: Expr,
     /// `IS NOT DISTINCT FROM`.
     pub negated: bool,
+}
+
+/// The planned parts of a `CASE` expression to plan.
+///
+/// This structure is used by [`ExprPlanner::plan_case`].
+#[derive(Debug, Clone)]
+pub struct RawCaseExpr {
+    /// The operand of `CASE operand WHEN value THEN ..`, absent in the
+    /// searched form `CASE WHEN condition THEN ..`.
+    pub expr: Option<Box<Expr>>,
+    /// Each `WHEN` condition (or comparison value) with its `THEN` result.
+    pub when_then_expr: Vec<(Box<Expr>, Box<Expr>)>,
+    /// The `ELSE` result.
+    pub else_expr: Option<Box<Expr>>,
 }
 
 /// An expression with GetFieldAccess to plan

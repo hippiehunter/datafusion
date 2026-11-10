@@ -1584,8 +1584,8 @@ fn output_names(sql: &str) -> Vec<String> {
 
 /// An unaliased item names its column as the dialect names a result column,
 /// beside a wildcard and inside a derived table alike, and a column reference
-/// keeps its column's name. Two items the dialect would give one name keep
-/// their distinct display names.
+/// keeps its column's name. Two items the dialect gives one name both take it,
+/// the second under the `name:N` field name a repeated output takes.
 #[test]
 fn unaliased_items_take_the_names_the_dialect_gives_them() {
     assert_eq!(
@@ -1600,7 +1600,7 @@ fn unaliased_items_take_the_names_the_dialect_gives_them() {
     );
     assert_eq!(
         output_names("SELECT j1_id + 1, j1_id + 2 FROM j1"),
-        ["j1.j1_id + Int32(1)", "j1.j1_id + Int32(2)"]
+        ["?column?", "?column?:1"]
     );
 }
 
@@ -3014,7 +3014,15 @@ fn select_simple_aggregate_repeated_aggregate() {
             .iter()
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>(),
-        ["min(person.age)", "min(person.age):1"]
+        ["min", "min:1"]
+    );
+    assert_snapshot!(
+        plan,
+        @"
+    Projection: min(person.age) AS min, min(person.age) AS min AS min:1
+      Aggregate: groupBy=[[]], aggr=[[min(person.age)]]
+        TableScan: person
+    "
     );
 }
 
@@ -3273,7 +3281,7 @@ fn select_simple_aggregate_with_groupby_aggregate_repeated() {
             .iter()
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>(),
-        ["state", "min(person.age)", "min(person.age):1"]
+        ["state", "min", "min:1"]
     );
 }
 
@@ -6364,7 +6372,7 @@ fn aggregate_with_rollup_with_grouping() {
     assert_snapshot!(
         plan,
         @"
-    Projection: person.id, person.state, person.age, grouping(person.state), grouping(person.age), grouping(person.state) + grouping(person.age), count(*) AS count
+    Projection: person.id, person.state, person.age, grouping(person.state) AS grouping, grouping(person.age) AS grouping AS grouping:1, grouping(person.state) + grouping(person.age), count(*) AS count
       Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[grouping(person.state), grouping(person.age), count(*)]]
         TableScan: person
     "

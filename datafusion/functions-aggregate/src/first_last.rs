@@ -55,6 +55,19 @@ use datafusion_physical_expr_common::sort_expr::LexOrdering;
 create_func!(FirstValue, first_value_udaf);
 create_func!(LastValue, last_value_udaf);
 
+/// FIRST_VALUE and LAST_VALUE return one of their input values: the input
+/// field's type and its metadata, which carries an identity that the Arrow
+/// type alone does not. The result is NULL over no rows, so it is nullable.
+fn first_last_return_field(name: &str, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+    let [input] = arg_fields else {
+        return internal_err!("{name} takes one argument, got {}", arg_fields.len());
+    };
+    Ok(Arc::new(
+        Field::new(name, input.data_type().clone(), true)
+            .with_metadata(input.metadata().clone()),
+    ))
+}
+
 /// Returns the first value in a group of values.
 pub fn first_value(expression: Expr, order_by: Vec<SortExpr>) -> Expr {
     first_value_udaf()
@@ -135,6 +148,10 @@ impl AggregateUDFImpl for FirstValue {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         Ok(arg_types[0].clone())
+    }
+
+    fn return_field(&self, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+        first_last_return_field(self.name(), arg_fields)
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
@@ -1075,6 +1092,10 @@ impl AggregateUDFImpl for LastValue {
         Ok(arg_types[0].clone())
     }
 
+    fn return_field(&self, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+        first_last_return_field(self.name(), arg_fields)
+    }
+
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         let Some(ordering) = LexOrdering::new(acc_args.order_bys.to_vec()) else {
             return TrivialLastValueAccumulator::try_new(
@@ -1552,6 +1573,29 @@ mod tests {
     use datafusion_physical_expr::{PhysicalSortExpr, expressions::col};
 
     use super::*;
+
+    #[test]
+    fn first_last_return_the_input_field_identity() -> Result<()> {
+        let metadata = std::collections::HashMap::from([(
+            "pg_type".to_string(),
+            "vector".to_string(),
+        )]);
+        let input: FieldRef = Arc::new(
+            Field::new("embedding", DataType::Binary, false)
+                .with_metadata(metadata.clone()),
+        );
+        for (udaf, name) in [
+            (&FirstValue::new() as &dyn AggregateUDFImpl, "first_value"),
+            (&LastValue::new() as &dyn AggregateUDFImpl, "last_value"),
+        ] {
+            let field = udaf.return_field(&[Arc::clone(&input)])?;
+            assert_eq!(field.name(), name);
+            assert_eq!(field.data_type(), &DataType::Binary);
+            assert!(field.is_nullable());
+            assert_eq!(field.metadata(), &metadata);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_first_last_value_value() -> Result<()> {

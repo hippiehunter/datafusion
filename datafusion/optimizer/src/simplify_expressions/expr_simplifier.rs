@@ -569,7 +569,7 @@ impl TreeNodeRewriter for ConstEvaluator<'_> {
             // and may not evaluate all their sub expressions. Thus, if
             // any error is countered during simplification, return the original
             // so that normal evaluation can occur
-            Some(true) => match self.evaluate_to_scalar(expr) {
+            Some(true) => match self.evaluate_to_scalar(expr)? {
                 ConstSimplifyResult::Simplified(s, m) => {
                     Ok(Transformed::yes(Expr::Literal(s, m)))
                 }
@@ -751,31 +751,42 @@ impl<'a> ConstEvaluator<'a> {
     }
 
     /// Internal helper to evaluates an Expr
-    pub(crate) fn evaluate_to_scalar(&mut self, expr: Expr) -> ConstSimplifyResult {
+    ///
+    /// The literal an expression folds to carries the field metadata of the
+    /// logical expression, so folding never changes the type identity
+    /// extension typing keeps there. An expression whose logical field cannot
+    /// be derived is left unfolded, like any other expression that cannot be
+    /// evaluated here, so the stage that types it reports the error.
+    pub(crate) fn evaluate_to_scalar(
+        &mut self,
+        expr: Expr,
+    ) -> Result<ConstSimplifyResult> {
         if let Expr::Literal(s, m) = expr {
-            return ConstSimplifyResult::NotSimplified(s, m);
+            return Ok(ConstSimplifyResult::NotSimplified(s, m));
         }
 
         let phys_expr =
             match create_physical_expr(&expr, &self.input_schema, self.execution_props) {
                 Ok(e) => e,
-                Err(err) => return ConstSimplifyResult::SimplifyRuntimeError(err, expr),
-            };
-        let metadata = phys_expr
-            .return_field(self.input_batch.schema_ref())
-            .ok()
-            .and_then(|f| {
-                let m = f.metadata();
-                match m.is_empty() {
-                    true => None,
-                    false => Some(FieldMetadata::from(m)),
+                Err(err) => {
+                    return Ok(ConstSimplifyResult::SimplifyRuntimeError(err, expr));
                 }
-            });
+            };
+        let field = match expr.to_field(&self.input_schema) {
+            Ok((_, field)) => field,
+            Err(err) => {
+                return Ok(ConstSimplifyResult::SimplifyRuntimeError(err, expr));
+            }
+        };
+        let metadata = match field.metadata().is_empty() {
+            true => None,
+            false => Some(FieldMetadata::from(field.metadata())),
+        };
         let col_val = match phys_expr.evaluate(&self.input_batch) {
             Ok(v) => v,
-            Err(err) => return ConstSimplifyResult::SimplifyRuntimeError(err, expr),
+            Err(err) => return Ok(ConstSimplifyResult::SimplifyRuntimeError(err, expr)),
         };
-        match col_val {
+        Ok(match col_val {
             ColumnarValue::Array(a) => {
                 if a.len() != 1 {
                     ConstSimplifyResult::SimplifyRuntimeError(
@@ -804,7 +815,7 @@ impl<'a> ConstEvaluator<'a> {
                 }
             }
             ColumnarValue::Scalar(s) => ConstSimplifyResult::Simplified(s, metadata),
-        }
+        })
     }
 }
 
@@ -3471,6 +3482,53 @@ mod tests {
 
     fn simplify(expr: Expr) -> Expr {
         try_simplify(expr).unwrap()
+    }
+
+    #[test]
+    fn constant_folding_keeps_the_logical_field_metadata() {
+        let tag = FieldMetadata::from(HashMap::from([(
+            "pg_type".to_string(),
+            "vector".to_string(),
+        )]));
+        let tagged = |value: &str| {
+            Expr::Literal(
+                ScalarValue::Utf8(Some(value.to_string())),
+                Some(tag.clone()),
+            )
+        };
+        let untagged =
+            |value: &str| Expr::Literal(ScalarValue::Utf8(Some(value.to_string())), None);
+        let case = |then_expr: Expr, else_expr: Expr| {
+            Expr::Case(Case::new(
+                None,
+                vec![(Box::new(lit(true)), Box::new(then_expr))],
+                Some(Box::new(else_expr)),
+            ))
+        };
+        let schema = expr_test_schema();
+
+        // Every branch agrees on the tag, so the folded literal has it.
+        let agreeing = case(tagged("a"), tagged("b"));
+        let (_, unfolded) = agreeing.to_field(schema.as_ref()).unwrap();
+        assert_eq!(
+            unfolded.metadata().get("pg_type").map(String::as_str),
+            Some("vector")
+        );
+        assert_eq!(simplify(agreeing), tagged("a"));
+
+        // A bare NULL branch contributes nothing.
+        let null_branch = case(
+            tagged("a"),
+            Expr::Literal(ScalarValue::Utf8(None), None),
+        );
+        assert_eq!(simplify(null_branch), tagged("a"));
+
+        // The unfolded expression has no tag when a branch lacks it, and
+        // neither does the literal it folds to.
+        let disagreeing = case(tagged("a"), untagged("b"));
+        let (_, unfolded) = disagreeing.to_field(schema.as_ref()).unwrap();
+        assert!(unfolded.metadata().is_empty());
+        assert_eq!(simplify(disagreeing), untagged("a"));
     }
 
     fn try_simplify_with_cycle_count(expr: Expr) -> Result<(Expr, u32)> {

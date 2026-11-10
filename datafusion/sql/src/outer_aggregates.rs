@@ -24,21 +24,28 @@
 //! b WHERE sum(a.f) = b.f)` computes `sum(a.f)` in the outer aggregate and
 //! the subquery reads the result as a correlated reference. An aggregate that
 //! reads any column of the subquery itself belongs to the subquery.
+//!
+//! A subquery in the aggregate's arguments counts through the columns it
+//! reads from outside itself: `(SELECT max((SELECT i.f FROM i WHERE i.k =
+//! o.k))) FROM o` aggregates over `o`, since `o.k` is the only column the
+//! argument reads from any query around it.
 
 use std::sync::Arc;
 
 use arrow::datatypes::Field;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_common::{Column, DFSchemaRef, Result};
-use datafusion_expr::{Expr, ExprSchemable};
+use datafusion_common::{Column, DFSchema, DFSchemaRef, Result};
+use datafusion_expr::{Expr, ExprSchemable, LogicalPlan};
 
 use crate::planner::PlannerContext;
 
 /// Replace every aggregate of `expr` that belongs to an enclosing query with
 /// an outer reference to that query's result column, handing the aggregate
-/// itself to the enclosing query through `planner_context`.
+/// itself to the enclosing query through `planner_context`. `local_schema`
+/// holds the columns of the query being planned.
 pub(crate) fn hoist_outer_level_aggregates(
     expr: Expr,
+    local_schema: &DFSchema,
     planner_context: &mut PlannerContext,
 ) -> Result<Expr> {
     let stack: Vec<DFSchemaRef> = planner_context.outer_query_schema_stack().to_vec();
@@ -49,7 +56,7 @@ pub(crate) fn hoist_outer_level_aggregates(
         if !matches!(expr, Expr::AggregateFunction(_)) {
             return Ok(Transformed::no(expr));
         }
-        let Some(level) = outer_aggregate_level(&expr, &stack)? else {
+        let Some(level) = outer_aggregate_level(&expr, local_schema, &stack)? else {
             return Ok(Transformed::new(expr, false, TreeNodeRecursion::Jump));
         };
         let hoisted = rebase_to_level(expr, level, &stack)?;
@@ -72,16 +79,18 @@ pub(crate) fn hoist_outer_level_aggregates(
 
 /// The stack index of the query that owns `aggregate`, or `None` when the
 /// aggregate belongs to the query being planned: it reads one of that
-/// query's own columns, reads no column at all, or nests a subquery.
+/// query's own columns, directly or from a subquery in its arguments, or
+/// reads no column of any query around it.
 fn outer_aggregate_level(
     aggregate: &Expr,
+    local_schema: &DFSchema,
     stack: &[DFSchemaRef],
 ) -> Result<Option<usize>> {
     let mut level: Option<usize> = None;
     let mut local = false;
     aggregate.apply(|expr| {
         match expr {
-            expr if matches!(expr, Expr::Column(_)) || expr.subquery().is_some() => {
+            Expr::Column(_) => {
                 local = true;
                 return Ok(TreeNodeRecursion::Stop);
             }
@@ -92,11 +101,81 @@ fn outer_aggregate_level(
                 };
                 level = Some(level.map_or(found, |current| current.max(found)));
             }
-            _ => {}
+            expr => {
+                if let Some(subquery) = expr.subquery() {
+                    let mut escaping = Vec::new();
+                    escaping_outer_references(
+                        subquery.subquery.as_ref(),
+                        &mut Vec::new(),
+                        &mut escaping,
+                    )?;
+                    for column in &escaping {
+                        // The query being planned is the nearest one around
+                        // the subquery, so its columns are found first.
+                        if local_schema.has_column(column) {
+                            local = true;
+                            return Ok(TreeNodeRecursion::Stop);
+                        }
+                        let Some(found) = column_level(column, stack) else {
+                            local = true;
+                            return Ok(TreeNodeRecursion::Stop);
+                        };
+                        level =
+                            Some(level.map_or(found, |current| current.max(found)));
+                    }
+                }
+            }
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
     Ok(if local { None } else { level })
+}
+
+/// Collect into `escaping` the columns `plan`, a subquery, reads from outside
+/// itself. `enclosing` holds, for each subquery between the outermost one
+/// walked and `plan`, the schemas of that subquery's own relations: an outer
+/// reference found in one of them stays inside the outermost subquery.
+fn escaping_outer_references(
+    plan: &LogicalPlan,
+    enclosing: &mut Vec<Vec<DFSchemaRef>>,
+    escaping: &mut Vec<Column>,
+) -> Result<()> {
+    let mut own: Vec<DFSchemaRef> = Vec::new();
+    plan.apply(|node| {
+        own.push(Arc::clone(node.schema()));
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    plan.apply(|node| {
+        for expr in node.expressions() {
+            expr.apply(|expr| {
+                match expr {
+                    Expr::OuterReferenceColumn(_, column) => {
+                        let inside = enclosing
+                            .iter()
+                            .flatten()
+                            .any(|schema| schema.has_column(column));
+                        if !inside && !escaping.contains(column) {
+                            escaping.push(column.clone());
+                        }
+                    }
+                    expr => {
+                        if let Some(subquery) = expr.subquery() {
+                            enclosing.push(own.clone());
+                            escaping_outer_references(
+                                subquery.subquery.as_ref(),
+                                enclosing,
+                                escaping,
+                            )?;
+                            enclosing.pop();
+                        }
+                    }
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })?;
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    Ok(())
 }
 
 /// The innermost enclosing query whose schema carries `column`.

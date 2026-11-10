@@ -128,6 +128,24 @@ impl AggregateUDFImpl for NthValueAgg {
         Ok(arg_types[0].clone())
     }
 
+    /// NTH_VALUE returns one of its input values: the input field's type and
+    /// its metadata, which carries an identity that the Arrow type alone does
+    /// not. The result is NULL when the group has no nth row, so it is
+    /// nullable.
+    fn return_field(&self, arg_fields: &[FieldRef]) -> Result<FieldRef> {
+        let [input, _] = arg_fields else {
+            return exec_err!(
+                "{} takes two arguments, got {}",
+                self.name(),
+                arg_fields.len()
+            );
+        };
+        Ok(Arc::new(
+            Field::new(self.name(), input.data_type().clone(), true)
+                .with_metadata(input.metadata().clone()),
+        ))
+    }
+
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         let n = match acc_args.exprs[1]
             .as_any()
@@ -542,5 +560,27 @@ impl Accumulator for NthValueAccumulator {
         total += size_of::<PhysicalSortExpr>() * self.ordering_req.capacity();
         // TODO: Calculate size of each `PhysicalSortExpr` more accurately.
         total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn nth_value_returns_the_input_field_identity() -> Result<()> {
+        let metadata = HashMap::from([("pg_type".to_string(), "vector".to_string())]);
+        let input: FieldRef = Arc::new(
+            Field::new("embedding", DataType::Binary, false)
+                .with_metadata(metadata.clone()),
+        );
+        let n: FieldRef = Arc::new(Field::new("n", DataType::Int64, false));
+        let field = NthValueAgg::new().return_field(&[input, n])?;
+        assert_eq!(field.name(), "nth_value");
+        assert_eq!(field.data_type(), &DataType::Binary);
+        assert!(field.is_nullable());
+        assert_eq!(field.metadata(), &metadata);
+        Ok(())
     }
 }

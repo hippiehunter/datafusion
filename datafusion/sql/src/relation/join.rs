@@ -22,6 +22,7 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::{Alias, Case, Cast};
 use datafusion_expr::type_coercion::binary::comparison_coercion;
+use datafusion_expr::utils::is_system_column;
 use datafusion_expr::{Expr, JoinType, LogicalPlan, LogicalPlanBuilder};
 use sqlparser::ast::{
     Join, JoinConstraint, JoinOperator, ObjectName, TableFactor, TableWithJoins,
@@ -343,7 +344,8 @@ fn visible_column_names(plan: &LogicalPlan) -> Result<HashSet<String>> {
         .schema()
         .iter()
         .filter(|(qualifier, field)| {
-            !hidden.contains(&Column::from((*qualifier, *field)))
+            !is_system_column(field.as_ref())
+                && !hidden.contains(&Column::from((*qualifier, *field)))
         })
         .map(|(_, field)| field.name().clone())
         .collect())

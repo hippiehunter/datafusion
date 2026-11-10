@@ -19,14 +19,14 @@ mod literal_lookup_table;
 
 use super::{Column, Literal};
 use crate::PhysicalExpr;
-use crate::expressions::{lit, try_cast};
+use crate::expressions::{CastExpr, TryCastExpr, lit, try_cast};
 use arrow::array::*;
 use arrow::compute::kernels::zip::zip;
 use arrow::compute::{
     FilterBuilder, FilterPredicate, SlicesIterator, is_not_null, not, nullif,
     prep_null_mask_filter,
 };
-use arrow::datatypes::{DataType, Schema, UInt32Type, UnionMode};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema, UInt32Type, UnionMode};
 use arrow::error::ArrowError;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::{
@@ -1417,6 +1417,53 @@ impl PhysicalExpr for CaseExpr {
         }
     }
 
+    /// The output field keeps the metadata every contributing branch agrees
+    /// on, as the logical `CASE` does: extension typing rides field metadata,
+    /// and a bare NULL branch adopts the unified type and contributes nothing.
+    fn return_field(&self, input_schema: &Schema) -> Result<FieldRef> {
+        fn is_bare_null(expr: &Arc<dyn PhysicalExpr>) -> bool {
+            let expr = expr.as_any();
+            if let Some(literal) = expr.downcast_ref::<Literal>() {
+                literal.value().is_null()
+            } else if let Some(cast) = expr.downcast_ref::<CastExpr>() {
+                is_bare_null(cast.expr())
+            } else if let Some(cast) = expr.downcast_ref::<TryCastExpr>() {
+                is_bare_null(cast.expr())
+            } else {
+                false
+            }
+        }
+        let branches = self
+            .body
+            .when_then_expr
+            .iter()
+            .map(|(_, then_expr)| then_expr)
+            .chain(self.body.else_expr.as_ref());
+        let mut metadata: Option<std::collections::HashMap<String, String>> = None;
+        for branch in branches {
+            if is_bare_null(branch) {
+                continue;
+            }
+            let branch_field = branch.return_field(input_schema)?;
+            let branch_metadata = branch_field.metadata();
+            match &mut metadata {
+                None => metadata = Some(branch_metadata.clone()),
+                Some(existing) => {
+                    existing.retain(|k, v| branch_metadata.get(k) == Some(&*v));
+                }
+            }
+        }
+        let field = Field::new(
+            format!("{self}"),
+            self.data_type(input_schema)?,
+            self.nullable(input_schema)?,
+        );
+        Ok(Arc::new(match metadata {
+            Some(metadata) if !metadata.is_empty() => field.with_metadata(metadata),
+            _ => field,
+        }))
+    }
+
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         match &self.eval_method {
             EvalMethod::WithExpression(p) => {
@@ -1583,7 +1630,85 @@ mod tests {
     use datafusion_expr::type_coercion::binary::comparison_coercion;
     use datafusion_expr_common::operator::Operator;
     use datafusion_physical_expr_common::physical_expr::fmt_sql;
+    use datafusion_common::metadata::FieldMetadata;
     use half::f16;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn return_field_keeps_the_metadata_branches_agree_on() -> Result<()> {
+        let schema = Schema::empty();
+        let tag = |pg_type: &str| {
+            FieldMetadata::new(BTreeMap::from([
+                ("pg_type".to_string(), pg_type.to_string()),
+                ("shared".to_string(), "yes".to_string()),
+            ]))
+        };
+        let tagged = |value: &str, pg_type: &str| -> Arc<dyn PhysicalExpr> {
+            Arc::new(Literal::new_with_metadata(
+                ScalarValue::Utf8(Some(value.to_string())),
+                Some(tag(pg_type)),
+            ))
+        };
+        let untagged = || -> Arc<dyn PhysicalExpr> { lit("plain") };
+        let null = || -> Arc<dyn PhysicalExpr> {
+            Arc::new(Literal::new(ScalarValue::Utf8(None)))
+        };
+        let cast_null = || -> Arc<dyn PhysicalExpr> {
+            Arc::new(TryCastExpr::new(
+                Arc::new(Literal::new(ScalarValue::Null)),
+                DataType::Utf8,
+            ))
+        };
+        let metadata = |then_exprs: Vec<Arc<dyn PhysicalExpr>>,
+                        else_expr: Option<Arc<dyn PhysicalExpr>>|
+         -> Result<BTreeMap<String, String>> {
+            let when_thens = then_exprs
+                .into_iter()
+                .map(|then_expr| (lit(true), then_expr))
+                .collect();
+            let field = case(None, when_thens, else_expr)?.return_field(&schema)?;
+            assert_eq!(field.data_type(), &DataType::Utf8);
+            Ok(field
+                .metadata()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        };
+        let expected = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let vector = expected(&[("pg_type", "vector"), ("shared", "yes")]);
+
+        // Every branch agrees.
+        assert_eq!(
+            metadata(
+                vec![tagged("a", "vector"), tagged("b", "vector")],
+                Some(tagged("c", "vector"))
+            )?,
+            vector
+        );
+        // Bare NULL branches, cast or not, contribute nothing.
+        assert_eq!(
+            metadata(vec![null(), tagged("a", "vector")], Some(cast_null()))?,
+            vector
+        );
+        assert_eq!(metadata(vec![tagged("a", "vector")], None)?, vector);
+        // Only the keys every branch agrees on survive.
+        assert_eq!(
+            metadata(vec![tagged("a", "vector")], Some(tagged("b", "halfvec")))?,
+            expected(&[("shared", "yes")])
+        );
+        // A branch without metadata leaves none.
+        assert_eq!(
+            metadata(vec![tagged("a", "vector")], Some(untagged()))?,
+            BTreeMap::new()
+        );
+        assert_eq!(metadata(vec![null()], Some(untagged()))?, BTreeMap::new());
+        Ok(())
+    }
 
     #[test]
     fn case_with_expr() -> Result<()> {

@@ -18,8 +18,8 @@
 use super::{Between, Expr, Like, predicate_bounds};
 use crate::expr::{
     AggregateFunction, AggregateFunctionParams, Alias, AllExpr, AnyExpr, BinaryExpr,
-    Cast, InList, InSubquery, Placeholder, ScalarFunction, TryCast, Unnest,
-    WindowFunction, WindowFunctionParams,
+    Cast, InList, InSubquery, Placeholder, QuantifiedSource, ScalarFunction, TryCast,
+    Unnest, WindowFunction, WindowFunctionParams,
 };
 use crate::type_coercion::functions::{
     data_types_with_scalar_udf, fields_with_aggregate_udf, fields_with_window_udf,
@@ -368,11 +368,36 @@ impl ExprSchemable for Expr {
             | Expr::IsNotFalse(_)
             | Expr::IsNotUnknown(_)
             | Expr::Exists { .. } => Ok(false),
-            Expr::InSubquery(InSubquery { expr, .. }) => expr.nullable(input_schema),
-            // ANY/ALL can be nullable due to SQL three-valued logic when
-            // comparing with NULL values
-            Expr::AnyExpr(AnyExpr { expr, .. }) | Expr::AllExpr(AllExpr { expr, .. }) => {
-                expr.nullable(input_schema)
+            // Membership is three-valued: with no match it is NULL when the
+            // probe is NULL or when the subquery produced a NULL.
+            Expr::InSubquery(InSubquery { expr, subquery, .. }) => Ok(expr
+                .nullable(input_schema)?
+                || subquery.subquery.schema().field(0).is_nullable()),
+            // ANY/ALL are three-valued for the same reason: an undecided
+            // comparison against a NULL from either side yields NULL.
+            Expr::AnyExpr(AnyExpr { expr, source, .. })
+            | Expr::AllExpr(AllExpr { expr, source, .. }) => {
+                if expr.nullable(input_schema)? {
+                    return Ok(true);
+                }
+                match source {
+                    QuantifiedSource::Subquery(subquery) => {
+                        Ok(subquery.subquery.schema().field(0).is_nullable())
+                    }
+                    QuantifiedSource::Array(array) => {
+                        if array.nullable(input_schema)? {
+                            return Ok(true);
+                        }
+                        Ok(match array.get_type(input_schema)? {
+                            DataType::List(element)
+                            | DataType::LargeList(element)
+                            | DataType::FixedSizeList(element, _) => {
+                                element.is_nullable()
+                            }
+                            _ => true,
+                        })
+                    }
+                }
             }
             Expr::ScalarSubquery(subquery) => {
                 Ok(subquery.subquery.schema().field(0).is_nullable())
@@ -919,7 +944,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::{and, col, lit, not, or, out_ref_col_with_metadata, when};
+    use crate::expr_fn::{in_subquery, not_in_subquery};
+    use crate::logical_plan::table_scan;
+    use crate::{Operator, and, col, lit, not, or, out_ref_col_with_metadata, when};
+
+    use arrow::datatypes::Schema;
 
     use datafusion_common::{DFSchema, ScalarValue, assert_or_internal_err};
 
@@ -1128,6 +1157,52 @@ mod tests {
         // Testing on long list
         let expr = col("foo").in_list(vec![lit(1); 6], false);
         assert!(expr.nullable(&get_schema(false)).unwrap());
+    }
+
+    #[test]
+    fn test_subquery_membership_nullability() -> Result<()> {
+        let body = |nullable| -> Result<Arc<LogicalPlan>> {
+            let schema = Schema::new(vec![Field::new("k", DataType::Int32, nullable)]);
+            Ok(Arc::new(table_scan(Some("t"), &schema, None)?.build()?))
+        };
+        let probe = |nullable| {
+            MockExprSchema::new()
+                .with_data_type(DataType::Int32)
+                .with_nullable(nullable)
+        };
+        let quantified = |nullable| -> Result<QuantifiedSource> {
+            Ok(QuantifiedSource::Subquery(Subquery {
+                subquery: body(nullable)?,
+                outer_ref_columns: vec![],
+                spans: Spans::new(),
+            }))
+        };
+
+        // A non-null probe against a body that cannot produce NULL is two-valued.
+        assert!(!in_subquery(col("foo"), body(false)?).nullable(&probe(false))?);
+        assert!(!not_in_subquery(col("foo"), body(false)?).nullable(&probe(false))?);
+        // A NULL from the body makes an unmatched probe UNKNOWN.
+        assert!(in_subquery(col("foo"), body(true)?).nullable(&probe(false))?);
+        assert!(not_in_subquery(col("foo"), body(true)?).nullable(&probe(false))?);
+        assert!(in_subquery(lit(100), body(true)?).nullable(&probe(false))?);
+        // So does a NULL probe.
+        assert!(in_subquery(col("foo"), body(false)?).nullable(&probe(true))?);
+        assert!(not_in_subquery(col("foo"), body(false)?).nullable(&probe(true))?);
+
+        let any = |source| {
+            Expr::AnyExpr(AnyExpr::new(Box::new(col("foo")), Operator::Eq, source))
+        };
+        let all = |source| {
+            Expr::AllExpr(AllExpr::new(Box::new(col("foo")), Operator::Eq, source))
+        };
+        assert!(!any(quantified(false)?).nullable(&probe(false))?);
+        assert!(any(quantified(true)?).nullable(&probe(false))?);
+        assert!(any(quantified(false)?).nullable(&probe(true))?);
+        assert!(!all(quantified(false)?).nullable(&probe(false))?);
+        assert!(all(quantified(true)?).nullable(&probe(false))?);
+        assert!(all(quantified(false)?).nullable(&probe(true))?);
+
+        Ok(())
     }
 
     #[test]

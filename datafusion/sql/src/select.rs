@@ -16,7 +16,7 @@
 // under the License.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::definition_plan::{EmptyGrouping, WindowClause, WindowDefinition};
@@ -25,13 +25,16 @@ use crate::outer_aggregates::hoist_outer_level_aggregates;
 use crate::planner::{PlannerContext, SqlToRel, WindowClauseEntry};
 use crate::query::{to_order_by_exprs_with_select, without_repeated_sort_keys};
 use crate::utils::{
-    check_columns_satisfy_exprs, extract_aliases, rebase_expr, resolve_aliases_to_exprs,
-    resolve_columns, resolve_positions_to_exprs, rewrite_recursive_unnests_bottom_up,
+    check_columns_satisfy_exprs, extract_aliases, literal_position, rebase_expr,
+    resolve_aliases_to_exprs, resolve_columns, resolve_positions_to_exprs,
+    rewrite_recursive_unnests_bottom_up,
 };
 
+use arrow::datatypes::DataType;
 use datafusion_common::error::{
     DataFusionErrorBuilder, sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
 };
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion,
 };
@@ -52,7 +55,7 @@ use datafusion_expr::utils::{
     find_window_exprs,
 };
 use datafusion_expr::{
-    Aggregate, Expr, Filter, GroupingSet, LogicalPlan, LogicalPlanBuilder,
+    Aggregate, Expr, ExprSchemable, Filter, GroupingSet, LogicalPlan, LogicalPlanBuilder,
     LogicalPlanBuilderOptions, SortExpr, UserDefinedLogicalNodeCore,
 };
 
@@ -177,6 +180,191 @@ fn without_repeated_group_items(group_expr: Vec<Expr>) -> Vec<Expr> {
     kept
 }
 
+/// The prefix of the name a grouping element carries while it stands for the
+/// output column at a select-list position, and of the grouping column that
+/// element becomes when the output column groups on its own.
+const GROUP_OUTPUT_PREFIX: &str = "__group_output_";
+
+/// `expr`, a grouping element, standing for the output column at `position`.
+fn group_output(expr: Expr, position: usize) -> Expr {
+    expr.alias(format!("{GROUP_OUTPUT_PREFIX}{position}"))
+}
+
+/// The select-list position `expr` stands for, when it is a grouping element
+/// made by [`group_output`].
+fn group_output_position(expr: &Expr) -> Option<usize> {
+    let Expr::Alias(alias) = expr else {
+        return None;
+    };
+    alias.name.strip_prefix(GROUP_OUTPUT_PREFIX)?.parse().ok()
+}
+
+/// A grouping element that names an output column, by position or by a name
+/// in `named_outputs` (the aliases no input column hides, each with its
+/// select-list position), as that column's expression standing for it.
+fn output_column_element(
+    element: Expr,
+    named_outputs: &[(String, usize)],
+    select_exprs: &[Expr],
+) -> Result<Expr> {
+    if let Some(position) = literal_position(&element) {
+        let expr = resolve_positions_to_exprs(element, select_exprs)?;
+        return Ok(group_output(expr, (position - 1) as usize));
+    }
+    if let Expr::Column(Column {
+        relation: None,
+        name,
+        ..
+    }) = &element
+        && let Some((_, position)) =
+            named_outputs.iter().find(|(output, _)| output == name)
+    {
+        return Ok(group_output(
+            select_exprs[*position].clone().unalias(),
+            *position,
+        ));
+    }
+    Ok(element)
+}
+
+/// `expr`, one GROUP BY item, with every element that names an output
+/// column, written alone or inside a grouping set, standing for that column.
+fn group_elements_as_output_columns(
+    expr: Expr,
+    named_outputs: &[(String, usize)],
+    select_exprs: &[Expr],
+) -> Result<Expr> {
+    let elements = |exprs: Vec<Expr>| -> Result<Vec<Expr>> {
+        exprs
+            .into_iter()
+            .map(|element| output_column_element(element, named_outputs, select_exprs))
+            .collect()
+    };
+    Ok(match expr {
+        Expr::GroupingSet(GroupingSet::Rollup(exprs)) => {
+            Expr::GroupingSet(GroupingSet::Rollup(elements(exprs)?))
+        }
+        Expr::GroupingSet(GroupingSet::Cube(exprs)) => {
+            Expr::GroupingSet(GroupingSet::Cube(elements(exprs)?))
+        }
+        Expr::GroupingSet(GroupingSet::GroupingSets(sets)) => {
+            Expr::GroupingSet(GroupingSet::GroupingSets(
+                sets.into_iter()
+                    .map(&elements)
+                    .collect::<Result<Vec<_>>>()?,
+            ))
+        }
+        other => output_column_element(other, named_outputs, select_exprs)?,
+    })
+}
+
+/// One element of the GROUP BY as [`distinct_output_group_columns`] has
+/// decided it.
+struct GroupElement {
+    /// The grouped expression.
+    expr: Expr,
+    /// The select-list position the element stands for.
+    position: Option<usize>,
+    /// Whether the element is written inside a grouping set.
+    in_grouping_set: bool,
+    /// The expression the element groups by.
+    kept: Expr,
+}
+
+/// PostgreSQL groups by select-list entries, not by expressions: an element
+/// stands for the output column it names, by position or by name, or,
+/// written as an expression, for the first output column computing it. Two
+/// output columns computing one expression are therefore separate grouping
+/// columns, and a grouping set that leaves one of them out reads it as NULL
+/// while the other keeps its value. Outside grouping sets the two always
+/// agree and group as one.
+///
+/// The first element grouping an expression groups by the expression itself.
+/// A later element standing for another output column becomes a grouping
+/// column of its own, named by [`group_output`], when either of the two is
+/// written inside a grouping set. Returns the grouping expressions and the
+/// select-list positions that read such a column of their own.
+fn distinct_output_group_columns(
+    group_expr: Vec<Expr>,
+    select_exprs: &[Expr],
+) -> (Vec<Expr>, Vec<usize>) {
+    fn element(
+        written: Expr,
+        in_grouping_set: bool,
+        select_exprs: &[Expr],
+        seen: &mut Vec<GroupElement>,
+    ) -> Expr {
+        let (expr, position) = match group_output_position(&written) {
+            Some(position) => (written.unalias(), Some(position)),
+            None => {
+                let position = select_exprs.iter().position(|item| match item {
+                    Expr::Alias(alias) => alias.expr.as_ref() == &written,
+                    item => item == &written,
+                });
+                (written, position)
+            }
+        };
+        let kept = if let Some(same) = seen
+            .iter()
+            .find(|other| other.expr == expr && other.position == position)
+        {
+            same.kept.clone()
+        } else if let Some(position) = position
+            && seen.iter().any(|other| {
+                other.expr == expr && (in_grouping_set || other.in_grouping_set)
+            })
+        {
+            group_output(expr.clone(), position)
+        } else {
+            expr.clone()
+        };
+        seen.push(GroupElement {
+            expr,
+            position,
+            in_grouping_set,
+            kept: kept.clone(),
+        });
+        kept
+    }
+
+    let mut seen = Vec::new();
+    let elements = |exprs: Vec<Expr>, seen: &mut Vec<GroupElement>| -> Vec<Expr> {
+        exprs
+            .into_iter()
+            .map(|expr| element(expr, true, select_exprs, seen))
+            .collect()
+    };
+    let grouped: Vec<Expr> = group_expr
+        .into_iter()
+        .map(|expr| match expr {
+            Expr::GroupingSet(GroupingSet::Rollup(exprs)) => {
+                Expr::GroupingSet(GroupingSet::Rollup(elements(exprs, &mut seen)))
+            }
+            Expr::GroupingSet(GroupingSet::Cube(exprs)) => {
+                Expr::GroupingSet(GroupingSet::Cube(elements(exprs, &mut seen)))
+            }
+            Expr::GroupingSet(GroupingSet::GroupingSets(sets)) => {
+                Expr::GroupingSet(GroupingSet::GroupingSets(
+                    sets.into_iter()
+                        .map(|set| elements(set, &mut seen))
+                        .collect(),
+                ))
+            }
+            expr => element(expr, false, select_exprs, &mut seen),
+        })
+        .collect();
+    let mut own_columns: Vec<usize> = Vec::new();
+    for position in seen
+        .iter()
+        .filter_map(|element| group_output_position(&element.kept))
+    {
+        if !own_columns.contains(&position) {
+            own_columns.push(position);
+        }
+    }
+    (grouped, own_columns)
+}
+
 impl SqlToRel<'_> {
     fn relation_name_from_wildcard_expr(expr: &SQLExpr) -> Option<ObjectName> {
         match expr {
@@ -232,7 +420,9 @@ impl SqlToRel<'_> {
     ) -> Result<LogicalPlan> {
         let windows = self.window_clause(&select.named_window)?;
         let enclosing = planner_context.set_window_clause(windows.into());
+        let enclosing_relations = planner_context.enter_select_scope();
         let plan = self.select_level_to_plan(select, query_order_by, planner_context);
+        planner_context.leave_select_scope(enclosing_relations);
         planner_context.set_window_clause(enclosing);
         plan
     }
@@ -248,6 +438,12 @@ impl SqlToRel<'_> {
         if select.top.is_some() {
             return not_impl_err!("TOP");
         }
+
+        // A relation read as a whole row under an outer join that can
+        // null-extend it is planned with its row-presence column.
+        planner_context.read_null_extended_whole_rows(
+            self.null_extended_whole_row_relations(select, query_order_by),
+        );
 
         // Process `from` clause
         let plan = self.plan_from_tables_ref(&select.from, planner_context)?;
@@ -270,8 +466,12 @@ impl SqlToRel<'_> {
             .into_iter()
             .map(|select_expr| match select_expr {
                 SelectExpr::Expression(expr) => {
-                    hoist_outer_level_aggregates(expr, planner_context)
-                        .map(SelectExpr::Expression)
+                    hoist_outer_level_aggregates(
+                        expr,
+                        base_plan.schema().as_ref(),
+                        planner_context,
+                    )
+                    .map(SelectExpr::Expression)
                 }
                 other => Ok(other),
             })
@@ -362,8 +562,11 @@ impl SqlToRel<'_> {
                 )?;
                 let having_expr =
                     self.plan_condition_expr(having_expr, &combined_schema)?;
-                let having_expr =
-                    hoist_outer_level_aggregates(having_expr, planner_context)?;
+                let having_expr = hoist_outer_level_aggregates(
+                    having_expr,
+                    base_plan.schema().as_ref(),
+                    planner_context,
+                )?;
                 // This step "dereferences" any aliases in the HAVING clause.
                 //
                 // This is how we support queries with HAVING expressions that
@@ -398,6 +601,8 @@ impl SqlToRel<'_> {
         let groups_whole_input = group_by_sql_exprs.is_some_and(|exprs| {
             !exprs.is_empty() && exprs.iter().all(is_empty_grouping_element)
         });
+        // The select-list positions that read a grouping column of their own.
+        let mut group_output_positions: Vec<usize> = Vec::new();
         let group_by_exprs = if let Some(exprs) = group_by_sql_exprs {
             let planned = exprs
                 .iter()
@@ -411,7 +616,12 @@ impl SqlToRel<'_> {
                         &output_names,
                         &select_exprs,
                     )? {
-                        Some(output_expr) => output_expr,
+                        // The item stands for the output column it names
+                        // until the whole GROUP BY is known.
+                        Some(position) => group_output(
+                            select_exprs[position].clone().unalias(),
+                            position,
+                        ),
                         None => self.sql_expr_to_logical_expr(
                             e,
                             &combined_schema,
@@ -424,6 +634,23 @@ impl SqlToRel<'_> {
                     for f in base_plan.schema().fields() {
                         alias_map.remove(f.name());
                     }
+                    let named_outputs: Vec<(String, usize)> = select_exprs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(position, item)| match item {
+                            Expr::Alias(alias)
+                                if alias_map.contains_key(&alias.name) =>
+                            {
+                                Some((alias.name.clone(), position))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let group_by_expr = group_elements_as_output_columns(
+                        group_by_expr,
+                        &named_outputs,
+                        &select_exprs,
+                    )?;
                     let group_by_expr =
                         resolve_aliases_to_exprs(group_by_expr, &alias_map)?;
                     let group_by_expr =
@@ -436,6 +663,9 @@ impl SqlToRel<'_> {
                     Ok(group_by_expr)
                 })
                 .collect::<Result<Vec<Expr>>>()?;
+            let (planned, own_columns) =
+                distinct_output_group_columns(planned, &select_exprs);
+            group_output_positions = own_columns;
             let planned = without_repeated_group_items(planned);
             if matches!(set_quantifier, Some(GroupBySetQuantifier::Distinct)) {
                 deduplicate_grouping_sets(planned)?
@@ -607,6 +837,37 @@ impl SqlToRel<'_> {
                 window_clause_exprs,
             }
         };
+
+        // A select item whose output column groups on its own reads that
+        // grouping column, under the name the item already has.
+        let own_group_columns = !group_output_positions.is_empty();
+        for position in group_output_positions {
+            let column = Expr::Column(Column::from_name(format!(
+                "{GROUP_OUTPUT_PREFIX}{position}"
+            )));
+            select_exprs_post_aggr[position] = match &select_exprs[position] {
+                Expr::Alias(alias) => Expr::Alias(Alias {
+                    expr: Box::new(column),
+                    ..alias.clone()
+                }),
+                item => {
+                    let (relation, name) = item.qualified_name();
+                    column.alias_qualified(relation, name)
+                }
+            };
+        }
+        // Output columns computing one expression are then told apart only by
+        // position, so a sort key naming an output column reads the column at
+        // its position rather than the expression the two share.
+        if own_group_columns {
+            for (sort, position) in order_by_rex.iter_mut().zip(&order_by_positions) {
+                if let Some(position) = position {
+                    let (relation, name) =
+                        select_exprs_post_aggr[*position].qualified_name();
+                    sort.expr = Expr::Column(Column::new(relation, name));
+                }
+            }
+        }
 
         let plan = if let Some(having_expr_post_aggr) = having_expr_post_aggr {
             LogicalPlanBuilder::from(plan)
@@ -1402,8 +1663,11 @@ impl SqlToRel<'_> {
 
                 let filter_expr =
                     self.sql_to_expr_ref(predicate_expr, plan.schema(), planner_context)?;
-                let filter_expr =
-                    hoist_outer_level_aggregates(filter_expr, planner_context)?;
+                let filter_expr = hoist_outer_level_aggregates(
+                    filter_expr,
+                    plan.schema().as_ref(),
+                    planner_context,
+                )?;
 
                 // An aggregate of this query level — written here, or handed
                 // up by a subquery of this clause because its arguments are
@@ -1496,8 +1760,10 @@ impl SqlToRel<'_> {
                 {
                     Ok(exprs) => {
                         unaliased_items.extend(exprs.iter().map(|_| None));
-                        prepared_select_exprs
-                            .extend(exprs.into_iter().map(SelectExpr::Expression));
+                        let width = exprs.len();
+                        prepared_select_exprs.extend(exprs.into_iter().map(|member| {
+                            SelectExpr::Expression(row_wildcard_member(member, width))
+                        }));
                     }
                     Err(err) => error_builder.add_error(err),
                 }
@@ -1515,7 +1781,11 @@ impl SqlToRel<'_> {
             }
         }
         let mut prepared_select_exprs = error_builder.error_or(prepared_select_exprs)?;
-        self.label_unaliased_expressions(&unaliased_items, &mut prepared_select_exprs);
+        self.label_unaliased_expressions(
+            &unaliased_items,
+            &mut prepared_select_exprs,
+            plan.schema(),
+        );
         Ok(prepared_select_exprs)
     }
 
@@ -1526,20 +1796,24 @@ impl SqlToRel<'_> {
     /// prefer them to input columns, and an enclosing query refers to the
     /// column by them, as `SELECT nextval('s')` is a column `nextval` and
     /// `SELECT 1` one named `?column?`. A column reference keeps its column's
-    /// name and qualifier. A label is applied when it is unique within the
-    /// projection; two `count(...)` calls keep their distinct display names so
-    /// the projection schema stays unambiguous.
+    /// name and qualifier. Items that share a label all take it, as two
+    /// `count(...)` calls are both a column `count`: the projection gives each
+    /// repeated name after the first the `name:N` field name every repeated
+    /// output takes, which keeps the schema unambiguous and which a result
+    /// label reads back as `name`.
     fn label_unaliased_expressions(
         &self,
         unaliased_items: &[Option<&SQLExpr>],
         prepared: &mut [SelectExpr],
+        input_schema: &DFSchema,
     ) {
         let labels: Vec<Option<String>> = unaliased_items
             .iter()
             .zip(prepared.iter())
             .map(|(item, prepared)| match (item, prepared) {
                 (Some(expression), SelectExpr::Expression(expr))
-                    if !matches!(expr, Expr::Column(_)) =>
+                    if !matches!(expr, Expr::Column(_))
+                        && !unnests_struct(expr, input_schema) =>
                 {
                     self.context_provider
                         .implicit_output_column_name(expression)
@@ -1548,25 +1822,10 @@ impl SqlToRel<'_> {
                 _ => None,
             })
             .collect();
-        if labels.iter().all(Option::is_none) {
-            return;
-        }
-        let mut occurrences: IndexMap<String, usize> = IndexMap::new();
-        for (label, item) in labels.iter().zip(prepared.iter()) {
-            let name = match (label, item) {
-                (Some(label), _) => label.clone(),
-                (None, SelectExpr::Expression(expr)) => expr.schema_name().to_string(),
-                (None, _) => continue,
-            };
-            *occurrences.entry(name).or_insert(0) += 1;
-        }
         for (label, item) in labels.into_iter().zip(prepared.iter_mut()) {
             let Some(label) = label else {
                 continue;
             };
-            if occurrences.get(&label).copied() != Some(1) {
-                continue;
-            }
             if let SelectExpr::Expression(expr) = item
                 && expr.schema_name().to_string() != label
             {
@@ -2108,13 +2367,11 @@ impl SqlToRel<'_> {
             }))
             .collect();
 
-        // For scalar aggregates (no GROUP BY), ORDER BY is a no-op since only one row
-        // is produced. Skip validation in this case.
-        if !group_by_exprs.is_empty() {
-            let order_by_exprs_only: Vec<Expr> =
-                order_by_post_aggr.iter().map(|s| s.expr.clone()).collect();
-            check_columns_satisfy_exprs(&all_valid_exprs, &order_by_exprs_only)?;
-        }
+        // ORDER BY reads the aggregated rows, so every column it names is
+        // grouped or aggregated, with or without GROUP BY.
+        let order_by_exprs_only: Vec<Expr> =
+            order_by_post_aggr.iter().map(|s| s.expr.clone()).collect();
+        check_columns_satisfy_exprs(&all_valid_exprs, &order_by_exprs_only)?;
 
         // DISTINCT ON groups the aggregated rows, so every column it names is
         // grouped or aggregated, with or without GROUP BY.
@@ -2208,15 +2465,15 @@ impl SqlToRel<'_> {
     }
 
     /// PostgreSQL's reading of a bare name as a GROUP BY item: an input column
-    /// of that name first, and otherwise the expression of the output column
-    /// it names. `None` leaves the item to ordinary expression planning.
+    /// of that name first, and otherwise the position of the output column it
+    /// names. `None` leaves the item to ordinary expression planning.
     fn group_by_output_column(
         &self,
         item: &SQLExpr,
         input_schema: &DFSchema,
         output_names: &[Option<String>],
         select_exprs: &[Expr],
-    ) -> Result<Option<Expr>> {
+    ) -> Result<Option<usize>> {
         let SQLExpr::Identifier(ident) = item else {
             return Ok(None);
         };
@@ -2224,9 +2481,7 @@ impl SqlToRel<'_> {
         if input_schema.has_column_with_unqualified_name(&name) {
             return Ok(None);
         }
-        Ok(self
-            .output_column_named(ident, "GROUP BY", output_names, select_exprs)?
-            .map(|position| select_exprs[position].clone().unalias()))
+        self.output_column_named(ident, "GROUP BY", output_names, select_exprs)
     }
 
     /// The position of the output column a bare name names, or `None` when no
@@ -2496,6 +2751,43 @@ impl SqlToRel<'_> {
             window_frame: spec.window_frame.clone(),
         })
     }
+}
+
+/// Field metadata key that records, on every column a `(composite).*` select
+/// item expands to, how many columns the item expands to. The select list no
+/// longer shows where such an expansion ends once its member reads are
+/// rewritten, and the names of result columns are assigned item by item.
+const ROW_WILDCARD_WIDTH_METADATA_KEY: &str = "pg_row_wildcard_width";
+
+/// `member`, one of the `width` columns a `(composite).*` item expands to,
+/// carrying that width on its output field.
+fn row_wildcard_member(member: Expr, width: usize) -> Expr {
+    let mark = FieldMetadata::from(BTreeMap::from([(
+        ROW_WILDCARD_WIDTH_METADATA_KEY.to_string(),
+        width.to_string(),
+    )]));
+    match member {
+        Expr::Alias(mut alias) => {
+            let mut metadata = alias.metadata.take().unwrap_or_default();
+            metadata.extend(mark);
+            alias.metadata = Some(metadata);
+            Expr::Alias(alias)
+        }
+        member => {
+            let name = member.schema_name().to_string();
+            member.alias_with_metadata(name, Some(mark))
+        }
+    }
+}
+
+/// Whether `expr` is an `unnest` of a struct, which expands to one output
+/// column per field, each named after its field, and so takes no label of its
+/// own.
+fn unnests_struct(expr: &Expr, input_schema: &DFSchema) -> bool {
+    let Expr::Unnest(unnest) = expr else {
+        return false;
+    };
+    matches!(unnest.expr.get_type(input_schema), Ok(DataType::Struct(_)))
 }
 
 /// The relation of a select item that is `relation.*` inside parentheses.

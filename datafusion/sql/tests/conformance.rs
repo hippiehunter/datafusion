@@ -1195,6 +1195,14 @@ stub_typed_udf!(
     DataType::Utf8
 );
 stub_scalar_udf!(DblSubstringSimilar, "__dbl_substring_similar");
+// `LIKE .. ESCAPE e` with an escape that is not one character rewrites its
+// pattern through `like_escape`.
+stub_typed_udf!(
+    LikeEscape,
+    "like_escape",
+    Signature::variadic_any(Volatility::Immutable),
+    DataType::Utf8
+);
 
 // JSON functions
 stub_scalar_udf!(JsonArray, "json_array");
@@ -1709,6 +1717,7 @@ impl ConformanceFunctionProvider for DataFusionFunctionProvider {
             "regexp_substr" => Some(regexp_substr_udf()),
             "similar_to_escape" => Some(similar_to_escape_udf()),
             "__dbl_substring_similar" => Some(dbl_substring_similar_udf()),
+            "like_escape" => Some(like_escape_udf()),
 
             // JSON functions
             "json_array" => Some(json_array_udf()),
@@ -2962,7 +2971,7 @@ impl FeatureInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion_sql::planner::{PlannerResult, RawCastExpr};
+    use datafusion_sql::planner::{PlannerResult, RawCaseExpr, RawCastExpr};
     use sqlparser::ast::{CastKind, DataType as SQLDataType};
 
     #[derive(Debug)]
@@ -2988,6 +2997,111 @@ mod tests {
 
             Ok(PlannerResult::Original(expr))
         }
+    }
+
+    /// Replaces every `THEN`/`ELSE` result of a `CASE` with a marker literal
+    /// and hands the parts back, or plans the whole expression itself when the
+    /// `CASE` has an operand.
+    #[derive(Debug)]
+    struct TestCaseExprPlanner;
+
+    impl ExprPlanner for TestCaseExprPlanner {
+        fn plan_case(
+            &self,
+            mut expr: RawCaseExpr,
+            _schema: &DFSchema,
+        ) -> Result<PlannerResult<RawCaseExpr>> {
+            if expr.expr.is_some() {
+                return Ok(PlannerResult::Planned(Expr::Literal(
+                    ScalarValue::Utf8(Some("planned_case".to_string())),
+                    None,
+                )));
+            }
+            let marker = || {
+                Box::new(Expr::Literal(
+                    ScalarValue::Utf8(Some("rewritten_branch".to_string())),
+                    None,
+                ))
+            };
+            for (_, then_expr) in &mut expr.when_then_expr {
+                *then_expr = marker();
+            }
+            if let Some(else_expr) = &mut expr.else_expr {
+                *else_expr = marker();
+            }
+            Ok(PlannerResult::Original(expr))
+        }
+    }
+
+    fn plan_text_with_case_planner(sql: &str) -> Result<String> {
+        let provider = DataFusionFunctionProvider;
+        let mut config_options = ConfigOptions::default();
+        config_options.catalog.information_schema = true;
+        let context = ConformanceContextProvider {
+            function_provider: &provider,
+            config_options,
+            expr_planners: vec![Arc::new(TestCaseExprPlanner)],
+        };
+        let planner = SqlToRel::new_with_options(&context, ParserOptions::default());
+        let mut ast = DFParser::parse_sql(sql)?;
+        let plan = planner.statement_to_plan(ast.pop_front().unwrap())?;
+        Ok(format!("{}", plan.display_indent()))
+    }
+
+    #[test]
+    fn test_expr_planner_plan_case_plans_the_whole_expression() -> Result<()> {
+        let plan_text = plan_text_with_case_planner(
+            "SELECT CASE age WHEN 1 THEN 'one' ELSE 'other' END FROM person",
+        )?;
+        assert!(
+            plan_text.contains("planned_case") && !plan_text.contains("CASE"),
+            "expected the case hook's expression in the logical plan, got:\n{plan_text}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_expr_planner_plan_case_returned_parts_build_the_case() -> Result<()> {
+        let plan_text = plan_text_with_case_planner(
+            "SELECT CASE WHEN age > 1 THEN 'one' ELSE 'other' END FROM person",
+        )?;
+        assert!(
+            plan_text.contains("CASE WHEN")
+                && plan_text.contains("THEN Utf8(\"rewritten_branch\")")
+                && plan_text.contains("ELSE Utf8(\"rewritten_branch\")")
+                && !plan_text.contains("one")
+                && !plan_text.contains("other"),
+            "expected the case hook's rewritten parts in the logical plan, got:\n{plan_text}"
+        );
+        Ok(())
+    }
+
+    /// A one-character ESCAPE stays on the LIKE expression; the empty escape,
+    /// which means no escape character, rewrites the pattern through
+    /// `like_escape`, as PostgreSQL plans every ESCAPE clause.
+    #[test]
+    fn test_like_escape_forms() -> Result<()> {
+        let text = |sql: &str| -> Result<String> {
+            Ok(format!("{}", logical_plan(sql)?.display_indent()))
+        };
+        let single = text("SELECT first_name LIKE last_name ESCAPE '!' FROM person")?;
+        assert!(
+            single.contains("ESCAPE '!'") && !single.contains("like_escape"),
+            "{single}"
+        );
+        for operator in ["LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE"] {
+            let empty = text(&format!(
+                "SELECT first_name {operator} last_name ESCAPE '' FROM person"
+            ))?;
+            assert!(
+                empty.contains(&format!("{operator} like_escape(person.last_name, "))
+                    && !empty.contains("ESCAPE"),
+                "{empty}"
+            );
+        }
+        let long = text("SELECT first_name LIKE last_name ESCAPE '!!' FROM person")?;
+        assert!(long.contains("like_escape(person.last_name, "), "{long}");
+        Ok(())
     }
 
     #[test]

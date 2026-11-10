@@ -25,13 +25,17 @@
 //! provider registers for each form, and the declared `RETURNING` type becomes
 //! the cast around the call — so the document is built once and typed after.
 
+use std::collections::BTreeMap;
+
 use datafusion_common::error::{
     sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
 };
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     DFSchema, Result, ScalarValue, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::logical_plan::SQL_JSON_RETURNING_METADATA_PREFIX;
 use datafusion_expr::{Expr, WindowFunctionDefinition, lit};
 use sqlparser::ast::{
     CastKind, DataType as SQLDataType, Expr as SQLExpr, ExprWithAlias,
@@ -407,6 +411,36 @@ impl SqlToRel<'_> {
         self.sql_json_function_call("jsonb_build_object", args)
     }
 
+    /// The `RETURNING` type as a query function receives it: the written
+    /// name, carrying the declared type's field metadata under
+    /// [`SQL_JSON_RETURNING_METADATA_PREFIX`]. The function coerces the
+    /// selected item by the type's input rules so a failure reaches the
+    /// `ON ERROR` clause; the metadata lets the context provider's analysis
+    /// bind the rules only its catalog knows, such as a domain's constraints.
+    fn returning_type_literal(&self, data_type: &SQLDataType) -> Result<Expr> {
+        let spelled = match self.context_provider.get_type_planner() {
+            Some(type_planner) => type_planner
+                .canonical_type_spelling(data_type)?
+                .unwrap_or_else(|| data_type.clone()),
+            None => data_type.clone(),
+        };
+        let target = self.written_cast_target(&spelled)?;
+        let metadata: BTreeMap<String, String> = target
+            .metadata()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    format!("{SQL_JSON_RETURNING_METADATA_PREFIX}{key}"),
+                    value.clone(),
+                )
+            })
+            .collect();
+        Ok(Expr::Literal(
+            ScalarValue::Utf8(Some(data_type.to_string())),
+            (!metadata.is_empty()).then(|| FieldMetadata::new(metadata)),
+        ))
+    }
+
     fn sql_json_function_call(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
         let Some(func) = self.context_provider.get_function_meta(name) else {
             return not_impl_err!(
@@ -459,10 +493,10 @@ impl SqlToRel<'_> {
             args.push(on_error);
             return self.sql_json_function_call(name, args);
         }
-        let returning = clauses
-            .returning
-            .as_ref()
-            .map_or_else(null_text, |data_type| lit(data_type.to_string()));
+        let returning = match &clauses.returning {
+            Some(data_type) => self.returning_type_literal(data_type)?,
+            None => null_text(),
+        };
         args.push(returning);
         if name == "json_query" {
             args.push(

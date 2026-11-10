@@ -217,6 +217,33 @@ pub(crate) fn extract_aliases(exprs: &[Expr]) -> HashMap<String, Expr> {
         .collect::<HashMap<String, Expr>>()
 }
 
+/// The select-list position an integer literal names in GROUP BY.
+pub(crate) fn literal_position(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Literal(ScalarValue::Int8(Some(position)), _) => Some(*position as i64),
+        Expr::Literal(ScalarValue::Int16(Some(position)), _) => {
+            Some(*position as i64)
+        }
+        Expr::Literal(ScalarValue::Int32(Some(position)), _) => {
+            Some(*position as i64)
+        }
+        Expr::Literal(ScalarValue::Int64(Some(position)), _) => Some(*position),
+        Expr::Literal(ScalarValue::UInt8(Some(position)), _) => {
+            Some(*position as i64)
+        }
+        Expr::Literal(ScalarValue::UInt16(Some(position)), _) => {
+            Some(*position as i64)
+        }
+        Expr::Literal(ScalarValue::UInt32(Some(position)), _) => {
+            Some(*position as i64)
+        }
+        Expr::Literal(ScalarValue::UInt64(Some(position)), _) => {
+            i64::try_from(*position).ok()
+        }
+        _ => None,
+    }
+}
+
 /// Given an expression that's literal int encoding position, lookup the corresponding expression
 /// in the select_exprs list, if the index is within the bounds and it is indeed a position literal,
 /// otherwise, returns planning error.
@@ -225,32 +252,6 @@ pub(crate) fn resolve_positions_to_exprs(
     expr: Expr,
     select_exprs: &[Expr],
 ) -> Result<Expr> {
-    fn literal_position(expr: &Expr) -> Option<i64> {
-        match expr {
-            Expr::Literal(ScalarValue::Int8(Some(position)), _) => Some(*position as i64),
-            Expr::Literal(ScalarValue::Int16(Some(position)), _) => {
-                Some(*position as i64)
-            }
-            Expr::Literal(ScalarValue::Int32(Some(position)), _) => {
-                Some(*position as i64)
-            }
-            Expr::Literal(ScalarValue::Int64(Some(position)), _) => Some(*position),
-            Expr::Literal(ScalarValue::UInt8(Some(position)), _) => {
-                Some(*position as i64)
-            }
-            Expr::Literal(ScalarValue::UInt16(Some(position)), _) => {
-                Some(*position as i64)
-            }
-            Expr::Literal(ScalarValue::UInt32(Some(position)), _) => {
-                Some(*position as i64)
-            }
-            Expr::Literal(ScalarValue::UInt64(Some(position)), _) => {
-                i64::try_from(*position).ok()
-            }
-            _ => None,
-        }
-    }
-
     match expr {
         expr if literal_position(&expr).is_some() => {
             let Some(position) = literal_position(&expr) else {

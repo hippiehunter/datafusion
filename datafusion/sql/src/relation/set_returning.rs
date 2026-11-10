@@ -30,6 +30,7 @@
 //! end early with NULL. A function with no list expansion is a table source
 //! the provider plans itself.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::definition_plan::{FunctionRelation, FunctionRelationCall};
@@ -38,7 +39,8 @@ use crate::planner::{PlannerContext, SetReturningColumns, SqlToRel};
 use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
-    Column, DFSchema, Result, Spans, UnnestOptions, not_impl_err, plan_err,
+    Column, DFSchema, Result, Spans, TableReference, UnnestOptions, not_impl_err,
+    plan_err,
 };
 use datafusion_expr::expr::WindowFunction;
 use datafusion_expr::{
@@ -95,7 +97,31 @@ impl SetReturningCall {
 }
 
 const LIST_COLUMN_PREFIX: &str = "__srf_";
+/// Field metadata key a provider sets on a function relation's column whose
+/// name the function's declaration gives: an OUT parameter, or a field of a
+/// composite result. Such a column keeps its name against a bare table alias,
+/// which names only a column that carries no mark. A provider marks a list
+/// column by aliasing its expression with this metadata.
+const FUNCTION_RESULT_NAME_METADATA_KEY: &str = "pg_function_result_name";
+/// The mark's value on a field of a composite result.
+const FUNCTION_RESULT_FIELD: &str = "field";
 const ORDINALITY_COLUMN: &str = "ordinality";
+
+/// Split a provider's declared-name mark off the list expression it aliases.
+fn declared_result_name(list: Expr) -> (Expr, Option<FieldMetadata>) {
+    match list {
+        Expr::Alias(alias)
+            if alias.metadata.as_ref().is_some_and(|metadata| {
+                metadata
+                    .inner()
+                    .contains_key(FUNCTION_RESULT_NAME_METADATA_KEY)
+            }) =>
+        {
+            (*alias.expr, alias.metadata)
+        }
+        list => (list, None),
+    }
+}
 
 impl SqlToRel<'_> {
     /// Plan the function calls of one FROM item.
@@ -114,6 +140,16 @@ impl SqlToRel<'_> {
         let pushed = siblings
             .as_ref()
             .map(|schema| planner_context.push_outer_query_schema(Arc::clone(schema)));
+        let single_call = calls.len() == 1;
+        // A column definition list, on a call or as a typed alias column
+        // list, declares the row type of a function returning `record`.
+        let defines_columns = calls.iter().any(|call| !call.column_defs.is_empty())
+            || alias.as_ref().is_some_and(|alias| {
+                alias
+                    .columns
+                    .iter()
+                    .any(|column| column.data_type.is_some())
+            });
         let planned = self.plan_function_relations_in_scope(
             calls,
             with_ordinality,
@@ -125,6 +161,34 @@ impl SqlToRel<'_> {
             planner_context.pop_outer_query_schema(depth);
         }
         let (plan, alias) = planned?;
+        // One function that returns a scalar, without ordinality, is read
+        // whole as that scalar: `x` over `f() AS x` or `f() AS x(y)` is the
+        // function's value. A composite result, a column definition list,
+        // several functions or an ordinality column make a record.
+        if single_call
+            && !with_ordinality
+            && !defines_columns
+            && plan.schema().fields().len() == 1
+        {
+            let (qualifier, field) = plan.schema().qualified_field(0);
+            let composite = field
+                .metadata()
+                .get(FUNCTION_RESULT_NAME_METADATA_KEY)
+                .is_some_and(|kind| kind == FUNCTION_RESULT_FIELD);
+            let relation = match &alias {
+                Some(alias) => Some(TableReference::bare(
+                    self.ident_normalizer.normalize(alias.name.clone()),
+                )),
+                None => qualifier.cloned(),
+            };
+            let column = match alias.as_ref().and_then(|alias| alias.columns.first()) {
+                Some(column) => self.ident_normalizer.normalize(column.name.clone()),
+                None => field.name().clone(),
+            };
+            if !composite && let Some(relation) = relation {
+                planner_context.set_scalar_function_relation(relation, column);
+            }
+        }
         let Some(siblings) = siblings else {
             return Ok((plan, alias));
         };
@@ -181,6 +245,8 @@ impl SqlToRel<'_> {
             })
             .unwrap_or_default();
         let mut columns: Vec<(String, Expr)> = Vec::new();
+        // The declared-name mark of each list column, by position.
+        let mut declared_names: Vec<Option<FieldMetadata>> = Vec::new();
         let mut record_columns = Vec::new();
         let mut relation_name = None;
         let mut definition_calls = Vec::new();
@@ -237,14 +303,22 @@ impl SqlToRel<'_> {
                 argument_schema,
                 Some(&column_definitions),
             )? {
-                Some(SetReturningColumns::Lists(output)) => columns.extend(output),
+                Some(SetReturningColumns::Lists(output)) => {
+                    for (column, list) in output {
+                        let (list, declared) = declared_result_name(list);
+                        declared_names.push(declared);
+                        columns.push((column, list));
+                    }
+                }
                 Some(SetReturningColumns::Rows(rows)) => {
                     record_columns.push(columns.len());
+                    declared_names.push(None);
                     columns.push((name.to_owned(), rows));
                 }
                 None if name == "unnest" => {
                     for arg in args {
                         Self::check_unnest_arg(&arg, argument_schema)?;
+                        declared_names.push(None);
                         columns.push((name.to_string(), arg));
                     }
                 }
@@ -290,9 +364,13 @@ impl SqlToRel<'_> {
             )?;
 
         let mut names = Vec::new();
+        let mut name_marks = Vec::new();
         let mut output_columns = Vec::new();
-        for (index, ((name, _), internal)) in
-            columns.into_iter().zip(&internal).enumerate()
+        for (index, (((name, _), internal), declared)) in columns
+            .into_iter()
+            .zip(&internal)
+            .zip(declared_names)
+            .enumerate()
         {
             if record_columns.contains(&index) {
                 let field = unnested.schema().field_with_unqualified_name(internal)?;
@@ -301,11 +379,16 @@ impl SqlToRel<'_> {
                 };
                 for field in fields {
                     names.push(field.name().clone());
+                    name_marks.push(Some(FieldMetadata::from(BTreeMap::from([(
+                        FUNCTION_RESULT_NAME_METADATA_KEY.to_string(),
+                        FUNCTION_RESULT_FIELD.to_string(),
+                    )]))));
                     output_columns
                         .push(Column::from_name(format!("{internal}.{}", field.name())));
                 }
             } else {
                 names.push(name);
+                name_marks.push(declared);
                 output_columns.push(Column::from_name(internal));
             }
         }
@@ -319,10 +402,12 @@ impl SqlToRel<'_> {
             )?;
         }
         let mut alias = alias;
-        // A base-type result takes a bare table alias as its column name.
+        // A base-type result takes a bare table alias as its column name,
+        // unless the function's declaration names it.
         if single_call
             && record_columns.is_empty()
             && names.len() == 1
+            && name_marks[0].is_none()
             && let Some(table_alias) = &alias
             && table_alias.columns.is_empty()
         {
@@ -331,7 +416,11 @@ impl SqlToRel<'_> {
         let mut output: Vec<Expr> = output_columns
             .into_iter()
             .zip(&names)
-            .map(|(column, name)| Expr::Column(column).alias(name))
+            .zip(name_marks)
+            .map(|((column, name), mark)| match mark {
+                Some(mark) => Expr::Column(column).alias_with_metadata(name, Some(mark)),
+                None => Expr::Column(column).alias(name),
+            })
             .collect();
         if with_ordinality {
             output.push(Expr::Column(Column::from_name(ORDINALITY_COLUMN)));
@@ -401,10 +490,20 @@ impl SqlToRel<'_> {
         if with_ordinality {
             plan = self.number_rows(plan, name)?;
         }
+        // A base-type result with no name of its own takes a bare table alias
+        // as its column name, as `FROM f() AS x` names both the relation and
+        // its column `x` in PostgreSQL. A column the function's declaration
+        // names (an OUT parameter, a composite result's field) keeps that
+        // name whatever the alias; the provider marks it.
         let base_columns = plan.schema().fields().len() - usize::from(with_ordinality);
         if base_columns == 1
             && let Some(table_alias) = &alias
             && table_alias.columns.is_empty()
+            && !plan
+                .schema()
+                .field(0)
+                .metadata()
+                .contains_key(FUNCTION_RESULT_NAME_METADATA_KEY)
         {
             let alias_name = self.ident_normalizer.normalize(table_alias.name.clone());
             let mut output: Vec<Expr> = plan

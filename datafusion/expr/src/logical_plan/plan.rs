@@ -275,6 +275,21 @@ pub enum JsonTableErrorHandling {
     Error,
 }
 
+/// Prefix under which the type-name argument of a SQL/JSON query function
+/// carries the field metadata of its `RETURNING` type. The argument is the
+/// type's name, not a value of the type, so the metadata is prefixed to keep
+/// it from reading as the argument's own type identity.
+pub const SQL_JSON_RETURNING_METADATA_PREFIX: &str = "sql_json_returning.";
+
+/// The quotes clause of a JSON_TABLE column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
+pub enum JsonTableQuotes {
+    /// KEEP QUOTES [ON SCALAR STRING]
+    Keep,
+    /// OMIT QUOTES [ON SCALAR STRING]
+    Omit,
+}
+
 /// Represents a column definition in JSON_TABLE.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
 pub enum JsonTableColumnDef {
@@ -283,6 +298,9 @@ pub enum JsonTableColumnDef {
     Path {
         name: String,
         data_type: DataType,
+        /// The column type as written, modifiers included: the type whose
+        /// input rules the selected item is coerced by.
+        declared_type: String,
         /// SQL type metadata produced by the dialect's type planner (for
         /// example PostgreSQL type identity and typmod).
         metadata: FieldMetadata,
@@ -293,8 +311,10 @@ pub enum JsonTableColumnDef {
         format_json: bool,
         /// SQL/JSON wrapper mode (`without`, `conditional`, `unconditional`).
         wrapper: Option<String>,
-        /// Remove quotes when the selected JSON item is a string.
-        omit_quotes: bool,
+        /// The written `KEEP QUOTES` / `OMIT QUOTES` clause; `None` when the
+        /// column has none. A column with a quotes or wrapper clause is a
+        /// JSON_QUERY column even without `FORMAT JSON`.
+        quotes: Option<JsonTableQuotes>,
         on_empty: Option<JsonTableErrorHandling>,
         on_error: Option<JsonTableErrorHandling>,
     },
@@ -3590,8 +3610,10 @@ impl SubqueryAlias {
 
     /// Whether this alias is a table alias over one relation (`FROM t AS x`)
     /// rather than a query level of its own (a derived table, view or common
-    /// table expression): its input is a table scan, under only filters and
-    /// projections that pass the scan's columns on by name, and the scan's
+    /// table expression): its input is a table scan, under only filters,
+    /// projections that pass the scan's columns on by name and extension
+    /// nodes that pass a table alias
+    /// ([`UserDefinedLogicalNode::passes_table_alias`]), and the scan's
     /// lock, if it has one, reached it through this alias
     /// ([`TableScanRowLock::unaliased`] is false). A locking clause locks the
     /// rows of a table alias in the alias's own query level; a query level
@@ -3612,6 +3634,13 @@ impl SubqueryAlias {
                         .iter()
                         .all(|expr| matches!(expr, Expr::Column(_)))
                         && relation_under_alias(&projection.input)
+                }
+                LogicalPlan::Extension(extension) => {
+                    extension.node.passes_table_alias()
+                        && matches!(
+                            extension.node.inputs().as_slice(),
+                            [input] if relation_under_alias(input)
+                        )
                 }
                 _ => false,
             }

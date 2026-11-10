@@ -25,8 +25,16 @@ use datafusion_expr::{Case, Expr, expr::ScalarFunction};
 use sqlparser::ast::{AstBox as SQLBox, CaseWhen, Expr as SQLExpr, Ident};
 use std::sync::Arc;
 
-use crate::planner::{PlannerContext, PlannerResult, SqlToRel};
+use crate::planner::{PlannerContext, PlannerResult, RawCaseExpr, SqlToRel};
+use crate::row_presence::row_presence_field;
 use datafusion_expr::UNNAMED_TABLE;
+
+/// A relation's qualifier in a schema and the qualified columns its
+/// whole-row value holds.
+type WholeRowMembers<'a> = (
+    &'a TableReference,
+    Vec<(Option<&'a TableReference>, &'a FieldRef)>,
+);
 
 impl SqlToRel<'_> {
     pub(super) fn sql_identifier_to_expr(
@@ -113,12 +121,20 @@ impl SqlToRel<'_> {
             // relation in scope (rather than a column) resolves to a record of
             // that relation's columns, e.g. `row_to_json(t)` over a subquery
             // aliased `t`.
-            if let Some(record) = self.try_plan_whole_row_reference(
-                &TableReference::bare(normalize_ident.clone()),
-                schema,
-                planner_context,
-            )? {
+            let relation = TableReference::bare(normalize_ident.clone());
+            if let Some(record) =
+                self.try_plan_whole_row_reference(&relation, schema, planner_context)?
+            {
                 return Ok(record);
+            }
+            // A relation of an enclosing query is in scope the same way, from
+            // the innermost outwards; its columns are outer references.
+            for outer in planner_context.outer_query_schema_stack().iter().rev() {
+                if let Some(record) =
+                    self.whole_row_reference(&relation, outer, planner_context, true)?
+                {
+                    return Ok(record);
+                }
             }
 
             // Default case
@@ -138,16 +154,25 @@ impl SqlToRel<'_> {
     /// `row_to_json`). Returns `None` when the name matches no relation in the
     /// schema or when the context provides no `named_struct` implementation, so
     /// the caller falls back to plain column resolution.
+    ///
+    /// A function relation that returns a scalar is read whole as that
+    /// scalar, the value of its one column, as PostgreSQL reads `x` over
+    /// `f() AS x`.
     pub(super) fn try_plan_whole_row_reference(
         &self,
         relation: &TableReference,
         schema: &DFSchema,
         planner_context: &PlannerContext,
     ) -> Result<Option<Expr>> {
-        let Some(named_struct) = self.context_provider.get_function_meta("named_struct")
-        else {
-            return Ok(None);
-        };
+        self.whole_row_reference(relation, schema, planner_context, false)
+    }
+
+    /// The relation of `schema` that `relation` names, with the columns its
+    /// whole-row value holds, or `None` when the name matches no relation.
+    fn whole_row_members<'a>(
+        relation: &TableReference,
+        schema: &'a DFSchema,
+    ) -> Result<Option<WholeRowMembers<'a>>> {
         let mut qualifiers = schema.iter().filter_map(|(qualifier, _)| {
             qualifier.filter(|qualifier| {
                 qualifier.table() == relation.table()
@@ -168,23 +193,113 @@ impl SqlToRel<'_> {
                 format!("table reference \"{relation}\" is ambiguous"),
             ));
         }
-        let mut args: Vec<Expr> = Vec::new();
-        for (field_qualifier, field) in schema.iter() {
-            if field_qualifier != Some(qualifier)
-                || field
-                    .metadata()
-                    .get(datafusion_expr::utils::SYSTEM_COLUMN_METADATA_KEY)
-                    .is_some_and(|value| value == "true")
-            {
-                continue;
+        let members = schema
+            .iter()
+            .filter(|(field_qualifier, field)| {
+                *field_qualifier == Some(qualifier)
+                    && !field
+                        .metadata()
+                        .get(datafusion_expr::utils::SYSTEM_COLUMN_METADATA_KEY)
+                        .is_some_and(|value| value == "true")
+            })
+            .collect();
+        Ok(Some((qualifier, members)))
+    }
+
+    /// The columns `relation.*` contributes where it expands in place, as
+    /// in a ROW constructor: each column of the relation, found in this
+    /// query's `schema` or else in an enclosing query, whose columns are
+    /// outer references. `None` when the name matches no relation in scope.
+    pub(super) fn relation_columns(
+        &self,
+        relation: &TableReference,
+        schema: &DFSchema,
+        planner_context: &PlannerContext,
+    ) -> Result<Option<Vec<Expr>>> {
+        if let Some((_, members)) = Self::whole_row_members(relation, schema)? {
+            return Ok(Some(
+                members
+                    .into_iter()
+                    .map(|(qualifier, field)| {
+                        Expr::Column(Column::from((qualifier, field)))
+                    })
+                    .collect(),
+            ));
+        }
+        for outer in planner_context.outer_query_schema_stack().iter().rev() {
+            if let Some((_, members)) = Self::whole_row_members(relation, outer)? {
+                return Ok(Some(
+                    members
+                        .into_iter()
+                        .map(|(qualifier, field)| {
+                            Expr::OuterReferenceColumn(
+                                Arc::clone(field),
+                                Column::from((qualifier, field)),
+                            )
+                        })
+                        .collect(),
+                ));
             }
+        }
+        Ok(None)
+    }
+
+    /// [`Self::try_plan_whole_row_reference`] over `schema`, the relations of
+    /// this query or, with `outer`, of an enclosing one, whose columns are
+    /// then outer references.
+    fn whole_row_reference(
+        &self,
+        relation: &TableReference,
+        schema: &DFSchema,
+        planner_context: &PlannerContext,
+        outer: bool,
+    ) -> Result<Option<Expr>> {
+        let named_struct = self.context_provider.get_function_meta("named_struct");
+        let Some((qualifier, members)) = Self::whole_row_members(relation, schema)?
+        else {
+            return Ok(None);
+        };
+        let member = |field_qualifier: Option<&TableReference>, field: &FieldRef| {
+            let column = Column::from((field_qualifier, field));
+            if outer {
+                Expr::OuterReferenceColumn(Arc::clone(field), column)
+            } else {
+                Expr::Column(column)
+            }
+        };
+        if let [(field_qualifier, field)] = members.as_slice()
+            && planner_context.is_scalar_function_relation(qualifier, field.name(), outer)
+        {
+            return Ok(Some(member(*field_qualifier, *field)));
+        }
+        let Some(named_struct) = named_struct else {
+            return Ok(None);
+        };
+        let mut args: Vec<Expr> = Vec::new();
+        for (field_qualifier, field) in members {
             args.push(Expr::Literal(
                 ScalarValue::Utf8(Some(field.name().clone())),
                 None,
             ));
-            args.push(Expr::Column(Column::from((field_qualifier, field))));
+            args.push(member(field_qualifier, field));
         }
         let record = Expr::ScalarFunction(ScalarFunction::new_udf(named_struct, args));
+        // An outer join leaves the relation's row-presence column NULL on
+        // exactly the rows it null-extends, where the whole-row value is
+        // NULL rather than a record of NULL fields.
+        let record = match row_presence_field(schema, qualifier) {
+            Some((field_qualifier, field)) if field.is_nullable() => {
+                Expr::Case(Case::new(
+                    None,
+                    vec![(
+                        Box::new(member(field_qualifier, field).is_not_null()),
+                        Box::new(record),
+                    )],
+                    None,
+                ))
+            }
+            _ => record,
+        };
         self.context_provider
             .plan_whole_row_reference(
                 qualifier,
@@ -384,6 +499,22 @@ impl SqlToRel<'_> {
             None
         };
 
+        let mut case = RawCaseExpr {
+            expr,
+            when_then_expr,
+            else_expr,
+        };
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_case(case, schema)? {
+                PlannerResult::Planned(planned) => return Ok(planned),
+                PlannerResult::Original(original) => case = original,
+            }
+        }
+        let RawCaseExpr {
+            expr,
+            when_then_expr,
+            else_expr,
+        } = case;
         Ok(Expr::Case(Case::new(expr, when_then_expr, else_expr)))
     }
 }

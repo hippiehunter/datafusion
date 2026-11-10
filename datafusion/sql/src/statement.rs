@@ -5260,6 +5260,7 @@ impl SqlToRel<'_> {
             }
             planner_context.set_values_defaults(Some(crate::planner::ValuesDefaults {
                 slots: defaults,
+                targets: row_fields.clone(),
             }));
         }
         if assemble_values {

@@ -25,7 +25,8 @@ use datafusion_expr::{Aggregate, Expr, LogicalPlan, LogicalPlanBuilder, Volatili
 
 /// Optimizer rule that removes constant expressions from `GROUP BY` clause
 /// and places additional projection on top of aggregation, to preserve
-/// original schema
+/// original schema. At least one group key always remains, so the aggregate
+/// stays grouped.
 #[derive(Default, Debug)]
 pub struct EliminateGroupByConstant {}
 
@@ -52,20 +53,23 @@ impl OptimizerRule for EliminateGroupByConstant {
                     .iter()
                     .partition(|expr| is_constant_expression(expr));
 
-                // If no constant expressions found (nothing to optimize) or
-                // constant expression is the only expression in aggregate,
-                // optimization is skipped
-                if const_group_expr.is_empty()
-                    || (!const_group_expr.is_empty()
-                        && nonconst_group_expr.is_empty()
-                        && aggregate.aggr_expr.is_empty())
-                {
+                // A grouped aggregate produces no row for empty input, while
+                // an aggregate without group keys produces exactly one. The
+                // last group key therefore carries the aggregate's
+                // cardinality and is kept even when it is constant.
+                let retained_group_expr = if nonconst_group_expr.is_empty() {
+                    const_group_expr.into_iter().take(1).collect::<Vec<_>>()
+                } else {
+                    nonconst_group_expr
+                };
+
+                if retained_group_expr.len() == aggregate.group_expr.len() {
                     return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
                 }
 
                 let simplified_aggregate = LogicalPlan::Aggregate(Aggregate::try_new(
                     aggregate.input,
-                    nonconst_group_expr.into_iter().cloned().collect(),
+                    retained_group_expr.into_iter().cloned().collect(),
                     aggregate.aggr_expr.clone(),
                 )?);
 
@@ -193,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eliminate_constant() -> Result<()> {
+    fn test_all_constant_keys_keep_one_group_key() -> Result<()> {
         let scan = test_table_scan()?;
         let plan = LogicalPlanBuilder::from(scan)
             .aggregate(vec![lit("test"), lit(123u32)], vec![count(col("c"))])?
@@ -201,9 +205,36 @@ mod tests {
 
         assert_optimized_plan_equal!(plan, @r#"
         Projection: Utf8("test"), UInt32(123), count(test.c)
-          Aggregate: groupBy=[[]], aggr=[[count(test.c)]]
+          Aggregate: groupBy=[[Utf8("test")]], aggr=[[count(test.c)]]
             TableScan: test
         "#)
+    }
+
+    #[test]
+    fn test_no_op_only_constant_with_aggregate() -> Result<()> {
+        let scan = test_table_scan()?;
+        let plan = LogicalPlanBuilder::from(scan)
+            .aggregate(vec![lit(123u32)], vec![count(col("c"))])?
+            .build()?;
+
+        assert_optimized_plan_equal!(plan, @r"
+        Aggregate: groupBy=[[UInt32(123)]], aggr=[[count(test.c)]]
+          TableScan: test
+        ")
+    }
+
+    #[test]
+    fn test_all_constant_keys_without_aggregates_keep_one_group_key() -> Result<()> {
+        let scan = test_table_scan()?;
+        let plan = LogicalPlanBuilder::from(scan)
+            .aggregate(vec![lit(1u32), lit(2u32)], Vec::<Expr>::new())?
+            .build()?;
+
+        assert_optimized_plan_equal!(plan, @r"
+        Projection: UInt32(1), UInt32(2)
+          Aggregate: groupBy=[[UInt32(1)]], aggr=[[]]
+            TableScan: test
+        ")
     }
 
     #[test]

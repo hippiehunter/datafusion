@@ -77,6 +77,27 @@ pub trait UserDefinedLogicalNode: fmt::Debug + Send + Sync {
         get_all_columns_from_schema(self.schema())
     }
 
+    /// Returns `true` if no predicate at all may be pushed below this node:
+    /// not one over columns outside
+    /// [`Self::prevent_predicate_push_down_columns`], and not one that reads
+    /// no column, such as `f()` or `1 / 0 = 1`.
+    ///
+    /// A node whose input must be evaluated before any predicate above it,
+    /// such as a security barrier, returns `true`.
+    fn blocks_predicate_push_down(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` if this node has one input, returns exactly that
+    /// input's rows under that input's column names, and so stands between
+    /// a table alias and the relation it names without making the alias a
+    /// query level of its own ([`SubqueryAlias::is_table_alias`]).
+    ///
+    /// [`SubqueryAlias::is_table_alias`]: crate::logical_plan::SubqueryAlias::is_table_alias
+    fn passes_table_alias(&self) -> bool {
+        false
+    }
+
     /// Write a single line, human readable string to `f` for use in explain plan.
     ///
     /// For example: `TopK: k=10`
@@ -265,6 +286,27 @@ pub trait UserDefinedLogicalNodeCore:
         get_all_columns_from_schema(self.schema())
     }
 
+    /// Returns `true` if no predicate at all may be pushed below this node:
+    /// not one over columns outside
+    /// [`Self::prevent_predicate_push_down_columns`], and not one that reads
+    /// no column, such as `f()` or `1 / 0 = 1`.
+    ///
+    /// A node whose input must be evaluated before any predicate above it,
+    /// such as a security barrier, returns `true`.
+    fn blocks_predicate_push_down(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` if this node has one input, returns exactly that
+    /// input's rows under that input's column names, and so stands between
+    /// a table alias and the relation it names without making the alias a
+    /// query level of its own ([`SubqueryAlias::is_table_alias`]).
+    ///
+    /// [`SubqueryAlias::is_table_alias`]: crate::logical_plan::SubqueryAlias::is_table_alias
+    fn passes_table_alias(&self) -> bool {
+        false
+    }
+
     /// Write a single line, human readable string to `f` for use in explain plan.
     ///
     /// For example: `TopK: k=10`
@@ -343,6 +385,14 @@ impl<T: UserDefinedLogicalNodeCore> UserDefinedLogicalNode for T {
 
     fn prevent_predicate_push_down_columns(&self) -> HashSet<String> {
         self.prevent_predicate_push_down_columns()
+    }
+
+    fn blocks_predicate_push_down(&self) -> bool {
+        self.blocks_predicate_push_down()
+    }
+
+    fn passes_table_alias(&self) -> bool {
+        self.passes_table_alias()
     }
 
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {

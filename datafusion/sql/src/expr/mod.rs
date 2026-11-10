@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use sqlparser::ast::{
-    AccessExpr, AstBox as SQLBox, BinaryOperator, CastFormat, CastKind, CeilFloorKind,
+    AccessExpr, ArrayElemTypeDef, AstBox as SQLBox, BinaryOperator, CastFormat, CastKind,
+    CeilFloorKind,
     DataType as SQLDataType, DateTimeField, Expr as SQLExpr,
     ExprWithAlias as SQLExprWithAlias, JsonPathElem, QuantifiedPredicateKind,
     StructField, Subscript, TrimWhereField, TypedString, Value, ValueWithSpan,
@@ -35,7 +36,9 @@ use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::expr::{
     AllExpr, AnyExpr, InList, QuantifiedSource, WildcardOptions,
 };
-use datafusion_expr::{BinaryExpr, Cast, Expr, GetFieldAccess, Like, Operator, lit};
+use datafusion_expr::{
+    BinaryExpr, Cast, Expr, ExprSchemable, GetFieldAccess, Like, Operator, lit,
+};
 
 use crate::planner::{
     PlannerContext, PlannerResult, RawBinaryExpr, RawCastExpr, RawDistinctFromExpr,
@@ -1649,16 +1652,58 @@ impl SqlToRel<'_> {
             });
         }
         let pattern = self.sql_expr_to_logical_expr(pattern, schema, planner_context)?;
-        let escape_char = match escape_char {
-            Some(Value::SingleQuotedString(char)) if char.len() == 1 => {
-                Some(char.chars().next().unwrap())
+        // PostgreSQL's `x LIKE p ESCAPE e` is `x ~~ like_escape(p, e)`:
+        // `like_escape` rewrites the pattern to one whose escape character is
+        // the backslash. A one-character escape is kept on the expression.
+        // Any other escape is planned as PostgreSQL plans it, so the empty
+        // string, which means no escape character, doubles each backslash of
+        // the pattern row by row, and a longer string is `like_escape`'s
+        // error.
+        let single_char = |text: &str| {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => Some(ch),
+                _ => None,
             }
-            Some(value) => {
-                return plan_err!(
-                    "Invalid escape character in LIKE expression. Expected a single character wrapped with single quotes, got {value}"
-                );
-            }
-            None => None,
+        };
+        let (pattern, escape_char) = match escape_char {
+            None => (pattern, None),
+            Some(value) => match value {
+                Value::SingleQuotedString(text) if single_char(text).is_some() => {
+                    (pattern, single_char(text))
+                }
+                value => {
+                    // Over a bytea pattern the untyped escape string resolves
+                    // to `like_escape(bytea, bytea)`. The bytea a string
+                    // without a backslash spells is its own bytes.
+                    let binary_pattern = matches!(
+                        pattern.get_type(schema),
+                        Ok(DataType::Binary
+                            | DataType::LargeBinary
+                            | DataType::BinaryView
+                            | DataType::FixedSizeBinary(_))
+                    );
+                    let escape = match value {
+                        Value::SingleQuotedString(text)
+                            if binary_pattern && !text.contains('\\') =>
+                        {
+                            Expr::Literal(
+                                ScalarValue::Binary(Some(text.as_bytes().to_vec())),
+                                None,
+                            )
+                        }
+                        value => self.sql_expr_to_logical_expr(
+                            &SQLExpr::Value(value.clone().with_empty_span()),
+                            schema,
+                            planner_context,
+                        )?,
+                    };
+                    (
+                        self.similar_to_call("like_escape", vec![pattern, escape])?,
+                        None,
+                    )
+                }
+            },
         };
         Ok(Expr::Like(Like::new(
             negated,
@@ -1824,8 +1869,117 @@ impl SqlToRel<'_> {
             return self.sql_regclass_cast_to_expr(expr, schema, planner_context);
         }
 
-        let expr = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        let expr = match (
+            Self::array_constructor(expr),
+            Self::sql_array_element_type(data_type),
+        ) {
+            (Some(elements), Some(element_type))
+                if matches!(cast_kind, CastKind::Cast | CastKind::DoubleColon) =>
+            {
+                self.sql_cast_array_constructor(
+                    elements,
+                    data_type,
+                    element_type,
+                    cast_kind,
+                    schema,
+                    planner_context,
+                )?
+            }
+            _ => self.sql_expr_to_logical_expr(expr, schema, planner_context)?,
+        };
         self.finish_cast_expr(expr, data_type, cast_kind.clone(), format.cloned(), schema)
+    }
+
+    /// The members of the ARRAY constructor `expr` is, looking through
+    /// parentheses only.
+    fn array_constructor(expr: &SQLExpr) -> Option<&[SQLExpr]> {
+        match expr {
+            SQLExpr::Array(array) => Some(array.elem.as_slice()),
+            SQLExpr::Nested(inner) => Self::array_constructor(inner.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The element type an array type spelling declares, through every
+    /// dimension it writes.
+    fn sql_array_element_type(data_type: &SQLDataType) -> Option<&SQLDataType> {
+        let SQLDataType::Array(
+            ArrayElemTypeDef::SquareBracket(inner, _)
+            | ArrayElemTypeDef::AngleBracket(inner)
+            | ArrayElemTypeDef::Parenthesis(inner),
+        ) = data_type
+        else {
+            return None;
+        };
+        let inner: &SQLDataType = inner.as_ref();
+        Some(Self::sql_array_element_type(inner).unwrap_or(inner))
+    }
+
+    /// Plan an ARRAY constructor written directly under a cast to an array
+    /// type. PostgreSQL types such a constructor in the cast's type instead
+    /// of resolving its members among themselves: every member is cast to
+    /// the element type, or to the array type once any member is itself an
+    /// array. A nested constructor is one more dimension of the same array:
+    /// its members are cast the same way and it is then a member of the
+    /// array type like any other array-valued member, so every dimension
+    /// carries the one type the cast names.
+    fn sql_cast_array_constructor(
+        &self,
+        elements: &[SQLExpr],
+        array_type: &SQLDataType,
+        element_type: &SQLDataType,
+        cast_kind: &CastKind,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let mut multidimensional = false;
+        let mut members = Vec::with_capacity(elements.len());
+        for element in elements {
+            if let Some(nested) = Self::array_constructor(element) {
+                multidimensional = true;
+                let dimension = self.sql_cast_array_constructor(
+                    nested,
+                    array_type,
+                    element_type,
+                    cast_kind,
+                    schema,
+                    planner_context,
+                )?;
+                members.push(dimension);
+            } else {
+                let member =
+                    self.sql_expr_to_logical_expr(element, schema, planner_context)?;
+                multidimensional |= matches!(
+                    member.get_type(schema)?,
+                    DataType::List(_)
+                        | DataType::LargeList(_)
+                        | DataType::FixedSizeList(_, _)
+                );
+                members.push(member);
+            }
+        }
+        let member_type = if multidimensional {
+            array_type
+        } else {
+            element_type
+        };
+        let values = members
+            .into_iter()
+            .map(|member| {
+                if Self::is_regclass_sql_type(member_type) {
+                    self.sql_regclass_cast_from_arg_expr(member)
+                } else {
+                    self.finish_cast_expr(
+                        member,
+                        member_type,
+                        cast_kind.clone(),
+                        None,
+                        schema,
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.try_plan_array_literal(values, schema)
     }
 
     /// Build a call to one of the SQL/XML functions the context provider

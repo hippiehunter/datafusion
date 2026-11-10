@@ -144,8 +144,11 @@ impl SqlToRel<'_> {
                 let plan = self.apply_query_locks(plan, query, planner_context)?;
                 self.plan_locking_level(plan, query)
             }
-        }?;
-        Ok(under_with_list(query.with.as_deref(), with_items, plan))
+        };
+        // An aggregate this query handed to a query around it reaches that
+        // query through the context this query was planned from.
+        outer_planner_context.adopt_outer_level_aggregates(&mut query_plan_context);
+        Ok(under_with_list(query.with.as_deref(), with_items, plan?))
     }
 
     /// Check a query level that carries a locking clause, as PostgreSQL's

@@ -765,8 +765,11 @@ impl SqlToRel<'_> {
                     planner_context,
                 )?;
             }
-            let (args, arg_names) =
-                self.function_args_to_expr_with_names(args, schema, planner_context)?;
+            let (args, arg_names) = if name == "row" {
+                self.row_constructor_args_to_expr(args, schema, planner_context)?
+            } else {
+                self.function_args_to_expr_with_names(args, schema, planner_context)?
+            };
 
             // Special handling for JSON_OBJECT: convert named args (key: value) to positional args
             let (args, arg_names) = if fm.name().eq_ignore_ascii_case("json_object")
@@ -1488,6 +1491,53 @@ impl SqlToRel<'_> {
 
         let pairs = results?;
         let (exprs, names): (Vec<Expr>, Vec<Option<String>>) = pairs.into_iter().unzip();
+        Ok((exprs, names))
+    }
+
+    /// The fields of a ROW constructor. `relation.*` contributes each of
+    /// the relation's columns as a field of its own, as PostgreSQL expands
+    /// `ROW(t.*, 42)`; in any other call it is the relation's whole-row
+    /// value.
+    fn row_constructor_args_to_expr(
+        &self,
+        args: &[FunctionArg],
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<(Vec<Expr>, Vec<Option<String>>)> {
+        let mut exprs = Vec::with_capacity(args.len());
+        let mut names = Vec::with_capacity(args.len());
+        for arg in args {
+            let relation = match arg {
+                FunctionArg::Unnamed(
+                    FunctionArgExpr::QualifiedWildcard(relation)
+                    | FunctionArgExpr::Expr(SQLExpr::QualifiedWildcard(relation, _)),
+                ) => Some(relation),
+                _ => None,
+            };
+            let columns = match relation {
+                Some(relation) => {
+                    let relation =
+                        self.object_name_to_table_reference(relation.clone())?;
+                    self.relation_columns(&relation, schema, planner_context)?
+                }
+                None => None,
+            };
+            match columns {
+                Some(columns) => {
+                    names.extend(columns.iter().map(|_| None));
+                    exprs.extend(columns);
+                }
+                None => {
+                    let (expr, name) = self.sql_fn_arg_to_logical_expr_with_name(
+                        arg,
+                        schema,
+                        planner_context,
+                    )?;
+                    exprs.push(expr);
+                    names.push(name);
+                }
+            }
+        }
         Ok((exprs, names))
     }
 

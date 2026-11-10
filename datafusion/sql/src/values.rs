@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use crate::planner::{PlannerContext, SqlToRel, ValuesAssembly, ValuesDefault};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::tree_node::TreeNode;
 use datafusion_common::{
     Column, DFSchema, DFSchemaRef, Result, ScalarValue, UnnestOptions, not_impl_err,
@@ -52,6 +52,16 @@ impl SqlToRel<'_> {
         // scalar subquery in a value slot may hold a VALUES of its own, whose
         // width has nothing to do with the target row's.
         let target_schema = planner_context.set_table_schema(None);
+        let targets = defaults.as_ref().map(|defaults| defaults.targets.clone());
+        // The column a value at `index` is assigned to: the INSERT's own
+        // column when it declared them, else the positional field.
+        let assignment_target = |schema: &DFSchemaRef, index: usize| {
+            targets
+                .as_ref()
+                .and_then(|targets| targets.get(index))
+                .or_else(|| schema.fields().get(index))
+                .cloned()
+        };
 
         // A row holding a set-returning call is every row the call produces,
         // and one holding a sub-select is computed rather than constant: such
@@ -121,7 +131,10 @@ impl SqlToRel<'_> {
 
         let schema = target_schema.unwrap_or_else(|| Arc::clone(&empty_schema));
         if relational {
-            return self.values_rows_to_union(rows, &schema);
+            let targets = (0..schema.fields().len())
+                .filter_map(|index| assignment_target(&schema, index))
+                .collect::<Vec<_>>();
+            return self.values_rows_to_union(rows, &schema, &targets);
         }
         let values = rows
             .into_iter()
@@ -130,13 +143,13 @@ impl SqlToRel<'_> {
                     .into_iter()
                     .enumerate()
                     .map(|(index, expr)| {
-                        let Some(target) = schema.fields().get(index) else {
+                        let Some(target) = assignment_target(&schema, index) else {
                             return Ok(expr);
                         };
                         if target.data_type() == &DataType::Null {
                             return Ok(expr);
                         }
-                        self.assign_to_column(expr, target, &empty_schema)
+                        self.assign_to_column(expr, &target, &empty_schema)
                     })
                     .collect::<Result<Vec<_>>>()
             })
@@ -327,14 +340,15 @@ impl SqlToRel<'_> {
 
     /// Rows that are relations of their own — the output of a set-returning
     /// call, or computed through a sub-select — as a union of one projection
-    /// per row, typed by the target schema or else by the first row.
+    /// per row, typed by the target schema or else by the first row. Each
+    /// value is assigned to its column of `targets`, which is empty when the
+    /// list has no target.
     fn values_rows_to_union(
         &self,
         rows: Vec<ValuesRow>,
         schema: &DFSchemaRef,
+        targets: &[FieldRef],
     ) -> Result<LogicalPlan> {
-        let target_fields =
-            (!schema.fields().is_empty()).then(|| schema.fields().clone());
         let mut columns: Vec<(String, DataType)> = schema
             .fields()
             .iter()
@@ -375,14 +389,12 @@ impl SqlToRel<'_> {
                 .zip(&columns)
                 .enumerate()
                 .map(|(index, (expr, (name, data_type)))| {
-                    let expr =
-                        match target_fields.as_ref().and_then(|fields| fields.get(index))
-                        {
-                            Some(target) => {
-                                self.assign_to_column(expr, target, input.schema())?
-                            }
-                            None => expr,
-                        };
+                    let expr = match targets.get(index) {
+                        Some(target) => {
+                            self.assign_to_column(expr, target, input.schema())?
+                        }
+                        None => expr,
+                    };
                     let expr = if expr.get_type(input.schema())? == *data_type {
                         expr
                     } else {

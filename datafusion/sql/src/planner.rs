@@ -21,7 +21,7 @@ use sqlparser::ast::{
     IdentityPropertyKind,
 };
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::vec;
@@ -268,6 +268,10 @@ pub enum ValuesDefault {
 pub struct ValuesDefaults {
     /// Default expression for each declared target slot.
     pub slots: Vec<ValuesDefault>,
+    /// The column each value of a row is assigned to, under the column's own
+    /// name. The relation the list produces names its columns by position, so
+    /// its schema cannot name the column an assignment is refused for.
+    pub targets: Fields,
 }
 
 /// How an INSERT's values list assembles the target table's rows when a
@@ -308,9 +312,15 @@ pub struct PlannerContext {
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
     ctes: HashMap<String, Arc<LogicalPlan>>,
+    /// The range variables an outer join can null-extend that a query reads
+    /// as a whole row; each carries a hidden row-presence column.
+    null_extended_whole_rows: HashSet<String>,
     /// Original base sources for the range variables in this query scope.
     /// None marks an explicitly anonymous source that shadows an outer name.
     whole_row_sources: HashMap<TableReference, Option<TableReference>>,
+    /// The function relations that return a scalar, by the SELECT whose
+    /// FROM clause wrote them.
+    scalar_function_relations: ScalarFunctionRelations,
     /// Stack of outer query schemas for resolving columns in nested subqueries.
     /// The last element is the immediate outer query's schema.
     /// Earlier elements are schemas from further ancestor queries.
@@ -364,6 +374,19 @@ pub(crate) struct WindowClauseEntry {
     pub(crate) window: WindowSpec,
 }
 
+/// The function relations that return a scalar, each by its range variable
+/// and the name of its one column. PostgreSQL reads such a relation whole as
+/// that column's value rather than as a record. A relation belongs to the
+/// SELECT whose FROM clause wrote it, so a derived table of the same name in
+/// another query level is not mistaken for it.
+#[derive(Debug, Clone, Default)]
+pub(super) struct ScalarFunctionRelations {
+    /// Written by the FROM clause of the SELECT being planned.
+    written: HashSet<(TableReference, String)>,
+    /// Written by the FROM clauses of the enclosing SELECTs.
+    enclosing: HashSet<(TableReference, String)>,
+}
+
 impl Default for PlannerContext {
     fn default() -> Self {
         Self::new()
@@ -377,7 +400,9 @@ impl PlannerContext {
             prepare_param_data_types: Arc::new(vec![]),
             parameter_list_fixed: false,
             ctes: HashMap::new(),
+            null_extended_whole_rows: HashSet::new(),
             whole_row_sources: HashMap::new(),
+            scalar_function_relations: ScalarFunctionRelations::default(),
             outer_query_schema_stack: Vec::new(),
             outer_from_schema: None,
             create_table_schema: None,
@@ -436,6 +461,14 @@ impl PlannerContext {
         self.outer_level_aggregates.push((level, aggregate));
     }
 
+    /// Take over the aggregates `nested`, the context a query inside this
+    /// one was planned with, holds for the queries around that query. The
+    /// nested context began as a copy of this one, so its list is this
+    /// one's with the nested query's own additions.
+    pub(crate) fn adopt_outer_level_aggregates(&mut self, nested: &mut PlannerContext) {
+        self.outer_level_aggregates = std::mem::take(&mut nested.outer_level_aggregates);
+    }
+
     /// The aggregates handed to the query at `level`, in order of appearance.
     pub fn take_outer_level_aggregates(&mut self, level: usize) -> Vec<Expr> {
         let (taken, kept): (Vec<_>, Vec<_>) =
@@ -452,6 +485,69 @@ impl PlannerContext {
         source: Option<TableReference>,
     ) {
         self.whole_row_sources.insert(relation, source);
+    }
+
+    /// Record that the FROM clause being planned wrote `relation`, a
+    /// function relation that returns a scalar as its one column `column`.
+    pub(super) fn set_scalar_function_relation(
+        &mut self,
+        relation: TableReference,
+        column: String,
+    ) {
+        self.scalar_function_relations
+            .written
+            .insert((relation, column));
+    }
+
+    /// Whether `relation`, whose one column is `column`, is a function
+    /// relation that returns a scalar: one this SELECT's FROM clause wrote,
+    /// or with `outer`, where the relation was found in an outer schema, one
+    /// any FROM clause in scope wrote. The items of a FROM clause reach the
+    /// items before them as outer relations.
+    pub(super) fn is_scalar_function_relation(
+        &self,
+        relation: &TableReference,
+        column: &str,
+        outer: bool,
+    ) -> bool {
+        let names = |relations: &HashSet<(TableReference, String)>| {
+            relations
+                .iter()
+                .any(|(scalar, name)| scalar == relation && name == column)
+        };
+        names(&self.scalar_function_relations.written)
+            || (outer && names(&self.scalar_function_relations.enclosing))
+    }
+
+    /// Enter a SELECT: its FROM clause has written no relation yet, and the
+    /// function relations in scope so far belong to enclosing queries.
+    /// Returns the scope to restore with [`Self::leave_select_scope`].
+    pub(super) fn enter_select_scope(&mut self) -> ScalarFunctionRelations {
+        let enclosing = self.scalar_function_relations.clone();
+        let written = std::mem::take(&mut self.scalar_function_relations.written);
+        self.scalar_function_relations.enclosing.extend(written);
+        enclosing
+    }
+
+    /// Leave the SELECT entered with [`Self::enter_select_scope`].
+    pub(super) fn leave_select_scope(&mut self, enclosing: ScalarFunctionRelations) {
+        self.scalar_function_relations = enclosing;
+    }
+
+    /// Record range variables that an outer join can null-extend and that a
+    /// query reads as a whole row. A relation of one of these names carries
+    /// a hidden row-presence column wherever it is planned from here on; the
+    /// column changes no result where nothing reads it.
+    pub(super) fn read_null_extended_whole_rows(
+        &mut self,
+        relations: impl IntoIterator<Item = String>,
+    ) {
+        self.null_extended_whole_rows.extend(relations);
+    }
+
+    /// Whether a relation named `relation` carries a row-presence column.
+    pub(super) fn reads_null_extended_whole_row(&self, relation: &str) -> bool {
+        self.null_extended_whole_rows.contains(relation)
     }
 
     pub(super) fn whole_row_source(
@@ -780,14 +876,22 @@ impl<'a> SqlToRel<'a> {
         plan: LogicalPlan,
         idents: &[Ident],
     ) -> Result<LogicalPlan> {
+        // A hidden system column is no column of the relation: it takes no
+        // name from the list and counts toward no position.
+        let visible_fields = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| !datafusion_expr::utils::is_system_column(field))
+            .count();
         if idents.is_empty() {
             Ok(plan)
-        } else if idents.len() > plan.schema().fields().len() {
+        } else if idents.len() > visible_fields {
             Err(datafusion_common::sqlstate_datafusion_err(
                 "42P10",
                 format!(
                     "Source table contains {} columns but {} names given as column alias",
-                    plan.schema().fields().len(),
+                    visible_fields,
                     idents.len()
                 ),
             ))
@@ -798,7 +902,7 @@ impl<'a> SqlToRel<'a> {
             let num_fields = schema.fields().len();
 
             // Collect the new column names for the renamed columns
-            let mut new_names: std::collections::HashSet<String> = idents
+            let mut new_names: HashSet<String> = idents
                 .iter()
                 .map(|id| self.ident_normalizer.normalize(id.clone()))
                 .collect();
@@ -808,12 +912,20 @@ impl<'a> SqlToRel<'a> {
             // projection is not validated so the columns stay as written and
             // SubqueryAlias applies the new qualifier on top.
             let mut exprs: Vec<_> = Vec::with_capacity(num_fields);
+            let mut position = 0;
             for i in 0..num_fields {
                 let (qualifier, field) = schema.qualified_field(i);
                 let col_expr = Expr::Column(Column::from((qualifier, field)));
-                let expr = if i < idents.len() {
+                if datafusion_expr::utils::is_system_column(field) {
+                    exprs.push((col_expr, false));
+                    continue;
+                }
+                let named = position;
+                position += 1;
+                let expr = if named < idents.len() {
                     // Rename this column
-                    col_expr.alias(self.ident_normalizer.normalize(idents[i].clone()))
+                    col_expr
+                        .alias(self.ident_normalizer.normalize(idents[named].clone()))
                 } else {
                     // Keep original name, but check for conflicts with renamed columns
                     let original_name = field.name();
@@ -892,7 +1004,7 @@ impl<'a> SqlToRel<'a> {
                     .unwrap_or_else(|| schema.field(index).name().clone()),
             })
             .collect::<Vec<_>>();
-        let mut seen = std::collections::HashSet::with_capacity(num_fields);
+        let mut seen = HashSet::with_capacity(num_fields);
         if let Some(duplicate) = names.iter().find(|name| !seen.insert(name.as_str())) {
             return Err(datafusion_common::sqlstate_datafusion_err(
                 "42701",

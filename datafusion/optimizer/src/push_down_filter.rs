@@ -1240,7 +1240,11 @@ impl OptimizerRule for PushDownFilter {
             LogicalPlan::Extension(extension_plan) => {
                 // This check prevents the Filter from being removed when the extension node has no children,
                 // so we return the original Filter unchanged.
-                if extension_plan.node.inputs().is_empty() {
+                // The same holds for a node that admits no predicate below
+                // it, whatever columns the predicate reads.
+                if extension_plan.node.inputs().is_empty()
+                    || extension_plan.node.blocks_predicate_push_down()
+                {
                     filter.input = Arc::new(LogicalPlan::Extension(extension_plan));
                     return Ok(Transformed::no(LogicalPlan::Filter(filter)));
                 }
@@ -2006,6 +2010,101 @@ mod tests {
           NoopPlan
             TableScan: test, full_filters=[test.a = Int64(1)]
             TableScan: test, full_filters=[test.a = Int64(1)]
+        "
+        )
+    }
+
+    /// A node that admits no predicate below it, although it names no column
+    /// in `prevent_predicate_push_down_columns`.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+    struct BarrierPlan {
+        input: LogicalPlan,
+    }
+
+    impl UserDefinedLogicalNodeCore for BarrierPlan {
+        fn name(&self) -> &str {
+            "BarrierPlan"
+        }
+
+        fn inputs(&self) -> Vec<&LogicalPlan> {
+            vec![&self.input]
+        }
+
+        fn schema(&self) -> &DFSchemaRef {
+            self.input.schema()
+        }
+
+        fn expressions(&self) -> Vec<Expr> {
+            vec![]
+        }
+
+        fn prevent_predicate_push_down_columns(&self) -> HashSet<String> {
+            HashSet::new()
+        }
+
+        fn blocks_predicate_push_down(&self) -> bool {
+            true
+        }
+
+        fn fmt_for_explain(&self, f: &mut Formatter) -> std::fmt::Result {
+            write!(f, "BarrierPlan")
+        }
+
+        fn with_exprs_and_inputs(
+            &self,
+            _exprs: Vec<Expr>,
+            mut inputs: Vec<LogicalPlan>,
+        ) -> Result<Self> {
+            assert_eq!(inputs.len(), 1);
+            Ok(Self {
+                input: inputs.swap_remove(0),
+            })
+        }
+    }
+
+    fn barrier_over(input: LogicalPlan) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(BarrierPlan { input }),
+        })
+    }
+
+    /// A node that blocks predicate push down keeps every conjunct above it:
+    /// one over a column it does not otherwise protect, and one that reads no
+    /// column at all.
+    #[test]
+    fn blocking_user_defined_plan_keeps_every_predicate_above() -> Result<()> {
+        let plan = LogicalPlanBuilder::from(barrier_over(test_table_scan()?))
+            .filter(col("a").eq(lit(1i64)).and(lit(1i64).eq(lit(2i64))))?
+            .build()?;
+
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Filter: test.a = Int64(1) AND Int64(1) = Int64(2)
+          BarrierPlan
+            TableScan: test
+        "
+        )
+    }
+
+    /// A filter below a blocking node is not merged with the filter above it:
+    /// the one below still reaches the scan and the one above stays put.
+    #[test]
+    fn blocking_user_defined_plan_separates_the_filters_around_it() -> Result<()> {
+        let inner = LogicalPlanBuilder::from(test_table_scan()?)
+            .filter(col("b").eq(lit(2i64)))?
+            .build()?;
+        let plan = LogicalPlanBuilder::from(barrier_over(inner))
+            .filter(col("a").eq(lit(1i64)))?
+            .filter(col("c").eq(lit(3i64)))?
+            .build()?;
+
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Filter: test.c = Int64(3) AND test.a = Int64(1)
+          BarrierPlan
+            TableScan: test, full_filters=[test.b = Int64(2)]
         "
         )
     }

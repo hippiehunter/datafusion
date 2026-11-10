@@ -268,7 +268,7 @@ fn f851_04_order_by_in_in_subquery() {
 #[test]
 fn f851_05_order_by_in_correlated_subquery() {
     assert_feature_supported!(
-        "SELECT a, (SELECT MAX(b) FROM t1 WHERE t1.a = t.a ORDER BY b LIMIT 1) FROM t",
+        "SELECT a, (SELECT b FROM t1 WHERE t1.a = t.a ORDER BY b LIMIT 1) FROM t",
         "F851-05",
         "ORDER BY in correlated subquery"
     );

@@ -329,12 +329,14 @@ fn lower_simple(mode: &OperatorMode, left: &Expr, hir: &Hir) -> Option<Expr> {
             let s = like_str_from_literal(l)?;
             return Some(mode.expr(Box::new(left.clone()), format!("%{s}%")));
         }
-        HirKind::Concat(inner) if is_anchored_literal(inner) => {
+        // Equality and list membership compare case-sensitively, so only a
+        // case-sensitive match of a fully anchored literal lowers to them.
+        HirKind::Concat(inner) if !mode.i && is_anchored_literal(inner) => {
             return anchored_literal_to_expr(inner).map(|right| {
                 mode.expr_matches_literal(Box::new(left.clone()), Box::new(right))
             });
         }
-        HirKind::Concat(inner) if is_anchored_capture(inner) => {
+        HirKind::Concat(inner) if !mode.i && is_anchored_capture(inner) => {
             return anchored_alternation_to_exprs(inner)
                 .map(|right| left.clone().in_list(right, mode.not));
         }

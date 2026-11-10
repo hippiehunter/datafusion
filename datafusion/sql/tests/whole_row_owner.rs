@@ -297,25 +297,27 @@ fn whole_row_owner_error_is_not_a_column_fallback() {
 
 #[test]
 fn whole_row_qualified_source_does_not_merge_equal_bare_names() {
-    for (sql, source) in [
-        (
-            "SELECT ROW(s1.typed_columns.*) FROM s1.typed_columns CROSS JOIN s2.typed_columns",
-            "s1.typed_columns",
-        ),
-        (
-            "SELECT named_struct('value',s2.typed_columns.*) FROM s1.typed_columns CROSS JOIN s2.typed_columns",
-            "s2.typed_columns",
-        ),
-    ] {
-        let context = OwnerContext::new();
-        context
-            .plan(sql)
-            .unwrap_or_else(|error| panic!("{sql}: {error}"));
-        assert_eq!(
-            *context.calls.borrow(),
-            vec![(source.into(), Some(source.into()))]
-        );
-    }
+    let context = OwnerContext::new();
+    context
+        .plan("SELECT named_struct('value',s2.typed_columns.*) FROM s1.typed_columns CROSS JOIN s2.typed_columns")
+        .unwrap();
+    assert_eq!(
+        *context.calls.borrow(),
+        vec![("s2.typed_columns".into(), Some("s2.typed_columns".into()))]
+    );
+    // A ROW constructor expands `relation.*` into that relation's columns as
+    // fields of its own, with no whole-row value to own.
+    let context = OwnerContext::new();
+    let plan = context
+        .plan("SELECT ROW(s1.typed_columns.*) FROM s1.typed_columns CROSS JOIN s2.typed_columns")
+        .unwrap();
+    assert!(context.calls.borrow().is_empty());
+    let row = &plan.expressions()[0];
+    let columns = row.column_refs();
+    assert!(!columns.is_empty());
+    assert!(columns.iter().all(|column| {
+        column.relation == Some(TableReference::partial("s1", "typed_columns"))
+    }));
     let context = OwnerContext::new();
     let error = context
         .plan("SELECT typed_columns FROM s1.typed_columns CROSS JOIN s2.typed_columns")
