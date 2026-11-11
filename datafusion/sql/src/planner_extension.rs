@@ -325,6 +325,19 @@ pub trait ContextProvider {
         false
     }
 
+    /// Whether the call of `name` with `args`, planned against `schema`, is
+    /// a call of the set-returning function [`Self::is_set_returning_function`]
+    /// answered for. A name can also be a function the arguments select in
+    /// its place, which the call then plans as.
+    fn set_returning_function_takes(
+        &self,
+        _name: &str,
+        _args: &[Expr],
+        _schema: &DFSchema,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+
     /// The row expansion of a set-returning function call, when the function
     /// expands as lists. The arguments were planned against `schema`.
     /// `column_definitions` is the call's `AS (name type, ...)` list — `Some`
@@ -567,6 +580,37 @@ pub trait ContextProvider {
         _args: &mut dyn FnMut() -> Result<Vec<Expr>>,
         _schema: &DFSchema,
     ) -> Result<Option<DataFusionError>> {
+        Ok(None)
+    }
+
+    /// Shape the error of a call of `name` that names its arguments where
+    /// the function declares no parameter names for them to match. `args` are
+    /// the call's lowered arguments and `argument_names` the name each was
+    /// written with. `None` keeps the ordinary diagnostic.
+    fn undeclared_argument_names_error(
+        &self,
+        _name: &str,
+        _args: &[Expr],
+        _argument_names: &[Option<String>],
+        _schema: &DFSchema,
+    ) -> Result<Option<DataFusionError>> {
+        Ok(None)
+    }
+
+    /// The type a positional call of `function` with the one `argument`
+    /// casts that argument to, when the call is a cast written in function
+    /// syntax rather than a call of the function: PostgreSQL reads
+    /// `typename(value)` as the cast to the type once no declaration of the
+    /// function takes the argument's type exactly. The cast plans as
+    /// `CAST(argument AS type)` does; `argument` is the value itself, without
+    /// a `VARIADIC` label written on it. `None` plans the call of the
+    /// function.
+    fn function_syntax_cast(
+        &self,
+        _function: &ScalarUDF,
+        _argument: &Expr,
+        _schema: &DFSchema,
+    ) -> Result<Option<sqlparser::ast::DataType>> {
         Ok(None)
     }
 
@@ -1497,6 +1541,20 @@ pub struct ViewDmlTarget {
     /// returns already-bound semantics; INSERT planning applies them directly
     /// to omitted columns without manufacturing or reparsing SQL syntax.
     pub column_defaults: Vec<(String, BoundSqlExpression)>,
+    /// How the host marks the source of the base relation as reached through
+    /// the view: the retargeted write's target, and the scan of the rows it
+    /// acts on, are planned over the source this returns. `None` plans them
+    /// over the base relation's own source.
+    pub base_source: Option<Arc<dyn ViewBaseSource>>,
+}
+
+/// The host's record of how a write through a view reaches the view's base
+/// relation, such as the principal the view's definition accesses it as. The
+/// SQL planner hands it the table source of the base relation where the
+/// retargeted statement writes it and takes back the source to plan over.
+pub trait ViewBaseSource: Debug + Send + Sync {
+    /// `source`, the base relation's table source, as the write reaches it.
+    fn stamp(&self, source: Arc<dyn TableSource>) -> Result<Arc<dyn TableSource>>;
 }
 
 impl ViewDmlTarget {

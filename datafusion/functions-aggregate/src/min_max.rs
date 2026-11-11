@@ -33,6 +33,7 @@ use datafusion_common::{ColumnStatistics, Result, exec_err, internal_err};
 use datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator;
 use datafusion_physical_expr::expressions;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use arrow::datatypes::i256;
@@ -60,21 +61,38 @@ use std::sync::Arc;
 /// names a domain over the field's type.
 const DOMAIN_METADATA_KEY_PREFIX: &str = "pg_domain_";
 
+/// The field metadata key through which a PostgreSQL host names the type a
+/// field's values have, and the keys that carry that type's modifier.
+const PG_TYPE_METADATA_KEY: &str = "pg_type";
+const PG_TYPE_MODIFIER_METADATA_KEYS: [&str; 2] = ["pg_type_modifier", "pg_char_len"];
+
 /// MIN and MAX return one of their input values: the input field's type and
 /// its metadata, which carries an identity such as `money` that the Arrow
 /// type alone does not. A domain is not part of that identity: PostgreSQL
 /// resolves `min(d)` over the domain's base type, which is the result type.
-/// The result is NULL over no rows, so it is nullable.
+/// PostgreSQL declares neither aggregate over `varchar` or `name`: both
+/// reach `min(text)` and `max(text)` through their implicit casts, so the
+/// result is `text`, which has no modifier. The result is NULL over no
+/// rows, so it is nullable.
 fn min_max_return_field(name: &str, arg_fields: &[FieldRef]) -> Result<FieldRef> {
     let [input] = arg_fields else {
         return internal_err!("{name} takes one argument, got {}", arg_fields.len());
     };
-    let metadata = input
+    let mut metadata: HashMap<String, String> = input
         .metadata()
         .iter()
         .filter(|(key, _)| !key.starts_with(DOMAIN_METADATA_KEY_PREFIX))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    if metadata
+        .get(PG_TYPE_METADATA_KEY)
+        .is_some_and(|pg_type| pg_type == "varchar" || pg_type == "name")
+    {
+        metadata.insert(PG_TYPE_METADATA_KEY.to_string(), "text".to_string());
+        for key in PG_TYPE_MODIFIER_METADATA_KEYS {
+            metadata.remove(key);
+        }
+    }
     Ok(Arc::new(
         Field::new(name, input.data_type().clone(), true).with_metadata(metadata),
     ))
@@ -1053,7 +1071,6 @@ mod tests {
             IntervalYearMonthType,
         },
     };
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -1089,6 +1106,36 @@ mod tests {
             let field = udaf.return_field(&[Arc::clone(&input)]).unwrap();
             assert_eq!(field.metadata(), &base);
         }
+    }
+
+    #[test]
+    fn min_max_over_varchar_and_name_return_text() {
+        let text = HashMap::from([("pg_type".to_string(), "text".to_string())]);
+        for (pg_type, modifier) in [("varchar", Some("14")), ("name", None)] {
+            let mut metadata =
+                HashMap::from([("pg_type".to_string(), pg_type.to_string())]);
+            if let Some(modifier) = modifier {
+                metadata.insert("pg_type_modifier".to_string(), modifier.to_string());
+                metadata.insert("pg_char_len".to_string(), "10".to_string());
+            }
+            let input: FieldRef =
+                Arc::new(Field::new("v", DataType::Utf8, true).with_metadata(metadata));
+            for udaf in [
+                &Max::new() as &dyn AggregateUDFImpl,
+                &Min::new() as &dyn AggregateUDFImpl,
+            ] {
+                let field = udaf.return_field(&[Arc::clone(&input)]).unwrap();
+                assert_eq!(field.metadata(), &text);
+            }
+        }
+        let bpchar = HashMap::from([
+            ("pg_type".to_string(), "bpchar".to_string()),
+            ("pg_char_len".to_string(), "5".to_string()),
+        ]);
+        let input: FieldRef =
+            Arc::new(Field::new("b", DataType::Utf8, true).with_metadata(bpchar.clone()));
+        let field = Max::new().return_field(&[input]).unwrap();
+        assert_eq!(field.metadata(), &bpchar);
     }
 
     #[test]

@@ -3302,7 +3302,7 @@ impl Display for SqlDisplay<'_> {
 /// Internal usage. Please call `schema_name_from_exprs` instead
 // TODO: Use ", " to standardize the formatting of Vec<Expr>,
 // <https://github.com/apache/datafusion/issues/10364>
-pub(crate) fn schema_name_from_exprs_comma_separated_without_space(
+pub fn schema_name_from_exprs_comma_separated_without_space(
     exprs: &[Expr],
 ) -> Result<String, fmt::Error> {
     schema_name_from_exprs_inner(exprs, ",")

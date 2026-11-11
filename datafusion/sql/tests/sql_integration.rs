@@ -4176,6 +4176,85 @@ Union
     );
 }
 
+/// The `(left, right)` column names of every key the joins of `plan` equate.
+/// INTERSECT and EXCEPT are planned as joins that equate their inputs'
+/// columns by position.
+fn set_operation_key_names(plan: &LogicalPlan) -> Vec<(String, String)> {
+    use datafusion_expr::Expr;
+
+    let mut keys = vec![];
+    plan.apply(|node| {
+        if let LogicalPlan::Join(join) = node {
+            for (left, right) in &join.on {
+                let (Expr::Column(left), Expr::Column(right)) = (left, right) else {
+                    panic!("a set operation equates columns, not {left} and {right}");
+                };
+                keys.push((left.name.clone(), right.name.clone()));
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .expect("walking the plan cannot fail");
+    keys
+}
+
+fn plan_field_names(plan: &LogicalPlan) -> Vec<String> {
+    plan.schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect()
+}
+
+#[test]
+fn intersect_and_except_by_name_match_the_right_side_to_the_lefts_names() {
+    for op in ["INTERSECT", "EXCEPT"] {
+        for quantifier in ["BY NAME", "DISTINCT BY NAME"] {
+            let sql = format!(
+                "SELECT order_id, price, qty FROM orders {op} {quantifier} \
+                 SELECT qty, order_id, price FROM orders"
+            );
+            let plan = logical_plan(&sql).unwrap();
+            assert_eq!(
+                plan_field_names(&plan),
+                ["order_id", "price", "qty"],
+                "{sql}"
+            );
+            assert_eq!(
+                set_operation_key_names(&plan),
+                [
+                    ("order_id".to_string(), "order_id".to_string()),
+                    ("price".to_string(), "price".to_string()),
+                    ("qty".to_string(), "qty".to_string()),
+                ],
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn intersect_and_except_by_name_read_null_for_a_column_one_side_lacks() {
+    for op in ["INTERSECT", "EXCEPT"] {
+        let sql = format!(
+            "SELECT order_id FROM orders {op} BY NAME SELECT price, order_id FROM orders"
+        );
+        let plan = logical_plan(&sql).unwrap();
+        // The left side's columns come first, then those only the right has,
+        // as UNION BY NAME orders them.
+        assert_eq!(plan_field_names(&plan), ["order_id", "price"], "{sql}");
+        assert_eq!(
+            set_operation_key_names(&plan),
+            [
+                ("order_id".to_string(), "order_id".to_string()),
+                ("price".to_string(), "price".to_string()),
+            ],
+            "{sql}"
+        );
+        assert_contains!(plan.to_string(), "NULL AS price");
+    }
+}
+
 #[test]
 fn empty_over() {
     let sql = "SELECT order_id, MAX(order_id) OVER () from orders";
@@ -5170,6 +5249,48 @@ fn prefix_operators_resolve_their_operand_through_the_host() {
         error.to_string(),
         "Unary operator '+' only supports numeric, interval and timestamp types"
     );
+}
+
+#[test]
+fn prefix_operators_without_a_spelling_are_the_hosts_or_do_not_exist() {
+    allow_duplicates! {
+        for sql in ["SELECT %% '1'", "SELECT OPERATOR(public.%%) '1'"] {
+            assert_snapshot!(
+                plan_with_prefix_operand_planner(sql).unwrap(),
+                @r#"
+            Projection: CAST(Utf8("1") AS Float64)
+              EmptyRelation: rows=1
+            "#
+            );
+        }
+    }
+    for (sql, name) in [
+        ("SELECT %% age FROM person", "operator %% does not exist"),
+        (
+            "SELECT OPERATOR(public.%%) age FROM person",
+            "operator public.%% does not exist",
+        ),
+    ] {
+        let error = plan_with_prefix_operand_planner(sql)
+            .expect_err("no planner declares the operator");
+        assert_contains!(error.to_string(), name);
+    }
+    // A qualified name of a prefix operator with its own spelling is that
+    // operator.
+    allow_duplicates! {
+        for sql in [
+            "SELECT OPERATOR(pg_catalog.-) age FROM person",
+            "SELECT OPERATOR(-) age FROM person",
+        ] {
+            assert_snapshot!(
+                plan_with_prefix_operand_planner(sql).unwrap(),
+                @r#"
+            Projection: (- person.age)
+              TableScan: person
+            "#
+            );
+        }
+    }
 }
 
 fn logical_plan(sql: &str) -> Result<LogicalPlan> {
@@ -9040,6 +9161,32 @@ mod planner_recorded_facts {
             as_definition_node::<SetOperation>(&plan).is_none(),
             "{plan}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn intersect_and_except_all_by_name_keep_their_multiplicity() -> Result<()> {
+        for (op, kind) in [
+            ("INTERSECT", SetOperationKind::Intersect),
+            ("EXCEPT", SetOperationKind::Except),
+        ] {
+            let sql = format!(
+                "SELECT id, age FROM person {op} ALL BY NAME SELECT age, id FROM person"
+            );
+            let plan = plan_in(&sql, definition_state())?;
+            let node = as_definition_node::<SetOperation>(&plan)
+                .unwrap_or_else(|| panic!("{sql}: a set operation node, not {plan}"));
+            assert_eq!((node.op, node.all), (kind, true), "{sql}");
+            for input in [node.left(), node.right()] {
+                let names = input
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["id", "age"], "{sql}");
+            }
+        }
         Ok(())
     }
 

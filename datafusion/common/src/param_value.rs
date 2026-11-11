@@ -21,6 +21,32 @@ use crate::{Result, ScalarValue};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use std::collections::HashMap;
 
+/// Field metadata key a parameter's declared field carries when the parameter
+/// is bound as a whole column of values rather than as one value. A `VALUES`
+/// row written over such parameters is a payload: it yields one row per bound
+/// element, so its literal row count bounds nothing.
+pub const VALUES_PAYLOAD_PARAMETER_METADATA_KEY: &str = "gantry.values_payload";
+
+/// Whether `field` declares a parameter bound as a whole column of values
+/// (see [`VALUES_PAYLOAD_PARAMETER_METADATA_KEY`]).
+pub fn is_values_payload_parameter(field: &Field) -> bool {
+    field
+        .metadata()
+        .get(VALUES_PAYLOAD_PARAMETER_METADATA_KEY)
+        .is_some_and(|value| value == "true")
+}
+
+/// `field` declared as a parameter bound as a whole column of values (see
+/// [`VALUES_PAYLOAD_PARAMETER_METADATA_KEY`]).
+pub fn values_payload_parameter_field(field: &Field) -> FieldRef {
+    let mut metadata = field.metadata().clone();
+    metadata.insert(
+        VALUES_PAYLOAD_PARAMETER_METADATA_KEY.to_string(),
+        "true".to_string(),
+    );
+    FieldRef::new(field.clone().with_metadata(metadata))
+}
+
 /// The parameter value corresponding to the placeholder
 #[derive(Debug, Clone)]
 pub enum ParamValues {

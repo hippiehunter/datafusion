@@ -39,10 +39,37 @@ use datafusion_expr::{
     },
 };
 use sqlparser::ast::{
-    AstBox as SQLBox, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction,
-    FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList,
-    FunctionArguments, ObjectName, OrderByExpr, Spanned, Value, WindowSpec, WindowType,
+    AstBox as SQLBox, CastKind, DuplicateTreatment, Expr as SQLExpr,
+    Function as SQLFunction, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
+    FunctionArgumentList, FunctionArguments, ObjectName, OrderByExpr, Spanned, Value,
+    WindowSpec, WindowType,
 };
+
+/// The value a `VARIADIC value` argument labels, or the argument itself.
+fn labelled_value(argument: &Expr) -> &Expr {
+    match argument {
+        Expr::ScalarFunction(marker)
+            if marker.func.name() == VARIADIC_MARKER_FUNCTION
+                && marker.args.len() == 1 =>
+        {
+            &marker.args[0]
+        }
+        argument => argument,
+    }
+}
+
+/// [`labelled_value`] of an owned argument.
+fn into_labelled_value(argument: Expr) -> Expr {
+    match argument {
+        Expr::ScalarFunction(mut marker)
+            if marker.func.name() == VARIADIC_MARKER_FUNCTION
+                && marker.args.len() == 1 =>
+        {
+            marker.args.swap_remove(0)
+        }
+        argument => argument,
+    }
+}
 
 /// Suggest a valid function based on an invalid input function name
 ///
@@ -668,9 +695,21 @@ impl SqlToRel<'_> {
         // happens after grouping, windows and HAVING, where the planner turns
         // `Expr::Unnest` into the plan's `Unnest`. A plan made to be printed
         // keeps the call as written, typed as the row that unnest produces.
-        if over.is_none() && self.context_provider.is_set_returning_function(&name) {
+        'set_returning: {
+            if over.is_some() || !self.context_provider.is_set_returning_function(&name)
+            {
+                break 'set_returning;
+            }
             let (srf_args, arg_names) =
                 self.function_args_to_expr_with_names(args, schema, planner_context)?;
+            // The arguments can select another function of the name, which
+            // the call then plans as below.
+            if !self
+                .context_provider
+                .set_returning_function_takes(&name, &srf_args, schema)?
+            {
+                break 'set_returning;
+            }
             // A call kept as written keeps its arguments in written order
             // and by the names they were written with, as a non-set-returning
             // named call does: the defaults resolution fills in for the
@@ -799,6 +838,7 @@ impl SqlToRel<'_> {
             };
 
             let mut written_arguments = None;
+            let positional = arg_names.iter().all(Option::is_none);
             let (fm, resolved_args) = if arg_names.iter().any(|name| name.is_some()) {
                 if let Some((chosen, resolved)) = self
                     .context_provider
@@ -823,6 +863,17 @@ impl SqlToRel<'_> {
                     written_arguments = written;
                     (fm, resolved)
                 } else {
+                    if let Some(error) =
+                        self.context_provider.undeclared_argument_names_error(
+                            &name, &args, &arg_names, schema,
+                        )?
+                    {
+                        let span = crate::utils::convert_parser_span(sql_parser_span);
+                        let message = error.to_string();
+                        return Err(
+                            error.with_diagnostic(Diagnostic::new_error(message, span))
+                        );
+                    }
                     return plan_err!(
                         "Function '{}' does not support named arguments",
                         fm.name()
@@ -834,6 +885,26 @@ impl SqlToRel<'_> {
 
             // After resolution, all arguments are positional
             let mut resolved_args = resolved_args;
+            // One positional argument under a type's name is the cast to
+            // that type when the provider reads the call as one. A
+            // `VARIADIC` label is no part of the value cast.
+            if positional
+                && let [argument] = resolved_args.as_slice()
+                && let Some(target) = self.context_provider.function_syntax_cast(
+                    &fm,
+                    labelled_value(argument),
+                    schema,
+                )?
+            {
+                let argument = into_labelled_value(resolved_args.swap_remove(0));
+                return self.finish_cast_expr(
+                    argument,
+                    &target,
+                    CastKind::Cast,
+                    None,
+                    schema,
+                );
+            }
             let call_span = crate::utils::convert_parser_span(sql_parser_span);
             for planner in self.context_provider.get_expr_planners() {
                 match planner.plan_function_arguments(
@@ -1107,6 +1178,26 @@ impl SqlToRel<'_> {
                             .with_diagnostic(Diagnostic::new_error(message, span)));
                     }
                 }
+                // A DISTINCT aggregate with an ORDER BY sorts its rows by
+                // those keys and then by the arguments they leave out, and
+                // tells duplicates by that whole list. A constant argument
+                // distinguishes no rows.
+                let order_by = if distinct
+                    && !supports_within_group
+                    && !order_by.is_empty()
+                {
+                    let mut order_by = order_by;
+                    for argument in &resolved_args {
+                        if !matches!(argument, Expr::Literal(..) | Expr::Placeholder(_))
+                            && !order_by.iter().any(|sort| sort.expr == *argument)
+                        {
+                            order_by.push(SortExpr::new(argument.clone(), true, false));
+                        }
+                    }
+                    order_by
+                } else {
+                    order_by
+                };
 
                 let mut aggregate_expr = RawAggregateExpr {
                     name: name.clone(),

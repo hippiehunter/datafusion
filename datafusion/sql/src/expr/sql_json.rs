@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 
+use arrow::datatypes::DataType;
 use datafusion_common::error::{
     sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
 };
@@ -36,13 +37,13 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::logical_plan::SQL_JSON_RETURNING_METADATA_PREFIX;
-use datafusion_expr::{Expr, WindowFunctionDefinition, lit};
+use datafusion_expr::{Expr, ExprSchemable, WindowFunctionDefinition, lit};
 use sqlparser::ast::{
-    CastKind, DataType as SQLDataType, Expr as SQLExpr, ExprWithAlias,
-    Function as SQLFunction, FunctionArg, FunctionArgExpr, FunctionArgumentClause,
-    FunctionArguments, JsonEncoding, JsonFormatClause, JsonNullClause, JsonOnBehavior,
-    JsonPredicateUniqueKeyConstraint, JsonQueryWrapper, JsonQuotesBehavior,
-    JsonQuotesClause, OrderByExpr, Spanned,
+    CastKind, DataType as SQLDataType, DuplicateTreatment, Expr as SQLExpr,
+    ExprWithAlias, Function as SQLFunction, FunctionArg, FunctionArgExpr,
+    FunctionArgumentClause, FunctionArguments, JsonEncoding, JsonFormatClause,
+    JsonNullClause, JsonOnBehavior, JsonPredicateUniqueKeyConstraint, JsonQueryWrapper,
+    JsonQuotesBehavior, JsonQuotesClause, OrderByExpr, Spanned,
 };
 
 use crate::planner::{PlannerContext, RawWindowExpr, SqlToRel};
@@ -140,6 +141,29 @@ fn wrapper_name(wrapper: &JsonQueryWrapper) -> &'static str {
 
 fn null_text() -> Expr {
     lit(ScalarValue::Utf8(None))
+}
+
+/// A character or bit string type without the length it declares: the type
+/// every value of that kind converts to whole. Any other type is returned as
+/// it is, a user-named type without its modifiers.
+fn without_declared_length(data_type: &SQLDataType) -> SQLDataType {
+    match data_type {
+        SQLDataType::Character(_)
+        | SQLDataType::Char(_)
+        | SQLDataType::CharacterVarying(_)
+        | SQLDataType::CharVarying(_)
+        | SQLDataType::Varchar(_)
+        | SQLDataType::Nvarchar(_)
+        | SQLDataType::Nchar(_)
+        | SQLDataType::Varchar2(_) => SQLDataType::Text,
+        SQLDataType::Bit(_) | SQLDataType::BitVarying(_) | SQLDataType::VarBit(_) => {
+            SQLDataType::BitVarying(None)
+        }
+        SQLDataType::Custom(name, modifiers) if !modifiers.is_empty() => {
+            SQLDataType::Custom(name.clone(), Vec::new())
+        }
+        other => other.clone(),
+    }
 }
 
 /// One SQL/JSON call's arguments, split by the shape the form takes.
@@ -257,6 +281,16 @@ impl SqlToRel<'_> {
             return Ok(None);
         }
         self.check_returning_format(&clauses)?;
+        // The SQL/JSON aggregates take no DISTINCT: PostgreSQL's grammar has
+        // no place for it.
+        if matches!(name.as_str(), "json_arrayagg" | "json_objectagg")
+            && matches!(list.duplicate_treatment, Some(DuplicateTreatment::Distinct))
+        {
+            return Err(sqlstate_datafusion_err(
+                "42601",
+                "syntax error at or near \"DISTINCT\"",
+            ));
+        }
         let arguments = SqlJsonArguments::collect(&list.args);
 
         let planned = match name.as_str() {
@@ -451,10 +485,12 @@ impl SqlToRel<'_> {
     }
 
     /// The `ON EMPTY` / `ON ERROR` pair each query function receives: the
-    /// behaviour's name, then the value a `DEFAULT` behaviour substitutes.
+    /// behaviour's name, then the value a `DEFAULT` behaviour substitutes,
+    /// coerced to `returning`, the type the call returns.
     fn plan_behavior(
         &self,
         behavior: &Option<JsonOnBehavior>,
+        returning: &SQLDataType,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<(Expr, Expr)> {
@@ -463,12 +499,87 @@ impl SqlToRel<'_> {
             None => null_text(),
         };
         let default = match behavior {
-            Some(JsonOnBehavior::Default(expr)) => {
-                self.sql_expr_to_logical_expr(expr.as_ref(), schema, planner_context)?
-            }
+            Some(JsonOnBehavior::Default(expr)) => self.plan_behavior_default(
+                expr.as_ref(),
+                returning,
+                schema,
+                planner_context,
+            )?,
             _ => null_text(),
         };
         Ok((name, default))
+    }
+
+    /// A `DEFAULT` behaviour expression as a query function receives it.
+    ///
+    /// The expression is coerced to the `RETURNING` type by an explicit cast
+    /// from its own type when the statement is planned, so a `DEFAULT` no
+    /// cast converts is refused there and the value follows the cast's rules,
+    /// not its text's. The function's result is text, so the cast value
+    /// travels as its text and the cast around the call reads it back.
+    ///
+    /// A declared length is applied as an assignment applies it: a longer
+    /// value is an error, where an explicit cast would cut it short. So the
+    /// cast written here reaches the type without its length, and the
+    /// function, which is given the type as declared, refuses the text the
+    /// length does not admit.
+    ///
+    /// A NULL has nothing to cast. A `jsonb` expression is handed over as it
+    /// is: the function reads its document by the `RETURNING` type's input,
+    /// as it reads a selected item.
+    pub(crate) fn plan_behavior_default(
+        &self,
+        expr: &SQLExpr,
+        returning: &SQLDataType,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let default = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        if matches!(&default, Expr::Literal(value, _) if value.is_null()) {
+            return Ok(null_text());
+        }
+        if self.is_jsonb_expr(&default, schema)? {
+            return Ok(default);
+        }
+        let spelled = match self.context_provider.get_type_planner() {
+            Some(type_planner) => type_planner
+                .canonical_type_spelling(returning)?
+                .unwrap_or_else(|| returning.clone()),
+            None => returning.clone(),
+        };
+        let coerced = self.finish_cast_expr(
+            default,
+            &without_declared_length(&spelled),
+            CastKind::Cast,
+            None,
+            schema,
+        )?;
+        self.finish_cast_expr(coerced, &SQLDataType::Text, CastKind::Cast, None, schema)
+    }
+
+    /// Whether `expr` is a `jsonb` value: its field carries the metadata the
+    /// type planner declares `jsonb` with, on a binary carrier. A context
+    /// provider that declares no `jsonb` type has no such expression.
+    fn is_jsonb_expr(&self, expr: &Expr, schema: &DFSchema) -> Result<bool> {
+        let Ok(jsonb) = self.convert_data_type_to_field(&SQLDataType::JSONB) else {
+            return Ok(false);
+        };
+        if jsonb.metadata().is_empty() {
+            return Ok(false);
+        }
+        let (_, field) = expr.to_field(schema)?;
+        let binary = |data_type: &DataType| {
+            matches!(
+                data_type,
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+            )
+        };
+        Ok((field.data_type() == jsonb.data_type()
+            || binary(field.data_type()) && binary(jsonb.data_type()))
+            && jsonb
+                .metadata()
+                .iter()
+                .all(|(key, value)| field.metadata().get(key) == Some(value)))
     }
 
     fn plan_sql_json_query_function(
@@ -487,12 +598,21 @@ impl SqlToRel<'_> {
             self.sql_expr_to_logical_expr(path, schema, planner_context)?,
             self.plan_passing_variables(&clauses.passing, schema, planner_context)?,
         ];
-        let (on_error, on_error_default) =
-            self.plan_behavior(&clauses.on_error, schema, planner_context)?;
         if name == "json_exists" {
-            args.push(on_error);
+            args.push(match &clauses.on_error {
+                Some(behavior) => lit(behavior_name(behavior)),
+                None => null_text(),
+            });
             return self.sql_json_function_call(name, args);
         }
+        // Without a clause JSON_VALUE returns text and JSON_QUERY jsonb.
+        let result_type = match (&clauses.returning, name) {
+            (Some(data_type), _) => data_type.clone(),
+            (None, "json_query") => SQLDataType::JSONB,
+            (None, _) => SQLDataType::Text,
+        };
+        let (on_error, on_error_default) =
+            self.plan_behavior(&clauses.on_error, &result_type, schema, planner_context)?;
         let returning = match &clauses.returning {
             Some(data_type) => self.returning_type_literal(data_type)?,
             None => null_text(),
@@ -513,7 +633,7 @@ impl SqlToRel<'_> {
             }));
         }
         let (on_empty, on_empty_default) =
-            self.plan_behavior(&clauses.on_empty, schema, planner_context)?;
+            self.plan_behavior(&clauses.on_empty, &result_type, schema, planner_context)?;
         args.extend([on_empty, on_empty_default, on_error, on_error_default]);
         self.sql_json_function_call(name, args)
     }

@@ -2073,23 +2073,59 @@ impl SqlToRel<'_> {
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let arg = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        if Self::is_text_typed_value(&arg, schema)? {
+            return self.regclass_function_call("__dbl_regclass_from_text", arg);
+        }
         self.sql_regclass_cast_from_arg_expr(arg)
     }
 
     fn sql_regclass_cast_from_arg_expr(&self, arg: Expr) -> Result<Expr> {
-        let fun = self
-            .context_provider
-            .get_function_meta("__dbl_regclass_cast")
-            .ok_or_else(|| {
-                internal_datafusion_err!(
-                    "Unable to find expected '__dbl_regclass_cast' function"
-                )
-            })?;
+        self.regclass_function_call("__dbl_regclass_cast", arg)
+    }
+
+    fn regclass_function_call(&self, name: &str, arg: Expr) -> Result<Expr> {
+        let fun = self.context_provider.get_function_meta(name).ok_or_else(|| {
+            internal_datafusion_err!("Unable to find expected '{name}' function")
+        })?;
 
         Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
             fun,
             vec![arg],
         )))
+    }
+
+    /// Whether `value` is a `text` or `character varying` value, which
+    /// PostgreSQL casts to `regclass` through `regclass(text)`: the text is
+    /// a relation's name. An untyped literal or parameter, and a value of
+    /// any other type, is read by `regclassin` instead, which also takes an
+    /// OID's digits.
+    fn is_text_typed_value(value: &Expr, schema: &DFSchema) -> Result<bool> {
+        let names_text = |pg_type: Option<&String>| {
+            pg_type.is_some_and(|pg_type| matches!(pg_type.as_str(), "text" | "varchar"))
+        };
+        match value {
+            Expr::Literal(_, metadata) => Ok(names_text(
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.inner().get("pg_type")),
+            )),
+            Expr::Placeholder(placeholder) => Ok(names_text(
+                placeholder
+                    .field
+                    .as_ref()
+                    .and_then(|field| field.metadata().get("pg_type")),
+            )),
+            _ => {
+                let (_, field) = value.to_field(schema)?;
+                Ok(matches!(
+                    field.data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) && field
+                    .metadata()
+                    .get("pg_type")
+                    .is_none_or(|pg_type| matches!(pg_type.as_str(), "text" | "varchar")))
+            }
+        }
     }
 
     fn is_regclass_sql_type(data_type: &SQLDataType) -> bool {

@@ -261,6 +261,19 @@ impl<'a> BinaryTypeCoercer<'a> {
                 )
             })
         }
+        // A signed integer shifted by an integer count no wider than `Int32`
+        // keeps its own type and takes the count as `Int32`, as PostgreSQL
+        // declares `int2 << int4`, `int4 << int4` and `int8 << int4`.
+        BitwiseShiftRight | BitwiseShiftLeft
+            if matches!(lhs, Int8 | Int16 | Int32 | Int64)
+                && matches!(rhs, Int8 | Int16 | Int32 | Null) =>
+        {
+            Ok(Signature {
+                lhs: lhs.clone(),
+                rhs: Int32,
+                ret: lhs.clone(),
+            })
+        }
         BitwiseAnd | BitwiseOr | BitwiseXor | BitwiseShiftRight | BitwiseShiftLeft => {
             bitwise_coercion(lhs, rhs).map(Signature::uniform).ok_or_else(|| {
                 plan_datafusion_err!(

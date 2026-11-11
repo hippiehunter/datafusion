@@ -702,6 +702,18 @@ impl<'a> ConstEvaluator<'a> {
                 false
             }
             Expr::SimilarTo { .. } => false,
+            // A case-insensitive LIKE folds case by the collation of its
+            // operands (ASCII letters only under C and POSIX) in the
+            // execution engine; Arrow's kernel lowercases whole strings. A
+            // NULL operand decides the result whatever the fold.
+            Expr::Like(like)
+                if like.case_insensitive
+                    && ![&like.expr, &like.pattern].into_iter().any(|operand| {
+                        matches!(operand.as_ref(), Expr::Literal(value, _) if value.is_null())
+                    }) =>
+            {
+                false
+            }
             // An array cast between shapes keeps each value's own shape, which
             // a literal of the cast's type could not hold.
             Expr::Cast(cast)

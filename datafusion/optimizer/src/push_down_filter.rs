@@ -31,7 +31,7 @@ use datafusion_common::{
     Column, DFSchema, Result, assert_eq_or_internal_err, assert_or_internal_err,
     internal_err, plan_err, qualified_name,
 };
-use datafusion_expr::expr::WindowFunction;
+use datafusion_expr::expr::{GroupingSet, WindowFunction};
 use datafusion_expr::expr_rewriter::replace_col;
 use datafusion_expr::logical_plan::{Join, JoinType, LogicalPlan, TableScan, Union};
 use datafusion_expr::utils::{
@@ -1032,6 +1032,20 @@ impl OptimizerRule for PushDownFilter {
 
                 let predicates = split_conjunction_owned(filter.predicate);
 
+                // An aggregate with an empty grouping set yields that set's
+                // row for an input of no rows, so a predicate below it does
+                // not decide whether the row is returned: only above the
+                // aggregate does it reject the row, or raise for it.
+                let groups_empty_input = agg.group_expr.is_empty()
+                    || agg.group_expr.iter().any(|e| match e {
+                        Expr::GroupingSet(GroupingSet::Rollup(_))
+                        | Expr::GroupingSet(GroupingSet::Cube(_)) => true,
+                        Expr::GroupingSet(GroupingSet::GroupingSets(sets)) => {
+                            sets.iter().any(Vec::is_empty)
+                        }
+                        _ => false,
+                    });
+
                 let mut keep_predicates = vec![];
                 let mut push_predicates = vec![];
                 for expr in predicates {
@@ -1041,6 +1055,7 @@ impl OptimizerRule for PushDownFilter {
                     // evaluated (once per input row instead of once per
                     // group).
                     if !expr.is_volatile()
+                        && !groups_empty_input
                         && cols.iter().all(|c| group_expr_columns.contains(c))
                     {
                         push_predicates.push(expr);

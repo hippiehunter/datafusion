@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{BinaryExpr, Expr, Like, Operator, lit};
 use regex_syntax::hir::{Capture, Hir, HirKind, Literal, Look};
@@ -44,9 +45,10 @@ pub fn simplify_regex_expr(
     op: Operator,
     right: Box<Expr>,
 ) -> Result<Expr> {
-    let mode = OperatorMode::new(&op);
+    let mut mode = OperatorMode::new(&op);
 
-    if let Expr::Literal(ScalarValue::Utf8(Some(pattern)), _) = right.as_ref() {
+    if let Expr::Literal(ScalarValue::Utf8(Some(pattern)), metadata) = right.as_ref() {
+        mode.pattern_metadata.clone_from(metadata);
         // Handle the special case for ".*" pattern
         if pattern == ANY_CHAR_REGEX_PATTERN {
             let new_expr = if mode.not {
@@ -106,6 +108,10 @@ struct OperatorMode {
     not: bool,
     /// Ignore case (`true` for case-insensitive).
     i: bool,
+    /// What the pattern literal carries beside its text, such as the
+    /// collation a `COLLATE` clause gave it, which decides how a
+    /// case-insensitive match folds. A `LIKE` pattern made from it keeps it.
+    pattern_metadata: Option<FieldMetadata>,
 }
 
 impl OperatorMode {
@@ -122,7 +128,11 @@ impl OperatorMode {
             _ => unreachable!(),
         };
 
-        Self { not, i }
+        Self {
+            not,
+            i,
+            pattern_metadata: None,
+        }
     }
 
     /// Creates an [`LIKE`](Expr::Like) from the given `LIKE` pattern.
@@ -130,7 +140,10 @@ impl OperatorMode {
         let like = Like {
             negated: self.not,
             expr,
-            pattern: Box::new(Expr::Literal(ScalarValue::from(pattern), None)),
+            pattern: Box::new(Expr::Literal(
+                ScalarValue::from(pattern),
+                self.pattern_metadata.clone(),
+            )),
             escape_char: None,
             case_insensitive: self.i,
         };

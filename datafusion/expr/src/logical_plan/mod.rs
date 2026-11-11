@@ -65,6 +65,7 @@ pub use plan::{
     StringifiedPlan, Subquery, SubqueryAlias, SubsetDef, SymbolDef, TableScan,
     TableScanRowLock, TableScanRowLockMode, TableScanRowLockWaitPolicy,
     ToStringifiedPlan, Union, Unnest, Values, Window, projection_schema,
+    values_rows_are_payload,
 };
 
 pub use display::display_schema;

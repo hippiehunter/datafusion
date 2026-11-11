@@ -78,9 +78,15 @@ impl SqlToRel<'_> {
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         match op {
-            UnaryOperator::Not => Ok(Expr::Not(Box::new(
-                self.sql_expr_to_logical_expr(expr, schema, planner_context)?,
-            ))),
+            UnaryOperator::Not => {
+                let operand =
+                    self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+                let operand = match self.plan_prefix_operand(op, operand, schema)? {
+                    PlannerResult::Planned(resolved)
+                    | PlannerResult::Original(resolved) => resolved,
+                };
+                Ok(Expr::Not(Box::new(operand)))
+            }
             UnaryOperator::Plus => {
                 let operand =
                     self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
@@ -190,7 +196,72 @@ impl SqlToRel<'_> {
                     }
                 }
             }
+            // `OPERATOR(-) x` and `OPERATOR(pg_catalog.-) x` name a prefix
+            // operator that has a spelling of its own.
+            UnaryOperator::PGCustomUnaryOperator(names) => {
+                match qualified_core_prefix_operator(names) {
+                    Some(core) => {
+                        self.parse_sql_unary_op(&core, expr, schema, planner_context)
+                    }
+                    None => self.plan_declared_prefix_operator(
+                        op,
+                        expr,
+                        schema,
+                        planner_context,
+                    ),
+                }
+            }
+            UnaryOperator::Custom(_) => {
+                self.plan_declared_prefix_operator(op, expr, schema, planner_context)
+            }
             _ => not_impl_err!("Unsupported SQL unary operator {op:?}"),
         }
     }
+
+    /// A prefix operator with no spelling of its own here: the host plans
+    /// the whole operator over the operand, or no such operator exists.
+    fn plan_declared_prefix_operator(
+        &self,
+        op: &UnaryOperator,
+        expr: &SQLExpr,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Expr> {
+        let operand = self.sql_expr_to_logical_expr(expr, schema, planner_context)?;
+        match self.plan_prefix_operand(op, operand, schema)? {
+            PlannerResult::Planned(planned) => Ok(planned),
+            PlannerResult::Original(_) => {
+                let name = match op {
+                    UnaryOperator::PGCustomUnaryOperator(names) => names.join("."),
+                    other => other.to_string(),
+                };
+                plan_err!("operator {name} does not exist")
+            }
+        }
+    }
+}
+
+/// The prefix operator `OPERATOR(name)` or `OPERATOR(pg_catalog.name)`
+/// spells, when it is one this planner plans by its own spelling.
+fn qualified_core_prefix_operator(names: &[String]) -> Option<UnaryOperator> {
+    let symbol = match names {
+        [symbol] => symbol,
+        [schema, symbol] if schema.trim_matches('"') == "pg_catalog" => symbol,
+        _ => return None,
+    };
+    Some(match symbol.as_str() {
+        "+" => UnaryOperator::Plus,
+        "-" => UnaryOperator::Minus,
+        "~" => UnaryOperator::BitwiseNot,
+        "|/" => UnaryOperator::PGSquareRoot,
+        "||/" => UnaryOperator::PGCubeRoot,
+        "@" => UnaryOperator::PGAbs,
+        "@@" => UnaryOperator::DoubleAt,
+        "#" => UnaryOperator::Hash,
+        "@-@" => UnaryOperator::AtDashAt,
+        "?-" => UnaryOperator::QuestionDash,
+        "?|" => UnaryOperator::QuestionPipe,
+        "!!" => UnaryOperator::PGPrefixFactorial,
+        _ => return None,
+    })
 }

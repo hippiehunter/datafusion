@@ -93,7 +93,10 @@ pub use join_type::{
 };
 pub use nested_struct::cast_column;
 pub use null_equality::NullEquality;
-pub use param_value::ParamValues;
+pub use param_value::{
+    ParamValues, VALUES_PAYLOAD_PARAMETER_METADATA_KEY, is_values_payload_parameter,
+    values_payload_parameter_field,
+};
 pub use scalar::{ScalarType, ScalarValue};
 pub use schema_reference::SchemaReference;
 pub use spans::{Location, Span, Spans};

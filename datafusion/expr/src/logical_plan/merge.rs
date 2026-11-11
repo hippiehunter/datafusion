@@ -220,6 +220,10 @@ pub struct MergeInsertExpr {
     /// PostgreSQL's rewriter completes an INSERT target list, so each column
     /// is provided, defaults and sequence draws included.
     pub columns: Vec<String>,
+    /// The columns the statement's arm writes a value into, by name or, for a
+    /// row written without a column list, by position: the columns PostgreSQL
+    /// requires the INSERT privilege on. `DEFAULT VALUES` writes none.
+    pub written_columns: Vec<String>,
     /// The statement's `OVERRIDING` clause, already applied to the row:
     /// under `OVERRIDING USER VALUE` an identity column's slot holds its
     /// default.

@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use crate::planner::{PlannerContext, SqlToRel};
 use datafusion_common::{
-    Column, DataFusionError, Diagnostic, JoinType, NullEquality, Result, Span,
-    not_impl_err, plan_datafusion_err, plan_err,
+    Column, DataFusionError, Diagnostic, JoinType, NullEquality, Result, ScalarValue,
+    Span, not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
 use datafusion_expr::logical_plan::builder::requalify_sides_if_needed;
@@ -212,6 +212,25 @@ impl SqlToRel<'_> {
         right_plan: LogicalPlan,
         set_quantifier: SetQuantifier,
     ) -> Result<LogicalPlan> {
+        // INTERSECT and EXCEPT match their inputs by position. BY NAME lines
+        // the inputs up by column name first, as UNION BY NAME does, and is
+        // the positional operation from there on.
+        let (left_plan, right_plan, set_quantifier) = match (op, set_quantifier) {
+            (
+                SetOperator::Intersect | SetOperator::Except,
+                SetQuantifier::ByName | SetQuantifier::DistinctByName,
+            ) => {
+                let (left_plan, right_plan) =
+                    set_operation_inputs_by_name(left_plan, right_plan)?;
+                (left_plan, right_plan, SetQuantifier::Distinct)
+            }
+            (SetOperator::Intersect | SetOperator::Except, SetQuantifier::AllByName) => {
+                let (left_plan, right_plan) =
+                    set_operation_inputs_by_name(left_plan, right_plan)?;
+                (left_plan, right_plan, SetQuantifier::All)
+            }
+            _ => (left_plan, right_plan, set_quantifier),
+        };
         let (left_plan, right_plan) = self
             .context_provider
             .plan_set_operation_inputs(op, left_plan, right_plan)?;
@@ -337,6 +356,41 @@ impl SqlToRel<'_> {
             .project(result_columns)?
             .build()
     }
+}
+
+/// The inputs of an `INTERSECT` or `EXCEPT` `BY NAME` with their columns lined
+/// up by name, as `UNION BY NAME` lines its inputs up: each produces the left
+/// input's columns in the left input's order, then the columns only the right
+/// input has, and reads NULL for a column it does not have.
+fn set_operation_inputs_by_name(
+    left_plan: LogicalPlan,
+    right_plan: LogicalPlan,
+) -> Result<(LogicalPlan, LogicalPlan)> {
+    let mut names: Vec<String> = vec![];
+    for field in left_plan
+        .schema()
+        .fields()
+        .iter()
+        .chain(right_plan.schema().fields().iter())
+    {
+        if !names.contains(field.name()) {
+            names.push(field.name().clone());
+        }
+    }
+    let by_name = |plan: LogicalPlan| {
+        let columns = names
+            .iter()
+            .map(|name| {
+                if plan.schema().has_column_with_unqualified_name(name) {
+                    Expr::Column(Column::from_name(name))
+                } else {
+                    Expr::Literal(ScalarValue::Null, None).alias(name)
+                }
+            })
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::from(plan).project(columns)?.build()
+    };
+    Ok((by_name(left_plan)?, by_name(right_plan)?))
 }
 
 /// The window function that numbers the duplicates of a value within its own

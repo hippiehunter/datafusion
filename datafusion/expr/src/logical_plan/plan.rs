@@ -64,7 +64,8 @@ use datafusion_common::{
     Column, DFSchema, DFSchemaRef, DataFusionError, Dependency, FunctionalDependence,
     FunctionalDependencies, NullEquality, ParamValues, Result, ScalarValue, Spans,
     TableReference, UnnestOptions, UsingColumns, aggregate_functional_dependencies,
-    assert_eq_or_internal_err, assert_or_internal_err, internal_err, plan_err,
+    assert_eq_or_internal_err, assert_or_internal_err, internal_err,
+    is_values_payload_parameter, plan_err,
 };
 use datafusion_common::error::sqlstate_datafusion_err;
 use indexmap::IndexSet;
@@ -269,8 +270,9 @@ pub struct SubsetDef {
 pub enum JsonTableErrorHandling {
     /// NULL ON ERROR/EMPTY
     Null,
-    /// DEFAULT <value> ON ERROR/EMPTY
-    Default(ScalarValue),
+    /// DEFAULT <value> ON ERROR/EMPTY: the planned expression, a constant
+    /// of the statement that reads no row.
+    Default(Expr),
     /// ERROR ON ERROR
     Error,
 }
@@ -1677,6 +1679,7 @@ impl LogicalPlan {
 
                             MergeAction::Insert(MergeInsertExpr {
                                 columns: insert.columns.clone(),
+                                written_columns: insert.written_columns.clone(),
                                 overriding: insert.overriding,
                                 kind,
                                 insert_predicate,
@@ -2457,7 +2460,7 @@ impl LogicalPlan {
             LogicalPlan::Distinct(
                 Distinct::All(input) | Distinct::On(DistinctOn { input, .. }),
             ) => input.max_rows(),
-            LogicalPlan::Values(v) => Some(v.values.len()),
+            LogicalPlan::Values(v) => (!v.is_payload()).then_some(v.values.len()),
             LogicalPlan::Unnest(_) => None,
             LogicalPlan::MatchRecognize(MatchRecognize { input, .. }) => input.max_rows(),
             LogicalPlan::JsonTable(_) => None, // JSON_TABLE output size depends on JSON content
@@ -3336,6 +3339,36 @@ pub struct Values {
     pub schema: DFSchemaRef,
     /// Values
     pub values: Vec<Vec<Expr>>,
+}
+
+impl Values {
+    /// Whether the node is a payload (see [`values_rows_are_payload`]).
+    pub fn is_payload(&self) -> bool {
+        values_rows_are_payload(&self.values)
+    }
+}
+
+/// Whether the rows of a `VALUES` list are a payload: one row written over
+/// parameters bound as whole columns of values
+/// ([`datafusion_common::VALUES_PAYLOAD_PARAMETER_METADATA_KEY`]). A payload
+/// yields one row per bound element, so nothing may be concluded from its one
+/// written row about how many rows it produces.
+pub fn values_rows_are_payload(rows: &[Vec<Expr>]) -> bool {
+    let [row] = rows else {
+        return false;
+    };
+    row.iter().any(|cell| {
+        cell.exists(|expr| {
+            Ok(matches!(
+                expr,
+                Expr::Placeholder(Placeholder {
+                    field: Some(field),
+                    ..
+                }) if is_values_payload_parameter(field)
+            ))
+        })
+        .is_ok_and(|payload| payload)
+    })
 }
 
 // Manual implementation needed because of `schema` field. Comparison excludes this field.
@@ -4661,7 +4694,10 @@ impl Limit {
                     if s >= 0 {
                         Ok(SkipType::Literal(s as usize))
                     } else {
-                        plan_err!("OFFSET must be >=0, '{}' was provided", s)
+                        Err(sqlstate_datafusion_err(
+                            "2201X",
+                            "OFFSET must not be negative",
+                        ))
                     }
                 }
                 _ => Ok(SkipType::UnsupportedExpr),
@@ -4679,7 +4715,10 @@ impl Limit {
                     if s >= 0 {
                         Ok(FetchType::Literal(Some(s as usize)))
                     } else {
-                        plan_err!("LIMIT must be >= 0, '{}' was provided", s)
+                        Err(sqlstate_datafusion_err(
+                            "2201W",
+                            "LIMIT must not be negative",
+                        ))
                     }
                 }
                 Expr::Literal(ScalarValue::Int64(None), _) => {
@@ -5775,7 +5814,10 @@ mod tests {
     use datafusion_common::tree_node::{
         TransformedResult, TreeNodeRewriter, TreeNodeVisitor,
     };
-    use datafusion_common::{Constraint, Constraints, NullsDistinct, ScalarValue, not_impl_err};
+    use datafusion_common::{
+        Constraint, Constraints, NullsDistinct, ScalarValue,
+        VALUES_PAYLOAD_PARAMETER_METADATA_KEY, not_impl_err, values_payload_parameter_field,
+    };
     use insta::{assert_debug_snapshot, assert_snapshot};
     use std::hash::DefaultHasher;
 
@@ -7365,6 +7407,50 @@ mod tests {
         );
         assert_eq!(using_join.join_constraint, JoinConstraint::Using);
 
+        Ok(())
+    }
+
+    #[test]
+    fn a_payload_values_row_bounds_no_row_count() -> Result<()> {
+        let declared = Field::new("$1", DataType::Int64, true);
+        let parameter = |field: FieldRef| {
+            Expr::Placeholder(Placeholder::new_with_field("$1".to_string(), Some(field)))
+        };
+
+        let literal =
+            LogicalPlanBuilder::values(vec![vec![parameter(Arc::new(declared.clone()))]])?
+                .build()?;
+        assert_eq!(literal.max_rows(), Some(1));
+
+        let payload = LogicalPlanBuilder::values(vec![vec![parameter(
+            values_payload_parameter_field(&declared),
+        )]])?
+        .build()?;
+        let LogicalPlan::Values(values) = &payload else {
+            return internal_err!("VALUES did not plan as a Values node");
+        };
+        assert!(values.is_payload());
+        assert_eq!(payload.max_rows(), None);
+        assert!(
+            !values
+                .schema
+                .field(0)
+                .metadata()
+                .contains_key(VALUES_PAYLOAD_PARAMETER_METADATA_KEY)
+        );
+
+        let computed = vec![vec![binary_expr(
+            parameter(values_payload_parameter_field(&declared)),
+            Operator::Plus,
+            lit(1_i64),
+        )]];
+        assert!(values_rows_are_payload(&computed));
+
+        let two_rows = vec![
+            vec![parameter(values_payload_parameter_field(&declared))],
+            vec![lit(2_i64)],
+        ];
+        assert!(!values_rows_are_payload(&two_rows));
         Ok(())
     }
 }

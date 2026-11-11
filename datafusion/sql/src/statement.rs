@@ -3127,7 +3127,8 @@ impl SqlToRel<'_> {
                 outer_planner_context,
             )?;
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
-            return crate::view_dml::stamp_check_option(plan, check_option);
+            let plan = crate::view_dml::stamp_check_option(plan, check_option)?;
+            return crate::view_dml::stamp_base_source(plan, &view_target);
         }
         // Extract table name from the TableWithJoins
         let (table_name, table_alias) = match &table.relation {
@@ -3472,15 +3473,15 @@ impl SqlToRel<'_> {
         value_schema: &DFSchema,
     ) -> Result<Vec<Expr>> {
         let positions: HashMap<&str, usize> = if named_columns.is_empty() {
-            if !values.is_empty() && values.len() != target_schema.fields().len() {
-                return plan_err!(
-                    "MERGE INSERT has {} values but target table has {} columns",
-                    values.len(),
-                    target_schema.fields().len()
-                );
+            if values.len() > target_schema.fields().len() {
+                return Err(sqlstate_datafusion_err(
+                    "42601",
+                    "INSERT has more expressions than target columns",
+                ));
             }
-            // A positional row covers the target in its own order; an empty row
-            // is DEFAULT VALUES and every column comes from its default.
+            // A positional row covers the leading columns of the target in
+            // its own order and the rest come from their defaults; an empty
+            // row is DEFAULT VALUES.
             target_schema
                 .fields()
                 .iter()
@@ -3698,6 +3699,13 @@ impl SqlToRel<'_> {
 
         let table_ref = self.object_name_to_table_reference(table_name)?;
         let table_source = self.context_provider.get_table_source(table_ref.clone())?;
+        let table_source = match view_target
+            .as_ref()
+            .and_then(|target| target.base_source.as_ref())
+        {
+            Some(base_source) => base_source.stamp(table_source)?,
+            None => table_source,
+        };
         let target_schema = table_source.schema();
         let target_relation =
             dml_target_relation(&self.ident_normalizer, &table_ref, table_alias.as_ref());
@@ -3821,6 +3829,23 @@ impl SqlToRel<'_> {
                         overriding,
                         view_defaults,
                     };
+                    let written_columns: Vec<String> = if named_columns.is_empty() {
+                        let width = match &insert.kind {
+                            ast::MergeInsertKind::DefaultValues => 0,
+                            ast::MergeInsertKind::Values(values) => {
+                                values.rows.first().map_or(0, Vec::len)
+                            }
+                            ast::MergeInsertKind::Row => target_schema.fields().len(),
+                        };
+                        target_schema
+                            .fields()
+                            .iter()
+                            .take(width)
+                            .map(|field| field.name().clone())
+                            .collect()
+                    } else {
+                        named_columns.clone()
+                    };
                     let kind = match insert.kind {
                         // DEFAULT VALUES is the whole row taken from defaults:
                         // an empty explicit row that the expansion below fills.
@@ -3871,6 +3896,7 @@ impl SqlToRel<'_> {
                         .collect();
                     MergeAction::Insert(MergeInsertExpr {
                         columns,
+                        written_columns,
                         overriding,
                         kind,
                         insert_predicate,
@@ -4158,7 +4184,8 @@ impl SqlToRel<'_> {
                 outer_planner_context,
             )?;
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
-            return crate::view_dml::stamp_check_option(plan, check_option);
+            let plan = crate::view_dml::stamp_check_option(plan, check_option)?;
+            return crate::view_dml::stamp_base_source(plan, &view_target);
         }
         // Reject writes to generated columns and recompute the stored ones the
         // statement's assignments reach as part of the statement, so the new
@@ -4880,7 +4907,8 @@ impl SqlToRel<'_> {
                 outer_planner_context,
             )?;
             let check_option = crate::view_dml::bind_check_option(&view_target)?;
-            return crate::view_dml::stamp_check_option(plan, check_option);
+            let plan = crate::view_dml::stamp_check_option(plan, check_option)?;
+            return crate::view_dml::stamp_base_source(plan, &view_target);
         }
         // Generated columns accept only DEFAULT (their value is the
         // generation expression's), a GENERATED ALWAYS identity takes a write

@@ -32,7 +32,7 @@
 
 use crate::ast_walk::Walk as AstWalk;
 use crate::planner::{ViewDmlError, ViewDmlTarget};
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{BoundSqlExpression, DmlCheckOption, LogicalPlan};
 use sqlparser::ast::{
@@ -41,6 +41,7 @@ use sqlparser::ast::{
     TableFactor, TableWithJoins, Visitor,
 };
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 /// Combine the already-bound check-option restrictions retained by the
 /// catalog. View source is never reopened during DML planning.
@@ -80,6 +81,49 @@ pub(crate) fn stamp_check_option(
         LogicalPlan::Dml(mut dml) => {
             dml.check_option = Some(check_option.clone());
             Ok(Transformed::yes(LogicalPlan::Dml(dml)))
+        }
+        other => Ok(Transformed::no(other)),
+    })
+    .map(|transformed| transformed.data)
+}
+
+/// Plan the retargeted write over the source the host stamps for the view's
+/// base relation: the DML node's target, and the scan of the rows an UPDATE
+/// or DELETE acts on. Any other scan of the base relation is a read the
+/// statement wrote itself, and a data-modifying statement nested in the
+/// input has a target of its own.
+pub(crate) fn stamp_base_source(
+    plan: LogicalPlan,
+    target: &ViewDmlTarget,
+) -> Result<LogicalPlan> {
+    let Some(base_source) = &target.base_source else {
+        return Ok(plan);
+    };
+    plan.transform_down(|node| match node {
+        LogicalPlan::Dml(mut dml) => {
+            dml.target = base_source.stamp(dml.target)?;
+            let input = Arc::unwrap_or_clone(dml.input)
+                .transform_down(|node| match node {
+                    LogicalPlan::TableScan(mut scan) if scan.result_relation => {
+                        scan.source = base_source.stamp(scan.source)?;
+                        Ok(Transformed::new(
+                            LogicalPlan::TableScan(scan),
+                            true,
+                            TreeNodeRecursion::Jump,
+                        ))
+                    }
+                    nested @ (LogicalPlan::Dml(_) | LogicalPlan::Merge(_)) => {
+                        Ok(Transformed::new(nested, false, TreeNodeRecursion::Jump))
+                    }
+                    other => Ok(Transformed::no(other)),
+                })?
+                .data;
+            dml.input = Arc::new(input);
+            Ok(Transformed::new(
+                LogicalPlan::Dml(dml),
+                true,
+                TreeNodeRecursion::Jump,
+            ))
         }
         other => Ok(Transformed::no(other)),
     })
@@ -484,4 +528,120 @@ fn references_qualifier(expr: &SQLExpr, qualifiers: &[String]) -> bool {
     };
     let _ = expr.walk(&mut search);
     search.found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::ViewBaseSource;
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion_common::TableReference;
+    use datafusion_expr::logical_plan::builder::LogicalTableSource;
+    use datafusion_expr::{
+        DmlStatement, LogicalPlanBuilder, TableScan, TableSource, TargetSelectRights,
+        WriteOp,
+    };
+    use std::any::Any;
+
+    struct ReachedThroughView(SchemaRef);
+
+    impl TableSource for ReachedThroughView {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn schema(&self) -> SchemaRef {
+            Arc::clone(&self.0)
+        }
+    }
+
+    #[derive(Debug)]
+    struct MarkReached;
+
+    impl ViewBaseSource for MarkReached {
+        fn stamp(&self, source: Arc<dyn TableSource>) -> Result<Arc<dyn TableSource>> {
+            Ok(Arc::new(ReachedThroughView(source.schema())))
+        }
+    }
+
+    fn view_target(base_source: Option<Arc<dyn ViewBaseSource>>) -> ViewDmlTarget {
+        ViewDmlTarget {
+            base_relation: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("t"))]),
+            columns: vec![("id".to_string(), Some("id".to_string()))],
+            read_expressions: Vec::new(),
+            row_restrictions: Vec::new(),
+            check_option_view: None,
+            check_option_restrictions: Vec::new(),
+            view_name: "v".to_string(),
+            column_defaults: Vec::new(),
+            base_source,
+        }
+    }
+
+    /// An UPDATE of `t` that also reads `t` under another name.
+    fn update_joining_its_own_table() -> Result<LogicalPlan> {
+        let source: Arc<dyn TableSource> =
+            Arc::new(LogicalTableSource::new(Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+            ]))));
+        let LogicalPlan::TableScan(target) =
+            LogicalPlanBuilder::scan("t", Arc::clone(&source), None)?.build()?
+        else {
+            unreachable!("a scan builds a TableScan")
+        };
+        let target = LogicalPlan::TableScan(TableScan::into_update_delete_target(target));
+        let read = LogicalPlanBuilder::scan("t", Arc::clone(&source), None)?
+            .alias("other")?
+            .build()?;
+        let input = LogicalPlanBuilder::from(target).cross_join(read)?.build()?;
+        Ok(LogicalPlan::Dml(DmlStatement::new(
+            TableReference::bare("t"),
+            source,
+            WriteOp::Update,
+            Arc::new(input),
+            TargetSelectRights::Required,
+        )))
+    }
+
+    /// Whether each scan of `plan` reads the result relation, and whether
+    /// its source was stamped.
+    fn scans(plan: &LogicalPlan) -> Result<Vec<(bool, bool)>> {
+        let mut scans = Vec::new();
+        plan.apply(|node| {
+            if let LogicalPlan::TableScan(scan) = node {
+                scans.push((
+                    scan.result_relation,
+                    scan.source.as_any().is::<ReachedThroughView>(),
+                ));
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        Ok(scans)
+    }
+
+    #[test]
+    fn the_base_source_stamps_the_target_and_its_result_relation_scan() -> Result<()> {
+        let plan = stamp_base_source(
+            update_joining_its_own_table()?,
+            &view_target(Some(Arc::new(MarkReached))),
+        )?;
+        let LogicalPlan::Dml(dml) = &plan else {
+            unreachable!("stamping keeps the DML node")
+        };
+        assert!(dml.target.as_any().is::<ReachedThroughView>());
+        assert_eq!(scans(&plan)?, [(true, true), (false, false)]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_target_without_a_base_source_keeps_the_base_relations_own() -> Result<()> {
+        let plan =
+            stamp_base_source(update_joining_its_own_table()?, &view_target(None))?;
+        let LogicalPlan::Dml(dml) = &plan else {
+            unreachable!("stamping keeps the DML node")
+        };
+        assert!(!dml.target.as_any().is::<ReachedThroughView>());
+        assert_eq!(scans(&plan)?, [(true, false), (false, false)]);
+        Ok(())
+    }
 }

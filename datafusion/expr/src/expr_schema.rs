@@ -34,6 +34,7 @@ use datafusion_common::datatype::FieldExt;
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::{
     Column, DataFusionError, ExprSchema, Result, ScalarValue, Spans, TableReference,
+    VALUES_PAYLOAD_PARAMETER_METADATA_KEY, is_values_payload_parameter,
     plan_datafusion_err, plan_err,
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
@@ -637,7 +638,7 @@ impl ExprSchemable for Expr {
             Expr::Placeholder(Placeholder {
                 id: _,
                 field: Some(field),
-            }) => Ok(Arc::clone(field).renamed(&schema_name)),
+            }) => Ok(placeholder_value_field(field).renamed(&schema_name)),
             Expr::Case(case) => {
                 // CASE unifies its branch types, and extension typing (e.g.
                 // PostgreSQL's pg_type tag) rides field metadata here, so the
@@ -760,6 +761,18 @@ impl ExprSchemable for Expr {
             plan_err!("Cannot automatically convert {this_type} to {cast_to_type}")
         }
     }
+}
+
+/// The field of a value of the parameter declared as `declared`: the
+/// declaration less the payload marker, which states how the parameter is
+/// bound and is no part of the identity of the values read from it.
+fn placeholder_value_field(declared: &FieldRef) -> FieldRef {
+    if !is_values_payload_parameter(declared) {
+        return Arc::clone(declared);
+    }
+    let mut metadata = declared.metadata().clone();
+    metadata.remove(VALUES_PAYLOAD_PARAMETER_METADATA_KEY);
+    Arc::new(declared.as_ref().clone().with_metadata(metadata))
 }
 
 /// The output field of a cast of `source_field` to `target_field`.

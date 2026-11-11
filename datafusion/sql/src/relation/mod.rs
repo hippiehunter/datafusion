@@ -46,8 +46,8 @@ use arrow::datatypes::{DataType, Field};
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, DataFusionError, Diagnostic, Result, ScalarValue, Spans,
-    TableReference, UnnestOptions, internal_err, not_impl_err, plan_err,
+    Column, DFSchema, DataFusionError, Diagnostic, Result, Spans, TableReference,
+    UnnestOptions, internal_err, not_impl_err, plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::{
@@ -59,10 +59,11 @@ use datafusion_expr::{
 };
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, TableSource, expr::Unnest};
 use sqlparser::ast::{
-    AstBox as SQLBox, Expr as SQLExpr, FunctionArg, FunctionArgExpr, Ident,
-    JsonOnBehavior, JsonQueryWrapper, JsonQuotesBehavior, Spanned, SqlJsonTable,
-    SqlJsonTableColumn, SqlJsonTableExistsColumn, SqlJsonTableNestedColumn,
-    SqlJsonTableRegularColumn, TableAlias, TableAliasColumnDef, TableFactor,
+    AstBox as SQLBox, DataType as SQLDataType, Expr as SQLExpr, FunctionArg,
+    FunctionArgExpr, Ident, JsonOnBehavior, JsonQueryWrapper, JsonQuotesBehavior,
+    Spanned, SqlJsonTable, SqlJsonTableColumn, SqlJsonTableExistsColumn,
+    SqlJsonTableNestedColumn, SqlJsonTableRegularColumn, TableAlias, TableAliasColumnDef,
+    TableFactor,
 };
 
 mod join;
@@ -1495,7 +1496,7 @@ impl SqlToRel<'_> {
             self.sql_expr_to_logical_expr(json_expr, &empty_schema, planner_context)?;
 
         // Convert sqlparser column definitions to DataFusion column definitions
-        let df_columns = self.convert_json_table_columns(columns)?;
+        let df_columns = self.convert_json_table_columns(columns, planner_context)?;
 
         // Create the JsonTable logical plan node
         let json_table = JsonTable::try_new(df_json_expr, json_path, df_columns)?;
@@ -1507,10 +1508,11 @@ impl SqlToRel<'_> {
     fn convert_json_table_columns(
         &self,
         columns: Vec<sqlparser::ast::JsonTableColumn>,
+        planner_context: &mut PlannerContext,
     ) -> Result<Vec<JsonTableColumnDef>> {
         columns
             .into_iter()
-            .map(|col| self.convert_json_table_column(col))
+            .map(|col| self.convert_json_table_column(col, planner_context))
             .collect()
     }
 
@@ -1518,6 +1520,7 @@ impl SqlToRel<'_> {
     fn convert_json_table_column(
         &self,
         column: sqlparser::ast::JsonTableColumn,
+        planner_context: &mut PlannerContext,
     ) -> Result<JsonTableColumnDef> {
         match column {
             sqlparser::ast::JsonTableColumn::Named(named) => {
@@ -1534,13 +1537,15 @@ impl SqlToRel<'_> {
                     }
                 };
 
+                // An EXISTS column keeps the boolean outcome its clause names.
+                let value_type = (!named.exists).then_some(&named.r#type);
                 let on_empty = named
                     .on_empty
-                    .map(|h| self.convert_error_handling(h))
+                    .map(|h| self.convert_error_handling(h, value_type, planner_context))
                     .transpose()?;
                 let on_error = named
                     .on_error
-                    .map(|h| self.convert_error_handling(h))
+                    .map(|h| self.convert_error_handling(h, value_type, planner_context))
                     .transpose()?;
 
                 Ok(JsonTableColumnDef::Path {
@@ -1572,7 +1577,8 @@ impl SqlToRel<'_> {
                     }
                 };
 
-                let nested_columns = self.convert_json_table_columns(nested.columns)?;
+                let nested_columns =
+                    self.convert_json_table_columns(nested.columns, planner_context)?;
 
                 Ok(JsonTableColumnDef::Nested {
                     path,
@@ -1582,10 +1588,16 @@ impl SqlToRel<'_> {
         }
     }
 
-    /// Convert sqlparser JsonTableColumnErrorHandling to DataFusion JsonTableErrorHandling
+    /// Convert sqlparser JsonTableColumnErrorHandling to DataFusion
+    /// JsonTableErrorHandling. `column_type` is the declared type of a column
+    /// that selects a value: its `DEFAULT` literal is coerced to that type as
+    /// the DEFAULT of a SQL/JSON query function is coerced to its RETURNING
+    /// type.
     fn convert_error_handling(
         &self,
         handling: sqlparser::ast::JsonTableColumnErrorHandling,
+        column_type: Option<&SQLDataType>,
+        planner_context: &mut PlannerContext,
     ) -> Result<JsonTableErrorHandling> {
         match handling {
             sqlparser::ast::JsonTableColumnErrorHandling::Null => {
@@ -1594,31 +1606,12 @@ impl SqlToRel<'_> {
             sqlparser::ast::JsonTableColumnErrorHandling::Error => {
                 Ok(JsonTableErrorHandling::Error)
             }
-            sqlparser::ast::JsonTableColumnErrorHandling::Default(value) => Ok(
-                JsonTableErrorHandling::Default(Self::json_table_default_scalar(value)?),
-            ),
-        }
-    }
-
-    /// The literal of a JSON_TABLE `DEFAULT <value> ON EMPTY/ERROR` clause.
-    fn json_table_default_scalar(value: sqlparser::ast::Value) -> Result<ScalarValue> {
-        match value {
-            sqlparser::ast::Value::Number(n, _) => {
-                if let Ok(i) = n.parse::<i64>() {
-                    Ok(ScalarValue::Int64(Some(i)))
-                } else if let Ok(f) = n.parse::<f64>() {
-                    Ok(ScalarValue::Float64(Some(f)))
-                } else {
-                    plan_err!("Invalid numeric value in DEFAULT clause")
-                }
-            }
-            sqlparser::ast::Value::SingleQuotedString(s)
-            | sqlparser::ast::Value::DoubleQuotedString(s) => {
-                Ok(ScalarValue::Utf8(Some(s)))
-            }
-            sqlparser::ast::Value::Boolean(b) => Ok(ScalarValue::Boolean(Some(b))),
-            sqlparser::ast::Value::Null => Ok(ScalarValue::Null),
-            _ => plan_err!("Unsupported default value type in JSON_TABLE"),
+            sqlparser::ast::JsonTableColumnErrorHandling::Default(value) => self
+                .plan_json_table_default(
+                    SQLExpr::Value(value.into()),
+                    column_type,
+                    planner_context,
+                ),
         }
     }
 
@@ -1652,7 +1645,7 @@ impl SqlToRel<'_> {
             self.sql_expr_to_logical_expr(context_item, &empty_schema, planner_context)?;
         let passing =
             self.plan_passing_variables(&passing, &empty_schema, planner_context)?;
-        let df_columns = self.convert_sql_json_table_columns(columns)?;
+        let df_columns = self.convert_sql_json_table_columns(columns, planner_context)?;
         let on_error = match on_error {
             None | Some(JsonOnBehavior::EmptyArray) => JsonTableErrorHandling::Null,
             Some(JsonOnBehavior::Error) => JsonTableErrorHandling::Error,
@@ -1694,16 +1687,18 @@ impl SqlToRel<'_> {
     fn convert_sql_json_table_columns(
         &self,
         columns: Vec<SqlJsonTableColumn>,
+        planner_context: &mut PlannerContext,
     ) -> Result<Vec<JsonTableColumnDef>> {
         columns
             .into_iter()
-            .map(|column| self.convert_sql_json_table_column(column))
+            .map(|column| self.convert_sql_json_table_column(column, planner_context))
             .collect()
     }
 
     fn convert_sql_json_table_column(
         &self,
         column: SqlJsonTableColumn,
+        planner_context: &mut PlannerContext,
     ) -> Result<JsonTableColumnDef> {
         match column {
             SqlJsonTableColumn::ForOrdinality(ident) => {
@@ -1748,10 +1743,22 @@ impl SqlToRel<'_> {
                     wrapper: wrapper.map(str::to_string),
                     quotes,
                     on_empty: on_empty
-                        .map(Self::convert_sql_json_behavior)
+                        .map(|behavior| {
+                            self.convert_sql_json_behavior(
+                                behavior,
+                                Some(&data_type),
+                                planner_context,
+                            )
+                        })
                         .transpose()?,
                     on_error: on_error
-                        .map(Self::convert_sql_json_behavior)
+                        .map(|behavior| {
+                            self.convert_sql_json_behavior(
+                                behavior,
+                                Some(&data_type),
+                                planner_context,
+                            )
+                        })
                         .transpose()?,
                 })
             }
@@ -1790,7 +1797,13 @@ impl SqlToRel<'_> {
                     quotes: None,
                     on_empty: None,
                     on_error: on_error
-                        .map(Self::convert_sql_json_behavior)
+                        .map(|behavior| {
+                            self.convert_sql_json_behavior(
+                                behavior,
+                                None,
+                                planner_context,
+                            )
+                        })
                         .transpose()?,
                 })
             }
@@ -1802,39 +1815,65 @@ impl SqlToRel<'_> {
                 let _ = path_name;
                 Ok(JsonTableColumnDef::Nested {
                     path: Self::json_table_path_string(path)?,
-                    columns: self.convert_sql_json_table_columns(columns)?,
+                    columns: self
+                        .convert_sql_json_table_columns(columns, planner_context)?,
                 })
             }
         }
     }
 
     /// The behaviors a JSON_TABLE column clause can carry into the plan node:
-    /// `NULL`, `ERROR`, a literal `DEFAULT`, and the boolean outcomes of an
-    /// `EXISTS` column.
+    /// `NULL`, `ERROR`, a `DEFAULT` expression, and the boolean outcomes of an
+    /// `EXISTS` column. `column_type` is the declared type of a column that
+    /// selects a value: its `DEFAULT` is coerced to that type as the DEFAULT
+    /// of a SQL/JSON query function is coerced to its RETURNING type. An
+    /// `EXISTS` column has none and keeps its boolean outcome.
     fn convert_sql_json_behavior(
+        &self,
         behavior: JsonOnBehavior,
+        column_type: Option<&SQLDataType>,
+        planner_context: &mut PlannerContext,
     ) -> Result<JsonTableErrorHandling> {
-        match behavior {
+        let outcome =
+            |value: bool| SQLExpr::Value(sqlparser::ast::Value::Boolean(value).into());
+        let default = match behavior {
             JsonOnBehavior::Null | JsonOnBehavior::Unknown => {
-                Ok(JsonTableErrorHandling::Null)
+                return Ok(JsonTableErrorHandling::Null);
             }
-            JsonOnBehavior::Error => Ok(JsonTableErrorHandling::Error),
-            JsonOnBehavior::True => Ok(JsonTableErrorHandling::Default(
-                ScalarValue::Boolean(Some(true)),
-            )),
-            JsonOnBehavior::False => Ok(JsonTableErrorHandling::Default(
-                ScalarValue::Boolean(Some(false)),
-            )),
-            JsonOnBehavior::Default(expr) => match expr.as_ref() {
-                SQLExpr::Value(value) => Ok(JsonTableErrorHandling::Default(
-                    Self::json_table_default_scalar(value.value.clone())?,
-                )),
-                other => not_impl_err!("JSON_TABLE DEFAULT {other} must be a literal"),
-            },
+            JsonOnBehavior::Error => return Ok(JsonTableErrorHandling::Error),
+            JsonOnBehavior::True => outcome(true),
+            JsonOnBehavior::False => outcome(false),
+            JsonOnBehavior::Default(expr) => expr.as_ref().clone(),
             JsonOnBehavior::EmptyArray | JsonOnBehavior::EmptyObject => {
-                not_impl_err!("JSON_TABLE {behavior} ON EMPTY/ERROR is not supported")
+                return not_impl_err!(
+                    "JSON_TABLE {behavior} ON EMPTY/ERROR is not supported"
+                );
             }
-        }
+        };
+        self.plan_json_table_default(default, column_type, planner_context)
+    }
+
+    /// The `DEFAULT` of a JSON_TABLE column clause, a constant that reads no
+    /// row: coerced to `column_type` when the column selects a value, and as
+    /// written for an `EXISTS` column.
+    fn plan_json_table_default(
+        &self,
+        default: SQLExpr,
+        column_type: Option<&SQLDataType>,
+        planner_context: &mut PlannerContext,
+    ) -> Result<JsonTableErrorHandling> {
+        let empty_schema = DFSchema::empty();
+        Ok(JsonTableErrorHandling::Default(match column_type {
+            Some(column_type) => self.plan_behavior_default(
+                &default,
+                column_type,
+                &empty_schema,
+                planner_context,
+            )?,
+            None => {
+                self.sql_expr_to_logical_expr(default, &empty_schema, planner_context)?
+            }
+        }))
     }
 
     /// Plan GRAPH_TABLE table factor (SQL/PGQ).
@@ -1854,9 +1893,10 @@ impl SqlToRel<'_> {
             .map(|rl| self.convert_row_limiting(rl));
 
         // Graph functions are in scope only inside the GRAPH_TABLE. Element
-        // references resolve against the graph, not a relation, so every
-        // clause is planned against an empty schema and the embedding binds
-        // the references when it compiles the graph table.
+        // references resolve against the graph, not a relation: every
+        // clause is planned in the scope the embedding derives from the
+        // pattern's variables, and the embedding binds the references when
+        // it compiles the graph table.
         let outer_scope = planner_context.set_in_graph_table(true);
         let planned = self.plan_graph_table_clauses(
             graph_ref,
@@ -1879,14 +1919,23 @@ impl SqlToRel<'_> {
         columns: Option<sqlparser::ast::GraphColumnsClause>,
         planner_context: &mut PlannerContext,
     ) -> Result<GraphTable> {
-        let patterns = patterns
-            .into_iter()
-            .map(|p| self.convert_graph_pattern(p, planner_context))
+        // The scope names the pattern's variables and the properties their
+        // labels expose, which the conditions written on the elements do not
+        // change: the pattern's shape gives the scope its conditions are
+        // then planned in.
+        let shape = patterns
+            .iter()
+            .cloned()
+            .map(|p| self.convert_graph_pattern(p, None, planner_context))
             .collect::<Result<Vec<_>>>()?;
         let scope = self
             .context_provider
-            .graph_table_scope(&graph_ref, &patterns, row_limiting.as_ref())?
+            .graph_table_scope(&graph_ref, &shape, row_limiting.as_ref())?
             .unwrap_or_else(DFSchema::empty);
+        let patterns = patterns
+            .into_iter()
+            .map(|p| self.convert_graph_pattern(p, Some(&scope), planner_context))
+            .collect::<Result<Vec<_>>>()?;
         let where_clause = where_clause
             .map(|expr| self.sql_expr_to_logical_expr(expr, &scope, planner_context))
             .transpose()?;
@@ -1958,10 +2007,13 @@ impl SqlToRel<'_> {
         }
     }
 
-    /// Convert sqlparser GraphPattern to DataFusion GraphPattern
+    /// Convert sqlparser GraphPattern to DataFusion GraphPattern. The
+    /// conditions of its elements are planned in `scope`; without one the
+    /// result is the pattern's shape, its elements carrying no condition.
     fn convert_graph_pattern(
         &self,
         pattern: sqlparser::ast::GraphPattern,
+        scope: Option<&DFSchema>,
         planner_context: &mut PlannerContext,
     ) -> Result<GraphPattern> {
         Ok(GraphPattern {
@@ -1970,7 +2022,7 @@ impl SqlToRel<'_> {
                 .map(|v| self.ident_normalizer.normalize(v)),
             path_finding: pattern.path_finding.map(|pf| self.convert_path_finding(pf)),
             path_mode: pattern.path_mode.map(|pm| self.convert_path_mode(&pm)),
-            expr: self.convert_graph_pattern_expr(pattern.expr, planner_context)?,
+            expr: self.convert_graph_pattern_expr(pattern.expr, scope, planner_context)?,
         })
     }
 
@@ -1978,19 +2030,22 @@ impl SqlToRel<'_> {
     fn convert_graph_pattern_expr(
         &self,
         expr: sqlparser::ast::GraphPatternExpr,
+        scope: Option<&DFSchema>,
         planner_context: &mut PlannerContext,
     ) -> Result<GraphPatternExpr> {
         Ok(match expr {
             SqlGraphPatternExpr::Chain(elements) => GraphPatternExpr::Chain(
                 elements
                     .into_iter()
-                    .map(|e| self.convert_graph_pattern_element(e, planner_context))
+                    .map(|e| {
+                        self.convert_graph_pattern_element(e, scope, planner_context)
+                    })
                     .collect::<Result<Vec<_>>>()?,
             ),
             SqlGraphPatternExpr::Alternation(patterns) => GraphPatternExpr::Alternation(
                 patterns
                     .into_iter()
-                    .map(|p| self.convert_graph_pattern_expr(p, planner_context))
+                    .map(|p| self.convert_graph_pattern_expr(p, scope, planner_context))
                     .collect::<Result<Vec<_>>>()?,
             ),
             SqlGraphPatternExpr::Group {
@@ -1999,6 +2054,7 @@ impl SqlToRel<'_> {
             } => GraphPatternExpr::Group {
                 pattern: Box::new(self.convert_graph_pattern_expr(
                     SQLBox::into_owned(pattern),
+                    scope,
                     planner_context,
                 )?),
                 quantifier: quantifier.map(|q| self.convert_quantifier(&q)),
@@ -2010,28 +2066,36 @@ impl SqlToRel<'_> {
     fn convert_graph_pattern_element(
         &self,
         element: sqlparser::ast::GraphPatternElement,
+        scope: Option<&DFSchema>,
         planner_context: &mut PlannerContext,
     ) -> Result<GraphPatternElement> {
         Ok(match element {
             SqlGraphPatternElement::Node(node) => GraphPatternElement::Node(
-                self.convert_node_pattern(node, planner_context)?,
+                self.convert_node_pattern(node, scope, planner_context)?,
             ),
             SqlGraphPatternElement::Edge(edge) => GraphPatternElement::Edge(
-                self.convert_edge_pattern(edge, planner_context)?,
+                self.convert_edge_pattern(edge, scope, planner_context)?,
             ),
             SqlGraphPatternElement::Subpattern(expr) => GraphPatternElement::Subpattern(
-                Box::new(self.convert_graph_pattern_expr(expr, planner_context)?),
+                Box::new(self.convert_graph_pattern_expr(expr, scope, planner_context)?),
             ),
         })
     }
 
-    /// Plan an element pattern's property map and WHERE clause.
+    /// Plan an element pattern's property map and WHERE clause: a property's
+    /// value reads no element, and the WHERE clause reads the properties of
+    /// the pattern's variables, which `scope` types. Without a scope the
+    /// element has neither.
     fn convert_element_conditions(
         &self,
         properties: Vec<sqlparser::ast::PropertyKeyValue>,
         where_clause: Option<SQLExpr>,
+        scope: Option<&DFSchema>,
         planner_context: &mut PlannerContext,
     ) -> Result<(Vec<(String, Expr)>, Option<Expr>)> {
+        let Some(scope) = scope else {
+            return Ok((Vec::new(), None));
+        };
         let empty_schema = DFSchema::empty();
         let properties = properties
             .into_iter()
@@ -2043,7 +2107,7 @@ impl SqlToRel<'_> {
             })
             .collect::<Result<Vec<_>>>()?;
         let where_clause = where_clause
-            .map(|e| self.sql_expr_to_logical_expr(e, &empty_schema, planner_context))
+            .map(|e| self.sql_expr_to_logical_expr(e, scope, planner_context))
             .transpose()?;
         Ok((properties, where_clause))
     }
@@ -2052,11 +2116,13 @@ impl SqlToRel<'_> {
     fn convert_node_pattern(
         &self,
         node: sqlparser::ast::NodePattern,
+        scope: Option<&DFSchema>,
         planner_context: &mut PlannerContext,
     ) -> Result<NodePattern> {
         let (properties, where_clause) = self.convert_element_conditions(
             node.properties,
             node.where_clause,
+            scope,
             planner_context,
         )?;
         Ok(NodePattern {
@@ -2075,11 +2141,13 @@ impl SqlToRel<'_> {
     fn convert_edge_pattern(
         &self,
         edge: sqlparser::ast::EdgePattern,
+        scope: Option<&DFSchema>,
         planner_context: &mut PlannerContext,
     ) -> Result<EdgePattern> {
         let (properties, where_clause) = self.convert_element_conditions(
             edge.properties,
             edge.where_clause,
+            scope,
             planner_context,
         )?;
         Ok(EdgePattern {

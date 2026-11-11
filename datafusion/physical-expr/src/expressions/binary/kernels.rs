@@ -18,6 +18,7 @@
 //! This module contains computation kernels that are specific to
 //! datafusion and not (yet) targeted to  port upstream to arrow
 use arrow::array::*;
+use arrow::compute::kernels::arity::binary;
 use arrow::compute::kernels::bitwise::{
     bitwise_and, bitwise_and_scalar, bitwise_or, bitwise_or_scalar, bitwise_shift_left,
     bitwise_shift_left_scalar, bitwise_shift_right, bitwise_shift_right_scalar,
@@ -25,7 +26,7 @@ use arrow::compute::kernels::bitwise::{
 };
 use arrow::compute::kernels::boolean::not;
 use arrow::compute::kernels::comparison::{regexp_is_match, regexp_is_match_scalar};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Int8Type, Int16Type, Int32Type, Int64Type};
 use arrow::error::ArrowError;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_common::{internal_err, plan_err};
@@ -85,8 +86,78 @@ macro_rules! create_left_integral_dyn_kernel {
 create_left_integral_dyn_kernel!(bitwise_or_dyn, bitwise_or);
 create_left_integral_dyn_kernel!(bitwise_xor_dyn, bitwise_xor);
 create_left_integral_dyn_kernel!(bitwise_and_dyn, bitwise_and);
-create_left_integral_dyn_kernel!(bitwise_shift_right_dyn, bitwise_shift_right);
-create_left_integral_dyn_kernel!(bitwise_shift_left_dyn, bitwise_shift_left);
+create_left_integral_dyn_kernel!(uniform_shift_right_dyn, bitwise_shift_right);
+create_left_integral_dyn_kernel!(uniform_shift_left_dyn, bitwise_shift_left);
+
+/// A signed integer array shifted by an `Int32` count, as PostgreSQL's shift
+/// operators compute it: `smallint` shifts as a 32-bit integer and keeps the
+/// low bits of its own width, and the count is read modulo the width shifted
+/// (32, or 64 for `bigint`). `None` for any other pair of types.
+fn shift_by_count(
+    left: &dyn Array,
+    count: &dyn Array,
+    shifts_left: bool,
+) -> Option<Result<ArrayRef>> {
+    let count = count.as_primitive_opt::<Int32Type>()?;
+    let shift32 = move |value: i32, count: i32| {
+        if shifts_left {
+            value.wrapping_shl(count as u32)
+        } else {
+            value.wrapping_shr(count as u32)
+        }
+    };
+    let shift64 = move |value: i64, count: i32| {
+        if shifts_left {
+            value.wrapping_shl(count as u32)
+        } else {
+            value.wrapping_shr(count as u32)
+        }
+    };
+    let shifted: std::result::Result<ArrayRef, ArrowError> = match left.data_type() {
+        DataType::Int8 => binary::<_, _, _, Int8Type>(
+            left.as_primitive::<Int8Type>(),
+            count,
+            |value, count| shift32(i32::from(value), count) as i8,
+        )
+        .map(|array| Arc::new(array) as ArrayRef),
+        DataType::Int16 => binary::<_, _, _, Int16Type>(
+            left.as_primitive::<Int16Type>(),
+            count,
+            |value, count| shift32(i32::from(value), count) as i16,
+        )
+        .map(|array| Arc::new(array) as ArrayRef),
+        DataType::Int32 => {
+            binary::<_, _, _, Int32Type>(left.as_primitive::<Int32Type>(), count, shift32)
+                .map(|array| Arc::new(array) as ArrayRef)
+        }
+        DataType::Int64 => {
+            binary::<_, _, _, Int64Type>(left.as_primitive::<Int64Type>(), count, shift64)
+                .map(|array| Arc::new(array) as ArrayRef)
+        }
+        _ => return None,
+    };
+    Some(shifted.map_err(Into::into))
+}
+
+pub(crate) fn bitwise_shift_right_dyn(
+    left: ArrayRef,
+    right: ArrayRef,
+) -> Result<ArrayRef> {
+    match shift_by_count(&left, &right, false) {
+        Some(shifted) => shifted,
+        None => uniform_shift_right_dyn(left, right),
+    }
+}
+
+pub(crate) fn bitwise_shift_left_dyn(
+    left: ArrayRef,
+    right: ArrayRef,
+) -> Result<ArrayRef> {
+    match shift_by_count(&left, &right, true) {
+        Some(shifted) => shifted,
+        None => uniform_shift_left_dyn(left, right),
+    }
+}
 
 /// Downcasts $LEFT as $ARRAY_TYPE and $RIGHT as TYPE and calls $KERNEL($LEFT, $RIGHT)
 macro_rules! call_scalar_kernel {
@@ -152,13 +223,50 @@ create_left_integral_dyn_scalar_kernel!(bitwise_and_dyn_scalar, bitwise_and_scal
 create_left_integral_dyn_scalar_kernel!(bitwise_or_dyn_scalar, bitwise_or_scalar);
 create_left_integral_dyn_scalar_kernel!(bitwise_xor_dyn_scalar, bitwise_xor_scalar);
 create_left_integral_dyn_scalar_kernel!(
-    bitwise_shift_right_dyn_scalar,
+    uniform_shift_right_dyn_scalar,
     bitwise_shift_right_scalar
 );
 create_left_integral_dyn_scalar_kernel!(
-    bitwise_shift_left_dyn_scalar,
+    uniform_shift_left_dyn_scalar,
     bitwise_shift_left_scalar
 );
+
+/// [`shift_by_count`] by one `Int32` count for every row.
+fn shift_by_scalar_count(
+    array: &dyn Array,
+    scalar: &ScalarValue,
+    shifts_left: bool,
+) -> Option<Result<ArrayRef>> {
+    if !matches!(scalar, ScalarValue::Int32(_))
+        || !matches!(
+            array.data_type(),
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+        )
+    {
+        return None;
+    }
+    Some(scalar.to_array_of_size(array.len()).and_then(|count| {
+        shift_by_count(array, &count, shifts_left).unwrap_or_else(|| {
+            internal_err!("a signed integer shift by an Int32 count has a kernel")
+        })
+    }))
+}
+
+pub(crate) fn bitwise_shift_right_dyn_scalar(
+    array: &dyn Array,
+    scalar: ScalarValue,
+) -> Option<Result<ArrayRef>> {
+    shift_by_scalar_count(array, &scalar, false)
+        .or_else(|| uniform_shift_right_dyn_scalar(array, scalar))
+}
+
+pub(crate) fn bitwise_shift_left_dyn_scalar(
+    array: &dyn Array,
+    scalar: ScalarValue,
+) -> Option<Result<ArrayRef>> {
+    shift_by_scalar_count(array, &scalar, true)
+        .or_else(|| uniform_shift_left_dyn_scalar(array, scalar))
+}
 
 /// Concatenates two `StringViewArray`s element-wise.  
 /// If either element is `Null`, the result element is also `Null`.

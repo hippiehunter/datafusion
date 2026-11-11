@@ -23,7 +23,9 @@ use datafusion_common::{DFSchema, assert_or_internal_err};
 use datafusion_common::{NullEquality, Result};
 use datafusion_expr::utils::split_conjunction_owned;
 use datafusion_expr::utils::{can_hash, find_valid_equijoin_key_pair};
-use datafusion_expr::{BinaryExpr, Expr, ExprSchemable, Join, LogicalPlan, Operator};
+use datafusion_expr::{
+    BinaryExpr, Expr, ExprSchemable, Join, JoinConstraint, LogicalPlan, Operator,
+};
 // equijoin predicate
 type EquijoinPredicate = (Expr, Expr);
 
@@ -94,8 +96,18 @@ impl OptimizerRule for ExtractEquijoinPredicate {
                 }
                 let left_schema = left.schema();
                 let right_schema = right.schema();
+                // The keys of a USING join are read back as its USING columns
+                // (`LogicalPlan::using_columns`), so a key it gains is a pair
+                // of columns; an equality over a computed operand stays in
+                // its filter.
+                let column_keys_only = join_constraint == JoinConstraint::Using;
                 let (equijoin_predicates, non_equijoin_expr) =
-                    split_eq_and_noneq_join_predicate(expr, left_schema, right_schema)?;
+                    split_eq_and_noneq_join_predicate(
+                        expr,
+                        left_schema,
+                        right_schema,
+                        column_keys_only,
+                    )?;
 
                 // Equi-join operators like HashJoin support a special behavior
                 // that evaluates `NULL = NULL` as true instead of NULL. Therefore,
@@ -116,6 +128,7 @@ impl OptimizerRule for ExtractEquijoinPredicate {
                             expr,
                             left_schema,
                             right_schema,
+                            column_keys_only,
                         )?;
 
                     if !equijoin_predicates.is_empty() {
@@ -189,8 +202,15 @@ fn split_eq_and_noneq_join_predicate(
     filter: Expr,
     left_schema: &DFSchema,
     right_schema: &DFSchema,
+    column_keys_only: bool,
 ) -> Result<(Vec<EquijoinPredicate>, Option<Expr>)> {
-    split_op_and_other_join_predicates(filter, left_schema, right_schema, Operator::Eq)
+    split_op_and_other_join_predicates(
+        filter,
+        left_schema,
+        right_schema,
+        Operator::Eq,
+        column_keys_only,
+    )
 }
 
 /// See `split_eq_and_noneq_join_predicate`'s comment for the idea. This function
@@ -222,21 +242,26 @@ fn split_is_not_distinct_from_and_other_join_predicate(
     filter: Expr,
     left_schema: &DFSchema,
     right_schema: &DFSchema,
+    column_keys_only: bool,
 ) -> Result<(Vec<EquijoinPredicate>, Option<Expr>)> {
     split_op_and_other_join_predicates(
         filter,
         left_schema,
         right_schema,
         Operator::IsNotDistinctFrom,
+        column_keys_only,
     )
 }
 
-/// See comments in `split_eq_and_noneq_join_predicate` for details.
+/// See comments in `split_eq_and_noneq_join_predicate` for details. With
+/// `column_keys_only`, a pair becomes a key only when both of its sides are
+/// columns ([`Expr::get_as_join_column`]); any other stays in the filter.
 fn split_op_and_other_join_predicates(
     filter: Expr,
     left_schema: &DFSchema,
     right_schema: &DFSchema,
     operator: Operator,
+    column_keys_only: bool,
 ) -> Result<(Vec<EquijoinPredicate>, Option<Expr>)> {
     assert_or_internal_err!(
         matches!(operator, Operator::Eq | Operator::IsNotDistinctFrom),
@@ -260,7 +285,11 @@ fn split_op_and_other_join_predicates(
                 let join_key_pair =
                     find_valid_equijoin_key_pair(left, right, left_schema, right_schema)?;
 
-                if let Some((left_expr, right_expr)) = join_key_pair {
+                if let Some((left_expr, right_expr)) = join_key_pair.filter(|(l, r)| {
+                    !column_keys_only
+                        || (l.get_as_join_column().is_some()
+                            && r.get_as_join_column().is_some())
+                }) {
                     let left_expr_type = left_expr.get_type(left_schema)?;
                     let right_expr_type = right_expr.get_type(right_schema)?;
 
@@ -330,6 +359,42 @@ mod tests {
         assert_eq!(join.on.len(), 1);
         assert!(join.filter.is_some());
         assert!(matches!(join.null_equality, NullEquality::NullEqualsNull));
+        Ok(())
+    }
+
+    #[test]
+    fn using_join_gains_column_keys_and_keeps_computed_equalities_in_its_filter()
+    -> Result<()> {
+        let t1 = test_table_scan_with_name("t1")?;
+        let t2 = test_table_scan_with_name("t2")?;
+        let computed = col("t1.c").eq(col("t2.c") + lit(1u32));
+        let plan = LogicalPlan::Join(Join::try_new(
+            Arc::new(t1),
+            Arc::new(t2),
+            vec![(col("t1.a"), col("t2.a"))],
+            Some(col("t1.b").eq(col("t2.b")).and(computed.clone())),
+            JoinType::Inner,
+            JoinConstraint::Using,
+            NullEquality::NullEqualsNothing,
+        )?);
+
+        let rewritten = ExtractEquijoinPredicate::new()
+            .rewrite(plan, &crate::OptimizerContext::new())?;
+        assert!(rewritten.transformed);
+        rewritten.data.using_columns()?;
+        let LogicalPlan::Join(join) = rewritten.data else {
+            panic!("expected a join");
+        };
+        assert_eq!(
+            join.on,
+            vec![(col("t1.a"), col("t2.a")), (col("t1.b"), col("t2.b"))]
+        );
+        assert_eq!(join.filter, Some(computed));
+        assert_eq!(join.join_constraint, JoinConstraint::Using);
+
+        let settled = ExtractEquijoinPredicate::new()
+            .rewrite(LogicalPlan::Join(join), &crate::OptimizerContext::new())?;
+        assert!(!settled.transformed);
         Ok(())
     }
 
