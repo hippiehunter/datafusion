@@ -652,6 +652,14 @@ impl SqlToRel<'_> {
                     let group_by_expr =
                         resolve_positions_to_exprs(group_by_expr, &select_exprs)?;
                     let group_by_expr = normalize_col(group_by_expr, &projected_plan)?;
+                    if group_by_expr
+                        .exists(|expr| Ok(matches!(expr, Expr::WindowFunction(_))))?
+                    {
+                        return Err(sqlstate_datafusion_err(
+                            "42P20",
+                            "window functions are not allowed in GROUP BY",
+                        ));
+                    }
                     self.validate_schema_satisfies_exprs(
                         base_plan.schema(),
                         std::slice::from_ref(&group_by_expr),
