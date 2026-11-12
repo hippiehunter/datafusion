@@ -24,10 +24,15 @@
 //! resolved here into the positional arguments of the function the context
 //! provider registers for each form, and the declared `RETURNING` type becomes
 //! the cast around the call — so the document is built once and typed after.
+//!
+//! Without `RETURNING`, constructors choose JSONB when a direct input has
+//! JSONB type identity, and JSON otherwise. Inspect the input before member
+//! rendering erases its identity; the query form of `JSON_ARRAY` likewise
+//! uses the subquery's original result field.
 
 use std::collections::BTreeMap;
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
 use datafusion_common::error::{
     sqlstate_datafusion_err, sqlstate_datafusion_err_with_hint,
 };
@@ -293,15 +298,17 @@ impl SqlToRel<'_> {
         }
         let arguments = SqlJsonArguments::collect(&list.args);
 
-        let planned = match name.as_str() {
-            "json_value" | "json_query" | "json_exists" => self
-                .plan_sql_json_query_function(
+        let (planned, constructor_jsonb) = match name.as_str() {
+            "json_value" | "json_query" | "json_exists" => (
+                self.plan_sql_json_query_function(
                     &name,
                     &arguments,
                     &clauses,
                     schema,
                     planner_context,
                 )?,
+                false,
+            ),
             "json_arrayagg" | "json_objectagg" => self.plan_sql_json_aggregate(
                 &name,
                 function,
@@ -318,9 +325,13 @@ impl SqlToRel<'_> {
                 planner_context,
             )?,
         };
-        Ok(Some(
-            self.cast_sql_json_result(planned, &name, &clauses, schema)?,
-        ))
+        Ok(Some(self.cast_sql_json_result(
+            planned,
+            &name,
+            &clauses,
+            schema,
+            constructor_jsonb,
+        )?))
     }
 
     /// The declared result type is applied outside the call: the function
@@ -333,11 +344,13 @@ impl SqlToRel<'_> {
         name: &str,
         clauses: &SqlJsonClauses,
         schema: &DFSchema,
+        constructor_jsonb: bool,
     ) -> Result<Expr> {
         let target = match (&clauses.returning, name) {
             (Some(data_type), _) => data_type.clone(),
             (None, "json_value" | "json_exists" | "json_serialize") => return Ok(expr),
             (None, "json_query") => SQLDataType::JSONB,
+            (None, _) if constructor_jsonb => SQLDataType::JSONB,
             (None, _) => SQLDataType::JSON,
         };
         // A constructed document reaches bytea as its UTF8 bytes; there is no
@@ -561,13 +574,17 @@ impl SqlToRel<'_> {
     /// type planner declares `jsonb` with, on a binary carrier. A context
     /// provider that declares no `jsonb` type has no such expression.
     fn is_jsonb_expr(&self, expr: &Expr, schema: &DFSchema) -> Result<bool> {
+        let (_, field) = expr.to_field(schema)?;
+        self.is_jsonb_field(&field)
+    }
+
+    fn is_jsonb_field(&self, field: &Field) -> Result<bool> {
         let Ok(jsonb) = self.convert_data_type_to_field(&SQLDataType::JSONB) else {
             return Ok(false);
         };
         if jsonb.metadata().is_empty() {
             return Ok(false);
         }
-        let (_, field) = expr.to_field(schema)?;
         let binary = |data_type: &DataType| {
             matches!(
                 data_type,
@@ -645,7 +662,7 @@ impl SqlToRel<'_> {
         clauses: &SqlJsonClauses,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
-    ) -> Result<Expr> {
+    ) -> Result<(Expr, bool)> {
         let first_value =
             |this: &Self, planner_context: &mut PlannerContext| match arguments
                 .values
@@ -662,14 +679,18 @@ impl SqlToRel<'_> {
         match name {
             "json" => {
                 let value = first_value(self, planner_context)?;
+                let jsonb = self.is_jsonb_expr(&value, schema)?;
                 self.sql_json_function_call(
                     "json_constructor",
                     vec![value, lit(clauses.unique_keys), lit(arguments.encoding)],
                 )
+                .map(|expr| (expr, jsonb))
             }
             "json_scalar" => {
                 let value = first_value(self, planner_context)?;
+                let jsonb = self.is_jsonb_expr(&value, schema)?;
                 self.sql_json_function_call("json_scalar_constructor", vec![value])
+                    .map(|expr| (expr, jsonb))
             }
             "json_serialize" => {
                 let value = first_value(self, planner_context)?;
@@ -681,22 +702,22 @@ impl SqlToRel<'_> {
                     "json_serialize_constructor",
                     vec![value, returning],
                 )
+                .map(|expr| (expr, false))
             }
             "json_object" => {
                 let mut args = vec![lit(absent_on_null), lit(clauses.unique_keys)];
+                let mut jsonb = false;
                 for (key, value) in &arguments.pairs {
-                    args.push(self.sql_expr_to_logical_expr(
-                        key,
-                        schema,
-                        planner_context,
-                    )?);
-                    args.push(self.sql_expr_to_logical_expr(
-                        value,
-                        schema,
-                        planner_context,
-                    )?);
+                    let key =
+                        self.sql_expr_to_logical_expr(key, schema, planner_context)?;
+                    let value =
+                        self.sql_expr_to_logical_expr(value, schema, planner_context)?;
+                    jsonb |= self.is_jsonb_expr(&key, schema)?
+                        || self.is_jsonb_expr(&value, schema)?;
+                    args.extend([key, value]);
                 }
                 self.sql_json_function_call("json_object_constructor", args)
+                    .map(|expr| (expr, jsonb))
             }
             _ => {
                 // `JSON_ARRAY(<query>)` aggregates the query's rows.
@@ -709,14 +730,15 @@ impl SqlToRel<'_> {
                     );
                 }
                 let mut args = vec![lit(absent_on_null)];
+                let mut jsonb = false;
                 for value in &arguments.values {
-                    args.push(self.sql_expr_to_logical_expr(
-                        value,
-                        schema,
-                        planner_context,
-                    )?);
+                    let value =
+                        self.sql_expr_to_logical_expr(value, schema, planner_context)?;
+                    jsonb |= self.is_jsonb_expr(&value, schema)?;
+                    args.push(value);
                 }
                 self.sql_json_function_call("json_array_constructor", args)
+                    .map(|expr| (expr, jsonb))
             }
         }
     }
@@ -729,7 +751,7 @@ impl SqlToRel<'_> {
         absent_on_null: bool,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
-    ) -> Result<Expr> {
+    ) -> Result<(Expr, bool)> {
         let SQLExpr::Subquery(query) = subquery else {
             return plan_err!("JSON_ARRAY expects a query or a value list");
         };
@@ -739,14 +761,15 @@ impl SqlToRel<'_> {
                 "SQL/JSON requires the 'json_arrayagg' aggregate to be registered"
             );
         };
-        self.plan_scalar_subquery_aggregate(
+        let (expr, input_field) = self.plan_scalar_subquery_aggregate(
             query.as_ref(),
             aggregate,
             vec![lit(absent_on_null)],
             Some("json_member_value"),
             schema,
             planner_context,
-        )
+        )?;
+        Ok((expr, self.is_jsonb_field(&input_field)?))
     }
 
     /// `JSON_ARRAYAGG(value ...)` and `JSON_OBJECTAGG(key : value ...)` as a
@@ -764,7 +787,7 @@ impl SqlToRel<'_> {
         clauses: &SqlJsonClauses,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
-    ) -> Result<Expr> {
+    ) -> Result<(Expr, bool)> {
         let Some(aggregate) = self.context_provider.get_aggregate_meta(name) else {
             return not_impl_err!(
                 "SQL/JSON requires the '{name}' aggregate to be registered"
@@ -777,27 +800,36 @@ impl SqlToRel<'_> {
         // type, which only a scalar function sees. Rendering each argument
         // before it reaches the aggregate keeps the accumulator a plain
         // concatenation of `json` fragments.
-        let args = if name == "json_arrayagg" {
+        let (args, jsonb) = if name == "json_arrayagg" {
             let Some(value) = arguments.values.first() else {
                 return plan_err!("JSON_ARRAYAGG takes one value expression");
             };
             let value = self.sql_expr_to_logical_expr(value, schema, planner_context)?;
-            vec![
-                self.sql_json_function_call("json_member_value", vec![value])?,
-                lit(absent_on_null),
-            ]
+            let jsonb = self.is_jsonb_expr(&value, schema)?;
+            (
+                vec![
+                    self.sql_json_function_call("json_member_value", vec![value])?,
+                    lit(absent_on_null),
+                ],
+                jsonb,
+            )
         } else {
             let Some((key, value)) = arguments.pairs.first() else {
                 return plan_err!("JSON_OBJECTAGG takes a key and a value expression");
             };
             let key = self.sql_expr_to_logical_expr(key, schema, planner_context)?;
             let value = self.sql_expr_to_logical_expr(value, schema, planner_context)?;
-            vec![
-                self.sql_json_function_call("json_member_key", vec![key])?,
-                self.sql_json_function_call("json_member_value", vec![value])?,
-                lit(clauses.unique_keys),
-                lit(absent_on_null),
-            ]
+            let jsonb = self.is_jsonb_expr(&key, schema)?
+                || self.is_jsonb_expr(&value, schema)?;
+            (
+                vec![
+                    self.sql_json_function_call("json_member_key", vec![key])?,
+                    self.sql_json_function_call("json_member_value", vec![value])?,
+                    lit(clauses.unique_keys),
+                    lit(absent_on_null),
+                ],
+                jsonb,
+            )
         };
         let filter = function
             .filter
@@ -818,22 +850,24 @@ impl SqlToRel<'_> {
             }
             let (partition_by, order_by, window_frame) =
                 self.plan_window_spec(&window, schema, planner_context)?;
-            return self.plan_window_call(
-                RawWindowExpr {
-                    name: name.to_string(),
-                    name_span: convert_parser_span(function.name.span()),
-                    func_def: WindowFunctionDefinition::AggregateUDF(aggregate),
-                    args,
-                    partition_by,
-                    order_by,
-                    window_frame,
-                    filter,
-                    null_treatment: None,
-                    distinct: false,
-                    window_reference,
-                },
-                schema,
-            );
+            return self
+                .plan_window_call(
+                    RawWindowExpr {
+                        name: name.to_string(),
+                        name_span: convert_parser_span(function.name.span()),
+                        func_def: WindowFunctionDefinition::AggregateUDF(aggregate),
+                        args,
+                        partition_by,
+                        order_by,
+                        window_frame,
+                        filter,
+                        null_treatment: None,
+                        distinct: false,
+                        window_reference,
+                    },
+                    schema,
+                )
+                .map(|expr| (expr, jsonb));
         }
         let order_by = if clauses.order_by.is_empty() {
             Vec::new()
@@ -846,10 +880,11 @@ impl SqlToRel<'_> {
                 None,
             )?
         };
-        Ok(Expr::AggregateFunction(
-            datafusion_expr::expr::AggregateFunction::new_udf(
+        Ok((
+            Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(
                 aggregate, args, false, filter, order_by, None,
-            ),
+            )),
+            jsonb,
         ))
     }
 }

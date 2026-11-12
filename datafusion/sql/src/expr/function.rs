@@ -24,7 +24,7 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::graph_functions::GraphFunction;
 use datafusion_expr::{Distinct, DistinctOn, LogicalPlan, Projection};
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::{
     Column, DFSchema, DataFusionError, Dependency, Diagnostic, Result, ScalarValue,
     Spans, internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err,
@@ -696,8 +696,7 @@ impl SqlToRel<'_> {
         // `Expr::Unnest` into the plan's `Unnest`. A plan made to be printed
         // keeps the call as written, typed as the row that unnest produces.
         'set_returning: {
-            if over.is_some() || !self.context_provider.is_set_returning_function(&name)
-            {
+            if over.is_some() || !self.context_provider.is_set_returning_function(&name) {
                 break 'set_returning;
             }
             let (srf_args, arg_names) =
@@ -1812,6 +1811,7 @@ impl SqlToRel<'_> {
             schema,
             planner_context,
         )
+        .map(|(expr, _)| expr)
     }
 
     /// Aggregate a one-column subquery into a single scalar value, which is
@@ -1824,6 +1824,8 @@ impl SqlToRel<'_> {
     /// through first, which is how an aggregate whose members are
     /// type-dependent text gets its arguments rendered before they reach the
     /// accumulator.
+    /// Returns the scalar expression and its original input field, before
+    /// any member renderer erases the input's semantic type.
     pub(super) fn plan_scalar_subquery_aggregate(
         &self,
         query: &sqlparser::ast::Query,
@@ -1832,7 +1834,7 @@ impl SqlToRel<'_> {
         value_wrapper: Option<&str>,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
-    ) -> Result<Expr> {
+    ) -> Result<(Expr, FieldRef)> {
         // A trivial scalar wrapper has an empty schema and must retain the
         // outer scopes it inherited. A nonempty query adds a scope rather
         // than replacing the previous one, so nested correlation still sees
@@ -1866,6 +1868,7 @@ impl SqlToRel<'_> {
         let outer_ref_columns = sub_plan.all_out_ref_exprs();
         let (qualifier, field) = sub_plan.schema().qualified_field(0);
         let agg_arg = Expr::Column(Column::new(qualifier.cloned(), field.name()));
+        let input_field = std::sync::Arc::clone(&sub_plan.schema().fields()[0]);
 
         let agg_arg = match value_wrapper {
             Some(name) => {
@@ -1894,11 +1897,14 @@ impl SqlToRel<'_> {
             .build()?;
 
         // Return as a scalar subquery
-        Ok(Expr::ScalarSubquery(Subquery {
-            subquery: std::sync::Arc::new(aggregate_plan),
-            outer_ref_columns,
-            spans: Spans::new(),
-        }))
+        Ok((
+            Expr::ScalarSubquery(Subquery {
+                subquery: std::sync::Arc::new(aggregate_plan),
+                outer_ref_columns,
+                spans: Spans::new(),
+            }),
+            input_field,
+        ))
     }
 
     /// Positional arguments for a call that named some of them, resolved
