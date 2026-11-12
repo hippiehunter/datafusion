@@ -3089,7 +3089,7 @@ impl Display for SchemaDisplay<'_> {
                         }
 
                         if let Some(filter) = filter {
-                            write!(f, " FILTER (WHERE {filter})")?;
+                            write!(f, " FILTER (WHERE {})", SchemaDisplay(filter))?;
                         }
 
                         if !partition_by.is_empty() {

@@ -887,7 +887,8 @@ pub fn udaf_default_schema_name<F: AggregateUDFImpl + ?Sized>(
     }
 
     if let Some(filter) = filter {
-        schema_name.write_fmt(format_args!(" FILTER (WHERE {filter})"))?;
+        schema_name
+            .write_fmt(format_args!(" FILTER (WHERE {})", filter.schema_name()))?;
     };
 
     if !order_by.is_empty() {
@@ -984,7 +985,8 @@ pub fn udaf_default_window_function_schema_name<F: AggregateUDFImpl + ?Sized>(
     }
 
     if let Some(filter) = filter {
-        schema_name.write_fmt(format_args!(" FILTER (WHERE {filter})"))?;
+        schema_name
+            .write_fmt(format_args!(" FILTER (WHERE {})", filter.schema_name()))?;
     }
 
     if !partition_by.is_empty() {
