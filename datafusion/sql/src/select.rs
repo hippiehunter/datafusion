@@ -465,14 +465,12 @@ impl SqlToRel<'_> {
         let select_exprs = select_exprs
             .into_iter()
             .map(|select_expr| match select_expr {
-                SelectExpr::Expression(expr) => {
-                    hoist_outer_level_aggregates(
-                        expr,
-                        base_plan.schema().as_ref(),
-                        planner_context,
-                    )
-                    .map(SelectExpr::Expression)
-                }
+                SelectExpr::Expression(expr) => hoist_outer_level_aggregates(
+                    expr,
+                    base_plan.schema().as_ref(),
+                    planner_context,
+                )
+                .map(SelectExpr::Expression),
                 other => Ok(other),
             })
             .collect::<Result<Vec<_>>>()?;
@@ -638,9 +636,7 @@ impl SqlToRel<'_> {
                         .iter()
                         .enumerate()
                         .filter_map(|(position, item)| match item {
-                            Expr::Alias(alias)
-                                if alias_map.contains_key(&alias.name) =>
-                            {
+                            Expr::Alias(alias) if alias_map.contains_key(&alias.name) => {
                                 Some((alias.name.clone(), position))
                             }
                             _ => None,
@@ -1680,9 +1676,10 @@ impl SqlToRel<'_> {
                         .take_outer_level_aggregates(level)
                         .is_empty()
                 {
-                    return plan_err!(
-                        "Aggregate functions are not allowed in the WHERE clause. Consider using HAVING instead"
-                    );
+                    return Err(sqlstate_datafusion_err(
+                        "42803",
+                        "aggregate functions are not allowed in WHERE",
+                    ));
                 }
 
                 let mut using_columns = HashSet::new();
