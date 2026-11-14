@@ -507,15 +507,16 @@ impl ExprSchemable for Expr {
                 metadata,
                 ..
             }) => {
-                let mut combined_metadata = expr.metadata(schema)?;
+                // The aliased expression's field is derived once: deriving
+                // it again for its metadata doubles the work at every alias
+                // of a nested expression.
+                let field = expr.to_field(schema).map(|(_, f)| f)?;
+                let mut combined_metadata = FieldMetadata::from(field.metadata());
                 if let Some(metadata) = metadata {
                     combined_metadata.extend(metadata.clone());
                 }
 
-                Ok(expr
-                    .to_field(schema)
-                    .map(|(_, f)| f)?
-                    .with_field_metadata(&combined_metadata))
+                Ok(field.with_field_metadata(&combined_metadata))
             }
             Expr::Negative(expr) => expr.to_field(schema).map(|(_, f)| f),
             Expr::Column(c) => schema.field_from_column(c).map(Arc::clone),
@@ -970,6 +971,16 @@ mod tests {
             let expr = lit(ScalarValue::Null).$EXPR_TYPE();
             assert!(!expr.nullable(&MockExprSchema::new()).unwrap());
         }};
+    }
+
+    #[test]
+    fn nested_aliases_derive_their_field_once_per_level() {
+        // Sixty-four levels derived twice each would never finish.
+        let expr = (0..64).fold(lit(1i64), |expr, level| {
+            (expr + lit(1i64)).alias(format!("level_{level}"))
+        });
+        let (_, field) = expr.to_field(&DFSchema::empty()).unwrap();
+        assert_eq!(field.data_type(), &DataType::Int64);
     }
 
     #[test]
