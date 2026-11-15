@@ -96,7 +96,7 @@ recursive = "0.1.1"
 regex = "1.12"
 rstest = "0.26.1"
 serde_json = "1"
-sqlparser = { git = "https://github.com/hippiehunter/datafusion-sqlparser-rs.git", rev = "d971ab120559c6f0f69b8fe213809f194a4efaf9", default-features = false, features = ["std", "visitor"] }
+sqlparser = { git = "https://github.com/hippiehunter/datafusion-sqlparser-rs.git", rev = "09ef69ff536c7129ac862846ad61f27d690cb5d4", default-features = false, features = ["std", "visitor"] }
 tempfile = "3"
 event-listener = "5.4"
 smol = "2"
