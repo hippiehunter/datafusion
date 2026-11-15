@@ -46,19 +46,19 @@
 
 mod ast_walk;
 mod cte;
-mod dml_carry;
 pub mod definition_plan;
+mod dml_carry;
 mod dml_front;
 mod expr;
-mod locking;
+pub mod locking;
 mod outer_aggregates;
 pub mod parser;
 pub mod planner;
 mod planner_extension;
 mod query;
 mod relation;
-mod row_presence;
 pub mod resolve;
+mod row_presence;
 mod select;
 mod set_expr;
 mod stack;
@@ -69,8 +69,8 @@ pub use statement::is_host_utility_statement;
 pub mod unparser;
 pub mod utils;
 mod values;
-mod view_dml;
 pub mod view_analysis;
+mod view_dml;
 #[deprecated(
     since = "46.0.0",
     note = "use datafusion_common::{ResolvedTableReference, TableReference}"

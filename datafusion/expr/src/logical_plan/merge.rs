@@ -51,6 +51,9 @@ pub struct Merge {
     /// arm's condition or assignment, or its RETURNING list names a target
     /// column, or an arm does nothing.
     pub target_select_rights: TargetSelectRights,
+    /// Authored caller-visible target reads, consumed by authorization before
+    /// executable lowering substitutes or prunes their expressions.
+    pub target_read_columns: Option<Vec<String>>,
     /// The check option of the view the statement wrote through, which every
     /// row an INSERT or UPDATE arm writes must satisfy.
     pub check_option: Option<DmlCheckOption>,
@@ -76,6 +79,7 @@ impl Merge {
             returning_context: None,
             output_schema: make_count_schema(),
             target_select_rights,
+            target_read_columns: None,
             check_option: None,
         }
     }
@@ -109,6 +113,7 @@ impl Debug for Merge {
             .field("returning_context", &self.returning_context)
             .field("output_schema", &self.output_schema)
             .field("target_select_rights", &self.target_select_rights)
+            .field("target_read_columns", &self.target_read_columns)
             .field("check_option", &self.check_option)
             .finish()
     }
@@ -126,6 +131,7 @@ impl PartialEq for Merge {
             && self.returning_context == other.returning_context
             && self.output_schema == other.output_schema
             && self.target_select_rights == other.target_select_rights
+            && self.target_read_columns == other.target_read_columns
             && self.check_option == other.check_option
     }
 }
@@ -144,6 +150,7 @@ impl Hash for Merge {
         self.returning_context.hash(state);
         self.output_schema.hash(state);
         self.target_select_rights.hash(state);
+        self.target_read_columns.hash(state);
         self.check_option.hash(state);
     }
 }

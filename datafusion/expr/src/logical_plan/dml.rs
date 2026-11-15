@@ -220,14 +220,57 @@ impl TargetSelectRights {
     /// subquery within them, names a target column.
     pub fn reading_columns<'a>(
         exprs: impl IntoIterator<Item = &'a Expr>,
-        is_target_column: impl Fn(&Column) -> bool,
+        mut is_target_column: impl FnMut(&Column) -> bool,
     ) -> Result<Self> {
         for expr in exprs {
-            if expr_reads_target(expr, &is_target_column)? {
+            if expr_reads_target(expr, &mut is_target_column)? {
                 return Ok(Self::Required);
             }
         }
         Ok(Self::NotRequired)
+    }
+
+    /// Bind every authored target-column read before view substitution or
+    /// generated old-row expressions replace the statement's public names.
+    pub fn reading_and_recording<'a>(
+        target: &TableReference,
+        exprs: impl IntoIterator<Item = &'a Expr>,
+        columns: &mut Vec<String>,
+    ) -> Result<Self> {
+        Self::reading_columns_and_recording(
+            exprs,
+            |column| {
+                column
+                    .relation
+                    .as_ref()
+                    .is_none_or(|relation| relation.resolved_eq(target))
+            },
+            columns,
+        )
+    }
+
+    /// Record reads with the caller's bound target-column classification.
+    pub fn reading_columns_and_recording<'a>(
+        exprs: impl IntoIterator<Item = &'a Expr>,
+        is_target_column: impl Fn(&Column) -> bool,
+        columns: &mut Vec<String>,
+    ) -> Result<Self> {
+        let mut reads = false;
+        Self::reading_columns(exprs, |column| {
+            if is_target_column(column) {
+                reads = true;
+                if !columns.contains(&column.name) {
+                    columns.push(column.name.clone());
+                }
+            }
+            // Visit every reference rather than stopping at the first read.
+            false
+        })?;
+        Ok(if reads {
+            Self::Required
+        } else {
+            Self::NotRequired
+        })
     }
 
     /// The rights a statement needs when one part of it needs `self` and
@@ -239,7 +282,7 @@ impl TargetSelectRights {
 
 fn expr_reads_target(
     expr: &Expr,
-    is_target_column: &dyn Fn(&Column) -> bool,
+    is_target_column: &mut dyn FnMut(&Column) -> bool,
 ) -> Result<bool> {
     let mut reads = false;
     expr.apply(|expr| {
@@ -265,7 +308,7 @@ fn expr_reads_target(
 /// nesting; its own columns name the relations it reads itself.
 fn subquery_reads_target(
     subquery: &Subquery,
-    is_target_column: &dyn Fn(&Column) -> bool,
+    is_target_column: &mut dyn FnMut(&Column) -> bool,
 ) -> Result<bool> {
     let mut reads = false;
     subquery.subquery.apply_with_subqueries(|plan| {
@@ -339,6 +382,9 @@ pub struct DmlStatement {
     pub check_option: Option<DmlCheckOption>,
     /// Whether the statement's own expressions read the target's columns.
     pub target_select_rights: TargetSelectRights,
+    /// Authored caller-visible target-column reads before view substitution.
+    /// Authorization consumes this recipe before executable lowering.
+    pub target_read_columns: Option<Vec<String>>,
     /// The relations other than the target whose rows an UPDATE's or DELETE's
     /// input joins, each with the junk columns that carry the columns of its
     /// joined row the statement's recheck reads, and its presence column. A
@@ -434,6 +480,7 @@ impl Hash for DmlStatement {
         self.overriding_system_value.hash(state);
         self.check_option.hash(state);
         self.target_select_rights.hash(state);
+        self.target_read_columns.hash(state);
         self.carried.hash(state);
     }
 }
@@ -452,6 +499,7 @@ impl PartialEq for DmlStatement {
             && self.overriding_system_value == other.overriding_system_value
             && self.check_option == other.check_option
             && self.target_select_rights == other.target_select_rights
+            && self.target_read_columns == other.target_read_columns
             && self.carried == other.carried
     }
 }
@@ -471,6 +519,7 @@ impl Debug for DmlStatement {
             .field("returning_context", &self.returning_context)
             .field("check_option", &self.check_option)
             .field("target_select_rights", &self.target_select_rights)
+            .field("target_read_columns", &self.target_read_columns)
             .field("carried", &self.carried)
             .finish()
     }
@@ -498,6 +547,7 @@ impl DmlStatement {
             overriding_system_value: false,
             check_option: None,
             target_select_rights,
+            target_read_columns: None,
             carried: Vec::new(),
         }
     }
@@ -642,7 +692,9 @@ impl DmlStatement {
             TableReference::bare(EXCLUDED),
             &excluded,
         )?;
-        Ok(Some(Arc::new(target_row.join(&excluded)?.join(&target_system)?)))
+        Ok(Some(Arc::new(
+            target_row.join(&excluded)?.join(&target_system)?,
+        )))
     }
 
     /// Return a descriptive name of this [`DmlStatement`]

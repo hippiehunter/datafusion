@@ -55,6 +55,7 @@ use crate::{
 
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datafusion_common::cse::{NormalizeEq, Normalizeable};
+use datafusion_common::error::sqlstate_datafusion_err;
 use datafusion_common::format::ExplainFormat;
 use datafusion_common::metadata::{FieldMetadata, check_metadata_with_storage_equal};
 use datafusion_common::tree_node::{
@@ -67,7 +68,6 @@ use datafusion_common::{
     assert_eq_or_internal_err, assert_or_internal_err, internal_err,
     is_values_payload_parameter, plan_err,
 };
-use datafusion_common::error::sqlstate_datafusion_err;
 use indexmap::IndexSet;
 
 // backwards compatibility
@@ -1618,6 +1618,7 @@ impl LogicalPlan {
                 );
                 new_dml.output_schema = Arc::clone(&dml.output_schema);
                 new_dml.target_columns = dml.target_columns.clone();
+                new_dml.target_read_columns = dml.target_read_columns.clone();
                 new_dml.returning_columns = dml.returning_columns.clone();
                 new_dml.returning_exprs = dml.returning_exprs.clone();
                 new_dml.returning_context = dml.returning_context.clone();
@@ -1750,6 +1751,7 @@ impl LogicalPlan {
                     returning_context: merge.returning_context.clone(),
                     output_schema: Arc::clone(&merge.output_schema),
                     target_select_rights: merge.target_select_rights,
+                    target_read_columns: merge.target_read_columns.clone(),
                     check_option: merge.check_option.clone(),
                 }))
             }
@@ -5816,7 +5818,8 @@ mod tests {
     };
     use datafusion_common::{
         Constraint, Constraints, NullsDistinct, ScalarValue,
-        VALUES_PAYLOAD_PARAMETER_METADATA_KEY, not_impl_err, values_payload_parameter_field,
+        VALUES_PAYLOAD_PARAMETER_METADATA_KEY, not_impl_err,
+        values_payload_parameter_field,
     };
     use insta::{assert_debug_snapshot, assert_snapshot};
     use std::hash::DefaultHasher;
@@ -6367,7 +6370,8 @@ mod tests {
             ScalarValue::Int32(Some(42)),
             Some(scalar_meta.into()),
         )]);
-        param_values.verify_fields(&fields)
+        param_values
+            .verify_fields(&fields)
             .expect_err("prepared field metadata mismatch unexpectedly succeeded");
     }
 
@@ -6785,7 +6789,8 @@ mod tests {
     /// like IN does: every walk with subqueries visits and rewrites it.
     #[test]
     fn quantified_subqueries_are_walked_and_rewritten_with_the_plan() {
-        let inner_schema = Schema::new(vec![Field::new("sub_id", DataType::Int32, false)]);
+        let inner_schema =
+            Schema::new(vec![Field::new("sub_id", DataType::Int32, false)]);
         let outer_schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
         for all in [false, true] {
             let source = QuantifiedSource::Subquery(Subquery {
@@ -7417,9 +7422,10 @@ mod tests {
             Expr::Placeholder(Placeholder::new_with_field("$1".to_string(), Some(field)))
         };
 
-        let literal =
-            LogicalPlanBuilder::values(vec![vec![parameter(Arc::new(declared.clone()))]])?
-                .build()?;
+        let literal = LogicalPlanBuilder::values(vec![vec![parameter(Arc::new(
+            declared.clone(),
+        ))]])?
+        .build()?;
         assert_eq!(literal.max_rows(), Some(1));
 
         let payload = LogicalPlanBuilder::values(vec![vec![parameter(

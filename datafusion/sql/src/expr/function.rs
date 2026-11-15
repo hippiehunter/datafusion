@@ -1050,11 +1050,12 @@ impl SqlToRel<'_> {
                 // UDAFs must opt-in via `supports_within_group_clause()` to
                 // accept a WITHIN GROUP clause.
                 let supports_within_group = fm.supports_within_group_clause();
+                let uses_within_group = !within_group.is_empty();
 
                 // `f(*)` passes an ordered-set aggregate no argument.
                 let (mut args, mut arg_names): (Vec<Expr>, Vec<Option<String>>) = args
                     .iter()
-                    .filter(|arg| !(supports_within_group && is_star_argument(arg)))
+                    .filter(|arg| !(uses_within_group && is_star_argument(arg)))
                     .map(|arg| {
                         self.sql_fn_arg_to_logical_expr_with_name(
                             arg,
@@ -1075,14 +1076,14 @@ impl SqlToRel<'_> {
                 // The written sort items, one per entry of `order_by` below.
                 // ORDER BY and WITHIN GROUP are exclusive, so at most one of
                 // the two lists is non-empty.
-                let written_order = if supports_within_group || order_by.is_empty() {
+                let written_order = if uses_within_group {
                     within_group
                 } else {
                     order_by
                 };
-                // If the UDAF supports WITHIN GROUP, convert the ordering into
-                // sort expressions and prepend them as unnamed function args.
-                let order_by = if supports_within_group {
+                // WITHIN GROUP prepends its sort keys to the direct arguments.
+                // A family can also contain ordinary aggregate overloads.
+                let order_by = if uses_within_group {
                     let (within_group_sorts, new_args, new_arg_names) = self
                         .extract_and_prepend_within_group_args(
                             written_order,
@@ -1181,10 +1182,7 @@ impl SqlToRel<'_> {
                 // those keys and then by the arguments they leave out, and
                 // tells duplicates by that whole list. A constant argument
                 // distinguishes no rows.
-                let order_by = if distinct
-                    && !supports_within_group
-                    && !order_by.is_empty()
-                {
+                let order_by = if distinct && !uses_within_group && !order_by.is_empty() {
                     let mut order_by = order_by;
                     for argument in &resolved_args {
                         if !matches!(argument, Expr::Literal(..) | Expr::Placeholder(_))
@@ -1206,6 +1204,7 @@ impl SqlToRel<'_> {
                     distinct,
                     filter,
                     order_by,
+                    within_group: uses_within_group,
                     null_treatment,
                 };
                 for planner in self.context_provider.get_expr_planners().iter() {
@@ -1223,6 +1222,7 @@ impl SqlToRel<'_> {
                     distinct,
                     filter,
                     order_by,
+                    within_group: _,
                     null_treatment,
                 } = aggregate_expr;
 

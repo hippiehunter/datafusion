@@ -256,6 +256,7 @@ impl TreeNode for LogicalPlan {
                 overriding_system_value,
                 check_option,
                 target_select_rights,
+                target_read_columns,
                 carried,
             }) => input.map_elements(f)?.update_data(|input| {
                 LogicalPlan::Dml(DmlStatement {
@@ -271,6 +272,7 @@ impl TreeNode for LogicalPlan {
                     overriding_system_value,
                     check_option,
                     target_select_rights,
+                    target_read_columns,
                     carried,
                 })
             }),
@@ -285,6 +287,7 @@ impl TreeNode for LogicalPlan {
                 returning_context,
                 output_schema,
                 target_select_rights,
+                target_read_columns,
                 check_option,
             }) => (target, source)
                 .map_elements(f)?
@@ -300,6 +303,7 @@ impl TreeNode for LogicalPlan {
                         returning_context,
                         output_schema,
                         target_select_rights,
+                        target_read_columns,
                         check_option,
                     })
                 }),

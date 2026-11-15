@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use datafusion_common::plan_err;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{Result, sqlstate_datafusion_err};
 use datafusion_expr::{
     LogicalPlan, SubqueryAlias, TableScanRowLock, TableScanRowLockMode,
@@ -41,7 +41,8 @@ use sqlparser::ast::{
     TableWithJoins,
 };
 
-use crate::planner::{PlannerContext, SqlToRel};
+use crate::dml_carry::add_locking_junk_columns;
+use crate::planner::{IdentNormalizer, PlannerContext, SqlToRel};
 
 const SYNTAX_ERROR: &str = "42601";
 const UNDEFINED_TABLE: &str = "42P01";
@@ -94,6 +95,177 @@ impl RangeEntry<'_> {
     }
 }
 
+/// The defining query's row-lock namespace, without its syntax or provider.
+/// Built only when a caller locks a view whose body is expanded separately.
+#[derive(Debug)]
+pub struct ViewLockScope {
+    ctes: CteReferences,
+    join_aliases: Vec<String>,
+    null_extended: bool,
+    level: LockingLevel,
+}
+
+impl ViewLockScope {
+    /// Capture a view query's CTE boundaries and nullable FROM items.
+    pub fn new(query: &Query, normalize_identifiers: bool) -> Self {
+        let normalizer = IdentNormalizer::new(normalize_identifiers);
+        let planner = LockPlanner {
+            ident_normalizer: &normalizer,
+        };
+        let context = PlannerContext::new();
+        let ctes = query
+            .with
+            .as_ref()
+            .map(|with| {
+                with.cte_tables
+                    .iter()
+                    .map(|cte| planner.alias_name(&cte.alias))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let join_aliases = match query.body.as_ref() {
+            SetExpr::Select(select) => planner
+                .lock_range(select, &context, &ctes)
+                .into_iter()
+                .filter(|entry| matches!(entry.kind, EntryKind::Join))
+                .filter_map(|entry| entry.name)
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            ctes: planner.query_cte_references(query, &context, &[]),
+            join_aliases,
+            null_extended: planner.locks_null_extended_rows(query, &context, &[]),
+            level: LockingLevel::new(query),
+        }
+    }
+
+    /// Apply a caller's lock with the same scope and lock combination rules
+    /// as a locking clause written in the defining query.
+    pub fn apply(
+        &self,
+        plan: LogicalPlan,
+        row_lock: TableScanRowLock,
+    ) -> Result<LogicalPlan> {
+        let strength = match row_lock.mode {
+            TableScanRowLockMode::ForUpdate => LockType::Update,
+            TableScanRowLockMode::ForNoKeyUpdate => LockType::NoKeyUpdate,
+            TableScanRowLockMode::ForShare => LockType::Share,
+            TableScanRowLockMode::ForKeyShare => LockType::KeyShare,
+        };
+        if self.null_extended {
+            return Err(sqlstate_datafusion_err(
+                FEATURE_NOT_SUPPORTED,
+                format!(
+                    "FOR {strength} cannot be applied to the nullable side of an outer join"
+                ),
+            ));
+        }
+        let plan = apply_locks_to_plan(
+            plan,
+            &LockScope::Level,
+            false,
+            &self.join_aliases,
+            Some(&self.ctes),
+            &[PlannedLock {
+                row_lock,
+                strength,
+                target: None,
+            }],
+            &mut [false],
+        )?;
+        self.level.apply(plan, strength, false)
+    }
+}
+
+#[derive(Debug)]
+enum LockingLevel {
+    Select { having: bool },
+    SetOperation,
+    Other,
+}
+
+impl LockingLevel {
+    fn new(query: &Query) -> Self {
+        match query.body.as_ref() {
+            SetExpr::Select(select) => Self::Select {
+                having: select.having.is_some(),
+            },
+            SetExpr::SetOperation { .. } => Self::SetOperation,
+            _ => Self::Other,
+        }
+    }
+
+    fn apply(
+        &self,
+        plan: LogicalPlan,
+        strength: LockType,
+        as_written: bool,
+    ) -> Result<LogicalPlan> {
+        let refused = match self {
+            Self::SetOperation => Some("UNION/INTERSECT/EXCEPT"),
+            Self::Select { having } => {
+                let (mut distinct, mut grouped, mut aggregated, mut windowed) =
+                    (false, false, false, false);
+                plan.apply(|node| {
+                    match node {
+                        // A FROM item's own query is a level of its own.
+                        LogicalPlan::SubqueryAlias(_) => {
+                            return Ok(TreeNodeRecursion::Jump);
+                        }
+                        LogicalPlan::Distinct(_) => distinct = true,
+                        LogicalPlan::Aggregate(aggregate) => {
+                            grouped |= !aggregate.group_expr.is_empty();
+                            aggregated = true;
+                        }
+                        LogicalPlan::Window(_) => windowed = true,
+                        _ => {}
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })?;
+                if distinct {
+                    Some("DISTINCT clause")
+                } else if grouped {
+                    Some("GROUP BY clause")
+                } else if *having {
+                    Some("HAVING clause")
+                } else if aggregated {
+                    Some("aggregate functions")
+                } else if windowed {
+                    Some("window functions")
+                } else {
+                    None
+                }
+            }
+            Self::Other => None,
+        };
+        if let Some(what) = refused {
+            return Err(sqlstate_datafusion_err(
+                FEATURE_NOT_SUPPORTED,
+                format!("FOR {strength} is not allowed with {what}"),
+            ));
+        }
+        if as_written {
+            return Ok(plan);
+        }
+        add_locking_junk_columns(plan)
+    }
+}
+
+/// Validate and decorate the query level whose clause is being applied.
+pub(crate) fn plan_locking_level(
+    plan: LogicalPlan,
+    query: &Query,
+    strength: LockType,
+    as_written: bool,
+) -> Result<LogicalPlan> {
+    LockingLevel::new(query).apply(plan, strength, as_written)
+}
+
+struct LockPlanner<'a> {
+    ident_normalizer: &'a IdentNormalizer,
+}
+
 impl SqlToRel<'_> {
     /// Apply `query`'s locking clauses to `plan`, the plan of its body.
     /// Every `OF` target resolves before any lock is checked against the
@@ -108,26 +280,29 @@ impl SqlToRel<'_> {
         if query.locks.is_empty() {
             return Ok(plan);
         }
+        let planner = LockPlanner {
+            ident_normalizer: &self.ident_normalizer,
+        };
         let locks = query
             .locks
             .iter()
-            .map(|lock| self.plan_lock(lock))
+            .map(|lock| planner.plan_lock(lock))
             .collect::<Result<Vec<_>>>()?;
 
         let ctes = match query.body.as_ref() {
             SetExpr::Select(select) => {
-                Some(self.cte_references(select, planner_context, &[]))
+                Some(planner.cte_references(select, planner_context, &[]))
             }
             _ => None,
         };
         let join_aliases = match query.body.as_ref() {
             SetExpr::Select(select) => {
-                let range = self.lock_range(select, planner_context, &[]);
+                let range = planner.lock_range(select, planner_context, &[]);
                 let targets = locks
                     .iter()
                     .map(|lock| resolve_target(&range, lock))
                     .collect::<Result<Vec<_>>>()?;
-                self.reject_null_extended_locks(
+                planner.reject_null_extended_locks(
                     &range,
                     &locks,
                     &targets,
@@ -161,7 +336,9 @@ impl SqlToRel<'_> {
         }
         Ok(plan)
     }
+}
 
+impl LockPlanner<'_> {
     fn plan_lock(&self, lock: &LockClause) -> Result<PlannedLock> {
         let target = match &lock.of {
             None => None,
@@ -595,7 +772,7 @@ fn table_scan_row_lock(lock: &LockClause) -> TableScanRowLock {
 /// references, by reference name, and those of each aliased derived table
 /// it reads. An unaliased derived table's are the level's own, since its
 /// FROM items reach the plan without an alias of their own.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CteReferences {
     names: Vec<String>,
     derived: Vec<(String, CteReferences)>,

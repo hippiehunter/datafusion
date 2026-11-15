@@ -1058,6 +1058,7 @@ impl ExprPlanner for AggregateFunctionPlanner {
             distinct,
             filter,
             order_by,
+            within_group,
             null_treatment,
         } = raw_expr;
 
@@ -1095,6 +1096,7 @@ impl ExprPlanner for AggregateFunctionPlanner {
             distinct,
             filter,
             order_by,
+            within_group,
             null_treatment,
         };
 
@@ -1112,6 +1114,7 @@ impl ExprPlanner for AggregateFunctionPlanner {
                 distinct,
                 filter,
                 order_by,
+                within_group: _,
                 null_treatment,
             } = raw_expr;
             let new_expr = Expr::AggregateFunction(AggregateFunction::new_udf(
@@ -1402,10 +1405,10 @@ pub struct RawAggregateExpr {
     pub args: Vec<Expr>,
     pub distinct: bool,
     pub filter: Option<Box<Expr>>,
-    /// The aggregate's input ordering. For an ordered-set aggregate (`func`
-    /// supports `WITHIN GROUP`) these are the `WITHIN GROUP` sort keys, also
-    /// the first `order_by.len()` of `args`, and the list is empty when the
-    /// call wrote no `WITHIN GROUP`.
+    /// Whether the call wrote WITHIN GROUP, independently of family capability.
+    pub within_group: bool,
+    /// The written ordering. With `within_group`, the sort keys are also the
+    /// first `order_by.len()` arguments; ordinary ORDER BY adds no arguments.
     pub order_by: Vec<SortExpr>,
     pub null_treatment: Option<NullTreatment>,
 }

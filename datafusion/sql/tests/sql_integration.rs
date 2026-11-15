@@ -2037,6 +2037,45 @@ fn plan_update() {
     );
 }
 
+#[test]
+fn mutation_target_reads_preserve_authored_columns_and_subquery_scope() {
+    for (sql, expected) in [
+        ("UPDATE person SET last_name = 'Kay'", vec![]),
+        (
+            "UPDATE person AS p SET last_name = 'Kay' WHERE p.id = 1 RETURNING p.first_name",
+            vec!["first_name", "id"],
+        ),
+        (
+            "UPDATE person AS p SET last_name = (SELECT s.first_name FROM person AS s WHERE s.id = p.id) \
+             WHERE p.age > 20 RETURNING p.last_name",
+            vec!["age", "id", "last_name"],
+        ),
+        (
+            "DELETE FROM person AS p USING orders AS o WHERE p.id = o.customer_id RETURNING p.last_name",
+            vec!["id", "last_name"],
+        ),
+        (
+            "INSERT INTO person(id, first_name) VALUES (1, 'A') ON CONFLICT(id) \
+             DO UPDATE SET first_name = excluded.first_name WHERE person.age > 20 RETURNING last_name",
+            vec!["age", "first_name", "id", "last_name"],
+        ),
+    ] {
+        let LogicalPlan::Dml(statement) = logical_plan(sql).expect(sql) else {
+            panic!("expected a mutation: {sql}");
+        };
+        let mut columns = statement.target_read_columns.expect("bound target reads");
+        columns.sort();
+        columns.dedup();
+        assert_eq!(columns, expected, "{sql}");
+    }
+    let sql = "MERGE INTO person AS t USING person AS s ON t.id = s.id \
+               WHEN MATCHED THEN UPDATE SET last_name = s.last_name";
+    let LogicalPlan::Merge(merge) = logical_plan(sql).expect(sql) else {
+        panic!("expected MERGE");
+    };
+    assert_eq!(merge.target_read_columns, Some(vec!["id".to_owned()]));
+}
+
 /// A quoted target alias keeps its case: the columns the statement leaves
 /// alone are read under the alias as written, which is the relation the
 /// WHERE clause names.

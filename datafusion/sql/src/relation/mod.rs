@@ -46,16 +46,15 @@ use arrow::datatypes::{DataType, Field};
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{
-    Column, DFSchema, DataFusionError, Diagnostic, Result, Spans, TableReference,
-    UnnestOptions, internal_err, not_impl_err, plan_err,
+    Column, DFSchema, Diagnostic, Result, Spans, TableReference, UnnestOptions,
+    internal_err, not_impl_err, plan_err, sqlstate_datafusion_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::{
     EdgeDirection, EdgePattern, GraphColumn, GraphPattern, GraphPatternElement,
     GraphPatternExpr, GraphTable, JsonTable, JsonTableColumnDef, JsonTableErrorHandling,
-    JsonTableQuotes,
-    LabelExpression, NodePattern, PathFinding, PathMode, RepetitionQuantifier,
-    RowLimiting, Subquery, SubqueryAlias,
+    JsonTableQuotes, LabelExpression, NodePattern, PathFinding, PathMode,
+    RepetitionQuantifier, RowLimiting, Subquery, SubqueryAlias,
 };
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, TableSource, expr::Unnest};
 use sqlparser::ast::{
@@ -89,7 +88,7 @@ fn validate_sql_json_table_names(
     fn insert_name(seen: &mut HashSet<String>, ident: &Ident) -> Result<()> {
         let name = normalized_json_table_ident(ident);
         if !seen.insert(name.clone()) {
-            return Err(datafusion_common::sqlstate_datafusion_err(
+            return Err(sqlstate_datafusion_err(
                 "42712",
                 format!("duplicate JSON_TABLE name {name}"),
             ));
@@ -752,8 +751,17 @@ impl SqlToRel<'_> {
             None => return plan_err!("TABLESAMPLE method is required"),
         };
         let quantity = sample.quantity.as_ref().ok_or_else(|| {
-            DataFusionError::Plan("TABLESAMPLE percentage is required".to_string())
+            sqlstate_datafusion_err(
+                "2202H",
+                "TABLESAMPLE requires exactly one percentage argument",
+            )
         })?;
+        if !quantity.additional_arguments.is_empty() {
+            return Err(sqlstate_datafusion_err(
+                "2202H",
+                "TABLESAMPLE requires exactly one percentage argument",
+            ));
+        }
         if matches!(quantity.unit, Some(sqlparser::ast::TableSampleUnit::Rows)) {
             return not_impl_err!("TABLESAMPLE row counts are not supported");
         }
@@ -796,11 +804,8 @@ impl SqlToRel<'_> {
         target: &DataType,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
-        let value = self.sql_expr_to_logical_expr(
-            argument,
-            &DFSchema::empty(),
-            planner_context,
-        )?;
+        let value =
+            self.sql_expr_to_logical_expr(argument, &DFSchema::empty(), planner_context)?;
         self.context_provider
             .plan_table_sample_argument(value, target)
     }
@@ -1650,7 +1655,7 @@ impl SqlToRel<'_> {
             None | Some(JsonOnBehavior::EmptyArray) => JsonTableErrorHandling::Null,
             Some(JsonOnBehavior::Error) => JsonTableErrorHandling::Error,
             Some(other) => {
-                return Err(datafusion_common::sqlstate_datafusion_err(
+                return Err(sqlstate_datafusion_err(
                     "42601",
                     format!("JSON_TABLE table-level {other} ON ERROR is not permitted"),
                 ));
@@ -1778,7 +1783,7 @@ impl SqlToRel<'_> {
                         | DataType::LargeUtf8
                         | DataType::Utf8View
                 ) {
-                    return Err(datafusion_common::sqlstate_datafusion_err(
+                    return Err(sqlstate_datafusion_err(
                         "42804",
                         format!(
                             "JSON_TABLE EXISTS column {name} must accept assignment from boolean"
@@ -1944,8 +1949,11 @@ impl SqlToRel<'_> {
                 cols.columns
                     .into_iter()
                     .map(|col| {
-                        let expr =
-                            self.sql_expr_to_logical_expr(col.expr, &scope, planner_context)?;
+                        let expr = self.sql_expr_to_logical_expr(
+                            col.expr,
+                            &scope,
+                            planner_context,
+                        )?;
                         Ok(GraphColumn {
                             expr,
                             alias: col.alias.map(|a| self.ident_normalizer.normalize(a)),
@@ -2022,7 +2030,11 @@ impl SqlToRel<'_> {
                 .map(|v| self.ident_normalizer.normalize(v)),
             path_finding: pattern.path_finding.map(|pf| self.convert_path_finding(pf)),
             path_mode: pattern.path_mode.map(|pm| self.convert_path_mode(&pm)),
-            expr: self.convert_graph_pattern_expr(pattern.expr, scope, planner_context)?,
+            expr: self.convert_graph_pattern_expr(
+                pattern.expr,
+                scope,
+                planner_context,
+            )?,
         })
     }
 
@@ -2076,9 +2088,11 @@ impl SqlToRel<'_> {
             SqlGraphPatternElement::Edge(edge) => GraphPatternElement::Edge(
                 self.convert_edge_pattern(edge, scope, planner_context)?,
             ),
-            SqlGraphPatternElement::Subpattern(expr) => GraphPatternElement::Subpattern(
-                Box::new(self.convert_graph_pattern_expr(expr, scope, planner_context)?),
-            ),
+            SqlGraphPatternElement::Subpattern(expr) => {
+                GraphPatternElement::Subpattern(Box::new(
+                    self.convert_graph_pattern_expr(expr, scope, planner_context)?,
+                ))
+            }
         })
     }
 
@@ -2101,8 +2115,11 @@ impl SqlToRel<'_> {
             .into_iter()
             .map(|p| {
                 let key = self.ident_normalizer.normalize(p.key);
-                let value =
-                    self.sql_expr_to_logical_expr(p.value, &empty_schema, planner_context)?;
+                let value = self.sql_expr_to_logical_expr(
+                    p.value,
+                    &empty_schema,
+                    planner_context,
+                )?;
                 Ok((key, value))
             })
             .collect::<Result<Vec<_>>>()?;

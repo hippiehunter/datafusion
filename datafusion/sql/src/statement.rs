@@ -3143,6 +3143,11 @@ impl SqlToRel<'_> {
         let target_relation =
             dml_target_relation(&self.ident_normalizer, &table_ref, table_alias.as_ref());
         let mut target_select_rights = TargetSelectRights::NotRequired;
+        let mut target_read_columns = Vec::new();
+        let read_relation = view_target.map_or_else(
+            || target_relation.clone(),
+            |target| TableReference::bare(target.view_name.clone()),
+        );
 
         // Clone the outer planner context to inherit CTEs
         let mut planner_context = outer_planner_context.clone();
@@ -3186,6 +3191,11 @@ impl SqlToRel<'_> {
                     binding_schema,
                     &mut planner_context,
                 )?;
+                target_select_rights = TargetSelectRights::reading_and_recording(
+                    &read_relation,
+                    [&filter_expr],
+                    &mut target_read_columns,
+                )?;
                 if let Some(target) = view_target {
                     filter_expr = substitute_bound_view_reads(
                         filter_expr,
@@ -3201,8 +3211,6 @@ impl SqlToRel<'_> {
                     &[&[scan.schema()]],
                     &[using_columns.into()],
                 )?;
-                target_select_rights =
-                    TargetSelectRights::reading(&target_relation, [&filter_expr])?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
         };
@@ -3237,6 +3245,10 @@ impl SqlToRel<'_> {
                     &cols,
                     source.schema().metadata(),
                 )?;
+                if let Some(schema) = &returning_output_schema {
+                    target_read_columns
+                        .extend(schema.fields().iter().map(|field| field.name().clone()));
+                }
                 returning_col_names = Some(cols);
             } else {
                 // Anything beyond bare target columns is planned as an
@@ -3289,6 +3301,12 @@ impl SqlToRel<'_> {
                         returning_target.fields().len(),
                     )?,
                 )?;
+                target_select_rights =
+                    target_select_rights.and(TargetSelectRights::reading_and_recording(
+                        &read_relation,
+                        &logical_exprs,
+                        &mut target_read_columns,
+                    )?);
                 if let Some(target) = view_target {
                     logical_exprs = substitute_bound_view_returning(
                         logical_exprs,
@@ -3298,9 +3316,6 @@ impl SqlToRel<'_> {
                         table_schema.fields().len(),
                     )?;
                 }
-                target_select_rights = target_select_rights.and(
-                    TargetSelectRights::reading(&target_relation, &logical_exprs)?,
-                );
                 let target_column_names = table_schema
                     .fields()
                     .iter()
@@ -3365,6 +3380,7 @@ impl SqlToRel<'_> {
             target_select_rights,
         )
         .with_carried(carried);
+        dml.target_read_columns = Some(target_read_columns);
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }
@@ -3763,6 +3779,7 @@ impl SqlToRel<'_> {
         // SOURCE clause has no source row. Resolving their expressions against
         // the whole join would make a name the two sides share ambiguous, and
         // would let a clause read a row that is not there.
+        let mut target_read_columns = Vec::new();
         let mut normalize_expr_in =
             |sql_expr: SQLExpr, schema: &DFSchema| -> Result<Expr> {
                 let expr = self.sql_to_expr(sql_expr, schema, planner_context)?;
@@ -3772,6 +3789,11 @@ impl SqlToRel<'_> {
                     expr,
                     &[&[schema]],
                     &[using_columns.into()],
+                )?;
+                TargetSelectRights::reading_and_recording(
+                    &target_relation,
+                    [&expr],
+                    &mut target_read_columns,
                 )?;
                 match &view_target {
                     Some(target) => substitute_bound_view_reads_under(
@@ -3961,34 +3983,15 @@ impl SqlToRel<'_> {
         // assignments are where a target column can be named; an arm that
         // does nothing reads the row it leaves alone. RETURNING is bound by
         // the caller, which adds its own reads.
-        let mut target_select_rights =
-            TargetSelectRights::reading(&target_relation, [&on_expr])?;
-        for clause in &merge_clauses {
-            let arm_rights = match &clause.action {
-                MergeAction::DoNothing => TargetSelectRights::Required,
-                MergeAction::Update(update) => TargetSelectRights::reading(
-                    &target_relation,
-                    clause
-                        .predicate
-                        .iter()
-                        .chain(
-                            update
-                                .assignments
-                                .iter()
-                                .map(|assignment| &assignment.value),
-                        )
-                        .chain(update.update_predicate.iter())
-                        .chain(update.delete_predicate.iter()),
-                )?,
-                MergeAction::Insert(_) | MergeAction::Delete => {
-                    TargetSelectRights::reading(
-                        &target_relation,
-                        clause.predicate.iter(),
-                    )?
-                }
-            };
-            target_select_rights = target_select_rights.and(arm_rights);
-        }
+        let target_select_rights = if !target_read_columns.is_empty()
+            || merge_clauses
+                .iter()
+                .any(|clause| matches!(clause.action, MergeAction::DoNothing))
+        {
+            TargetSelectRights::Required
+        } else {
+            TargetSelectRights::NotRequired
+        };
 
         // The view's row restrictions limit the rows the target offers: a
         // base row the view hides matches no source row, so the source row
@@ -4028,6 +4031,7 @@ impl SqlToRel<'_> {
             target_select_rights,
         );
         merge.check_option = check_option;
+        merge.target_read_columns = Some(target_read_columns);
         Ok(LogicalPlan::Merge(merge))
     }
 
@@ -4091,15 +4095,46 @@ impl SqlToRel<'_> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        self.plan_assignment_target_with_reads(
+            base,
+            column,
+            path,
+            value,
+            schema,
+            schema,
+            planner_context,
+            None,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "assignment binding carries its original scope and target-read recorder"
+    )]
+    fn plan_assignment_target_with_reads(
+        &self,
+        base: Expr,
+        column: FieldRef,
+        path: &[AccessExpr],
+        value: Expr,
+        schema: &DFSchema,
+        binding_schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+        mut record_read: Option<&mut dyn FnMut(Expr) -> Result<Expr>>,
+    ) -> Result<Expr> {
+        let mut bind_step = |expression: &SQLExpr| {
+            let expression =
+                self.sql_to_expr_ref(expression, binding_schema, planner_context)?;
+            match record_read.as_mut() {
+                Some(record_read) => record_read(expression),
+                None => Ok(expression),
+            }
+        };
         let mut steps = Vec::with_capacity(path.len());
         for access in path {
             steps.push(match access {
                 AccessExpr::Subscript(Subscript::Index { index }) => {
-                    AssignmentStep::Index(self.sql_to_expr_ref(
-                        index,
-                        schema,
-                        planner_context,
-                    )?)
+                    AssignmentStep::Index(bind_step(index)?)
                 }
                 AccessExpr::Subscript(Subscript::Slice {
                     lower_bound,
@@ -4108,11 +4143,11 @@ impl SqlToRel<'_> {
                 }) => AssignmentStep::Slice {
                     lower: lower_bound
                         .as_ref()
-                        .map(|bound| self.sql_to_expr_ref(bound, schema, planner_context))
+                        .map(|bound| bind_step(bound))
                         .transpose()?,
                     upper: upper_bound
                         .as_ref()
-                        .map(|bound| self.sql_to_expr_ref(bound, schema, planner_context))
+                        .map(|bound| bind_step(bound))
                         .transpose()?,
                 },
                 AccessExpr::Dot(SQLExpr::Identifier(ident)) => {
@@ -4222,6 +4257,11 @@ impl SqlToRel<'_> {
             table_alias.as_ref(),
         );
         let mut target_select_rights = TargetSelectRights::NotRequired;
+        let mut target_read_columns = Vec::new();
+        let read_relation = view_target.map_or_else(
+            || target_relation.clone(),
+            |target| TableReference::bare(target.view_name.clone()),
+        );
 
         // Overwrite with assignment expressions
         // Clone the outer planner context to inherit CTEs
@@ -4461,6 +4501,11 @@ impl SqlToRel<'_> {
                     binding_schema,
                     &mut planner_context,
                 )?;
+                target_select_rights = TargetSelectRights::reading_and_recording(
+                    &read_relation,
+                    [&filter_expr],
+                    &mut target_read_columns,
+                )?;
                 if let Some(target) = view_target {
                     filter_expr = substitute_bound_view_reads(
                         filter_expr,
@@ -4476,8 +4521,6 @@ impl SqlToRel<'_> {
                     &[&[scan.schema()]],
                     &[using_columns.into()],
                 )?;
-                target_select_rights =
-                    TargetSelectRights::reading(&target_relation, [&filter_expr])?;
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
         };
@@ -4522,6 +4565,13 @@ impl SqlToRel<'_> {
                             assignment_schema,
                             &mut planner_context,
                         )?;
+                        target_select_rights = target_select_rights.and(
+                            TargetSelectRights::reading_and_recording(
+                                &read_relation,
+                                [&value],
+                                &mut target_read_columns,
+                            )?,
+                        );
                         if let Some(target) = view_target {
                             value = substitute_bound_view_reads(
                                 value,
@@ -4530,18 +4580,33 @@ impl SqlToRel<'_> {
                                 table_schema.fields().len(),
                             )?;
                         }
-                        // The path's base is the stored column the executor
-                        // writes into, not a read the statement makes.
-                        target_select_rights = target_select_rights.and(
-                            TargetSelectRights::reading(&target_relation, [&value])?,
-                        );
-                        base = self.plan_assignment_target(
+                        let mut record_selector = |expr: Expr| {
+                            target_select_rights = target_select_rights.and(
+                                TargetSelectRights::reading_and_recording(
+                                    &read_relation,
+                                    [&expr],
+                                    &mut target_read_columns,
+                                )?,
+                            );
+                            match view_target {
+                                Some(target) => substitute_bound_view_reads(
+                                    expr,
+                                    target,
+                                    source.schema(),
+                                    table_schema.fields().len(),
+                                ),
+                                None => Ok(expr),
+                            }
+                        };
+                        base = self.plan_assignment_target_with_reads(
                             base,
                             Arc::clone(field),
                             &path,
                             value,
                             source.schema(),
+                            assignment_schema,
                             &mut planner_context,
+                            Some(&mut record_selector),
                         )?;
                     }
                     let expr = base.cast_to(field.data_type(), source.schema())?;
@@ -4574,6 +4639,13 @@ impl SqlToRel<'_> {
                             assignment_schema,
                             &mut planner_context,
                         )?;
+                        target_select_rights = target_select_rights.and(
+                            TargetSelectRights::reading_and_recording(
+                                &read_relation,
+                                [&expr],
+                                &mut target_read_columns,
+                            )?,
+                        );
                         if let Some(target) = view_target {
                             expr = substitute_bound_view_reads(
                                 expr,
@@ -4582,8 +4654,6 @@ impl SqlToRel<'_> {
                                 table_schema.fields().len(),
                             )?;
                         }
-                        target_select_rights = target_select_rights
-                            .and(TargetSelectRights::reading(&target_relation, [&expr])?);
                         // Update placeholder's datatype to the type of the target column
                         if let Expr::Placeholder(placeholder) = &mut expr {
                             placeholder.field = placeholder
@@ -4680,6 +4750,12 @@ impl SqlToRel<'_> {
                     returning_target.fields().len(),
                 )?,
             )?;
+            target_select_rights =
+                target_select_rights.and(TargetSelectRights::reading_and_recording(
+                    &read_relation,
+                    &logical_exprs,
+                    &mut target_read_columns,
+                )?);
             if let Some(target) = view_target {
                 logical_exprs = substitute_bound_view_returning(
                     logical_exprs,
@@ -4689,10 +4765,6 @@ impl SqlToRel<'_> {
                     table_schema.fields().len(),
                 )?;
             }
-            target_select_rights = target_select_rights.and(TargetSelectRights::reading(
-                &target_relation,
-                &logical_exprs,
-            )?);
 
             let target_column_names = table_schema
                 .fields()
@@ -4762,6 +4834,7 @@ impl SqlToRel<'_> {
         )
         .with_target_columns(assigned_columns)
         .with_carried(carried);
+        dml.target_read_columns = Some(target_read_columns);
         if let Some(ret_cols) = returning_col_names {
             dml = dml.with_returning_columns(ret_cols);
         }
@@ -5420,6 +5493,7 @@ impl SqlToRel<'_> {
             .collect::<Result<Vec<Expr>>>()?;
         let mut source = project(source, exprs)?;
 
+        let mut target_read_columns = Vec::new();
         let insert_op = match (overwrite, replace_into, on_conflict) {
             (false, false, None) => InsertOp::Append,
             (true, false, None) => InsertOp::Overwrite,
@@ -5435,6 +5509,7 @@ impl SqlToRel<'_> {
                     generated_columns.as_ref(),
                     source,
                     outer_planner_context,
+                    &mut target_read_columns,
                 )?;
                 source = widened_source;
                 InsertOp::WithConflictClause(planned_conflict)
@@ -5449,6 +5524,11 @@ impl SqlToRel<'_> {
                 "Conflicting insert operations: `overwrite` and `replace_into` cannot both be true"
             )?,
         };
+        if let InsertOp::WithConflictClause(conflict) = &insert_op {
+            if let Some(ConflictTarget::Columns(columns)) = &conflict.conflict_target {
+                target_read_columns.extend(columns.iter().cloned());
+            }
+        }
         let mut target_select_rights = match &insert_op {
             // An arbiter reads the target's rows to find a conflict, and DO
             // UPDATE reads the conflicting row.
@@ -5473,20 +5553,25 @@ impl SqlToRel<'_> {
                     false,
                     &mut planner_context,
                 )?;
-                let expressions = substitute_bound_view_returning(
-                    expand_returning_select_exprs(
-                        prepared,
-                        &public_schema,
+                let expressions = expand_returning_select_exprs(
+                    prepared,
+                    &public_schema,
+                    &TableReference::bare(target.view_name.clone()),
+                    &[],
+                )?;
+                target_select_rights =
+                    target_select_rights.and(TargetSelectRights::reading_and_recording(
                         &TableReference::bare(target.view_name.clone()),
-                        &[],
-                    )?,
+                        &expressions,
+                        &mut target_read_columns,
+                    )?);
+                let expressions = substitute_bound_view_returning(
+                    expressions,
                     &scope,
                     target,
                     source.schema(),
                     table_schema.fields().len(),
                 )?;
-                target_select_rights = target_select_rights
-                    .and(TargetSelectRights::reading(&table_name, &expressions)?);
                 let written_row =
                     written_row_schema(source.schema(), table_source.schema().as_ref())?;
                 let fields = expressions
@@ -5519,6 +5604,7 @@ impl SqlToRel<'_> {
                             table_alias,
                             &table_source,
                             &mut outer_planner_context.clone(),
+                            &mut target_read_columns,
                         )?);
                 }
                 let names = returning.map(|items| {
@@ -5545,6 +5631,7 @@ impl SqlToRel<'_> {
             Arc::new(source),
             target_select_rights,
         );
+        dml.target_read_columns = Some(target_read_columns);
         if records_target_columns {
             dml = dml.with_target_columns(target_col_names);
         }
@@ -5573,6 +5660,7 @@ impl SqlToRel<'_> {
         table_alias: Option<&Ident>,
         table_source: &Arc<dyn TableSource>,
         planner_context: &mut PlannerContext,
+        target_read_columns: &mut Vec<String>,
     ) -> Result<TargetSelectRights> {
         let row_relation = table_alias.map_or_else(
             || table_name.clone(),
@@ -5586,13 +5674,25 @@ impl SqlToRel<'_> {
         for item in returning {
             let expr = match item {
                 SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
-                    return Ok(TargetSelectRights::Required);
+                    target_read_columns.extend(
+                        table_source
+                            .schema()
+                            .fields()
+                            .iter()
+                            .map(|field| field.name().clone()),
+                    );
+                    rights = TargetSelectRights::Required;
+                    continue;
                 }
                 SelectItem::UnnamedExpr(expr)
                 | SelectItem::ExprWithAlias { expr, .. } => expr,
             };
             let expr = self.sql_to_expr_ref(expr, &row_schema, planner_context)?;
-            rights = rights.and(TargetSelectRights::reading(&row_relation, [&expr])?);
+            rights = rights.and(TargetSelectRights::reading_and_recording(
+                &row_relation,
+                [&expr],
+                target_read_columns,
+            )?);
         }
         Ok(rights)
     }
@@ -5616,6 +5716,7 @@ impl SqlToRel<'_> {
         generated_columns: Option<&DmlGeneratedColumns>,
         source: LogicalPlan,
         planner_context: &mut PlannerContext,
+        target_read_columns: &mut Vec<String>,
     ) -> Result<(OnConflict, LogicalPlan)> {
         let mut source = source;
         // Plan the action
@@ -5635,6 +5736,19 @@ impl SqlToRel<'_> {
                         self.ident_normalizer.normalize(alias.clone()),
                     ),
                     None => TableReference::bare(table_name.table()),
+                };
+                let mut record_target_read = |expr: &Expr| -> Result<()> {
+                    TargetSelectRights::reading_columns_and_recording(
+                        [expr],
+                        |column| {
+                            column.relation.as_ref().is_none_or(|relation| {
+                                relation.resolved_eq(&table_ref)
+                                    || relation.table() == EXCLUDED
+                            })
+                        },
+                        target_read_columns,
+                    )?;
+                    Ok(())
                 };
                 let qualified_table_schema = DFSchema::try_from_qualified_schema(
                     table_ref.clone(),
@@ -5820,13 +5934,20 @@ impl SqlToRel<'_> {
                                 &combined_schema,
                                 planner_context,
                             )?;
-                            value = self.plan_assignment_target(
+                            record_target_read(&assigned)?;
+                            let mut record_selector = |expr: Expr| {
+                                record_target_read(&expr)?;
+                                Ok(expr)
+                            };
+                            value = self.plan_assignment_target_with_reads(
                                 value,
                                 Arc::clone(field),
                                 &path,
                                 assigned,
                                 &combined_schema,
+                                &combined_schema,
                                 planner_context,
+                                Some(&mut record_selector),
                             )?;
                         }
                         let mut using_columns = HashSet::new();
@@ -5883,6 +6004,9 @@ impl SqlToRel<'_> {
                         &[&[&combined_schema]],
                         &[using_columns.into()],
                     )?;
+                    if !is_default {
+                        record_target_read(&value)?;
+                    }
                     // The value reaches the column by assignment, exactly as an
                     // UPDATE's does.
                     let value = self.assign_to_column(value, field, &combined_schema)?;
@@ -5951,6 +6075,7 @@ impl SqlToRel<'_> {
                         &combined_schema,
                         planner_context,
                     )?;
+                    record_target_read(&expr)?;
                     let mut using_columns = HashSet::new();
                     expr_to_columns(&expr, &mut using_columns)?;
                     Some(normalize_col_with_schemas_and_ambiguity_check(
