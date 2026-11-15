@@ -4905,6 +4905,56 @@ fn fmt_binary(data: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
     Ok(())
 }
 
+/// The longest string or binary payload `Debug` renders in full.
+///
+/// An expression's schema name and every plan rendering are built from this
+/// `Debug` form, once per derivation, so a payload of megabytes rendered in
+/// full makes each of them cost its length again.
+const DEBUG_FULL_PAYLOAD_BYTES: usize = 256;
+
+/// The leading bytes of a longer payload its abbreviated `Debug` form shows.
+const DEBUG_ABBREVIATED_PREFIX_BYTES: usize = 32;
+
+/// Writes the length and a 128-bit digest of a payload too long to render in
+/// full, so two abbreviated payloads render alike only when they are equal.
+fn fmt_abbreviated_payload(payload: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
+    let mut low = std::collections::hash_map::DefaultHasher::new();
+    low.write(payload);
+    let mut high = std::collections::hash_map::DefaultHasher::new();
+    high.write_usize(payload.len());
+    high.write(payload);
+    write!(
+        f,
+        "... {} bytes, digest {:016x}{:016x}",
+        payload.len(),
+        high.finish(),
+        low.finish()
+    )
+}
+
+/// Writes a string payload in full, or abbreviated when it is long.
+fn fmt_debug_text(variant: &str, text: &str, f: &mut fmt::Formatter) -> fmt::Result {
+    if text.len() <= DEBUG_FULL_PAYLOAD_BYTES {
+        return write!(f, "{variant}(\"{text}\")");
+    }
+    let mut prefix = DEBUG_ABBREVIATED_PREFIX_BYTES;
+    while !text.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    write!(f, "{variant}(\"{}", &text[..prefix])?;
+    fmt_abbreviated_payload(text.as_bytes(), f)?;
+    write!(f, "\")")
+}
+
+/// Writes a binary payload in full, or abbreviated when it is long.
+fn fmt_debug_binary(data: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
+    if data.len() <= DEBUG_FULL_PAYLOAD_BYTES {
+        return fmt_binary(data, f);
+    }
+    fmt_binary(&data[..DEBUG_ABBREVIATED_PREFIX_BYTES], f)?;
+    fmt_abbreviated_payload(data, f)
+}
+
 impl fmt::Debug for ScalarValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -4937,21 +4987,21 @@ impl fmt::Debug for ScalarValue {
                 write!(f, "TimestampNanosecond({self}, {tz_opt:?})")
             }
             ScalarValue::Utf8(None) => write!(f, "Utf8({self})"),
-            ScalarValue::Utf8(Some(_)) => write!(f, "Utf8(\"{self}\")"),
+            ScalarValue::Utf8(Some(text)) => fmt_debug_text("Utf8", text, f),
             ScalarValue::Utf8View(None) => write!(f, "Utf8View({self})"),
-            ScalarValue::Utf8View(Some(_)) => write!(f, "Utf8View(\"{self}\")"),
+            ScalarValue::Utf8View(Some(text)) => fmt_debug_text("Utf8View", text, f),
             ScalarValue::LargeUtf8(None) => write!(f, "LargeUtf8({self})"),
-            ScalarValue::LargeUtf8(Some(_)) => write!(f, "LargeUtf8(\"{self}\")"),
+            ScalarValue::LargeUtf8(Some(text)) => fmt_debug_text("LargeUtf8", text, f),
             ScalarValue::Binary(None) => write!(f, "Binary({self})"),
             ScalarValue::Binary(Some(b)) => {
                 write!(f, "Binary(\"")?;
-                fmt_binary(b.as_slice(), f)?;
+                fmt_debug_binary(b.as_slice(), f)?;
                 write!(f, "\")")
             }
             ScalarValue::BinaryView(None) => write!(f, "BinaryView({self})"),
             ScalarValue::BinaryView(Some(b)) => {
                 write!(f, "BinaryView(\"")?;
-                fmt_binary(b.as_slice(), f)?;
+                fmt_debug_binary(b.as_slice(), f)?;
                 write!(f, "\")")
             }
             ScalarValue::FixedSizeBinary(size, None) => {
@@ -4959,13 +5009,13 @@ impl fmt::Debug for ScalarValue {
             }
             ScalarValue::FixedSizeBinary(size, Some(b)) => {
                 write!(f, "FixedSizeBinary({size}, \"")?;
-                fmt_binary(b.as_slice(), f)?;
+                fmt_debug_binary(b.as_slice(), f)?;
                 write!(f, "\")")
             }
             ScalarValue::LargeBinary(None) => write!(f, "LargeBinary({self})"),
             ScalarValue::LargeBinary(Some(b)) => {
                 write!(f, "LargeBinary(\"")?;
-                fmt_binary(b.as_slice(), f)?;
+                fmt_debug_binary(b.as_slice(), f)?;
                 write!(f, "\")")
             }
             ScalarValue::FixedSizeList(_) => write!(f, "FixedSizeList({self})"),
@@ -8568,6 +8618,37 @@ mod tests {
         |                    |
         +--------------------+
         ");
+    }
+
+    #[test]
+    fn debug_abbreviates_a_long_payload_and_tells_unequal_ones_apart() {
+        let short = ScalarValue::Utf8(Some("x".repeat(DEBUG_FULL_PAYLOAD_BYTES)));
+        assert_eq!(
+            format!("{short:?}"),
+            format!("Utf8(\"{}\")", "x".repeat(DEBUG_FULL_PAYLOAD_BYTES))
+        );
+
+        let long = "é".repeat(1 << 20);
+        let mut other = long.clone();
+        other.push('!');
+        other.remove(0);
+        let rendered = format!("{:?}", ScalarValue::Utf8(Some(long.clone())));
+        assert!(rendered.len() < 128, "{rendered}");
+        assert!(rendered.starts_with("Utf8(\"éééé"), "{rendered}");
+        assert!(rendered.contains("2097152 bytes"), "{rendered}");
+        assert_eq!(rendered, format!("{:?}", ScalarValue::Utf8(Some(long))));
+        assert_ne!(rendered, format!("{:?}", ScalarValue::Utf8(Some(other))));
+
+        let bytes = vec![7_u8; 1 << 20];
+        let mut changed = bytes.clone();
+        changed[1 << 19] = 8;
+        let rendered = format!("{:?}", ScalarValue::Binary(Some(bytes)));
+        assert!(rendered.len() < 256, "{rendered}");
+        assert!(rendered.starts_with("Binary(\"7,7,7"), "{rendered}");
+        assert_ne!(
+            rendered,
+            format!("{:?}", ScalarValue::Binary(Some(changed)))
+        );
     }
 
     #[test]
