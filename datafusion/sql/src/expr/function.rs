@@ -20,6 +20,7 @@ use crate::planner::{
     ContextProvider, PlannerContext, PlannerResult, RawAggregateExpr, RawCallForm,
     RawWindowExpr, RoutineCallKind, SqlToRel,
 };
+use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::graph_functions::GraphFunction;
 use datafusion_expr::{Distinct, DistinctOn, LogicalPlan, Projection};
@@ -698,7 +699,7 @@ impl SqlToRel<'_> {
                 Some(crate::planner::SetReturningColumns::Rows(rows)) => {
                     Expr::Unnest(Unnest::new(rows))
                 }
-                None => self.set_returning_source_expr(&name, srf_args)?,
+                None => self.set_returning_source_expr(&name, srf_args, schema)?,
             };
             return match written_args {
                 Some(args) => {
@@ -948,8 +949,8 @@ impl SqlToRel<'_> {
                     && let Some(frame) = &window.window_frame
                 {
                     let name = planned.schema_name().to_string();
-                    let metadata = datafusion_common::metadata::FieldMetadata::from(
-                        std::collections::HashMap::from([(
+                    let metadata =
+                        FieldMetadata::from(std::collections::HashMap::from([(
                             crate::definition_plan::WINDOW_FRAME_SYNTAX_METADATA_KEY
                                 .to_string(),
                             if frame.end_bound.is_some() {
@@ -958,8 +959,7 @@ impl SqlToRel<'_> {
                                 "short"
                             }
                             .to_string(),
-                        )]),
-                    );
+                        )]));
                     return Ok(planned.alias_with_metadata(name, Some(metadata)));
                 }
                 return Ok(planned);
@@ -1652,7 +1652,10 @@ impl SqlToRel<'_> {
     /// Plan an ARRAY subquery constructor (SQL:2016 S095)
     ///
     /// Transforms `ARRAY(SELECT col FROM t ORDER BY x)` into:
-    /// `(SELECT ARRAY_AGG(col ORDER BY x) FROM t)` as a ScalarSubquery
+    /// `(SELECT CASE WHEN a IS NULL THEN '{}' ELSE a END FROM (SELECT
+    /// ARRAY_AGG(col ORDER BY x) AS a FROM t))` as a ScalarSubquery: a
+    /// subquery that returns no row constructs the empty array, where the
+    /// aggregate alone would be NULL.
     pub(super) fn plan_array_subquery_constructor(
         &self,
         query: &sqlparser::ast::Query,
@@ -1663,14 +1666,55 @@ impl SqlToRel<'_> {
             .context_provider
             .get_aggregate_meta("array_agg")
             .ok_or_else(|| internal_datafusion_err!("ARRAY_AGG function not found"))?;
-        self.plan_scalar_subquery_aggregate(
+        let Expr::ScalarSubquery(subquery) = self.plan_scalar_subquery_aggregate(
             query,
             array_agg_fn,
             Vec::new(),
             None,
             schema,
             planner_context,
-        )
+        )?
+        else {
+            return internal_err!("an aggregated subquery plans as a scalar subquery");
+        };
+        let aggregated = subquery.subquery.schema();
+        let (qualifier, field) = aggregated.qualified_field(0);
+        let DataType::List(item) = field.data_type() else {
+            return internal_err!(
+                "ARRAY_AGG returned {} rather than a list",
+                field.data_type()
+            );
+        };
+        // One empty list, its item typed exactly as the aggregate's.
+        let empty = ScalarValue::List(std::sync::Arc::new(arrow::array::ListArray::new(
+            std::sync::Arc::clone(item),
+            arrow::buffer::OffsetBuffer::from_lengths([0]),
+            arrow::array::new_empty_array(item.data_type()),
+            None,
+        )));
+        let aggregate = Expr::Column(Column::new(qualifier.cloned(), field.name()));
+        let constructed = Expr::Case(Case::new(
+            None,
+            // The empty array carries the aggregate's type identity, which
+            // CASE keeps only where its branches agree.
+            vec![(
+                Box::new(aggregate.clone().is_null()),
+                Box::new(Expr::Literal(
+                    empty,
+                    Some(FieldMetadata::from(field.metadata().clone())),
+                )),
+            )],
+            Some(Box::new(aggregate)),
+        ))
+        .alias(field.name());
+        let plan = LogicalPlanBuilder::from(subquery.subquery.as_ref().clone())
+            .project(vec![constructed])?
+            .build()?;
+        Ok(Expr::ScalarSubquery(Subquery {
+            subquery: std::sync::Arc::new(plan),
+            outer_ref_columns: subquery.outer_ref_columns,
+            spans: subquery.spans,
+        }))
     }
 
     /// Aggregate a one-column subquery into a single scalar value, which is
@@ -1716,8 +1760,12 @@ impl SqlToRel<'_> {
         // projected field loses unselected input columns. Keep that typed
         // ordering and carry its keys through the query's final projection
         // and row limit instead. The complete query remains below the
-        // aggregate, preserving DISTINCT and LIMIT/OFFSET semantics.
-        let (sub_plan, order_by_sort_exprs) = if query.order_by.is_some() {
+        // aggregate, preserving DISTINCT and LIMIT/OFFSET semantics. A
+        // definition bound to be printed, never evaluated, keeps the query
+        // beneath the aggregate as written, its ORDER BY included.
+        let (sub_plan, order_by_sort_exprs) = if query.order_by.is_some()
+            && !self.context_provider.plans_definitions_as_written()
+        {
             scalar_subquery_ordering(sub_plan)?
         } else {
             (sub_plan, vec![])
@@ -1860,8 +1908,19 @@ impl SqlToRel<'_> {
     /// A set-returning function the provider plans as a table source, in
     /// expression position: its rows gathered into one array per evaluation
     /// and unnested back, so it multiplies the row the way a list expansion
-    /// does. A multi-column source is gathered as records.
-    fn set_returning_source_expr(&self, name: &str, args: Vec<Expr>) -> Result<Expr> {
+    /// does. A multi-column source is gathered as records. The arguments read
+    /// the row of `schema` the call multiplies, which to the source's own
+    /// one-row input is the enclosing query.
+    fn set_returning_source_expr(
+        &self,
+        name: &str,
+        args: Vec<Expr>,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        let args = args
+            .into_iter()
+            .map(|arg| crate::relation::outer_references_of(arg, schema))
+            .collect::<Result<Vec<_>>>()?;
         let source = self
             .context_provider
             .get_table_function_source(name, args)?;
@@ -2015,6 +2074,7 @@ mod scalar_subquery_aggregate_tests {
     use super::*;
     use crate::parser::{DFParser, Statement};
     use crate::planner::ExprPlanner;
+    use arrow::array::Array;
     use arrow::datatypes::{Field, Schema};
     use datafusion_common::TableReference;
     use datafusion_common::config::ConfigOptions;
@@ -2032,6 +2092,7 @@ mod scalar_subquery_aggregate_tests {
         options: ConfigOptions,
         owns_missing_functions: bool,
         owns_national_literals: bool,
+        prints_definitions: bool,
         planners: Vec<Arc<dyn ExprPlanner>>,
     }
 
@@ -2056,6 +2117,9 @@ mod scalar_subquery_aggregate_tests {
     impl ContextProvider for ArrayContext {
         fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
             &self.planners
+        }
+        fn plans_definitions_as_written(&self) -> bool {
+            self.prints_definitions
         }
         fn get_table_source(&self, _: TableReference) -> Result<Arc<dyn TableSource>> {
             Ok(Arc::new(LogicalTableSource::new(Arc::new(Schema::new(
@@ -2307,10 +2371,65 @@ mod scalar_subquery_aggregate_tests {
     }
 
     fn planned_array(sql: &str) -> Result<datafusion_expr::Aggregate> {
+        planned_array_in(sql, &ArrayContext::default())
+    }
+
+    fn planned_array_in(
+        sql: &str,
+        context: &ArrayContext,
+    ) -> Result<datafusion_expr::Aggregate> {
+        let LogicalPlan::Projection(projection) = plan_with_context(sql, context)? else {
+            panic!("ARRAY query must project its result")
+        };
+        // A definition bound to be printed also marks the sublink written.
+        let mut planned = &projection.expr[0];
+        while let Expr::Alias(alias) = planned {
+            planned = alias.expr.as_ref();
+        }
+        let Expr::ScalarSubquery(subquery) = planned else {
+            panic!("ARRAY result must be a scalar subquery: {planned}")
+        };
+        let LogicalPlan::Projection(constructed) = subquery.subquery.as_ref() else {
+            panic!("ARRAY body must construct its array over the aggregate")
+        };
+        let LogicalPlan::Aggregate(aggregate) = constructed.input.as_ref() else {
+            panic!("ARRAY body must aggregate the complete query")
+        };
+        Ok(aggregate.clone())
+    }
+
+    #[test]
+    fn printed_array_subquery_keeps_its_query_as_written() -> Result<()> {
+        let context = ArrayContext {
+            prints_definitions: true,
+            ..ArrayContext::default()
+        };
+        for query in [
+            "SELECT a FROM t ORDER BY b DESC, 1",
+            "SELECT a + 1 AS c FROM t ORDER BY c LIMIT 2",
+            "SELECT DISTINCT a FROM t ORDER BY a",
+        ] {
+            let aggregate =
+                planned_array_in(&format!("SELECT ARRAY({query})"), &context)?;
+            assert!(aggregate_ordering(&aggregate).is_empty(), "{query}");
+            assert_eq!(
+                aggregate.input.as_ref(),
+                &plan_with_context(query, &context)?,
+                "{query}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn array_subquery_constructs_the_empty_array_when_no_row_aggregates() -> Result<()> {
         let context = ArrayContext::default();
-        let statement = DFParser::parse_sql_with_dialect(sql, &PostgreSqlDialect {})?
-            .pop_front()
-            .expect("one statement");
+        let statement = DFParser::parse_sql_with_dialect(
+            "SELECT ARRAY(SELECT a FROM t WHERE false)",
+            &PostgreSqlDialect {},
+        )?
+        .pop_front()
+        .expect("one statement");
         let plan = SqlToRel::new(&context).statement_to_plan(statement)?;
         let LogicalPlan::Projection(projection) = plan else {
             panic!("ARRAY query must project its result")
@@ -2318,10 +2437,23 @@ mod scalar_subquery_aggregate_tests {
         let Expr::ScalarSubquery(subquery) = projection.expr[0].clone().unalias() else {
             panic!("ARRAY result must be a scalar subquery")
         };
-        let LogicalPlan::Aggregate(aggregate) = subquery.subquery.as_ref() else {
-            panic!("ARRAY body must aggregate the complete query")
+        let LogicalPlan::Projection(constructed) = subquery.subquery.as_ref() else {
+            panic!("ARRAY body must construct its array over the aggregate")
         };
-        Ok(aggregate.clone())
+        let Expr::Case(case) = constructed.expr[0].clone().unalias() else {
+            panic!("ARRAY must construct the empty array for a NULL aggregate")
+        };
+        let Expr::Literal(ScalarValue::List(empty), _) =
+            case.when_then_expr[0].1.as_ref()
+        else {
+            panic!("the empty array is a list literal")
+        };
+        assert_eq!((empty.as_ref().len(), empty.value_length(0)), (1, 0));
+        assert_eq!(
+            constructed.schema.field(0).data_type(),
+            constructed.input.schema().field(0).data_type()
+        );
+        Ok(())
     }
 
     fn aggregate_ordering(aggregate: &datafusion_expr::Aggregate) -> &[SortExpr] {

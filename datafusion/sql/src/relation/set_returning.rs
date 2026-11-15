@@ -33,7 +33,9 @@
 use std::sync::Arc;
 
 use crate::definition_plan::{FunctionRelation, FunctionRelationCall};
-use crate::planner::{PlannerContext, SetReturningColumns, SqlToRel};
+use crate::planner::{
+    FUNCTION_NAMED_COLUMN_METADATA_KEY, PlannerContext, SetReturningColumns, SqlToRel,
+};
 
 use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::metadata::FieldMetadata;
@@ -402,7 +404,31 @@ impl SqlToRel<'_> {
             plan = self.number_rows(plan, name)?;
         }
         let base_columns = plan.schema().fields().len() - usize::from(with_ordinality);
-        if base_columns == 1
+        let named_by_function = plan
+            .schema()
+            .fields()
+            .first()
+            .is_some_and(|field| {
+                field
+                    .metadata()
+                    .contains_key(FUNCTION_NAMED_COLUMN_METADATA_KEY)
+            });
+        if named_by_function {
+            // The function named its column: the marker has served.
+            let mut output: Vec<Expr> = plan
+                .schema()
+                .columns()
+                .into_iter()
+                .map(Expr::Column)
+                .collect();
+            let field = plan.schema().field(0);
+            let mut metadata = field.metadata().clone();
+            metadata.remove(FUNCTION_NAMED_COLUMN_METADATA_KEY);
+            output[0] = output[0]
+                .clone()
+                .alias_with_metadata(field.name(), Some(FieldMetadata::from(metadata)));
+            plan = LogicalPlanBuilder::from(plan).project(output)?.build()?;
+        } else if base_columns == 1
             && let Some(table_alias) = &alias
             && table_alias.columns.is_empty()
         {

@@ -45,6 +45,13 @@ use sqlparser::ast::{
     UnaryOperator, Value,
 };
 
+/// Field metadata a table source puts on the one column of a function that
+/// names that column itself, as a routine's single OUT parameter or the
+/// attribute of a one-attribute record does. A bare table alias then names
+/// only the relation: PostgreSQL's `chooseScalarFunctionAlias` keeps the
+/// parameter's name. The planner removes the marker once it has decided.
+pub const FUNCTION_NAMED_COLUMN_METADATA_KEY: &str = "pg_function_named_column";
+
 /// Row expansion supplied by an embedding. List columns zip by position;
 /// a list of records evaluates a multi-column function and its arguments once.
 #[derive(Debug, Clone)]

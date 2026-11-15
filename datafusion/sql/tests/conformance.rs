@@ -71,6 +71,9 @@ use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use datafusion_expr::test::function_stub::{
     avg_udaf, count_udaf, max_udaf, min_udaf, sum_udaf,
 };
+// ARRAY(subquery) plans over ARRAY_AGG's list result type, which a stub
+// cannot describe.
+use datafusion_functions_aggregate::array_agg::array_agg_udaf;
 
 // Re-export submodules for each standard part
 pub mod part2_foundation;
@@ -1335,8 +1338,7 @@ stub_aggregate_udf!(BitAndAgg, "bit_and_agg");
 stub_aggregate_udf!(BitOrAgg, "bit_or_agg");
 stub_aggregate_udf!(BitXorAgg, "bit_xor_agg");
 
-// Array/list aggregate functions
-stub_aggregate_udf!(ArrayAgg, "array_agg");
+// String aggregate functions
 stub_aggregate_udf!(StringAgg, "string_agg");
 
 // ListAgg needs special handling for WITHIN GROUP support

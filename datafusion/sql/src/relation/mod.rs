@@ -274,24 +274,8 @@ impl SqlToRel<'_> {
                 }
             };
             // Every column in a function argument refers to the preceding
-            // (implicit-lateral) FROM items. Convert nested references too:
-            // ARRAY[r, r + 1] has a constructor at its root, so matching only
-            // a top-level Column leaves its children local to the function's
-            // empty one-row input.
-            let expr = expr
-                .transform(|expr| match expr {
-                    Expr::Column(column) => {
-                        match schema.qualified_field_from_column(&column) {
-                            Ok((_, field)) => Ok(Transformed::yes(
-                                Expr::OuterReferenceColumn(Arc::clone(field), column),
-                            )),
-                            Err(_) => Ok(Transformed::no(Expr::Column(column))),
-                        }
-                    }
-                    other => Ok(Transformed::no(other)),
-                })
-                .data()?;
-            planned.push(expr);
+            // (implicit-lateral) FROM items.
+            planned.push(outer_references_of(expr, schema)?);
         }
         if !arg_names.iter().any(Option::is_some) {
             return Ok(planned);
@@ -1413,6 +1397,24 @@ impl SqlToRel<'_> {
             })),
         }
     }
+}
+
+/// `expr` with every column `schema` resolves made a reference to the
+/// enclosing query, as the argument of a function whose relation is planned
+/// over its own one-row input reads the row it is called for. Nested
+/// references convert too: ARRAY[r, r + 1] has a constructor at its root.
+pub(crate) fn outer_references_of(expr: Expr, schema: &DFSchema) -> Result<Expr> {
+    expr.transform(|expr| match expr {
+        Expr::Column(column) => match schema.qualified_field_from_column(&column) {
+            Ok((_, field)) => Ok(Transformed::yes(Expr::OuterReferenceColumn(
+                Arc::clone(field),
+                column,
+            ))),
+            Err(_) => Ok(Transformed::no(Expr::Column(column))),
+        },
+        other => Ok(Transformed::no(other)),
+    })
+    .data()
 }
 
 /// Whether the query wrote the keyword LATERAL before `factor`.
