@@ -453,3 +453,74 @@ fn whole_row_excludes_internal_system_columns() {
         vec![("r".into(), Some("system_columns".into()))]
     );
 }
+
+#[test]
+fn whole_row_of_an_enclosing_query_is_a_record_of_its_outer_references() {
+    for (sql, references) in [
+        ("SELECT (SELECT r) FROM typed_columns r", 1),
+        (
+            "SELECT (SELECT x FROM (VALUES (r)) v(x)) FROM typed_columns r",
+            1,
+        ),
+        (
+            "SELECT v.x FROM typed_columns r, LATERAL (VALUES (r), (r)) v(x)",
+            2,
+        ),
+        ("SELECT (SELECT r WHERE r.id > 0) FROM typed_columns r", 1),
+    ] {
+        let context = OwnerContext::new();
+        let plan = context
+            .plan(sql)
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert_eq!(
+            *context.calls.borrow(),
+            vec![("r".into(), Some("typed_columns".into())); references],
+            "{sql}"
+        );
+        let DataType::Struct(fields) = plan.schema().field(0).data_type() else {
+            panic!("{sql}: an enclosing query's whole row must be a record")
+        };
+        assert_eq!(fields.len(), 2, "{sql}");
+    }
+}
+
+#[test]
+fn whole_row_prefers_its_own_query_and_a_column_of_any_level() {
+    // The inner FROM item named `r` shadows the enclosing one.
+    let context = OwnerContext::new();
+    context
+        .plan(
+            "SELECT (SELECT r FROM (SELECT * FROM typed_columns) r) FROM typed_columns r",
+        )
+        .unwrap();
+    assert_eq!(*context.calls.borrow(), vec![("r".into(), None)]);
+    // A column of an enclosing query is found before a relation of the
+    // subquery's own of its name, as PostgreSQL looks a name up as a column
+    // at every level before it looks it up as a relation.
+    let context = OwnerContext::new();
+    let plan = context
+        .plan("SELECT (SELECT id FROM (VALUES (1)) id(x)) FROM typed_columns t")
+        .unwrap();
+    assert!(context.calls.borrow().is_empty());
+    assert_eq!(plan.schema().field(0).data_type(), &DataType::Int32);
+}
+
+#[test]
+fn values_row_expands_an_enclosing_relation_star_into_its_columns() {
+    let context = OwnerContext::new();
+    let plan = context
+        .plan("SELECT v.a, v.b FROM typed_columns r, LATERAL (VALUES (r.*)) v(a, b)")
+        .unwrap();
+    assert!(context.calls.borrow().is_empty());
+    assert_eq!(plan.schema().field(0).data_type(), &DataType::Int32);
+    assert_eq!(plan.schema().field(1).data_type(), &DataType::Utf8);
+    let error = OwnerContext::new()
+        .plan("SELECT v.a FROM typed_columns r, LATERAL (VALUES (missing.*)) v(a)")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing FROM-clause entry for table \"missing\""),
+        "{error}"
+    );
+}

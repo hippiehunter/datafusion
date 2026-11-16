@@ -1329,15 +1329,10 @@ impl SqlToRel<'_> {
             FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(object_name)) => {
                 let qualifier =
                     self.object_name_to_table_reference(object_name.clone())?;
-                // Sanity check on qualifier with schema
-                let qualified_indices = schema.fields_indices_with_qualified(&qualifier);
-                if qualified_indices.is_empty() {
-                    return plan_err!("Invalid qualifier {qualifier}");
-                }
-
                 // In a function argument PostgreSQL's `relation.*` is one
-                // composite whole-row value, not a projection wildcard. This
-                // is what lets calls such as `row_to_json(t.*)` preserve the
+                // composite whole-row value, not a projection wildcard, of a
+                // relation of this query or of an enclosing one. This is what
+                // lets calls such as `row_to_json(t.*)` preserve the
                 // relation's field names. A bare `*` remains the special
                 // aggregate wildcard used by count(*).
                 if let Some(record) = self.try_plan_whole_row_reference(
@@ -1346,6 +1341,11 @@ impl SqlToRel<'_> {
                     planner_context,
                 )? {
                     return Ok((record, None));
+                }
+                // Sanity check on qualifier with schema
+                let qualified_indices = schema.fields_indices_with_qualified(&qualifier);
+                if qualified_indices.is_empty() {
+                    return plan_err!("Invalid qualifier {qualifier}");
                 }
 
                 #[expect(deprecated)]

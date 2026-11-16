@@ -74,11 +74,34 @@ impl SqlToRel<'_> {
                     )));
                     continue;
                 }
+                // A VALUES row is a target list: `relation.*` there is the
+                // relation's columns, each a value of the row.
+                if let SQLExpr::QualifiedWildcard(object_name, _) = value {
+                    let relation =
+                        self.object_name_to_table_reference(object_name.clone())?;
+                    let columns = self
+                        .relation_columns_in_scope(
+                            &relation,
+                            &row_schema,
+                            planner_context,
+                        )?
+                        .ok_or_else(|| {
+                            datafusion_common::sqlstate_datafusion_err(
+                                "42P01",
+                                format!(
+                                    "missing FROM-clause entry for table \"{}\"",
+                                    relation.table()
+                                ),
+                            )
+                        })?;
+                    exprs.extend(columns.into_iter().map(|(_, column)| column));
+                    continue;
+                }
                 if let (Some(defaults), SQLExpr::Identifier(ident)) =
                     (defaults.as_ref().map(|defaults| &defaults.slots), value)
                     && is_default_identifier(ident)
                 {
-                    exprs.push(match defaults.get(idx) {
+                    exprs.push(match defaults.get(exprs.len()) {
                         Some(ValuesDefault::Refused(message)) => {
                             return not_impl_err!("{message}");
                         }

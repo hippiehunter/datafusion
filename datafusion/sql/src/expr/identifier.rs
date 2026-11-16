@@ -21,7 +21,7 @@ use datafusion_common::{
     Column, DFSchema, Result, ScalarValue, Span, TableReference, assert_or_internal_err,
     exec_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
 };
-use datafusion_expr::{Case, Expr, expr::ScalarFunction};
+use datafusion_expr::{Case, Expr, ScalarUDF, expr::ScalarFunction};
 use sqlparser::ast::{AstBox as SQLBox, CaseWhen, Expr as SQLExpr, Ident};
 use std::sync::Arc;
 
@@ -135,9 +135,13 @@ impl SqlToRel<'_> {
     /// Expand a bare relation name used in value position into a record of all
     /// that relation's columns: `named_struct('c1', rel.c1, 'c2', rel.c2, ...)`.
     /// The field names become the record's attribute names (json keys for
-    /// `row_to_json`). Returns `None` when the name matches no relation in the
-    /// schema or when the context provides no `named_struct` implementation, so
-    /// the caller falls back to plain column resolution.
+    /// `row_to_json`). The relation is looked up in `schema`, then in the
+    /// enclosing queries' FROM clauses, innermost first, as PostgreSQL looks a
+    /// relation name up once no column of any level has the name; a relation
+    /// of an enclosing query gives a record of outer references. Returns `None`
+    /// when the name matches no relation in scope or when the context provides
+    /// no `named_struct` implementation, so the caller falls back to plain
+    /// column resolution.
     pub(super) fn try_plan_whole_row_reference(
         &self,
         relation: &TableReference,
@@ -148,43 +152,74 @@ impl SqlToRel<'_> {
         else {
             return Ok(None);
         };
-        let mut qualifiers = schema.iter().filter_map(|(qualifier, _)| {
-            qualifier.filter(|qualifier| {
-                qualifier.table() == relation.table()
-                    && relation
-                        .schema()
-                        .is_none_or(|schema| qualifier.schema() == Some(schema))
-                    && relation
-                        .catalog()
-                        .is_none_or(|catalog| qualifier.catalog() == Some(catalog))
-            })
-        });
-        let Some(qualifier) = qualifiers.next() else {
+        if let Some(record) = self.plan_whole_row_of(
+            relation,
+            schema,
+            false,
+            &named_struct,
+            planner_context,
+        )? {
+            return Ok(Some(record));
+        }
+        for outer in planner_context.outer_query_schema_stack().iter().rev() {
+            if let Some(record) = self.plan_whole_row_of(
+                relation,
+                outer,
+                true,
+                &named_struct,
+                planner_context,
+            )? {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The columns of `relation`, which `relation.*` names in a VALUES row or
+    /// select list, with their names: those of the FROM item of this query
+    /// that `schema` holds or, failing one, of an enclosing query's, innermost
+    /// first, as outer references. `None` when no FROM item in scope has the
+    /// name.
+    pub(crate) fn relation_columns_in_scope(
+        &self,
+        relation: &TableReference,
+        schema: &DFSchema,
+        planner_context: &PlannerContext,
+    ) -> Result<Option<Vec<(String, Expr)>>> {
+        if let Some((_, columns)) = relation_columns_of(relation, schema, false)? {
+            return Ok(Some(columns));
+        }
+        for outer in planner_context.outer_query_schema_stack().iter().rev() {
+            if let Some((_, columns)) = relation_columns_of(relation, outer, true)? {
+                return Ok(Some(columns));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The record of `relation`'s columns in `schema`, a scope of the query
+    /// (`outer` false) or of an enclosing one, whose columns it reads as
+    /// outer references.
+    fn plan_whole_row_of(
+        &self,
+        relation: &TableReference,
+        schema: &DFSchema,
+        outer: bool,
+        named_struct: &Arc<ScalarUDF>,
+        planner_context: &PlannerContext,
+    ) -> Result<Option<Expr>> {
+        let Some((qualifier, columns)) = relation_columns_of(relation, schema, outer)?
+        else {
             return Ok(None);
         };
-        if qualifiers.any(|candidate| candidate != qualifier) {
-            return Err(datafusion_common::sqlstate_datafusion_err(
-                "42P09",
-                format!("table reference \"{relation}\" is ambiguous"),
-            ));
-        }
-        let mut args: Vec<Expr> = Vec::new();
-        for (field_qualifier, field) in schema.iter() {
-            if field_qualifier != Some(qualifier)
-                || field
-                    .metadata()
-                    .get(datafusion_expr::utils::SYSTEM_COLUMN_METADATA_KEY)
-                    .is_some_and(|value| value == "true")
-            {
-                continue;
-            }
-            args.push(Expr::Literal(
-                ScalarValue::Utf8(Some(field.name().clone())),
-                None,
-            ));
-            args.push(Expr::Column(Column::from((field_qualifier, field))));
-        }
-        let record = Expr::ScalarFunction(ScalarFunction::new_udf(named_struct, args));
+        let args = columns
+            .into_iter()
+            .flat_map(|(name, column)| {
+                [Expr::Literal(ScalarValue::Utf8(Some(name)), None), column]
+            })
+            .collect();
+        let record =
+            Expr::ScalarFunction(ScalarFunction::new_udf(Arc::clone(named_struct), args));
         self.context_provider
             .plan_whole_row_reference(
                 qualifier,
@@ -505,6 +540,60 @@ fn generate_schema_search_terms(
         let (relation, column_name) = form_identifier(qualifier_and_column).unwrap();
         (relation, column_name, &ids[nested_names_index..])
     })
+}
+
+/// A FROM item's qualifier and its columns, each with its name.
+type RelationColumns<'a> = (&'a TableReference, Vec<(String, Expr)>);
+
+/// The columns of the FROM item `relation` names in `schema`, with its
+/// qualifier: each column but a system column, with its name, read as an
+/// outer reference when `outer`. `None` when no FROM item of `schema` has the
+/// name; a name two FROM items share is ambiguous.
+fn relation_columns_of<'a>(
+    relation: &TableReference,
+    schema: &'a DFSchema,
+    outer: bool,
+) -> Result<Option<RelationColumns<'a>>> {
+    let mut qualifiers = schema.iter().filter_map(|(qualifier, _)| {
+        qualifier.filter(|qualifier| {
+            qualifier.table() == relation.table()
+                && relation
+                    .schema()
+                    .is_none_or(|schema| qualifier.schema() == Some(schema))
+                && relation
+                    .catalog()
+                    .is_none_or(|catalog| qualifier.catalog() == Some(catalog))
+        })
+    });
+    let Some(qualifier) = qualifiers.next() else {
+        return Ok(None);
+    };
+    if qualifiers.any(|candidate| candidate != qualifier) {
+        return Err(datafusion_common::sqlstate_datafusion_err(
+            "42P09",
+            format!("table reference \"{relation}\" is ambiguous"),
+        ));
+    }
+    let columns = schema
+        .iter()
+        .filter(|(field_qualifier, field)| {
+            *field_qualifier == Some(qualifier)
+                && field
+                    .metadata()
+                    .get(datafusion_expr::utils::SYSTEM_COLUMN_METADATA_KEY)
+                    .is_none_or(|value| value != "true")
+        })
+        .map(|(field_qualifier, field)| {
+            let column = Column::from((field_qualifier, field));
+            let expr = if outer {
+                Expr::OuterReferenceColumn(Arc::clone(field), column)
+            } else {
+                Expr::Column(column)
+            };
+            (field.name().clone(), expr)
+        })
+        .collect();
+    Ok(Some((qualifier, columns)))
 }
 
 #[cfg(test)]
