@@ -1652,10 +1652,12 @@ impl SqlToRel<'_> {
     /// Plan an ARRAY subquery constructor (SQL:2016 S095)
     ///
     /// Transforms `ARRAY(SELECT col FROM t ORDER BY x)` into:
-    /// `(SELECT CASE WHEN a IS NULL THEN '{}' ELSE a END FROM (SELECT
+    /// `(SELECT CASE WHEN a IS NOT NULL THEN a ELSE '{}' END FROM (SELECT
     /// ARRAY_AGG(col ORDER BY x) AS a FROM t))` as a ScalarSubquery: a
     /// subquery that returns no row constructs the empty array, where the
-    /// aggregate alone would be NULL.
+    /// aggregate alone would be NULL. The empty array is marked
+    /// [`expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY`], so it follows the
+    /// type analysis settles the aggregate on.
     pub(super) fn plan_array_subquery_constructor(
         &self,
         query: &sqlparser::ast::Query,
@@ -1693,18 +1695,23 @@ impl SqlToRel<'_> {
             None,
         )));
         let aggregate = Expr::Column(Column::new(qualifier.cloned(), field.name()));
+        // The empty array carries the aggregate's type identity, which CASE
+        // keeps only where its branches agree.
+        let mut identity = field.metadata().clone();
+        identity.insert(
+            expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY.to_string(),
+            "true".to_string(),
+        );
         let constructed = Expr::Case(Case::new(
             None,
-            // The empty array carries the aggregate's type identity, which
-            // CASE keeps only where its branches agree.
             vec![(
-                Box::new(aggregate.clone().is_null()),
-                Box::new(Expr::Literal(
-                    empty,
-                    Some(FieldMetadata::from(field.metadata().clone())),
-                )),
+                Box::new(aggregate.clone().is_not_null()),
+                Box::new(aggregate),
             )],
-            Some(Box::new(aggregate)),
+            Some(Box::new(Expr::Literal(
+                empty,
+                Some(FieldMetadata::from(identity)),
+            ))),
         ))
         .alias(field.name());
         let plan = LogicalPlanBuilder::from(subquery.subquery.as_ref().clone())
@@ -2443,11 +2450,16 @@ mod scalar_subquery_aggregate_tests {
         let Expr::Case(case) = constructed.expr[0].clone().unalias() else {
             panic!("ARRAY must construct the empty array for a NULL aggregate")
         };
-        let Expr::Literal(ScalarValue::List(empty), _) =
-            case.when_then_expr[0].1.as_ref()
+        let Some(Expr::Literal(ScalarValue::List(empty), Some(metadata))) =
+            case.else_expr.as_deref()
         else {
             panic!("the empty array is a list literal")
         };
+        assert!(
+            metadata
+                .inner()
+                .contains_key(expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY)
+        );
         assert_eq!((empty.as_ref().len(), empty.value_length(0)), (1, 0));
         assert_eq!(
             constructed.schema.field(0).data_type(),

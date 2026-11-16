@@ -384,7 +384,14 @@ impl SqlToRel<'_> {
             None
         };
 
-        Ok(Expr::Case(Case::new(expr, when_then_expr, else_expr)))
+        let mut case = Expr::Case(Case::new(expr, when_then_expr, else_expr));
+        for planner in self.context_provider.get_expr_planners() {
+            match planner.plan_case(case, schema)? {
+                PlannerResult::Planned(planned) => return Ok(planned),
+                PlannerResult::Original(original) => case = original,
+            }
+        }
+        Ok(case)
     }
 }
 

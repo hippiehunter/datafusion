@@ -774,6 +774,15 @@ pub trait ExprPlanner: Debug + Send + Sync {
         Ok(PlannerResult::Original(expr))
     }
 
+    /// Plan a written `CASE` expression, its operand, conditions and results
+    /// already planned, before an enclosing expression reads its type: a
+    /// planner that brings the results to their common type does so here.
+    ///
+    /// Returns the original expression if not possible
+    fn plan_case(&self, case: Expr, _schema: &DFSchema) -> Result<PlannerResult<Expr>> {
+        Ok(PlannerResult::Original(case))
+    }
+
     /// Plans a struct literal, such as  `{'field1' : expr1, 'field2' : expr2, ...}`
     ///
     /// This function takes a vector of expressions and a boolean flag

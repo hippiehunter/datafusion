@@ -335,6 +335,20 @@ impl SqlToRel<'_> {
     ) -> Result<LogicalPlan> {
         let target_fields =
             (!schema.fields().is_empty()).then(|| schema.fields().clone());
+        // Rows that read no scan are typed against no input, as literal rows
+        // are, and their columns take their common types the same way before
+        // each row is cast to the first row's carrier.
+        let rows = if target_fields.is_none()
+            && rows.iter().all(|row| row.input.is_none())
+        {
+            self.context_provider
+                .plan_values_coercion(rows.into_iter().map(|row| row.exprs).collect())?
+                .into_iter()
+                .map(|exprs| ValuesRow { input: None, exprs })
+                .collect()
+        } else {
+            rows
+        };
         let mut columns: Vec<(String, DataType)> = schema
             .fields()
             .iter()

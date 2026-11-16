@@ -619,7 +619,8 @@ impl ExprSchemable for Expr {
                 // output field keeps the metadata every contributing branch
                 // agrees on. Bare NULL branches adopt the unified type and
                 // contribute nothing — `CASE WHEN .. THEN NULL ELSE attrs END`
-                // keeps the metadata of `attrs`.
+                // keeps the metadata of `attrs` — unless every branch is NULL:
+                // the result is then of the type its NULLs agree on.
                 fn is_bare_null(expr: &Expr) -> bool {
                     match expr {
                         Expr::Literal(value, _) => value.is_null(),
@@ -633,21 +634,29 @@ impl ExprSchemable for Expr {
                     .iter()
                     .map(|(_, then_expr)| then_expr.as_ref())
                     .chain(case.else_expr.as_deref());
-                let mut metadata: Option<std::collections::BTreeMap<String, String>> =
-                    None;
-                for branch in branches {
-                    if is_bare_null(branch) {
-                        continue;
-                    }
-                    let branch_metadata = branch.metadata(schema)?;
-                    match &mut metadata {
-                        None => metadata = Some(branch_metadata.inner().clone()),
+                fn agree(
+                    metadata: &mut Option<std::collections::BTreeMap<String, String>>,
+                    branch: &FieldMetadata,
+                ) {
+                    match metadata {
+                        None => *metadata = Some(branch.inner().clone()),
                         Some(existing) => {
-                            existing
-                                .retain(|k, v| branch_metadata.inner().get(k) == Some(v));
+                            existing.retain(|k, v| branch.inner().get(k) == Some(v));
                         }
                     }
                 }
+                let mut metadata: Option<std::collections::BTreeMap<String, String>> =
+                    None;
+                let mut null_metadata = None;
+                for branch in branches {
+                    let branch_metadata = branch.metadata(schema)?;
+                    if !is_bare_null(branch) {
+                        agree(&mut metadata, &branch_metadata);
+                    } else if !branch_metadata.is_empty() {
+                        agree(&mut null_metadata, &branch_metadata);
+                    }
+                }
+                let metadata = metadata.or(null_metadata);
                 let field = Field::new(
                     &schema_name,
                     self.get_type(schema)?,
@@ -1194,6 +1203,32 @@ mod tests {
             Column::from_name("foo"),
         );
         assert_eq!(meta, outer_ref.metadata(&schema).unwrap());
+    }
+
+    /// A CASE whose every result is NULL is of the type its typed NULLs
+    /// agree on; a NULL beside a typed result leaves that result's type.
+    #[test]
+    fn case_of_typed_nulls_keeps_their_type() {
+        let row = FieldMetadata::from(HashMap::from([(
+            "pg_composite_name".to_string(),
+            "public.r".to_string(),
+        )]));
+        let typed_null = Expr::Literal(ScalarValue::Utf8(None), Some(row.clone()));
+        let schema = MockExprSchema::new().with_data_type(DataType::Utf8);
+        let all_null = when(col("c").is_null(), typed_null.clone())
+            .otherwise(lit(ScalarValue::Utf8(None)))
+            .unwrap();
+        assert_eq!(row, all_null.metadata(&schema).unwrap());
+
+        let text = FieldMetadata::from(HashMap::from([(
+            "pg_type".to_string(),
+            "text".to_string(),
+        )]));
+        let schema = schema.with_metadata(text.clone());
+        let beside_value = when(col("c").is_null(), typed_null)
+            .otherwise(col("c"))
+            .unwrap();
+        assert_eq!(text, beside_value.metadata(&schema).unwrap());
     }
 
     #[test]

@@ -1119,6 +1119,14 @@ pub const ARRAY_SUBLINK: &str = "array";
 /// `(a, b, ...) IN (subquery)`, planned as `(a, b, ...) = ANY (subquery)`.
 pub const ROW_IN_SUBLINK: &str = "row_in";
 
+/// Field metadata key of the empty array an `ARRAY(subquery)` constructor
+/// projects when its query returns no row. The array is of the
+/// constructor's element type, whatever type analysis settles the
+/// aggregate on, so type coercion re-makes it at the type of the CASE
+/// branch it stands beside rather than casting it there.
+pub const CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY: &str =
+    "datafusion.constructed_empty_array";
+
 /// How an OVER clause named a window of its query level's WINDOW clause.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
 pub enum WindowReference {

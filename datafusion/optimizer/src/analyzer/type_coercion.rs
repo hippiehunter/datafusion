@@ -22,7 +22,10 @@ use std::sync::Arc;
 use datafusion_expr::binary::BinaryTypeCoercer;
 use itertools::{Itertools as _, izip};
 
+use arrow::array::{ListArray, new_empty_array};
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
+use datafusion_common::metadata::FieldMetadata;
 
 use crate::analyzer::AnalyzerRule;
 use crate::utils::NamePreserver;
@@ -1071,7 +1074,63 @@ fn coerce_arguments_for_signature_with_window_udf(
         .collect()
 }
 
+/// `case` with each result that is the empty array an `ARRAY(subquery)`
+/// constructor projects ([`expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY`])
+/// re-made as an empty array of the first other result's list type and
+/// identity, which analysis may have changed since the constructor typed it.
+fn retype_constructed_empty_arrays(mut case: Case, schema: &DFSchema) -> Result<Case> {
+    fn constructed_empty(result: &Expr) -> bool {
+        matches!(
+            result,
+            Expr::Literal(ScalarValue::List(_), Some(metadata))
+                if metadata
+                    .inner()
+                    .contains_key(expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY)
+        )
+    }
+    let Some(peer) = case
+        .when_then_expr
+        .iter()
+        .map(|(_, then)| then.as_ref())
+        .chain(case.else_expr.as_deref())
+        .find(|result| !constructed_empty(result))
+    else {
+        return Ok(case);
+    };
+    let (_, peer) = peer.to_field(schema)?;
+    let DataType::List(item) = peer.data_type() else {
+        return Ok(case);
+    };
+    let mut identity = peer.metadata().clone();
+    identity.insert(
+        expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY.to_string(),
+        "true".to_string(),
+    );
+    let remade = |result: Box<Expr>| {
+        if !constructed_empty(&result) {
+            return result;
+        }
+        Box::new(Expr::Literal(
+            ScalarValue::List(Arc::new(ListArray::new(
+                Arc::clone(item),
+                OffsetBuffer::from_lengths([0]),
+                new_empty_array(item.data_type()),
+                None,
+            ))),
+            Some(FieldMetadata::from(identity.clone())),
+        ))
+    };
+    case.when_then_expr = case
+        .when_then_expr
+        .into_iter()
+        .map(|(when, then)| (when, remade(then)))
+        .collect();
+    case.else_expr = case.else_expr.map(remade);
+    Ok(case)
+}
+
 fn coerce_case_expression(case: Case, schema: &DFSchema) -> Result<Case> {
+    let case = retype_constructed_empty_arrays(case, schema)?;
     // Given expressions like:
     //
     // CASE a1
@@ -1349,8 +1408,11 @@ mod test {
     use std::any::Any;
     use std::sync::Arc;
 
+    use arrow::array::{Array, ListArray, new_empty_array};
+    use arrow::buffer::OffsetBuffer;
     use arrow::datatypes::DataType::Utf8;
     use arrow::datatypes::{DataType, Field, Schema, SchemaBuilder, TimeUnit};
+    use datafusion_common::metadata::FieldMetadata;
     use insta::assert_snapshot;
 
     use crate::analyzer::type_coercion::{
@@ -2514,6 +2576,63 @@ mod test {
             when_then_expr,
             else_expr,
         }
+    }
+
+    #[test]
+    /// The empty array of an `ARRAY(subquery)` constructor follows the
+    /// aggregate it stands beside, though analysis gave the aggregate an
+    /// element type no cast reaches from the one the constructor typed it
+    /// with.
+    #[test]
+    fn constructed_empty_array_follows_its_aggregate() -> Result<()> {
+        let item = Arc::new(
+            Field::new("item", DataType::Binary, true)
+                .with_metadata([("pg_type".to_string(), "numeric".to_string())].into()),
+        );
+        let schema = DFSchema::from_unqualified_fields(
+            vec![
+                Field::new("aggregate", DataType::List(Arc::clone(&item)), true)
+                    .with_metadata(
+                        [("pg_type".to_string(), "numeric[]".to_string())].into(),
+                    ),
+            ]
+            .into(),
+            std::collections::HashMap::new(),
+        )?;
+        let frozen = Arc::new(Field::new("item", DataType::Decimal128(6, 2), true));
+        let marked = Expr::Literal(
+            ScalarValue::List(Arc::new(ListArray::new(
+                Arc::clone(&frozen),
+                OffsetBuffer::from_lengths([0]),
+                new_empty_array(frozen.data_type()),
+                None,
+            ))),
+            Some(FieldMetadata::from(std::collections::HashMap::from([(
+                expr::CONSTRUCTED_EMPTY_ARRAY_METADATA_KEY.to_string(),
+                "true".to_string(),
+            )]))),
+        );
+        let case = Case {
+            expr: None,
+            when_then_expr: vec![(
+                Box::new(col("aggregate").is_not_null()),
+                Box::new(col("aggregate")),
+            )],
+            else_expr: Some(Box::new(marked)),
+        };
+        let coerced = coerce_case_expression(case, &schema)?;
+        let Some(Expr::Literal(ScalarValue::List(empty), Some(metadata))) =
+            coerced.else_expr.as_deref()
+        else {
+            panic!("the constructed empty array stays a list literal")
+        };
+        assert_eq!(empty.data_type(), &DataType::List(item));
+        assert_eq!((empty.len(), empty.value_length(0)), (1, 0));
+        assert_eq!(
+            metadata.inner().get("pg_type").map(String::as_str),
+            Some("numeric[]")
+        );
+        Ok(())
     }
 
     #[test]
