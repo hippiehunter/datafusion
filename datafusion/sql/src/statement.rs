@@ -4171,6 +4171,7 @@ impl SqlToRel<'_> {
         };
         crate::dml_front::validate_update_assignments(
             self.context_provider,
+            &self.ident_normalizer,
             generated_columns.as_ref(),
             assignments,
         )?;

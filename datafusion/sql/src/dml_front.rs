@@ -22,7 +22,7 @@
 //!
 //! [`ContextProvider`]: crate::planner::ContextProvider
 
-use crate::planner::{ContextProvider, DmlGeneratedColumns};
+use crate::planner::{ContextProvider, DmlGeneratedColumns, IdentNormalizer};
 use arrow::datatypes::Fields;
 use datafusion_common::Result;
 use sqlparser::ast::{
@@ -158,17 +158,19 @@ pub(crate) fn prepare_merge_insert_clauses(
 /// where the host's parser-free semantics can be used directly.
 pub(crate) fn validate_update_assignments(
     provider: &dyn ContextProvider,
+    ident_normalizer: &IdentNormalizer,
     generated: Option<&DmlGeneratedColumns>,
     assignments: &[Assignment],
 ) -> Result<()> {
     let Some(generated) = generated else {
         return Ok(());
     };
-    reject_generated_assignments(provider, generated, assignments)
+    reject_generated_assignments(provider, ident_normalizer, generated, assignments)
 }
 
 fn reject_generated_assignments(
     provider: &dyn ContextProvider,
+    ident_normalizer: &IdentNormalizer,
     generated: &DmlGeneratedColumns,
     assignments: &[Assignment],
 ) -> Result<()> {
@@ -176,10 +178,12 @@ fn reject_generated_assignments(
         let AssignmentTarget::ColumnName(column) = &assignment.target else {
             continue;
         };
-        let Some(leaf) = column.0.last() else {
+        // The column's name, not its spelling: a quoted name is the same
+        // column as the unquoted one.
+        let Some(leaf) = column.0.last().and_then(|part| part.as_ident()) else {
             continue;
         };
-        let leaf = leaf.to_string();
+        let leaf = ident_normalizer.normalize(leaf.clone());
         if is_default_value(&assignment.value) {
             continue;
         }

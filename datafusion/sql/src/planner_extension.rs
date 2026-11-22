@@ -52,6 +52,12 @@ use sqlparser::ast::{
 /// parameter's name. The planner removes the marker once it has decided.
 pub const FUNCTION_NAMED_COLUMN_METADATA_KEY: &str = "pg_function_named_column";
 
+/// Field metadata key on the single column of a function in FROM whose
+/// result is one scalar value rather than a row: a function with a single
+/// OUT parameter, or one returning `TABLE` of one column. The alias of such
+/// a FROM item, read as a value, is that column.
+pub const FUNCTION_SCALAR_COLUMN_METADATA_KEY: &str = "pg_function_scalar_column";
+
 /// Row expansion supplied by an embedding. List columns zip by position;
 /// a list of records evaluates a multi-column function and its arguments once.
 #[derive(Debug, Clone)]

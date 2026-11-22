@@ -21,7 +21,7 @@ use sqlparser::ast::{
     IdentityPropertyKind,
 };
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::vec;
@@ -311,6 +311,9 @@ pub struct PlannerContext {
     /// Original base sources for the range variables in this query scope.
     /// None marks an explicitly anonymous source that shadows an outer name.
     whole_row_sources: HashMap<TableReference, Option<TableReference>>,
+    /// Range variables over a function whose result is one scalar value:
+    /// such a variable read as a value is the function's column.
+    scalar_function_relations: HashSet<TableReference>,
     /// Stack of outer query schemas for resolving columns in nested subqueries.
     /// The last element is the immediate outer query's schema.
     /// Earlier elements are schemas from further ancestor queries.
@@ -378,6 +381,7 @@ impl PlannerContext {
             parameter_list_fixed: false,
             ctes: HashMap::new(),
             whole_row_sources: HashMap::new(),
+            scalar_function_relations: HashSet::new(),
             outer_query_schema_stack: Vec::new(),
             outer_from_schema: None,
             create_table_schema: None,
@@ -452,6 +456,14 @@ impl PlannerContext {
         source: Option<TableReference>,
     ) {
         self.whole_row_sources.insert(relation, source);
+    }
+
+    pub(super) fn set_scalar_function_relation(&mut self, relation: TableReference) {
+        self.scalar_function_relations.insert(relation);
+    }
+
+    pub(super) fn is_scalar_function_relation(&self, relation: &TableReference) -> bool {
+        self.scalar_function_relations.contains(relation)
     }
 
     pub(super) fn whole_row_source(
@@ -798,7 +810,7 @@ impl<'a> SqlToRel<'a> {
             let num_fields = schema.fields().len();
 
             // Collect the new column names for the renamed columns
-            let mut new_names: std::collections::HashSet<String> = idents
+            let mut new_names: HashSet<String> = idents
                 .iter()
                 .map(|id| self.ident_normalizer.normalize(id.clone()))
                 .collect();
@@ -892,7 +904,7 @@ impl<'a> SqlToRel<'a> {
                     .unwrap_or_else(|| schema.field(index).name().clone()),
             })
             .collect::<Vec<_>>();
-        let mut seen = std::collections::HashSet::with_capacity(num_fields);
+        let mut seen = HashSet::with_capacity(num_fields);
         if let Some(duplicate) = names.iter().find(|name| !seen.insert(name.as_str())) {
             return Err(datafusion_common::sqlstate_datafusion_err(
                 "42701",

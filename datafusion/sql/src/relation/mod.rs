@@ -38,7 +38,8 @@ use std::sync::Arc;
 
 use crate::definition_plan::{AliasedRelation, SampledRelation};
 use crate::planner::{
-    ContextProvider, PlannedRelation, PlannerContext, RelationPlannerContext,
+    ContextProvider, FUNCTION_SCALAR_COLUMN_METADATA_KEY, PlannedRelation, PlannerContext,
+    RelationPlannerContext,
     RelationPlanning, SqlToRel, TableSampleMethod as LogicalTableSampleMethod,
 };
 
@@ -375,13 +376,17 @@ impl SqlToRel<'_> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let anonymous_source;
+        let function_source;
         let planned_relation =
             match self.create_extension_relation(relation, planner_context)? {
                 RelationPlanning::Planned(planned) => {
                     anonymous_source = true;
+                    function_source = false;
                     *planned
                 }
                 RelationPlanning::Original(original) => {
+                    function_source =
+                        matches!(original.as_ref(), TableFactor::Table { args: Some(_), .. });
                     anonymous_source = !matches!(
                         original.as_ref(),
                         TableFactor::Table { args: None, .. }
@@ -398,11 +403,7 @@ impl SqlToRel<'_> {
             optimized_plan
         };
         if anonymous_source {
-            for (qualifier, _) in plan.schema().iter() {
-                if let Some(qualifier) = qualifier {
-                    planner_context.set_whole_row_source(qualifier.clone(), None);
-                }
-            }
+            register_anonymous_source(&plan, function_source, planner_context);
         }
         Ok(plan)
     }
@@ -450,6 +451,7 @@ impl SqlToRel<'_> {
             TableFactor::Table { args: None, .. }
                 | TableFactor::NestedJoin { alias: None, .. }
         );
+        let function_source = matches!(relation, TableFactor::Table { args: Some(_), .. });
         let planned_relation =
             self.create_default_relation_ref(relation, planner_context)?;
         let optimized_plan = optimize_subquery_sort(planned_relation.plan)?.data;
@@ -459,11 +461,7 @@ impl SqlToRel<'_> {
             optimized_plan
         };
         if anonymous_source {
-            for (qualifier, _) in plan.schema().iter() {
-                if let Some(qualifier) = qualifier {
-                    planner_context.set_whole_row_source(qualifier.clone(), None);
-                }
-            }
+            register_anonymous_source(&plan, function_source, planner_context);
         }
         Ok(plan)
     }
@@ -2161,5 +2159,30 @@ impl SqlToRel<'_> {
             .collect();
 
         DFSchema::from_unqualified_fields(fields.into(), HashMap::new())
+    }
+}
+
+/// Record the range variables of `plan`, a FROM item with no base relation
+/// behind it. A function whose result is one scalar value is also recorded
+/// as one, so its range variable read as a value is that column.
+fn register_anonymous_source(
+    plan: &LogicalPlan,
+    function_source: bool,
+    planner_context: &mut PlannerContext,
+) {
+    let schema = plan.schema();
+    let scalar = function_source
+        && schema.fields().len() == 1
+        && schema
+            .field(0)
+            .metadata()
+            .contains_key(FUNCTION_SCALAR_COLUMN_METADATA_KEY);
+    for (qualifier, _) in schema.iter() {
+        if let Some(qualifier) = qualifier {
+            planner_context.set_whole_row_source(qualifier.clone(), None);
+            if scalar {
+                planner_context.set_scalar_function_relation(qualifier.clone());
+            }
+        }
     }
 }

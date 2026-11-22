@@ -208,10 +208,13 @@ impl SqlToRel<'_> {
         named_struct: &Arc<ScalarUDF>,
         planner_context: &PlannerContext,
     ) -> Result<Option<Expr>> {
-        let Some((qualifier, columns)) = relation_columns_of(relation, schema, outer)?
+        let Some((qualifier, mut columns)) = relation_columns_of(relation, schema, outer)?
         else {
             return Ok(None);
         };
+        if columns.len() == 1 && planner_context.is_scalar_function_relation(qualifier) {
+            return Ok(columns.pop().map(|(_, column)| column));
+        }
         let args = columns
             .into_iter()
             .flat_map(|(name, column)| {
