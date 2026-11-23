@@ -69,6 +69,10 @@ pub trait ExprSchemable {
     -> Result<(DataType, bool)>;
 }
 
+/// The field metadata keys that carry a PostgreSQL type modifier and not the
+/// type: a character type's declared length and an explicit `atttypmod`.
+const TYPE_MODIFIER_METADATA_KEYS: [&str; 2] = ["pg_char_len", "pg_type_modifier"];
+
 impl ExprSchemable for Expr {
     /// Returns the [arrow::datatypes::DataType] of the expression
     /// based on [ExprSchema]
@@ -374,9 +378,10 @@ impl ExprSchemable for Expr {
             Expr::AnyExpr(AnyExpr { expr, .. }) | Expr::AllExpr(AllExpr { expr, .. }) => {
                 expr.nullable(input_schema)
             }
-            Expr::ScalarSubquery(subquery) => {
-                Ok(subquery.subquery.schema().field(0).is_nullable())
-            }
+            // A scalar subquery that returns no row is NULL, whatever the
+            // nullability of the column it selects: `(SELECT count(*) FROM t
+            // WHERE false GROUP BY k)` is NULL though `count(*)` never is.
+            Expr::ScalarSubquery(_) => Ok(true),
             Expr::BinaryExpr(BinaryExpr { left, right, .. }) => {
                 Ok(left.nullable(input_schema)? || right.nullable(input_schema)?)
             }
@@ -620,7 +625,11 @@ impl ExprSchemable for Expr {
                 // agrees on. Bare NULL branches adopt the unified type and
                 // contribute nothing — `CASE WHEN .. THEN NULL ELSE attrs END`
                 // keeps the metadata of `attrs` — unless every branch is NULL:
-                // the result is then of the type its NULLs agree on.
+                // the result is then of the type its NULLs agree on. A NULL
+                // has no type modifier, though, and the result has one only
+                // when every branch has the same, as PostgreSQL's
+                // `select_common_typmod` decides: `CASE WHEN .. THEN
+                // varchar30 ELSE NULL END` is an unconstrained `varchar`.
                 fn is_bare_null(expr: &Expr) -> bool {
                     match expr {
                         Expr::Literal(value, _) => value.is_null(),
@@ -648,12 +657,23 @@ impl ExprSchemable for Expr {
                 let mut metadata: Option<std::collections::BTreeMap<String, String>> =
                     None;
                 let mut null_metadata = None;
+                let mut null_branch = false;
                 for branch in branches {
                     let branch_metadata = branch.metadata(schema)?;
                     if !is_bare_null(branch) {
                         agree(&mut metadata, &branch_metadata);
-                    } else if !branch_metadata.is_empty() {
-                        agree(&mut null_metadata, &branch_metadata);
+                    } else {
+                        null_branch = true;
+                        if !branch_metadata.is_empty() {
+                            agree(&mut null_metadata, &branch_metadata);
+                        }
+                    }
+                }
+                if null_branch {
+                    if let Some(metadata) = &mut metadata {
+                        for key in TYPE_MODIFIER_METADATA_KEYS {
+                            metadata.remove(key);
+                        }
                     }
                 }
                 let metadata = metadata.or(null_metadata);
