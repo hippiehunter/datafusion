@@ -5122,6 +5122,35 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_type_only_cast_keeps_its_input_metadata() {
+        let named = FieldMetadata::from(HashMap::from([(
+            "pg_type".to_string(),
+            "text".to_string(),
+        )]));
+        let typed_null = Expr::Literal(ScalarValue::Utf8(None), Some(named.clone()));
+        let expr = Expr::Cast(Cast::new(Box::new(typed_null.clone()), DataType::Utf8));
+        assert_eq!(
+            expr.metadata(&DFSchema::empty()).unwrap(),
+            named,
+            "the logical cast leaves its input's metadata on its result"
+        );
+        assert_eq!(simplify(expr), typed_null);
+
+        // A written cast of the untyped NULL to a target that names a type
+        // folds to a NULL of that type, alone or under a type-only cast.
+        let named_target = Arc::new(
+            Field::new("", DataType::Utf8, true).with_metadata(named.to_hashmap()),
+        );
+        let written = Expr::Cast(Cast::new_from_field(
+            Box::new(Expr::Literal(ScalarValue::Null, None)),
+            named_target,
+        ));
+        assert_eq!(simplify(written.clone()), typed_null);
+        let rewrapped = Expr::Cast(Cast::new(Box::new(written), DataType::Utf8));
+        assert_eq!(simplify(rewrapped), typed_null);
+    }
+
+    #[test]
     fn simplify_cast_literal() {
         // Test that CAST(literal) expressions are evaluated at plan time
 
