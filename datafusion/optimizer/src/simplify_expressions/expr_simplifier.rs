@@ -770,6 +770,16 @@ impl<'a> ConstEvaluator<'a> {
                     true => None,
                     false => Some(FieldMetadata::from(m)),
                 }
+            })
+            // The constant stands for the expression it replaces, so it has
+            // that expression's field. A cast that states only a type leaves
+            // its input's metadata on its result, which the physical cast
+            // does not report: `CAST(NULL-of-text AS Utf8)` folds to a NULL
+            // that is still of `text`.
+            .or_else(|| {
+                expr.metadata(&self.input_schema)
+                    .ok()
+                    .filter(|metadata| !metadata.is_empty())
             });
         let col_val = match phys_expr.evaluate(&self.input_batch) {
             Ok(v) => v,
