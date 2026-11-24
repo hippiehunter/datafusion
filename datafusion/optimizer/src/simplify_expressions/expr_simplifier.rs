@@ -36,6 +36,7 @@ use datafusion_common::{
     metadata::FieldMetadata,
     tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRewriter},
 };
+use datafusion_expr::expr_schema::is_type_only_cast_target;
 use datafusion_expr::type_coercion::binary::array_cast_target;
 use datafusion_expr::{
     BinaryExpr, Case, ColumnarValue, Expr, ExprSchemable, Like, Operator, Volatility,
@@ -702,6 +703,17 @@ impl<'a> ConstEvaluator<'a> {
                 false
             }
             Expr::SimilarTo { .. } => false,
+            // A cast the statement wrote to a type whose field names nothing
+            // is what says a NULL under it has that type. A NULL constant in
+            // its place would read as an untyped NULL wherever a result's
+            // type is chosen from its members, so the cast stays.
+            Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field })
+                if !is_type_only_cast_target(field)
+                    && field.metadata().is_empty()
+                    && is_null_or_cast(expr) =>
+            {
+                false
+            }
             // An array cast between shapes keeps each value's own shape, which
             // a literal of the cast's type could not hold.
             Expr::Cast(cast)
@@ -5147,7 +5159,29 @@ mod tests {
         ));
         assert_eq!(simplify(written.clone()), typed_null);
         let rewrapped = Expr::Cast(Cast::new(Box::new(written), DataType::Utf8));
-        assert_eq!(simplify(rewrapped), typed_null);
+        assert_eq!(simplify(rewrapped.clone()), typed_null);
+
+        // The same cast folds the same way as a result of a CASE.
+        let case = Expr::Case(Case {
+            expr: None,
+            when_then_expr: vec![(
+                Box::new(col("c3").eq(lit(1i64))),
+                Box::new(col("c1")),
+            )],
+            else_expr: Some(Box::new(rewrapped)),
+        });
+        let Expr::Case(folded) = simplify(case) else {
+            panic!("the CASE stays a CASE");
+        };
+        assert_eq!(folded.else_expr.as_deref(), Some(&typed_null));
+
+        // A written cast whose target names nothing keeps its NULL typed by
+        // staying a cast: the NULL constant it would fold to has no type.
+        let written_unnamed = Expr::Cast(Cast::new_from_field(
+            Box::new(Expr::Literal(ScalarValue::Null, None)),
+            Arc::new(Field::new("", DataType::Utf8, false)),
+        ));
+        assert_eq!(simplify(written_unnamed.clone()), written_unnamed);
     }
 
     #[test]
