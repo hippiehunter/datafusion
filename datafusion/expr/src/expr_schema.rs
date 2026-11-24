@@ -632,20 +632,29 @@ impl ExprSchemable for Expr {
                 // varchar30 ELSE NULL END` is an unconstrained `varchar`.
                 // A NULL the statement cast to a type is of that type, as
                 // any other typed branch is: `ELSE NULL::text` beside a
-                // `varchar` branch makes the result `text`. Only a cast that
-                // merely puts an untyped NULL on a carrier leaves it bare,
-                // and a NULL constant is bare unless it carries the metadata
-                // of the type a written cast gave it.
+                // `varchar` branch makes the result `text`. A NULL constant is
+                // bare unless it carries the metadata of the type a written
+                // cast gave it. A cast is bare only when it merely puts the
+                // untyped NULL constant on a carrier: a cast over a NULL
+                // constant already on its carrier is one the statement wrote
+                // to a type whose field names nothing, as `NULL::text` is.
+                fn carries_untyped_null(expr: &Expr) -> bool {
+                    match expr {
+                        Expr::Literal(ScalarValue::Null, _) => true,
+                        Expr::Cast(Cast { expr, field })
+                        | Expr::TryCast(TryCast { expr, field }) => {
+                            is_type_only_cast_target(field) && carries_untyped_null(expr)
+                        }
+                        _ => false,
+                    }
+                }
                 fn is_bare_null(expr: &Expr) -> bool {
                     match expr {
                         Expr::Literal(value, metadata) => {
                             value.is_null()
                                 && metadata.as_ref().is_none_or(FieldMetadata::is_empty)
                         }
-                        Expr::Cast(Cast { expr, field })
-                        | Expr::TryCast(TryCast { expr, field }) => {
-                            is_type_only_cast_target(field) && is_bare_null(expr)
-                        }
+                        Expr::Cast(_) | Expr::TryCast(_) => carries_untyped_null(expr),
                         _ => false,
                     }
                 }
