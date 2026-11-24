@@ -570,6 +570,9 @@ impl TreeNodeRewriter for ConstEvaluator<'_> {
             // and may not evaluate all their sub expressions. Thus, if
             // any error is countered during simplification, return the original
             // so that normal evaluation can occur
+            // The cast stays, and an expression over it still folds: what
+            // the cast protects is the type of its own NULL.
+            Some(true) if Self::is_written_null_cast(&expr) => Ok(Transformed::no(expr)),
             Some(true) => match self.evaluate_to_scalar(expr) {
                 ConstSimplifyResult::Simplified(s, m) => {
                     Ok(Transformed::yes(Expr::Literal(s, m)))
@@ -611,6 +614,21 @@ impl<'a> ConstEvaluator<'a> {
             input_schema,
             input_batch,
         })
+    }
+
+    /// A cast the statement wrote, over a NULL, to a type whose field names
+    /// nothing. The cast is what says the NULL has that type: a NULL constant
+    /// in its place would read as an untyped NULL wherever a result's type is
+    /// chosen from its members.
+    fn is_written_null_cast(expr: &Expr) -> bool {
+        match expr {
+            Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field }) => {
+                !is_type_only_cast_target(field)
+                    && field.metadata().is_empty()
+                    && is_null_or_cast(expr)
+            }
+            _ => false,
+        }
     }
 
     /// Can a function of the specified volatility be evaluated?
@@ -703,17 +721,6 @@ impl<'a> ConstEvaluator<'a> {
                 false
             }
             Expr::SimilarTo { .. } => false,
-            // A cast the statement wrote to a type whose field names nothing
-            // is what says a NULL under it has that type. A NULL constant in
-            // its place would read as an untyped NULL wherever a result's
-            // type is chosen from its members, so the cast stays.
-            Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field })
-                if !is_type_only_cast_target(field)
-                    && field.metadata().is_empty()
-                    && is_null_or_cast(expr) =>
-            {
-                false
-            }
             // An array cast between shapes keeps each value's own shape, which
             // a literal of the cast's type could not hold.
             Expr::Cast(cast)
@@ -5182,6 +5189,18 @@ mod tests {
             Arc::new(Field::new("", DataType::Utf8, false)),
         ));
         assert_eq!(simplify(written_unnamed.clone()), written_unnamed);
+
+        // An expression over that cast is still a constant.
+        assert_eq!(
+            simplify(written_unnamed.clone().is_null()),
+            lit(true)
+        );
+        let compared = Expr::Cast(Cast::new_from_field(
+            Box::new(Expr::Literal(ScalarValue::Null, None)),
+            Arc::new(Field::new("", DataType::Int64, false)),
+        ))
+        .gt(lit(1i64));
+        assert_eq!(simplify(compared), lit(ScalarValue::Boolean(None)));
     }
 
     #[test]
