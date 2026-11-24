@@ -633,10 +633,15 @@ impl ExprSchemable for Expr {
                 // A NULL the statement cast to a type is of that type, as
                 // any other typed branch is: `ELSE NULL::text` beside a
                 // `varchar` branch makes the result `text`. Only a cast that
-                // merely puts an untyped NULL on a carrier leaves it bare.
+                // merely puts an untyped NULL on a carrier leaves it bare,
+                // and a NULL constant is bare unless it carries the metadata
+                // of the type a written cast gave it.
                 fn is_bare_null(expr: &Expr) -> bool {
                     match expr {
-                        Expr::Literal(value, _) => value.is_null(),
+                        Expr::Literal(value, metadata) => {
+                            value.is_null()
+                                && metadata.as_ref().is_none_or(FieldMetadata::is_empty)
+                        }
                         Expr::Cast(Cast { expr, field })
                         | Expr::TryCast(TryCast { expr, field }) => {
                             is_type_only_cast_target(field) && is_bare_null(expr)
