@@ -630,11 +630,17 @@ impl ExprSchemable for Expr {
                 // when every branch has the same, as PostgreSQL's
                 // `select_common_typmod` decides: `CASE WHEN .. THEN
                 // varchar30 ELSE NULL END` is an unconstrained `varchar`.
+                // A NULL the statement cast to a type is of that type, as
+                // any other typed branch is: `ELSE NULL::text` beside a
+                // `varchar` branch makes the result `text`. Only a cast that
+                // merely puts an untyped NULL on a carrier leaves it bare.
                 fn is_bare_null(expr: &Expr) -> bool {
                     match expr {
                         Expr::Literal(value, _) => value.is_null(),
-                        Expr::Cast(Cast { expr, .. })
-                        | Expr::TryCast(TryCast { expr, .. }) => is_bare_null(expr),
+                        Expr::Cast(Cast { expr, field })
+                        | Expr::TryCast(TryCast { expr, field }) => {
+                            is_type_only_cast_target(field) && is_bare_null(expr)
+                        }
                         _ => false,
                     }
                 }
